@@ -1,0 +1,1677 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>InvocationMethodFactory.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.internal.runtime.methods</a> &gt; <span class="el_source">InvocationMethodFactory.java</span></div><h1>InvocationMethodFactory.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ * 
+ * Copyright (C) 2006 The JRuby Community &lt;www.jruby.org&gt;
+ * Copyright (C) 2006 Ola Bini &lt;ola@ologix.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.internal.runtime.methods;
+
+import java.io.PrintWriter;
+import java.lang.reflect.Modifier;
+import java.util.Arrays;
+import java.util.List;
+
+import org.jruby.Ruby;
+import org.jruby.RubyInstanceConfig;
+import org.jruby.RubyKernel;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.Helpers;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Opcodes;
+import org.jruby.RubyModule;
+import org.jruby.RubyString;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.anno.JavaMethodDescriptor;
+import org.jruby.anno.TypePopulator;
+import org.jruby.compiler.impl.SkinnyMethodAdapter;
+import org.jruby.exceptions.JumpException;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.lexer.yacc.ISourcePosition;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.CompiledBlockCallback;
+import org.jruby.runtime.CompiledBlockCallback19;
+import org.jruby.runtime.MethodFactory;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.Visibility;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.CodegenUtils;
+import static org.jruby.util.CodegenUtils.*;
+import static java.lang.System.*;
+import org.jruby.util.ClassDefininngJRubyClassLoader;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.Label;
+import org.objectweb.asm.util.CheckClassAdapter;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+
+/**
+ * In order to avoid the overhead with reflection-based method handles, this
+ * MethodFactory uses ASM to generate tiny invoker classes. This allows for
+ * better performance and more specialization per-handle than can be supported
+ * via reflection. It also allows optimizing away many conditionals that can
+ * be determined once ahead of time.
+ * 
+ * When running in secured environments, this factory may not function. When
+ * this can be detected, MethodFactory will fall back on the reflection-based
+ * factory instead.
+ * 
+ * @see org.jruby.runtime.MethodFactory
+ */
+public class InvocationMethodFactory extends MethodFactory implements Opcodes {
+
+<span class="fc" id="L85">    private static final Logger LOG = LoggerFactory.getLogger(&quot;InvocationMethodFactory&quot;);</span>
+
+    private static final boolean DEBUG = false;
+
+    /** The class used for the super class of compiled Ruby method handles. */
+<span class="fc" id="L90">    private final static Class COMPILED_SUPER_CLASS = CompiledMethod.class;</span>
+    
+    /** The pathname of the super class for compiled Ruby method handles. */ 
+<span class="fc" id="L93">    private final static String COMPILED_SUPER_CLASS_NAME = p(COMPILED_SUPER_CLASS);</span>
+
+    /** The class used for the super class of compiled Ruby block handles. */
+<span class="fc" id="L96">    private static final Class&lt;CompiledBlockCallback&gt; COMPILED_BLOCK_SUPER_CLASS = CompiledBlockCallback.class;</span>
+
+    /** The pathname of the super class for compiled Ruby block handles. */
+<span class="fc" id="L99">    private static final String COMPILED_BLOCK_SUPER_CLASS_NAME = p(COMPILED_BLOCK_SUPER_CLASS);</span>
+
+    /** The interface used for compiled Ruby 1.9+ block handles. */
+<span class="fc" id="L102">    public static final Class&lt;CompiledBlockCallback19&gt; COMPILED_BLOCK_19_INTERFACE = CompiledBlockCallback19.class;</span>
+
+    /** The pathname of the interface for compiled Ruby block handles. */
+<span class="fc" id="L105">    public static final String COMPILED_BLOCK_19_INTERFACE_NAME = p(COMPILED_BLOCK_19_INTERFACE);</span>
+    
+    /** The outward call signature for compiled Ruby method handles. */
+<span class="fc" id="L108">    private final static String COMPILED_CALL_SIG = sig(IRubyObject.class,</span>
+<span class="fc" id="L109">            params(ThreadContext.class, IRubyObject.class, RubyModule.class, String.class, IRubyObject[].class));</span>
+    
+    /** The outward call signature for compiled Ruby method handles. */
+<span class="fc" id="L112">    private final static String COMPILED_CALL_SIG_BLOCK = sig(IRubyObject.class,</span>
+<span class="fc" id="L113">            params(ThreadContext.class, IRubyObject.class, RubyModule.class, String.class, IRubyObject[].class, Block.class));</span>
+    
+    /** The outward arity-zero call-with-block signature for compiled Ruby method handles. */
+<span class="fc" id="L116">    private final static String COMPILED_CALL_SIG_ZERO_BLOCK = sig(IRubyObject.class,</span>
+<span class="fc" id="L117">            params(ThreadContext.class, IRubyObject.class, RubyModule.class, String.class, Block.class));</span>
+    
+    /** The outward arity-zero call-with-block signature for compiled Ruby method handles. */
+<span class="fc" id="L120">    private final static String COMPILED_CALL_SIG_ZERO = sig(IRubyObject.class,</span>
+<span class="fc" id="L121">            params(ThreadContext.class, IRubyObject.class, RubyModule.class, String.class));</span>
+    
+    /** The outward arity-zero call-with-block signature for compiled Ruby method handles. */
+<span class="fc" id="L124">    private final static String COMPILED_CALL_SIG_ONE_BLOCK = sig(IRubyObject.class,</span>
+<span class="fc" id="L125">            params(ThreadContext.class, IRubyObject.class, RubyModule.class, String.class, IRubyObject.class, Block.class));</span>
+    
+    /** The outward arity-zero call-with-block signature for compiled Ruby method handles. */
+<span class="fc" id="L128">    private final static String COMPILED_CALL_SIG_ONE = sig(IRubyObject.class,</span>
+<span class="fc" id="L129">            params(ThreadContext.class, IRubyObject.class, RubyModule.class, String.class, IRubyObject.class));</span>
+    
+    /** The outward arity-zero call-with-block signature for compiled Ruby method handles. */
+<span class="fc" id="L132">    private final static String COMPILED_CALL_SIG_TWO_BLOCK = sig(IRubyObject.class,</span>
+<span class="fc" id="L133">            params(ThreadContext.class, IRubyObject.class, RubyModule.class, String.class, IRubyObject.class, IRubyObject.class, Block.class));</span>
+    
+    /** The outward arity-zero call-with-block signature for compiled Ruby method handles. */
+<span class="fc" id="L136">    private final static String COMPILED_CALL_SIG_TWO = sig(IRubyObject.class,</span>
+<span class="fc" id="L137">            params(ThreadContext.class, IRubyObject.class, RubyModule.class, String.class, IRubyObject.class, IRubyObject.class));</span>
+    
+    /** The outward arity-zero call-with-block signature for compiled Ruby method handles. */
+<span class="fc" id="L140">    private final static String COMPILED_CALL_SIG_THREE_BLOCK = sig(IRubyObject.class,</span>
+<span class="fc" id="L141">            params(ThreadContext.class, IRubyObject.class, RubyModule.class, String.class, IRubyObject.class, IRubyObject.class, IRubyObject.class, Block.class));</span>
+    
+    /** The outward arity-zero call-with-block signature for compiled Ruby method handles. */
+<span class="fc" id="L144">    private final static String COMPILED_CALL_SIG_THREE = sig(IRubyObject.class,</span>
+<span class="fc" id="L145">            params(ThreadContext.class, IRubyObject.class, RubyModule.class, String.class, IRubyObject.class, IRubyObject.class, IRubyObject.class));</span>
+
+<span class="fc" id="L147">    private final static String BLOCK_CALL_SIG = sig(RubyKernel.IRUBY_OBJECT, params(</span>
+            ThreadContext.class, RubyKernel.IRUBY_OBJECT, IRubyObject.class, Block.class));
+<span class="fc" id="L149">    private final static String BLOCK_CALL_SIG19 = sig(RubyKernel.IRUBY_OBJECT, params(</span>
+            ThreadContext.class, IRubyObject.class, IRubyObject[].class, Block.class));
+    
+    /** The super constructor signature for Java-based method handles. */
+<span class="fc" id="L153">    private final static String JAVA_SUPER_SIG = sig(Void.TYPE, params(RubyModule.class, Visibility.class));</span>
+    
+    /** The lvar index of &quot;this&quot; */
+    public static final int THIS_INDEX = 0;
+    
+    /** The lvar index of the passed-in ThreadContext */
+    public static final int THREADCONTEXT_INDEX = 1;
+    
+    /** The lvar index of the method-receiving object */
+    public static final int RECEIVER_INDEX = 2;
+    
+    /** The lvar index of the RubyClass being invoked against */
+    public static final int CLASS_INDEX = 3;
+    
+    /** The lvar index method name being invoked */
+    public static final int NAME_INDEX = 4;
+    
+    /** The lvar index of the method args on the call */
+    public static final int ARGS_INDEX = 5;
+    
+    /** The lvar index of the passed-in Block on the call */
+    public static final int BLOCK_INDEX = 6;
+
+    /** The classloader to use for code loading */
+    protected final ClassDefininngJRubyClassLoader classLoader;
+    
+    /** An object to sync against when loading classes, to avoid dups */
+    protected final Object syncObject;
+    
+    /**
+     * Whether this factory has seen undefined methods already. This is used to
+     * detect likely method handle collisions when we expect to create a new
+     * handle for each call.
+     */
+<span class="fc" id="L187">    private boolean seenUndefinedClasses = false;</span>
+
+    /**
+     * Whether we've informed the user that we've seen undefined methods; this
+     * is to avoid a flood of repetitive information.
+     */
+<span class="fc" id="L193">    private boolean haveWarnedUser = false;</span>
+    
+    /**
+     * Construct a new InvocationMethodFactory using the specified classloader
+     * to load code. If the target classloader is not an instance of
+     * JRubyClassLoader, it will be wrapped with one.
+     * 
+     * @param classLoader The classloader to use, or to wrap if it is not a
+     * JRubyClassLoader instance.
+     */
+<span class="fc" id="L203">    public InvocationMethodFactory(ClassLoader classLoader) {</span>
+        // use the given classloader as our sync, regardless of whether we wrap it
+<span class="fc" id="L205">        this.syncObject = classLoader;</span>
+        
+<span class="pc bpc" id="L207" title="1 of 2 branches missed.">        if (classLoader instanceof ClassDefininngJRubyClassLoader) {</span>
+<span class="fc" id="L208">            this.classLoader = (ClassDefininngJRubyClassLoader)classLoader;</span>
+        } else {
+<span class="nc" id="L210">            this.classLoader = new ClassDefininngJRubyClassLoader(classLoader);</span>
+        }
+<span class="fc" id="L212">    }</span>
+
+    /**
+     * Use code generation to provide a method handle for a compiled Ruby method.
+     * 
+     * @see org.jruby.runtime.MethodFactory#getCompiledMethod
+     */
+    public DynamicMethod getCompiledMethodLazily(
+            RubyModule implementationClass,
+            String rubyName,
+            String javaName,
+            Arity arity,
+            Visibility visibility,
+            StaticScope scope,
+            Object scriptObject,
+            CallConfiguration callConfig,
+            ISourcePosition position,
+            String parameterDesc,
+            MethodNodes methodNodes) {
+
+<span class="nc" id="L232">        return new CompiledMethod.LazyCompiledMethod(</span>
+                implementationClass,
+                rubyName,
+                javaName,
+                arity,
+                visibility,
+                scope,
+                scriptObject,
+                callConfig,
+                position,
+                parameterDesc,
+                new InvocationMethodFactory(classLoader),
+                methodNodes);
+    }
+
+    public static String getCompiledCallbackName(String typePath, String method) {
+<span class="nc" id="L248">        return (typePath + &quot;$&quot; + method).replaceAll(&quot;/&quot;, &quot;\\$&quot;);</span>
+    }
+
+    /**
+     * Use code generation to provide a method handle for a compiled Ruby method.
+     * 
+     * @see org.jruby.runtime.MethodFactory#getCompiledMethod
+     */
+    public DynamicMethod getCompiledMethod(
+            RubyModule implementationClass,
+            String rubyName,
+            String javaName,
+            Arity arity,
+            Visibility visibility,
+            StaticScope scope,
+            Object scriptObject,
+            CallConfiguration callConfig,
+            ISourcePosition position,
+            String parameterDesc,
+            MethodNodes methodNodes) {
+        
+<span class="nc" id="L269">        Class scriptClass = scriptObject.getClass();</span>
+<span class="nc" id="L270">        String typePath = p(scriptClass);</span>
+<span class="nc" id="L271">        String invokerPath = getCompiledCallbackName(typePath, javaName);</span>
+<span class="nc" id="L272">        Class generatedClass = null;</span>
+<span class="nc" id="L273">        boolean tryLoad = false;</span>
+
+        try {
+<span class="nc" id="L276">            byte[] invokerBytes = getCompiledMethodOffline(</span>
+                    rubyName,
+                    javaName,
+                    typePath,
+                    invokerPath,
+                    arity,
+                    scope,
+                    callConfig,
+<span class="nc" id="L284">                    position.getFile(),</span>
+<span class="nc" id="L285">                    position.getLine(),</span>
+                    methodNodes);
+<span class="nc" id="L287">            generatedClass = endCallWithBytes(invokerBytes, invokerPath);</span>
+<span class="nc" id="L288">        } catch (LinkageError le) {</span>
+<span class="nc" id="L289">            tryLoad = true;</span>
+<span class="nc" id="L290">        } catch (SecurityException se) {</span>
+<span class="nc" id="L291">            tryLoad = true;</span>
+<span class="nc" id="L292">        }</span>
+
+<span class="nc bnc" id="L294" title="All 2 branches missed.">        if (tryLoad) {</span>
+            // failed to define a new class, try loading existing
+<span class="nc" id="L296">            generatedClass = tryClass(invokerPath, scriptClass, COMPILED_SUPER_CLASS);</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">            if (generatedClass == null) {</span>
+<span class="nc" id="L298">                throw implementationClass.getRuntime().newLoadError(&quot;failed to generate or load invoker for &quot; + invokerPath);</span>
+            }
+        }
+
+        CompiledMethod compiledMethod;
+        try {
+<span class="nc" id="L304">            compiledMethod = (CompiledMethod)generatedClass.newInstance();</span>
+<span class="nc" id="L305">        } catch (Exception e) {</span>
+<span class="nc" id="L306">            e.printStackTrace();</span>
+<span class="nc" id="L307">            throw implementationClass.getRuntime().newLoadError(e.getMessage());</span>
+<span class="nc" id="L308">        }</span>
+
+<span class="nc" id="L310">        compiledMethod.init(implementationClass, arity, visibility, scope, scriptObject, callConfig, position, parameterDesc);</span>
+
+        Class[] params;
+<span class="nc bnc" id="L313" title="All 4 branches missed.">        if (arity.isFixed() &amp;&amp; scope.getRequiredArgs() &lt; 4) {</span>
+<span class="nc" id="L314">            params = Helpers.getStaticMethodParams(scriptClass, scope.getRequiredArgs());</span>
+        } else {
+<span class="nc" id="L316">            params = Helpers.getStaticMethodParams(scriptClass, 4);</span>
+        }
+<span class="nc" id="L318">        compiledMethod.setNativeCall(scriptClass, javaName, IRubyObject.class, params, true);</span>
+
+<span class="nc" id="L320">        return compiledMethod;</span>
+    }
+
+    /**
+     * Use code generation to provide a method handle for a compiled Ruby method.
+     *
+     * @see org.jruby.runtime.MethodFactory#getCompiledMethod
+     */
+    @Override
+    public byte[] getCompiledMethodOffline(
+            String RubyName, String method, String className, String invokerPath, Arity arity,
+            StaticScope scope, CallConfiguration callConfig, String filename, int line,
+            MethodNodes methodNodes) {
+<span class="nc" id="L333">        String sup = COMPILED_SUPER_CLASS_NAME;</span>
+        ClassWriter cw;
+<span class="nc" id="L335">        cw = createCompiledCtor(invokerPath, invokerPath, sup);</span>
+<span class="nc" id="L336">        SkinnyMethodAdapter mv = null;</span>
+<span class="nc" id="L337">        String signature = null;</span>
+<span class="nc" id="L338">        boolean specificArity = false;</span>
+
+        // if trace, need to at least populate a backtrace frame
+<span class="nc bnc" id="L341" title="All 2 branches missed.">        if (RubyInstanceConfig.FULL_TRACE_ENABLED) {</span>
+<span class="nc bnc" id="L342" title="All 4 branches missed.">            switch (callConfig) {</span>
+            case FrameNoneScopeDummy:
+<span class="nc" id="L344">                callConfig = CallConfiguration.FrameBacktraceScopeDummy;</span>
+<span class="nc" id="L345">                break;</span>
+            case FrameNoneScopeFull:
+<span class="nc" id="L347">                callConfig = CallConfiguration.FrameBacktraceScopeFull;</span>
+<span class="nc" id="L348">                break;</span>
+            case FrameNoneScopeNone:
+<span class="nc" id="L350">                callConfig = CallConfiguration.FrameBacktraceScopeNone;</span>
+                break;
+            }
+        }
+
+<span class="nc bnc" id="L355" title="All 6 branches missed.">        if (scope.getRestArg() &gt;= 0 || scope.getOptionalArgs() &gt; 0 || scope.getRequiredArgs() &gt; 3) {</span>
+<span class="nc" id="L356">            signature = COMPILED_CALL_SIG_BLOCK;</span>
+<span class="nc" id="L357">            mv = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;call&quot;, signature, null, null);</span>
+        } else {
+<span class="nc" id="L359">            specificArity = true;</span>
+
+<span class="nc" id="L361">            mv = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;call&quot;, COMPILED_CALL_SIG_BLOCK, null, null);</span>
+<span class="nc" id="L362">            mv.start();</span>
+
+            // check arity
+<span class="nc" id="L365">            mv.aloadMany(0, 1, 4, 5); // method, context, name, args, required</span>
+<span class="nc" id="L366">            mv.pushInt(scope.getRequiredArgs());</span>
+<span class="nc" id="L367">            mv.invokestatic(p(JavaMethod.class), &quot;checkArgumentCount&quot;, sig(void.class, JavaMethod.class, ThreadContext.class, String.class, IRubyObject[].class, int.class));</span>
+
+<span class="nc" id="L369">            mv.aloadMany(0, 1, 2, 3, 4);</span>
+<span class="nc bnc" id="L370" title="All 2 branches missed.">            for (int i = 0; i &lt; scope.getRequiredArgs(); i++) {</span>
+<span class="nc" id="L371">                mv.aload(5);</span>
+<span class="nc" id="L372">                mv.ldc(i);</span>
+<span class="nc" id="L373">                mv.arrayload();</span>
+            }
+<span class="nc" id="L375">            mv.aload(6);</span>
+
+<span class="nc bnc" id="L377" title="All 5 branches missed.">            switch (scope.getRequiredArgs()) {</span>
+            case 0:
+<span class="nc" id="L379">                signature = COMPILED_CALL_SIG_ZERO_BLOCK;</span>
+<span class="nc" id="L380">                break;</span>
+            case 1:
+<span class="nc" id="L382">                signature = COMPILED_CALL_SIG_ONE_BLOCK;</span>
+<span class="nc" id="L383">                break;</span>
+            case 2:
+<span class="nc" id="L385">                signature = COMPILED_CALL_SIG_TWO_BLOCK;</span>
+<span class="nc" id="L386">                break;</span>
+            case 3:
+<span class="nc" id="L388">                signature = COMPILED_CALL_SIG_THREE_BLOCK;</span>
+                break;
+            }
+
+<span class="nc" id="L392">            mv.invokevirtual(invokerPath, &quot;call&quot;, signature);</span>
+<span class="nc" id="L393">            mv.areturn();</span>
+<span class="nc" id="L394">            mv.end();</span>
+
+            // Define a second version that doesn't take a block, so we have unique code paths for both cases.
+<span class="nc bnc" id="L397" title="All 5 branches missed.">            switch (scope.getRequiredArgs()) {</span>
+            case 0:
+<span class="nc" id="L399">                signature = COMPILED_CALL_SIG_ZERO;</span>
+<span class="nc" id="L400">                break;</span>
+            case 1:
+<span class="nc" id="L402">                signature = COMPILED_CALL_SIG_ONE;</span>
+<span class="nc" id="L403">                break;</span>
+            case 2:
+<span class="nc" id="L405">                signature = COMPILED_CALL_SIG_TWO;</span>
+<span class="nc" id="L406">                break;</span>
+            case 3:
+<span class="nc" id="L408">                signature = COMPILED_CALL_SIG_THREE;</span>
+                break;
+            }
+<span class="nc" id="L411">            mv = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;call&quot;, signature, null, null);</span>
+<span class="nc" id="L412">            mv.start();</span>
+
+<span class="nc" id="L414">            mv.aloadMany(0, 1, 2, 3, 4);</span>
+<span class="nc bnc" id="L415" title="All 2 branches missed.">            for (int i = 1; i &lt;= scope.getRequiredArgs(); i++) {</span>
+<span class="nc" id="L416">                mv.aload(4 + i);</span>
+            }
+<span class="nc" id="L418">            mv.getstatic(p(Block.class), &quot;NULL_BLOCK&quot;, ci(Block.class));</span>
+
+<span class="nc bnc" id="L420" title="All 5 branches missed.">            switch (scope.getRequiredArgs()) {</span>
+            case 0:
+<span class="nc" id="L422">                signature = COMPILED_CALL_SIG_ZERO_BLOCK;</span>
+<span class="nc" id="L423">                break;</span>
+            case 1:
+<span class="nc" id="L425">                signature = COMPILED_CALL_SIG_ONE_BLOCK;</span>
+<span class="nc" id="L426">                break;</span>
+            case 2:
+<span class="nc" id="L428">                signature = COMPILED_CALL_SIG_TWO_BLOCK;</span>
+<span class="nc" id="L429">                break;</span>
+            case 3:
+<span class="nc" id="L431">                signature = COMPILED_CALL_SIG_THREE_BLOCK;</span>
+                break;
+            }
+
+<span class="nc" id="L435">            mv.invokevirtual(invokerPath, &quot;call&quot;, signature);</span>
+<span class="nc" id="L436">            mv.areturn();</span>
+<span class="nc" id="L437">            mv.end();</span>
+
+<span class="nc" id="L439">            mv = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;call&quot;, signature, null, null);</span>
+        }
+
+<span class="nc" id="L442">        mv.start();</span>
+
+<span class="nc bnc" id="L444" title="All 2 branches missed.">        boolean heapScoped = callConfig.scoping() != Scoping.None;</span>
+<span class="nc bnc" id="L445" title="All 2 branches missed.">        boolean framed = callConfig.framing() != Framing.None;</span>
+
+        // save off callNumber if framed or scoped, for non-local returns
+<span class="nc" id="L448">        int callNumberIndex = -1;</span>
+<span class="nc bnc" id="L449" title="All 4 branches missed.">        if (framed || heapScoped) {</span>
+<span class="nc" id="L450">            mv.aload(1);</span>
+<span class="nc" id="L451">            mv.getfield(p(ThreadContext.class), &quot;callNumber&quot;, ci(int.class));</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">            if (specificArity) {</span>
+<span class="nc bnc" id="L453" title="All 3 branches missed.">                switch (scope.getRequiredArgs()) {</span>
+                case -1:
+<span class="nc" id="L455">                    callNumberIndex = ARGS_INDEX + 1/*args*/ + 1/*block*/ + 1;</span>
+<span class="nc" id="L456">                    break;</span>
+                case 0:
+<span class="nc" id="L458">                    callNumberIndex = ARGS_INDEX + 1/*block*/ + 1;</span>
+<span class="nc" id="L459">                    break;</span>
+                default:
+<span class="nc" id="L461">                    callNumberIndex = ARGS_INDEX + scope.getRequiredArgs() + 1/*block*/ + 1;</span>
+                }
+            } else {
+<span class="nc" id="L464">                callNumberIndex = ARGS_INDEX + 1/*block*/ + 1;</span>
+            }
+<span class="nc" id="L466">            mv.istore(callNumberIndex);</span>
+        }
+
+        // invoke pre method stuff
+<span class="nc bnc" id="L470" title="All 4 branches missed.">        if (!callConfig.isNoop() || RubyInstanceConfig.FULL_TRACE_ENABLED) {</span>
+<span class="nc bnc" id="L471" title="All 2 branches missed.">            if (specificArity) {</span>
+<span class="nc" id="L472">                invokeCallConfigPre(mv, COMPILED_SUPER_CLASS_NAME, scope.getRequiredArgs(), true, callConfig);</span>
+            } else {
+<span class="nc" id="L474">                invokeCallConfigPre(mv, COMPILED_SUPER_CLASS_NAME, -1, true, callConfig);</span>
+            }
+        }
+
+        // pre-call trace
+<span class="nc" id="L479">        int traceBoolIndex = -1;</span>
+<span class="nc bnc" id="L480" title="All 2 branches missed.">        if (RubyInstanceConfig.FULL_TRACE_ENABLED) {</span>
+            // load and store trace enabled flag
+<span class="nc bnc" id="L482" title="All 2 branches missed.">            if (specificArity) {</span>
+<span class="nc bnc" id="L483" title="All 3 branches missed.">                switch (scope.getRequiredArgs()) {</span>
+                case -1:
+<span class="nc" id="L485">                    traceBoolIndex = ARGS_INDEX + 1/*args*/ + 1/*block*/ + 2;</span>
+<span class="nc" id="L486">                    break;</span>
+                case 0:
+<span class="nc" id="L488">                    traceBoolIndex = ARGS_INDEX + 1/*block*/ + 2;</span>
+<span class="nc" id="L489">                    break;</span>
+                default:
+<span class="nc" id="L491">                    traceBoolIndex = ARGS_INDEX + scope.getRequiredArgs() + 1/*block*/ + 2;</span>
+                }
+            } else {
+<span class="nc" id="L494">                traceBoolIndex = ARGS_INDEX + 1/*block*/ + 2;</span>
+            }
+
+<span class="nc" id="L497">            mv.aload(1);</span>
+<span class="nc" id="L498">            mv.invokevirtual(p(ThreadContext.class), &quot;getRuntime&quot;, sig(Ruby.class));</span>
+<span class="nc" id="L499">            mv.invokevirtual(p(Ruby.class), &quot;hasEventHooks&quot;, sig(boolean.class));</span>
+<span class="nc" id="L500">            mv.istore(traceBoolIndex);</span>
+            // tracing pre
+<span class="nc" id="L502">            invokeTraceCompiledPre(mv, COMPILED_SUPER_CLASS_NAME, traceBoolIndex, filename, line);</span>
+        }
+
+<span class="nc" id="L505">        Label tryBegin = new Label();</span>
+<span class="nc" id="L506">        Label tryEnd = new Label();</span>
+<span class="nc" id="L507">        Label doFinally = new Label();</span>
+<span class="nc" id="L508">        Label doReturnFinally = new Label();</span>
+<span class="nc" id="L509">        Label doRedoFinally = new Label();</span>
+<span class="nc" id="L510">        Label catchReturnJump = new Label();</span>
+<span class="nc" id="L511">        Label catchRedoJump = new Label();</span>
+
+<span class="nc bnc" id="L513" title="All 4 branches missed.">        if (framed || heapScoped)   mv.trycatch(tryBegin, tryEnd, catchReturnJump, p(JumpException.ReturnJump.class));</span>
+<span class="nc bnc" id="L514" title="All 2 branches missed.">        if (framed)                 mv.trycatch(tryBegin, tryEnd, catchRedoJump, p(JumpException.RedoJump.class));</span>
+<span class="nc bnc" id="L515" title="All 4 branches missed.">        if (framed || heapScoped)   mv.trycatch(tryBegin, tryEnd, doFinally, null);</span>
+<span class="nc bnc" id="L516" title="All 4 branches missed.">        if (framed || heapScoped)   mv.trycatch(catchReturnJump, doReturnFinally, doFinally, null);</span>
+<span class="nc bnc" id="L517" title="All 2 branches missed.">        if (framed)                 mv.trycatch(catchRedoJump, doRedoFinally, doFinally, null);</span>
+<span class="nc bnc" id="L518" title="All 4 branches missed.">        if (framed || heapScoped)   mv.label(tryBegin);</span>
+
+        // main body
+        {
+<span class="nc" id="L522">            mv.aload(0);</span>
+            // FIXME we want to eliminate these type casts when possible
+<span class="nc" id="L524">            mv.getfield(invokerPath, &quot;$scriptObject&quot;, ci(Object.class));</span>
+<span class="nc" id="L525">            mv.checkcast(className);</span>
+<span class="nc" id="L526">            mv.aloadMany(THREADCONTEXT_INDEX, RECEIVER_INDEX);</span>
+<span class="nc bnc" id="L527" title="All 2 branches missed.">            if (specificArity) {</span>
+<span class="nc bnc" id="L528" title="All 2 branches missed.">                for (int i = 0; i &lt; scope.getRequiredArgs(); i++) {</span>
+<span class="nc" id="L529">                    mv.aload(ARGS_INDEX + i);</span>
+                }
+<span class="nc" id="L531">                mv.aload(ARGS_INDEX + scope.getRequiredArgs());</span>
+<span class="nc" id="L532">                mv.invokestatic(className, method, Helpers.getStaticMethodSignature(className, scope.getRequiredArgs()));</span>
+            } else {
+<span class="nc" id="L534">                mv.aloadMany(ARGS_INDEX, BLOCK_INDEX);</span>
+<span class="nc" id="L535">                mv.invokestatic(className, method, Helpers.getStaticMethodSignature(className, 4));</span>
+            }
+        }
+<span class="nc bnc" id="L538" title="All 4 branches missed.">        if (framed || heapScoped) {</span>
+<span class="nc" id="L539">            mv.label(tryEnd);</span>
+        }
+
+        // normal exit, perform finally and return
+        {
+<span class="nc bnc" id="L544" title="All 2 branches missed.">            if (RubyInstanceConfig.FULL_TRACE_ENABLED) {</span>
+<span class="nc" id="L545">                invokeTraceCompiledPost(mv, COMPILED_SUPER_CLASS_NAME, traceBoolIndex);</span>
+            }
+<span class="nc bnc" id="L547" title="All 2 branches missed.">            if (!callConfig.isNoop()) {</span>
+<span class="nc" id="L548">                invokeCallConfigPost(mv, COMPILED_SUPER_CLASS_NAME, callConfig);</span>
+            }
+<span class="nc" id="L550">            mv.visitInsn(ARETURN);</span>
+        }
+
+        // return jump handling
+<span class="nc bnc" id="L554" title="All 4 branches missed.">        if (framed || heapScoped) {</span>
+<span class="nc" id="L555">            mv.label(catchReturnJump);</span>
+            {
+<span class="nc" id="L557">                mv.aload(0);</span>
+<span class="nc" id="L558">                mv.swap();</span>
+<span class="nc" id="L559">                mv.aload(1);</span>
+<span class="nc" id="L560">                mv.swap();</span>
+<span class="nc" id="L561">                mv.iload(callNumberIndex);</span>
+<span class="nc" id="L562">                mv.invokevirtual(COMPILED_SUPER_CLASS_NAME, &quot;handleReturn&quot;, sig(IRubyObject.class, ThreadContext.class, JumpException.ReturnJump.class, int.class));</span>
+<span class="nc" id="L563">                mv.label(doReturnFinally);</span>
+
+                // finally
+<span class="nc bnc" id="L566" title="All 2 branches missed.">                if (RubyInstanceConfig.FULL_TRACE_ENABLED) {</span>
+<span class="nc" id="L567">                    invokeTraceCompiledPost(mv, COMPILED_SUPER_CLASS_NAME, traceBoolIndex);</span>
+                }
+<span class="nc bnc" id="L569" title="All 2 branches missed.">                if (!callConfig.isNoop()) {</span>
+<span class="nc" id="L570">                    invokeCallConfigPost(mv, COMPILED_SUPER_CLASS_NAME, callConfig);</span>
+                }
+
+                // return result if we're still good
+<span class="nc" id="L574">                mv.areturn();</span>
+            }
+        }
+
+<span class="nc bnc" id="L578" title="All 2 branches missed.">        if (framed) {</span>
+            // redo jump handling
+<span class="nc" id="L580">            mv.label(catchRedoJump);</span>
+            {
+                // clear the redo
+<span class="nc" id="L583">                mv.pop();</span>
+
+                // get runtime, create jump error, and throw it
+<span class="nc" id="L586">                mv.aload(1);</span>
+<span class="nc" id="L587">                mv.invokevirtual(p(ThreadContext.class), &quot;getRuntime&quot;, sig(Ruby.class));</span>
+<span class="nc" id="L588">                mv.invokevirtual(p(Ruby.class), &quot;newRedoLocalJumpError&quot;, sig(RaiseException.class));</span>
+<span class="nc" id="L589">                mv.label(doRedoFinally);</span>
+
+                // finally
+<span class="nc bnc" id="L592" title="All 2 branches missed.">                if (RubyInstanceConfig.FULL_TRACE_ENABLED) {</span>
+<span class="nc" id="L593">                    invokeTraceCompiledPost(mv, COMPILED_SUPER_CLASS_NAME, traceBoolIndex);</span>
+                }
+<span class="nc bnc" id="L595" title="All 2 branches missed.">                if (!callConfig.isNoop()) {</span>
+<span class="nc" id="L596">                    invokeCallConfigPost(mv, COMPILED_SUPER_CLASS_NAME, callConfig);</span>
+                }
+
+                // throw redo error if we're still good
+<span class="nc" id="L600">                mv.athrow();</span>
+            }
+        }
+
+        // finally handling for abnormal exit
+<span class="nc bnc" id="L605" title="All 4 branches missed.">        if (framed || heapScoped) {</span>
+<span class="nc" id="L606">            mv.label(doFinally);</span>
+
+            //call post method stuff (exception raised)
+<span class="nc bnc" id="L609" title="All 2 branches missed.">            if (RubyInstanceConfig.FULL_TRACE_ENABLED) {</span>
+<span class="nc" id="L610">                invokeTraceCompiledPost(mv, COMPILED_SUPER_CLASS_NAME, traceBoolIndex);</span>
+            }
+<span class="nc bnc" id="L612" title="All 2 branches missed.">            if (!callConfig.isNoop()) {</span>
+<span class="nc" id="L613">                invokeCallConfigPost(mv, COMPILED_SUPER_CLASS_NAME, callConfig);</span>
+            }
+
+            // rethrow exception
+<span class="nc" id="L617">            mv.athrow(); // rethrow it</span>
+        }
+<span class="nc" id="L619">        mv.end();</span>
+
+<span class="nc" id="L621">        return endCallOffline(cw);</span>
+    }
+    
+    static class DescriptorInfo {
+        private int min;
+        private int max;
+        private boolean frame;
+        private boolean scope;
+        private boolean rest;
+        private boolean block;
+        private String parameterDesc;
+        
+        private static final boolean RICH_NATIVE_METHOD_PARAMETERS = false;
+        
+<span class="fc" id="L635">        public DescriptorInfo(List&lt;JavaMethodDescriptor&gt; descs) {</span>
+<span class="fc" id="L636">            min = Integer.MAX_VALUE;</span>
+<span class="fc" id="L637">            max = 0;</span>
+<span class="fc" id="L638">            frame = false;</span>
+<span class="fc" id="L639">            scope = false;</span>
+<span class="fc" id="L640">            rest = false;</span>
+<span class="fc" id="L641">            block = false;</span>
+<span class="fc" id="L642">            boolean first = true;</span>
+<span class="fc" id="L643">            boolean lastBlock = false;</span>
+
+<span class="fc bfc" id="L645" title="All 2 branches covered.">            for (JavaMethodDescriptor desc: descs) {</span>
+                // make sure we don't have some methods with blocks and others without
+                // the handle generation logic can't handle such cases yet
+<span class="fc bfc" id="L648" title="All 2 branches covered.">                if (first) {</span>
+<span class="fc" id="L649">                    first = false;</span>
+                } else {
+<span class="pc bpc" id="L651" title="1 of 2 branches missed.">                    if (lastBlock != desc.hasBlock) {</span>
+<span class="nc" id="L652">                        throw new RuntimeException(&quot;Mismatched block parameters for method &quot; + desc.declaringClassName + &quot;.&quot; + desc.name);</span>
+                    }
+                }
+<span class="fc" id="L655">                lastBlock = desc.hasBlock;</span>
+                
+<span class="fc" id="L657">                int specificArity = -1;</span>
+<span class="fc bfc" id="L658" title="All 2 branches covered.">                if (desc.hasVarArgs) {</span>
+<span class="pc bpc" id="L659" title="1 of 6 branches missed.">                    if (desc.optional == 0 &amp;&amp; !desc.rest &amp;&amp; desc.required == 0) {</span>
+<span class="nc" id="L660">                        throw new RuntimeException(&quot;IRubyObject[] args but neither of optional or rest specified for method &quot; + desc.declaringClassName + &quot;.&quot; + desc.name);</span>
+                    }
+<span class="fc" id="L662">                    rest = true;</span>
+<span class="pc bpc" id="L663" title="1 of 2 branches missed.">                    if (descs.size() == 1) {</span>
+<span class="fc" id="L664">                        min = -1;</span>
+                    }
+                } else {
+<span class="pc bpc" id="L667" title="2 of 4 branches missed.">                    if (desc.optional == 0 &amp;&amp; !desc.rest) {</span>
+<span class="fc bfc" id="L668" title="All 2 branches covered.">                        if (desc.required == 0) {</span>
+                            // No required specified, check actual number of required args
+<span class="pc bpc" id="L670" title="1 of 2 branches missed.">                            if (desc.actualRequired &lt;= 3) {</span>
+                                // actual required is less than 3, so we use specific arity
+<span class="fc" id="L672">                                specificArity = desc.actualRequired;</span>
+                            } else {
+                                // actual required is greater than 3, raise error (we don't support actual required &gt; 3)
+<span class="nc" id="L675">                                throw new RuntimeException(&quot;Invalid specific-arity number of arguments (&quot; + desc.actualRequired + &quot;) on method &quot; + desc.declaringClassName + &quot;.&quot; + desc.name);</span>
+                            }
+<span class="pc bpc" id="L677" title="2 of 4 branches missed.">                        } else if (desc.required &gt;= 0 &amp;&amp; desc.required &lt;= 3) {</span>
+<span class="pc bpc" id="L678" title="1 of 2 branches missed.">                            if (desc.actualRequired != desc.required) {</span>
+<span class="nc" id="L679">                                throw new RuntimeException(&quot;Specified required args does not match actual on method &quot; + desc.declaringClassName + &quot;.&quot; + desc.name);</span>
+                            }
+<span class="fc" id="L681">                            specificArity = desc.required;</span>
+                        }
+                    }
+
+<span class="fc bfc" id="L685" title="All 2 branches covered.">                    if (specificArity &lt; min) {</span>
+<span class="fc" id="L686">                        min = specificArity;</span>
+                    }
+
+<span class="fc bfc" id="L689" title="All 2 branches covered.">                    if (specificArity &gt; max) {</span>
+<span class="fc" id="L690">                        max = specificArity;</span>
+                    }
+                }
+
+<span class="pc bpc" id="L694" title="3 of 4 branches missed.">                if (frame &amp;&amp; !desc.anno.frame()) throw new RuntimeException(&quot;Unbalanced frame property on method &quot; + desc.declaringClassName + &quot;.&quot; + desc.name);</span>
+<span class="pc bpc" id="L695" title="3 of 4 branches missed.">                if (scope &amp;&amp; !desc.anno.scope()) throw new RuntimeException(&quot;Unbalanced scope property on method &quot; + desc.declaringClassName + &quot;.&quot; + desc.name);</span>
+<span class="fc" id="L696">                frame |= desc.anno.frame();</span>
+<span class="fc" id="L697">                scope |= desc.anno.scope();</span>
+<span class="fc" id="L698">                block |= desc.hasBlock;</span>
+<span class="fc" id="L699">            }</span>
+            
+            // Core methods currently only show :req's for fixed-arity or a single
+            // :rest if it's variable arity. I have filed a bug to improve this
+            // (using the skipped logic below, when the time comes) but for now
+            // we follow suit. See https://bugs.ruby-lang.org/issues/8088
+            
+<span class="fc" id="L706">            StringBuilder descBuilder = new StringBuilder();</span>
+<span class="fc bfc" id="L707" title="All 2 branches covered.">            if (min == max) {</span>
+<span class="fc" id="L708">                int i = 0;</span>
+<span class="fc bfc" id="L709" title="All 2 branches covered.">                for (; i &lt; min; i++) {</span>
+<span class="fc bfc" id="L710" title="All 2 branches covered.">                    if (i &gt; 0) descBuilder.append(';');</span>
+<span class="fc" id="L711">                    descBuilder.append(&quot;q&quot;);</span>
+                }
+               // variable arity
+<span class="fc" id="L714">            } else if (RICH_NATIVE_METHOD_PARAMETERS) {</span>
+                int i = 0;
+                for (; i &lt; min; i++) {
+                    if (i &gt; 0) descBuilder.append(';');
+                    descBuilder.append(&quot;q&quot;);
+                }
+
+                for (; i &lt; max; i++) {
+                    if (i &gt; 0) descBuilder.append(';');
+                    descBuilder.append(&quot;o&quot;);
+                }
+
+                if (rest) {
+                    if (i &gt; 0) descBuilder.append(';');
+                    descBuilder.append(&quot;r&quot;);
+                }
+            } else {
+<span class="fc" id="L731">                descBuilder.append(&quot;r&quot;);</span>
+            }
+            
+<span class="fc" id="L734">            parameterDesc = descBuilder.toString();</span>
+<span class="fc" id="L735">        }</span>
+
+        @Deprecated
+        public boolean isBacktrace() {
+<span class="nc" id="L739">            return false;</span>
+        }
+
+        public boolean isFrame() {
+<span class="nc" id="L743">            return frame;</span>
+        }
+
+        public int getMax() {
+<span class="fc" id="L747">            return max;</span>
+        }
+
+        public int getMin() {
+<span class="fc" id="L751">            return min;</span>
+        }
+
+        public boolean isScope() {
+<span class="nc" id="L755">            return scope;</span>
+        }
+        
+        public boolean isRest() {
+<span class="fc" id="L759">            return rest;</span>
+        }
+        
+        public boolean isBlock() {
+<span class="fc" id="L763">            return block;</span>
+        }
+        
+        public String getParameterDesc() {
+<span class="nc" id="L767">            return parameterDesc;</span>
+        }
+    }
+
+    /**
+     * Use code generation to provide a method handle based on an annotated Java
+     * method.
+     * 
+     * @see org.jruby.runtime.MethodFactory#getAnnotatedMethod
+     */
+    public DynamicMethod getAnnotatedMethod(RubyModule implementationClass, List&lt;JavaMethodDescriptor&gt; descs) {
+<span class="fc" id="L778">        JavaMethodDescriptor desc1 = descs.get(0);</span>
+<span class="fc" id="L779">        JRubyMethod anno = desc1.anno;</span>
+<span class="fc" id="L780">        String javaMethodName = desc1.name;</span>
+        
+        if (DEBUG) out.println(&quot;Binding multiple: &quot; + desc1.declaringClassName + &quot;.&quot; + javaMethodName);
+
+        try {
+<span class="fc" id="L785">            Class c = getAnnotatedMethodClass(descs);</span>
+
+<span class="fc" id="L787">            DescriptorInfo info = new DescriptorInfo(descs);</span>
+            if (DEBUG) out.println(&quot; min: &quot; + info.getMin() + &quot;, max: &quot; + info.getMax());
+
+<span class="fc" id="L790">            JavaMethod ic = (JavaMethod)c.getConstructor(new Class[]{RubyModule.class, Visibility.class}).newInstance(new Object[]{implementationClass, desc1.anno.visibility()});</span>
+
+<span class="fc" id="L792">            TypePopulator.populateMethod(</span>
+                    ic,
+<span class="fc" id="L794">                    Arity.optional().getValue(),</span>
+                    javaMethodName,
+                    desc1.isStatic,
+<span class="fc" id="L797">                    CallConfiguration.getCallConfigByAnno(anno),</span>
+<span class="fc" id="L798">                    desc1.anno.notImplemented(),</span>
+<span class="fc" id="L799">                    desc1.getDeclaringClass(),</span>
+                    desc1.name,
+<span class="fc" id="L801">                    desc1.getReturnClass(),</span>
+<span class="fc" id="L802">                    desc1.getParameterClasses(),</span>
+<span class="fc" id="L803">                    CallConfiguration.getCallerCallConfigByAnno(anno));</span>
+<span class="fc" id="L804">            return ic;</span>
+<span class="nc" id="L805">        } catch(Exception e) {</span>
+<span class="nc" id="L806">            e.printStackTrace();</span>
+<span class="nc" id="L807">            throw implementationClass.getRuntime().newLoadError(e.getMessage());</span>
+        }
+    }
+
+    /**
+     * Use code generation to provide a method handle based on an annotated Java
+     * method. Return the resulting generated or loaded class.
+     * 
+     * @see org.jruby.runtime.MethodFactory#getAnnotatedMethod
+     */
+    public Class getAnnotatedMethodClass(List&lt;JavaMethodDescriptor&gt; descs) throws Exception {
+<span class="fc" id="L818">        JavaMethodDescriptor desc1 = descs.get(0);</span>
+
+<span class="pc bpc" id="L820" title="1 of 2 branches missed.">        if (!Modifier.isPublic(desc1.getDeclaringClass().getModifiers())) {</span>
+<span class="nc" id="L821">            LOG.warn(&quot;warning: binding non-public class {}; reflected handles won't work&quot;, desc1.declaringClassName);</span>
+        }
+        
+<span class="fc" id="L824">        String javaMethodName = desc1.name;</span>
+        
+        if (DEBUG) {
+            if (descs.size() &gt; 1) {
+                out.println(&quot;Binding multiple: &quot; + desc1.declaringClassName + &quot;.&quot; + javaMethodName);
+            } else {
+                out.println(&quot;Binding single: &quot; + desc1.declaringClassName + &quot;.&quot; + javaMethodName);
+            }
+        }
+        
+<span class="fc bfc" id="L834" title="All 2 branches covered.">        String generatedClassName = CodegenUtils.getAnnotatedBindingClassName(javaMethodName, desc1.declaringClassName, desc1.isStatic, desc1.actualRequired, desc1.optional, descs.size() &gt; 1, desc1.anno.frame());</span>
+<span class="pc bpc" id="L835" title="1 of 2 branches missed.">        if (RubyInstanceConfig.FULL_TRACE_ENABLED) {</span>
+            // in debug mode we append _DBG to class name to force it to regenerate (or use pre-generated debug version)
+<span class="nc" id="L837">            generatedClassName += &quot;_DBG&quot;;</span>
+        }
+<span class="fc" id="L839">        String generatedClassPath = generatedClassName.replace('.', '/');</span>
+
+<span class="fc" id="L841">        DescriptorInfo info = new DescriptorInfo(descs);</span>
+
+<span class="fc" id="L843">        Class superclass = determineSuperclass(info);</span>
+
+<span class="fc" id="L845">        Class c = tryClass(generatedClassName, desc1.getDeclaringClass(), superclass);</span>
+<span class="pc bpc" id="L846" title="1 of 2 branches missed.">        if (c == null) {</span>
+<span class="nc" id="L847">            synchronized (syncObject) {</span>
+                // try again
+<span class="nc" id="L849">                c = tryClass(generatedClassName, desc1.getDeclaringClass(), superclass);</span>
+<span class="nc bnc" id="L850" title="All 2 branches missed.">                if (c == null) {</span>
+                    if (DEBUG) out.println(&quot;Generating &quot; + generatedClassName + &quot;, min: &quot; + info.getMin() + &quot;, max: &quot; + info.getMax() + &quot;, hasBlock: &quot; + info.isBlock() + &quot;, rest: &quot; + info.isRest());
+
+<span class="nc" id="L853">                    String superClassString = p(superclass);</span>
+                    
+<span class="nc" id="L855">                    ClassWriter cw = createJavaMethodCtor(generatedClassPath, superClassString, info.getParameterDesc());</span>
+
+<span class="nc" id="L857">                    addAnnotatedMethodInvoker(cw, &quot;call&quot;, superClassString, descs);</span>
+
+<span class="nc" id="L859">                    c = endClass(cw, generatedClassName);</span>
+                }
+<span class="nc" id="L861">            }</span>
+        }
+
+<span class="fc" id="L864">        return c;</span>
+    }
+
+    private Class determineSuperclass(DescriptorInfo info) {
+        Class superClass;
+<span class="fc bfc" id="L869" title="All 2 branches covered.">        if (info.getMin() == -1) {</span>
+            // normal all-rest method
+<span class="fc bfc" id="L871" title="All 2 branches covered.">            if (info.isBlock()) {</span>
+<span class="fc" id="L872">                superClass = JavaMethod.JavaMethodNBlock.class;</span>
+            } else {
+<span class="fc" id="L874">                superClass = JavaMethod.JavaMethodN.class;</span>
+            }
+        } else {
+<span class="pc bpc" id="L877" title="1 of 2 branches missed.">            if (info.isRest()) {</span>
+<span class="nc bnc" id="L878" title="All 2 branches missed.">                if (info.isBlock()) {</span>
+<span class="nc" id="L879">                    superClass = JavaMethod.BLOCK_REST_METHODS[info.getMin()][info.getMax()];</span>
+                } else {
+<span class="nc" id="L881">                    superClass = JavaMethod.REST_METHODS[info.getMin()][info.getMax()];</span>
+                }
+            } else {
+<span class="fc bfc" id="L884" title="All 2 branches covered.">                if (info.isBlock()) {</span>
+<span class="fc" id="L885">                    superClass = JavaMethod.BLOCK_METHODS[info.getMin()][info.getMax()];</span>
+                } else {
+<span class="fc" id="L887">                    superClass = JavaMethod.METHODS[info.getMin()][info.getMax()];</span>
+                }
+            }
+        }
+
+<span class="pc bpc" id="L892" title="1 of 2 branches missed.">        if (superClass == null) throw new RuntimeException(&quot;invalid multi combination&quot;);</span>
+<span class="fc" id="L893">        return superClass;</span>
+    }
+
+    /**
+     * Use code generation to provide a method handle based on an annotated Java
+     * method.
+     * 
+     * @see org.jruby.runtime.MethodFactory#getAnnotatedMethod
+     */
+    public DynamicMethod getAnnotatedMethod(RubyModule implementationClass, JavaMethodDescriptor desc) {
+<span class="fc" id="L903">        String javaMethodName = desc.name;</span>
+
+        try {
+<span class="fc" id="L906">            Class c = getAnnotatedMethodClass(Arrays.asList(desc));</span>
+
+<span class="fc" id="L908">            JavaMethod ic = (JavaMethod)c.getConstructor(new Class[]{RubyModule.class, Visibility.class}).newInstance(new Object[]{implementationClass, desc.anno.visibility()});</span>
+
+<span class="fc" id="L910">            TypePopulator.populateMethod(</span>
+                    ic,
+<span class="fc" id="L912">                    Arity.fromAnnotation(desc.anno, desc.actualRequired).getValue(),</span>
+                    javaMethodName,
+                    desc.isStatic,
+<span class="fc" id="L915">                    CallConfiguration.getCallConfigByAnno(desc.anno),</span>
+<span class="fc" id="L916">                    desc.anno.notImplemented(),</span>
+<span class="fc" id="L917">                    desc.getDeclaringClass(),</span>
+                    desc.name,
+<span class="fc" id="L919">                    desc.getReturnClass(),</span>
+<span class="fc" id="L920">                    desc.getParameterClasses(),</span>
+<span class="fc" id="L921">                    CallConfiguration.getCallerCallConfigByAnno(desc.anno));</span>
+<span class="fc" id="L922">            return ic;</span>
+<span class="nc" id="L923">        } catch(Exception e) {</span>
+<span class="nc" id="L924">            e.printStackTrace();</span>
+<span class="nc" id="L925">            throw implementationClass.getRuntime().newLoadError(e.getMessage());</span>
+        }
+    }
+
+    public static String getBlockCallbackName(String typePathString, String method) {
+<span class="nc" id="L930">        return (typePathString + &quot;$&quot; + method).replaceAll(&quot;/&quot;, &quot;\\$&quot;);</span>
+    }
+
+    public CompiledBlockCallback getBlockCallback(String method, String file, int line, Object scriptObject) {
+<span class="nc" id="L934">        Class typeClass = scriptObject.getClass();</span>
+<span class="nc" id="L935">        String typePathString = p(typeClass);</span>
+<span class="nc" id="L936">        String mname = getBlockCallbackName(typePathString, method);</span>
+        try {
+<span class="nc" id="L938">            Class c = tryBlockCallbackClass(mname, COMPILED_BLOCK_SUPER_CLASS);</span>
+<span class="nc bnc" id="L939" title="All 2 branches missed.">            if (c == null) {</span>
+<span class="nc" id="L940">                synchronized (syncObject) {</span>
+<span class="nc" id="L941">                    c = tryBlockCallbackClass(mname, COMPILED_BLOCK_SUPER_CLASS);</span>
+<span class="nc bnc" id="L942" title="All 2 branches missed.">                    if (c == null) {</span>
+<span class="nc bnc" id="L943" title="All 2 branches missed.">                        if (RubyInstanceConfig.JIT_LOADING_DEBUG) {</span>
+<span class="nc" id="L944">                            LOG.debug(&quot;no generated handle in classloader for: {}&quot;, mname);</span>
+                        }
+<span class="nc" id="L946">                        byte[] bytes = getBlockCallbackOffline(method, file, line, typePathString);</span>
+<span class="nc" id="L947">                        c = endClassWithBytes(bytes, mname);</span>
+<span class="nc" id="L948">                    } else {</span>
+<span class="nc bnc" id="L949" title="All 2 branches missed.">                        if (RubyInstanceConfig.JIT_LOADING_DEBUG) {</span>
+<span class="nc" id="L950">                            LOG.debug(&quot;found generated handle in classloader for: {}&quot;, mname);</span>
+                        }
+                    }
+<span class="nc" id="L953">                }</span>
+            }
+                
+<span class="nc" id="L956">            CompiledBlockCallback ic = (CompiledBlockCallback) c.getConstructor(Object.class).newInstance(scriptObject);</span>
+<span class="nc" id="L957">            return ic;</span>
+<span class="nc" id="L958">        } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L959">            throw e;</span>
+<span class="nc" id="L960">        } catch (Exception e) {</span>
+<span class="nc" id="L961">            throw new IllegalArgumentException(e.getMessage());</span>
+        }
+    }
+
+    @Override
+    public byte[] getBlockCallbackOffline(String method, String file, int line, String classname) {
+<span class="nc" id="L967">        String mname = getBlockCallbackName(classname, method);</span>
+<span class="nc" id="L968">        ClassWriter cw = createBlockCtor(mname, classname);</span>
+<span class="nc" id="L969">        SkinnyMethodAdapter mv = startBlockCall(cw);</span>
+<span class="nc" id="L970">        mv.aload(0);</span>
+<span class="nc" id="L971">        mv.getfield(mname, &quot;$scriptObject&quot;, &quot;L&quot; + classname + &quot;;&quot;);</span>
+<span class="nc" id="L972">        mv.aloadMany(1, 2, 3, 4);</span>
+<span class="nc" id="L973">        mv.invokestatic(classname, method, sig(</span>
+                IRubyObject.class, &quot;L&quot; + classname + &quot;;&quot;, ThreadContext.class,
+                        IRubyObject.class, IRubyObject.class, Block.class));
+<span class="nc" id="L976">        mv.areturn();</span>
+<span class="nc" id="L977">        mv.end();</span>
+
+<span class="nc" id="L979">        mv = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;getFile&quot;, sig(String.class), null, null);</span>
+<span class="nc" id="L980">        mv.start();</span>
+<span class="nc" id="L981">        mv.ldc(file);</span>
+<span class="nc" id="L982">        mv.areturn();</span>
+<span class="nc" id="L983">        mv.end();</span>
+
+<span class="nc" id="L985">        mv = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;getLine&quot;, sig(int.class), null, null);</span>
+<span class="nc" id="L986">        mv.start();</span>
+<span class="nc" id="L987">        mv.ldc(line);</span>
+<span class="nc" id="L988">        mv.ireturn();</span>
+<span class="nc" id="L989">        mv.end();</span>
+
+<span class="nc" id="L991">        return endCallOffline(cw);</span>
+    }
+
+    public CompiledBlockCallback19 getBlockCallback19(String method, String file, int line, Object scriptObject) {
+<span class="nc" id="L995">        Class typeClass = scriptObject.getClass();</span>
+<span class="nc" id="L996">        String typePathString = p(typeClass);</span>
+<span class="nc" id="L997">        String mname = getBlockCallbackName(typePathString, method);</span>
+        try {
+<span class="nc" id="L999">            Class c = tryBlockCallback19Class(mname, COMPILED_BLOCK_19_INTERFACE);</span>
+<span class="nc bnc" id="L1000" title="All 2 branches missed.">            if (c == null) {</span>
+<span class="nc" id="L1001">                synchronized (syncObject) {</span>
+<span class="nc" id="L1002">                    c = tryBlockCallback19Class(mname, COMPILED_BLOCK_19_INTERFACE);</span>
+<span class="nc bnc" id="L1003" title="All 2 branches missed.">                    if (c == null) {</span>
+<span class="nc bnc" id="L1004" title="All 2 branches missed.">                        if (RubyInstanceConfig.JIT_LOADING_DEBUG) {</span>
+<span class="nc" id="L1005">                            LOG.debug(&quot;no generated handle in classloader for: {}&quot;, mname);</span>
+                        }
+<span class="nc" id="L1007">                        byte[] bytes = getBlockCallback19Offline(method, file, line, typePathString);</span>
+<span class="nc" id="L1008">                        c = endClassWithBytes(bytes, mname);</span>
+<span class="nc" id="L1009">                    } else {</span>
+<span class="nc bnc" id="L1010" title="All 2 branches missed.">                        if (RubyInstanceConfig.JIT_LOADING_DEBUG) {</span>
+<span class="nc" id="L1011">                            LOG.debug(&quot;found generated handle in classloader for: {}&quot;, mname);</span>
+                        }
+                    }
+<span class="nc" id="L1014">                }</span>
+            }
+                
+<span class="nc" id="L1017">            CompiledBlockCallback19 ic = (CompiledBlockCallback19) c.getConstructor(Object.class).newInstance(scriptObject);</span>
+<span class="nc" id="L1018">            return ic;</span>
+<span class="nc" id="L1019">        } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L1020">            throw e;</span>
+<span class="nc" id="L1021">        } catch (Exception e) {</span>
+<span class="nc" id="L1022">            throw new IllegalArgumentException(e.getMessage());</span>
+        }
+    }
+
+    @Override
+    public byte[] getBlockCallback19Offline(String method, String file, int line, String classname) {
+<span class="nc" id="L1028">        String mnamePath = getBlockCallbackName(classname, method);</span>
+<span class="nc" id="L1029">        ClassWriter cw = createBlockCtor19(mnamePath, classname);</span>
+<span class="nc" id="L1030">        SkinnyMethodAdapter mv = startBlockCall19(cw);</span>
+<span class="nc" id="L1031">        mv.aload(0);</span>
+<span class="nc" id="L1032">        mv.getfield(mnamePath, &quot;$scriptObject&quot;, &quot;L&quot; + classname + &quot;;&quot;);</span>
+<span class="nc" id="L1033">        mv.aloadMany(1, 2, 3, 4);</span>
+<span class="nc" id="L1034">        mv.invokestatic(classname, method, sig(</span>
+                IRubyObject.class, &quot;L&quot; + classname + &quot;;&quot;, ThreadContext.class,
+                        IRubyObject.class, IRubyObject[].class, Block.class));
+<span class="nc" id="L1037">        mv.areturn();</span>
+<span class="nc" id="L1038">        mv.end();</span>
+
+<span class="nc" id="L1040">        mv = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;getFile&quot;, sig(String.class), null, null);</span>
+<span class="nc" id="L1041">        mv.start();</span>
+<span class="nc" id="L1042">        mv.ldc(file);</span>
+<span class="nc" id="L1043">        mv.areturn();</span>
+<span class="nc" id="L1044">        mv.end();</span>
+
+<span class="nc" id="L1046">        mv = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;getLine&quot;, sig(int.class), null, null);</span>
+<span class="nc" id="L1047">        mv.start();</span>
+<span class="nc" id="L1048">        mv.ldc(line);</span>
+<span class="nc" id="L1049">        mv.ireturn();</span>
+<span class="nc" id="L1050">        mv.end();</span>
+        
+<span class="nc" id="L1052">        return endCallOffline(cw);</span>
+    }
+
+    private SkinnyMethodAdapter startBlockCall(ClassWriter cw) {
+<span class="nc" id="L1056">        SkinnyMethodAdapter mv = new SkinnyMethodAdapter(cw, ACC_PUBLIC | ACC_SYNTHETIC | ACC_FINAL, &quot;call&quot;, BLOCK_CALL_SIG, null, null);</span>
+
+<span class="nc" id="L1058">        mv.visitCode();</span>
+<span class="nc" id="L1059">        return mv;</span>
+    }
+
+    private SkinnyMethodAdapter startBlockCall19(ClassWriter cw) {
+<span class="nc" id="L1063">        SkinnyMethodAdapter mv = new SkinnyMethodAdapter(cw, ACC_PUBLIC | ACC_SYNTHETIC | ACC_FINAL, &quot;call&quot;, BLOCK_CALL_SIG19, null, null);</span>
+
+<span class="nc" id="L1065">        mv.visitCode();</span>
+<span class="nc" id="L1066">        return mv;</span>
+    }
+
+    private ClassWriter createBlockCtor(String namePath, String classname) {
+<span class="nc" id="L1070">        String ciClassname = &quot;L&quot; + classname + &quot;;&quot;;</span>
+<span class="nc" id="L1071">        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES);</span>
+<span class="nc" id="L1072">        cw.visit(RubyInstanceConfig.JAVA_VERSION, ACC_PUBLIC + ACC_SUPER, namePath, null, COMPILED_BLOCK_SUPER_CLASS_NAME, null);</span>
+<span class="nc" id="L1073">        cw.visitSource(namePath, null);</span>
+<span class="nc" id="L1074">        cw.visitField(ACC_PRIVATE | ACC_FINAL, &quot;$scriptObject&quot;, ciClassname, null, null);</span>
+<span class="nc" id="L1075">        SkinnyMethodAdapter mv = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;&lt;init&gt;&quot;, sig(Void.TYPE, params(Object.class)), null, null);</span>
+<span class="nc" id="L1076">        mv.start();</span>
+<span class="nc" id="L1077">        mv.aload(0);</span>
+<span class="nc" id="L1078">        mv.invokespecial(p(CompiledBlockCallback.class), &quot;&lt;init&gt;&quot;, sig(void.class));</span>
+<span class="nc" id="L1079">        mv.aloadMany(0, 1);</span>
+<span class="nc" id="L1080">        mv.checkcast(classname);</span>
+<span class="nc" id="L1081">        mv.putfield(namePath, &quot;$scriptObject&quot;, ciClassname);</span>
+<span class="nc" id="L1082">        mv.voidreturn();</span>
+<span class="nc" id="L1083">        mv.end();</span>
+
+<span class="nc" id="L1085">        return cw;</span>
+    }
+
+    private ClassWriter createBlockCtor19(String namePath, String classname) {
+<span class="nc" id="L1089">        String ciClassname = &quot;L&quot; + classname + &quot;;&quot;;</span>
+<span class="nc" id="L1090">        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES);</span>
+<span class="nc" id="L1091">        cw.visit(RubyInstanceConfig.JAVA_VERSION, ACC_PUBLIC + ACC_SUPER, namePath, null, p(Object.class), new String[] {COMPILED_BLOCK_19_INTERFACE_NAME});</span>
+<span class="nc" id="L1092">        cw.visitSource(namePath, null);</span>
+<span class="nc" id="L1093">        cw.visitField(ACC_PRIVATE | ACC_FINAL, &quot;$scriptObject&quot;, ciClassname, null, null);</span>
+<span class="nc" id="L1094">        SkinnyMethodAdapter mv = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;&lt;init&gt;&quot;, sig(Void.TYPE, params(Object.class)), null, null);</span>
+<span class="nc" id="L1095">        mv.start();</span>
+<span class="nc" id="L1096">        mv.aload(0);</span>
+<span class="nc" id="L1097">        mv.invokespecial(p(Object.class), &quot;&lt;init&gt;&quot;, sig(void.class));</span>
+<span class="nc" id="L1098">        mv.aloadMany(0, 1);</span>
+<span class="nc" id="L1099">        mv.checkcast(classname);</span>
+<span class="nc" id="L1100">        mv.putfield(namePath, &quot;$scriptObject&quot;, ciClassname);</span>
+<span class="nc" id="L1101">        mv.voidreturn();</span>
+<span class="nc" id="L1102">        mv.end();</span>
+
+<span class="nc" id="L1104">        return cw;</span>
+    }
+
+    /**
+     * Use code generation to provide a method handle based on an annotated Java
+     * method.
+     * 
+     * @see org.jruby.runtime.MethodFactory#getAnnotatedMethod
+     */
+    public void prepareAnnotatedMethod(RubyModule implementationClass, JavaMethod javaMethod, JavaMethodDescriptor desc) {
+<span class="nc" id="L1114">        String javaMethodName = desc.name;</span>
+        
+<span class="nc" id="L1116">        javaMethod.setArity(Arity.fromAnnotation(desc.anno, desc.actualRequired));</span>
+<span class="nc" id="L1117">        javaMethod.setJavaName(javaMethodName);</span>
+<span class="nc" id="L1118">        javaMethod.setSingleton(desc.isStatic);</span>
+<span class="nc" id="L1119">        javaMethod.setCallConfig(CallConfiguration.getCallConfigByAnno(desc.anno));</span>
+<span class="nc" id="L1120">    }</span>
+
+    /**
+     * Emit code to check the arity of a call to a Java-based method.
+     * 
+     * @param jrubyMethod The annotation of the called method
+     * @param method The code generator for the handle being created
+     */
+    private void checkArity(JRubyMethod jrubyMethod, SkinnyMethodAdapter method, int specificArity) {
+<span class="nc" id="L1129">        Label arityError = new Label();</span>
+<span class="nc" id="L1130">        Label noArityError = new Label();</span>
+        
+<span class="nc bnc" id="L1132" title="All 2 branches missed.">        switch (specificArity) {</span>
+        case 0:
+        case 1:
+        case 2:
+        case 3:
+            // for zero, one, two, three arities, JavaMethod.JavaMethod*.call(...IRubyObject[] args...) will check
+<span class="nc" id="L1138">            return;</span>
+        default:
+<span class="nc" id="L1140">            boolean checkArity = false;</span>
+<span class="nc bnc" id="L1141" title="All 2 branches missed.">            if (jrubyMethod.rest()) {</span>
+<span class="nc bnc" id="L1142" title="All 2 branches missed.">                if (jrubyMethod.required() &gt; 0) {</span>
+                    // just confirm minimum args provided
+<span class="nc" id="L1144">                    method.aload(ARGS_INDEX);</span>
+<span class="nc" id="L1145">                    method.arraylength();</span>
+<span class="nc" id="L1146">                    method.ldc(jrubyMethod.required());</span>
+<span class="nc" id="L1147">                    method.if_icmplt(arityError);</span>
+<span class="nc" id="L1148">                    checkArity = true;</span>
+                }
+<span class="nc bnc" id="L1150" title="All 2 branches missed.">            } else if (jrubyMethod.optional() &gt; 0) {</span>
+<span class="nc bnc" id="L1151" title="All 2 branches missed.">                if (jrubyMethod.required() &gt; 0) {</span>
+                    // confirm minimum args provided
+<span class="nc" id="L1153">                    method.aload(ARGS_INDEX);</span>
+<span class="nc" id="L1154">                    method.arraylength();</span>
+<span class="nc" id="L1155">                    method.ldc(jrubyMethod.required());</span>
+<span class="nc" id="L1156">                    method.if_icmplt(arityError);</span>
+                }
+
+                // confirm maximum not greater than optional
+<span class="nc" id="L1160">                method.aload(ARGS_INDEX);</span>
+<span class="nc" id="L1161">                method.arraylength();</span>
+<span class="nc" id="L1162">                method.ldc(jrubyMethod.required() + jrubyMethod.optional());</span>
+<span class="nc" id="L1163">                method.if_icmpgt(arityError);</span>
+<span class="nc" id="L1164">                checkArity = true;</span>
+            } else {
+                // just confirm args length == required
+<span class="nc" id="L1167">                method.aload(ARGS_INDEX);</span>
+<span class="nc" id="L1168">                method.arraylength();</span>
+<span class="nc" id="L1169">                method.ldc(jrubyMethod.required());</span>
+<span class="nc" id="L1170">                method.if_icmpne(arityError);</span>
+<span class="nc" id="L1171">                checkArity = true;</span>
+            }
+
+<span class="nc bnc" id="L1174" title="All 2 branches missed.">            if (checkArity) {</span>
+<span class="nc" id="L1175">                method.go_to(noArityError);</span>
+
+                // Raise an error if arity does not match requirements
+<span class="nc" id="L1178">                method.label(arityError);</span>
+<span class="nc" id="L1179">                method.aload(THREADCONTEXT_INDEX);</span>
+<span class="nc" id="L1180">                method.invokevirtual(p(ThreadContext.class), &quot;getRuntime&quot;, sig(Ruby.class));</span>
+<span class="nc" id="L1181">                method.aload(ARGS_INDEX);</span>
+<span class="nc" id="L1182">                method.ldc(jrubyMethod.required());</span>
+<span class="nc" id="L1183">                method.ldc(jrubyMethod.required() + jrubyMethod.optional());</span>
+<span class="nc" id="L1184">                method.invokestatic(p(Arity.class), &quot;checkArgumentCount&quot;, sig(int.class, Ruby.class, IRubyObject[].class, int.class, int.class));</span>
+<span class="nc" id="L1185">                method.pop();</span>
+
+<span class="nc" id="L1187">                method.label(noArityError);</span>
+            }
+        }
+<span class="nc" id="L1190">    }</span>
+
+    private ClassWriter createCompiledCtor(String namePath, String shortPath, String sup) {
+<span class="nc" id="L1193">        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES);</span>
+<span class="nc" id="L1194">        cw.visit(RubyInstanceConfig.JAVA_VERSION, ACC_PUBLIC + ACC_SUPER, namePath, null, sup, null);</span>
+<span class="nc" id="L1195">        cw.visitSource(shortPath, null);</span>
+<span class="nc" id="L1196">        SkinnyMethodAdapter mv = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;&lt;init&gt;&quot;, &quot;()V&quot;, null, null);</span>
+<span class="nc" id="L1197">        mv.visitCode();</span>
+<span class="nc" id="L1198">        mv.aload(0);</span>
+<span class="nc" id="L1199">        mv.visitMethodInsn(INVOKESPECIAL, sup, &quot;&lt;init&gt;&quot;, &quot;()V&quot;);</span>
+<span class="nc" id="L1200">        mv.voidreturn();</span>
+<span class="nc" id="L1201">        mv.end();</span>
+
+<span class="nc" id="L1203">        return cw;</span>
+    }
+
+    private ClassWriter createJavaMethodCtor(String namePath, String sup, String parameterDesc) throws Exception {
+<span class="nc" id="L1207">        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES);</span>
+<span class="nc" id="L1208">        String sourceFile = namePath.substring(namePath.lastIndexOf('/') + 1) + &quot;.gen&quot;;</span>
+<span class="nc" id="L1209">        cw.visit(RubyInstanceConfig.JAVA_VERSION, ACC_PUBLIC + ACC_SUPER, namePath, null, sup, null);</span>
+<span class="nc" id="L1210">        cw.visitSource(sourceFile, null);</span>
+<span class="nc" id="L1211">        SkinnyMethodAdapter mv = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;&lt;init&gt;&quot;, JAVA_SUPER_SIG, null, null);</span>
+<span class="nc" id="L1212">        mv.start();</span>
+<span class="nc" id="L1213">        mv.aloadMany(0, 1, 2);</span>
+<span class="nc" id="L1214">        mv.visitMethodInsn(INVOKESPECIAL, sup, &quot;&lt;init&gt;&quot;, JAVA_SUPER_SIG);</span>
+<span class="nc" id="L1215">        mv.aload(0);</span>
+<span class="nc" id="L1216">        mv.ldc(parameterDesc);</span>
+<span class="nc" id="L1217">        mv.invokevirtual(p(JavaMethod.class), &quot;setParameterDesc&quot;, sig(void.class, String.class));</span>
+<span class="nc" id="L1218">        mv.voidreturn();</span>
+<span class="nc" id="L1219">        mv.end();</span>
+        
+<span class="nc" id="L1221">        return cw;</span>
+    }
+
+    private void invokeCallConfigPre(SkinnyMethodAdapter mv, String superClass, int specificArity, boolean block, CallConfiguration callConfig) {
+        // invoke pre method stuff
+<span class="nc bnc" id="L1226" title="All 2 branches missed.">        if (callConfig.isNoop()) return;</span>
+
+<span class="nc" id="L1228">        prepareForPre(mv, specificArity, block, callConfig);</span>
+<span class="nc" id="L1229">        mv.invokevirtual(superClass, getPreMethod(callConfig), getPreSignature(callConfig));</span>
+<span class="nc" id="L1230">    }</span>
+
+    private void invokeCallConfigPost(SkinnyMethodAdapter mv, String superClass, CallConfiguration callConfig) {
+<span class="nc bnc" id="L1233" title="All 2 branches missed.">        if (callConfig.isNoop()) return;</span>
+
+<span class="nc" id="L1235">        mv.aload(1);</span>
+<span class="nc" id="L1236">        mv.invokestatic(superClass, getPostMethod(callConfig), sig(void.class, params(ThreadContext.class)));</span>
+<span class="nc" id="L1237">    }</span>
+
+    private void prepareForPre(SkinnyMethodAdapter mv, int specificArity, boolean block, CallConfiguration callConfig) {
+<span class="nc bnc" id="L1240" title="All 2 branches missed.">        if (callConfig.isNoop()) return;</span>
+        
+<span class="nc" id="L1242">        mv.aloadMany(0, THREADCONTEXT_INDEX);</span>
+        
+<span class="nc bnc" id="L1244" title="All 4 branches missed.">        switch (callConfig.framing()) {</span>
+        case Full:
+<span class="nc" id="L1246">            mv.aloadMany(RECEIVER_INDEX, NAME_INDEX); // self, name</span>
+<span class="nc" id="L1247">            loadBlockForPre(mv, specificArity, block);</span>
+<span class="nc" id="L1248">            break;</span>
+        case Backtrace:
+<span class="nc" id="L1250">            mv.aload(NAME_INDEX); // name</span>
+<span class="nc" id="L1251">            break;</span>
+        case None:
+<span class="nc" id="L1253">            break;</span>
+<span class="nc" id="L1254">        default: throw new RuntimeException(&quot;Unknown call configuration&quot;);</span>
+        }
+<span class="nc" id="L1256">    }</span>
+
+    private String getPreMethod(CallConfiguration callConfig) {
+<span class="nc bnc" id="L1259" title="All 10 branches missed.">        switch (callConfig) {</span>
+<span class="nc" id="L1260">        case FrameFullScopeFull: return &quot;preFrameAndScope&quot;;</span>
+<span class="nc" id="L1261">        case FrameFullScopeDummy: return &quot;preFrameAndDummyScope&quot;;</span>
+<span class="nc" id="L1262">        case FrameFullScopeNone: return &quot;preFrameOnly&quot;;</span>
+<span class="nc" id="L1263">        case FrameBacktraceScopeFull: return &quot;preBacktraceAndScope&quot;;</span>
+<span class="nc" id="L1264">        case FrameBacktraceScopeDummy: return &quot;preBacktraceDummyScope&quot;;</span>
+<span class="nc" id="L1265">        case FrameBacktraceScopeNone:  return &quot;preBacktraceOnly&quot;;</span>
+<span class="nc" id="L1266">        case FrameNoneScopeFull: return &quot;preScopeOnly&quot;;</span>
+<span class="nc" id="L1267">        case FrameNoneScopeDummy: return &quot;preNoFrameDummyScope&quot;;</span>
+<span class="nc" id="L1268">        case FrameNoneScopeNone: return &quot;preNoop&quot;;</span>
+<span class="nc" id="L1269">        default: throw new RuntimeException(&quot;Unknown call configuration&quot;);</span>
+        }
+    }
+
+    private String getPreSignature(CallConfiguration callConfig) {
+<span class="nc bnc" id="L1274" title="All 10 branches missed.">        switch (callConfig) {</span>
+<span class="nc" id="L1275">        case FrameFullScopeFull: return sig(void.class, params(ThreadContext.class, IRubyObject.class, String.class, Block.class));</span>
+<span class="nc" id="L1276">        case FrameFullScopeDummy: return sig(void.class, params(ThreadContext.class, IRubyObject.class, String.class, Block.class));</span>
+<span class="nc" id="L1277">        case FrameFullScopeNone: return sig(void.class, params(ThreadContext.class, IRubyObject.class, String.class, Block.class));</span>
+<span class="nc" id="L1278">        case FrameBacktraceScopeFull: return sig(void.class, params(ThreadContext.class, String.class));</span>
+<span class="nc" id="L1279">        case FrameBacktraceScopeDummy: return sig(void.class, params(ThreadContext.class, String.class));</span>
+<span class="nc" id="L1280">        case FrameBacktraceScopeNone:  return sig(void.class, params(ThreadContext.class, String.class));</span>
+<span class="nc" id="L1281">        case FrameNoneScopeFull: return sig(void.class, params(ThreadContext.class));</span>
+<span class="nc" id="L1282">        case FrameNoneScopeDummy: return sig(void.class, params(ThreadContext.class));</span>
+<span class="nc" id="L1283">        case FrameNoneScopeNone: return sig(void.class);</span>
+<span class="nc" id="L1284">        default: throw new RuntimeException(&quot;Unknown call configuration&quot;);</span>
+        }
+    }
+
+    public static String getPostMethod(CallConfiguration callConfig) {
+<span class="nc bnc" id="L1289" title="All 10 branches missed.">        switch (callConfig) {</span>
+<span class="nc" id="L1290">        case FrameFullScopeFull: return &quot;postFrameAndScope&quot;;</span>
+<span class="nc" id="L1291">        case FrameFullScopeDummy: return &quot;postFrameAndScope&quot;;</span>
+<span class="nc" id="L1292">        case FrameFullScopeNone: return &quot;postFrameOnly&quot;;</span>
+<span class="nc" id="L1293">        case FrameBacktraceScopeFull: return &quot;postBacktraceAndScope&quot;;</span>
+<span class="nc" id="L1294">        case FrameBacktraceScopeDummy: return &quot;postBacktraceDummyScope&quot;;</span>
+<span class="nc" id="L1295">        case FrameBacktraceScopeNone:  return &quot;postBacktraceOnly&quot;;</span>
+<span class="nc" id="L1296">        case FrameNoneScopeFull: return &quot;postScopeOnly&quot;;</span>
+<span class="nc" id="L1297">        case FrameNoneScopeDummy: return &quot;postNoFrameDummyScope&quot;;</span>
+<span class="nc" id="L1298">        case FrameNoneScopeNone: return &quot;postNoop&quot;;</span>
+<span class="nc" id="L1299">        default: throw new RuntimeException(&quot;Unknown call configuration&quot;);</span>
+        }
+    }
+
+    private void loadArguments(SkinnyMethodAdapter mv, JavaMethodDescriptor desc, int specificArity) {
+<span class="nc bnc" id="L1304" title="All 5 branches missed.">        switch (specificArity) {</span>
+        default:
+        case -1:
+<span class="nc" id="L1307">            mv.aload(ARGS_INDEX);</span>
+<span class="nc" id="L1308">            break;</span>
+        case 0:
+            // no args
+<span class="nc" id="L1311">            break;</span>
+        case 1:
+<span class="nc" id="L1313">            loadArgumentWithCast(mv, 1, desc.argumentTypes[0]);</span>
+<span class="nc" id="L1314">            break;</span>
+        case 2:
+<span class="nc" id="L1316">            loadArgumentWithCast(mv, 1, desc.argumentTypes[0]);</span>
+<span class="nc" id="L1317">            loadArgumentWithCast(mv, 2, desc.argumentTypes[1]);</span>
+<span class="nc" id="L1318">            break;</span>
+        case 3:
+<span class="nc" id="L1320">            loadArgumentWithCast(mv, 1, desc.argumentTypes[0]);</span>
+<span class="nc" id="L1321">            loadArgumentWithCast(mv, 2, desc.argumentTypes[1]);</span>
+<span class="nc" id="L1322">            loadArgumentWithCast(mv, 3, desc.argumentTypes[2]);</span>
+            break;
+        }
+<span class="nc" id="L1325">    }</span>
+
+    private void loadArgumentWithCast(SkinnyMethodAdapter mv, int argNumber, Class coerceType) {
+<span class="nc" id="L1328">        mv.aload(ARGS_INDEX + (argNumber - 1));</span>
+<span class="nc bnc" id="L1329" title="All 4 branches missed.">        if (coerceType != IRubyObject.class &amp;&amp; coerceType != IRubyObject[].class) {</span>
+<span class="nc bnc" id="L1330" title="All 2 branches missed.">            if (coerceType == RubyString.class) {</span>
+<span class="nc" id="L1331">                mv.invokeinterface(p(IRubyObject.class), &quot;convertToString&quot;, sig(RubyString.class));</span>
+            } else {
+<span class="nc" id="L1333">                throw new RuntimeException(&quot;Unknown coercion target: &quot; + coerceType);</span>
+            }
+        }
+<span class="nc" id="L1336">    }</span>
+
+    /** load block argument for pre() call.  Since we have fixed-arity call
+     * paths we need calculate where the last var holding the block is.
+     *
+     * is we don't have a block we setup NULL_BLOCK as part of our null pattern
+     * strategy (we do not allow null in any field which accepts block).
+     */
+    private void loadBlockForPre(SkinnyMethodAdapter mv, int specificArity, boolean getsBlock) {
+<span class="nc bnc" id="L1345" title="All 2 branches missed.">        if (!getsBlock) {            // No block so load null block instance</span>
+<span class="nc" id="L1346">            mv.getstatic(p(Block.class), &quot;NULL_BLOCK&quot;, ci(Block.class));</span>
+<span class="nc" id="L1347">            return;</span>
+        }
+
+<span class="nc" id="L1350">        loadBlock(mv, specificArity, getsBlock);</span>
+<span class="nc" id="L1351">    }</span>
+
+    /** load the block argument from the correct position.  Since we have fixed-
+     * arity call paths we need to calculate where the last var holding the
+     * block is.
+     * 
+     * If we don't have a block then this does nothing.
+     */
+    private void loadBlock(SkinnyMethodAdapter mv, int specificArity, boolean getsBlock) {
+<span class="nc bnc" id="L1360" title="All 2 branches missed.">        if (!getsBlock) return;         // No block so nothing more to do</span>
+        
+<span class="nc bnc" id="L1362" title="All 2 branches missed.">        switch (specificArity) {        // load block since it accepts a block</span>
+        case 0: case 1: case 2: case 3: // Fixed arities signatures
+<span class="nc" id="L1364">            mv.aload(BLOCK_INDEX - 1 + specificArity);</span>
+<span class="nc" id="L1365">            break;</span>
+        default: case -1:
+<span class="nc" id="L1367">            mv.aload(BLOCK_INDEX);      // Generic arity signature</span>
+            break;
+        }
+<span class="nc" id="L1370">    }</span>
+
+    private void loadReceiver(String typePath, JavaMethodDescriptor desc, SkinnyMethodAdapter mv) {
+        // load target for invocations
+<span class="nc bnc" id="L1374" title="All 2 branches missed.">        if (Modifier.isStatic(desc.modifiers)) {</span>
+<span class="nc bnc" id="L1375" title="All 2 branches missed.">            if (desc.hasContext) {</span>
+<span class="nc" id="L1376">                mv.aload(THREADCONTEXT_INDEX);</span>
+            }
+            
+            // load self object as IRubyObject, for recv param
+<span class="nc" id="L1380">            mv.aload(RECEIVER_INDEX);</span>
+        } else {
+            // load receiver as original type for virtual invocation
+<span class="nc" id="L1383">            mv.aload(RECEIVER_INDEX);</span>
+<span class="nc" id="L1384">            mv.checkcast(typePath);</span>
+            
+<span class="nc bnc" id="L1386" title="All 2 branches missed.">            if (desc.hasContext) {</span>
+<span class="nc" id="L1387">                mv.aload(THREADCONTEXT_INDEX);</span>
+            }
+        }
+<span class="nc" id="L1390">    }</span>
+
+    private Class tryClass(String name, Class targetClass, Class expectedSuperclass) {
+        Class c;
+        try {
+<span class="pc bpc" id="L1395" title="1 of 2 branches missed.">            if (classLoader == null) {</span>
+<span class="nc" id="L1396">                c = Class.forName(name, true, classLoader);</span>
+            } else {
+<span class="fc" id="L1398">                c = classLoader.loadClass(name);</span>
+            }
+<span class="nc" id="L1400">        } catch(Exception e) {</span>
+<span class="nc" id="L1401">            seenUndefinedClasses = true;</span>
+<span class="nc" id="L1402">            return null;</span>
+<span class="fc" id="L1403">        }</span>
+
+        // For JRUBY-5038, ensure loaded class has superclass from same classloader as current JRuby
+<span class="pc bpc" id="L1406" title="1 of 2 branches missed.">        if (c.getSuperclass() == expectedSuperclass) {</span>
+<span class="pc bpc" id="L1407" title="3 of 4 branches missed.">            if (seenUndefinedClasses &amp;&amp; !haveWarnedUser) {</span>
+<span class="nc" id="L1408">                haveWarnedUser = true;</span>
+<span class="nc" id="L1409">                System.err.println(&quot;WARNING: while creating new bindings for &quot; + targetClass + &quot;,\n&quot; +</span>
+                        &quot;found an existing binding; you may want to run a clean build.&quot;);
+            }
+
+<span class="fc" id="L1413">            return c;</span>
+        } else {
+<span class="nc" id="L1415">            seenUndefinedClasses = true;</span>
+<span class="nc" id="L1416">            return null;</span>
+        }
+    }
+
+    private Class tryBlockCallbackClass(String name, Class expectedSuperclass) {
+        try {
+<span class="nc" id="L1422">            Class c = classLoader.loadClass(name);</span>
+
+            // For JRUBY-5038, ensure loaded class has superclass from same classloader as current JRuby
+<span class="nc bnc" id="L1425" title="All 2 branches missed.">            if (c.getSuperclass() == expectedSuperclass) {</span>
+<span class="nc" id="L1426">                return c;</span>
+            } else {
+<span class="nc" id="L1428">                return null;</span>
+            }
+<span class="nc" id="L1430">        } catch (Exception e) {</span>
+<span class="nc" id="L1431">            return null;</span>
+        }
+    }
+
+    private Class tryBlockCallback19Class(String name, Class expectedInterface) {
+        try {
+<span class="nc" id="L1437">            Class c = classLoader.loadClass(name);</span>
+
+            // For JRUBY-5038, ensure loaded class has superclass from same classloader as current JRuby
+<span class="nc" id="L1440">            Class&lt;?&gt;[] interfaces = c.getInterfaces();</span>
+<span class="nc bnc" id="L1441" title="All 4 branches missed.">            if (interfaces.length == 1 &amp;&amp; interfaces[0] == expectedInterface) {</span>
+<span class="nc" id="L1442">                return c;</span>
+            } else {
+<span class="nc" id="L1444">                return null;</span>
+            }
+<span class="nc" id="L1446">        } catch (Exception e) {</span>
+<span class="nc" id="L1447">            return null;</span>
+        }
+    }
+
+    protected Class endCall(ClassWriter cw, String name) {
+<span class="nc" id="L1452">        return endClass(cw, name);</span>
+    }
+
+    protected Class endCallWithBytes(byte[] classBytes, String name) {
+<span class="nc" id="L1456">        return endClassWithBytes(classBytes, name);</span>
+    }
+
+    protected byte[] endCallOffline(ClassWriter cw) {
+<span class="nc" id="L1460">        return endClassOffline(cw);</span>
+    }
+
+    protected Class endClass(ClassWriter cw, String name) {
+<span class="nc" id="L1464">        cw.visitEnd();</span>
+<span class="nc" id="L1465">        byte[] code = cw.toByteArray();</span>
+        if (DEBUG) CheckClassAdapter.verify(new ClassReader(code), false, new PrintWriter(System.err));
+         
+<span class="nc" id="L1468">        return classLoader.defineClass(name, code);</span>
+    }
+
+    protected Class endClassWithBytes(byte[] code, String name) {
+<span class="nc" id="L1472">        return classLoader.defineClass(name, code);</span>
+    }
+
+    protected byte[] endClassOffline(ClassWriter cw) {
+<span class="nc" id="L1476">        cw.visitEnd();</span>
+<span class="nc" id="L1477">        byte[] code = cw.toByteArray();</span>
+        if (DEBUG) CheckClassAdapter.verify(new ClassReader(code), false, new PrintWriter(System.err));
+
+<span class="nc" id="L1480">        return code;</span>
+    }
+    
+    private SkinnyMethodAdapter beginMethod(ClassWriter cw, String methodName, int specificArity, boolean block) {
+<span class="nc bnc" id="L1484" title="All 5 branches missed.">        switch (specificArity) {</span>
+        default:
+        case -1:
+<span class="nc bnc" id="L1487" title="All 2 branches missed.">            if (block) {</span>
+<span class="nc" id="L1488">                return new SkinnyMethodAdapter(cw, ACC_PUBLIC, methodName, COMPILED_CALL_SIG_BLOCK, null, null);</span>
+            } else {
+<span class="nc" id="L1490">                return new SkinnyMethodAdapter(cw, ACC_PUBLIC, methodName, COMPILED_CALL_SIG, null, null);</span>
+            }
+        case 0:
+<span class="nc bnc" id="L1493" title="All 2 branches missed.">            if (block) {</span>
+<span class="nc" id="L1494">                return new SkinnyMethodAdapter(cw, ACC_PUBLIC, methodName, COMPILED_CALL_SIG_ZERO_BLOCK, null, null);</span>
+            } else {
+<span class="nc" id="L1496">                return new SkinnyMethodAdapter(cw, ACC_PUBLIC, methodName, COMPILED_CALL_SIG_ZERO, null, null);</span>
+            }
+        case 1:
+<span class="nc bnc" id="L1499" title="All 2 branches missed.">            if (block) {</span>
+<span class="nc" id="L1500">                return new SkinnyMethodAdapter(cw, ACC_PUBLIC, methodName, COMPILED_CALL_SIG_ONE_BLOCK, null, null);</span>
+            } else {
+<span class="nc" id="L1502">                return new SkinnyMethodAdapter(cw, ACC_PUBLIC, methodName, COMPILED_CALL_SIG_ONE, null, null);</span>
+            }
+        case 2:
+<span class="nc bnc" id="L1505" title="All 2 branches missed.">            if (block) {</span>
+<span class="nc" id="L1506">                return new SkinnyMethodAdapter(cw, ACC_PUBLIC, methodName, COMPILED_CALL_SIG_TWO_BLOCK, null, null);</span>
+            } else {
+<span class="nc" id="L1508">                return new SkinnyMethodAdapter(cw, ACC_PUBLIC, methodName, COMPILED_CALL_SIG_TWO, null, null);</span>
+            }
+        case 3:
+<span class="nc bnc" id="L1511" title="All 2 branches missed.">            if (block) {</span>
+<span class="nc" id="L1512">                return new SkinnyMethodAdapter(cw, ACC_PUBLIC, methodName, COMPILED_CALL_SIG_THREE_BLOCK, null, null);</span>
+            } else {
+<span class="nc" id="L1514">                return new SkinnyMethodAdapter(cw, ACC_PUBLIC, methodName, COMPILED_CALL_SIG_THREE, null, null);</span>
+            }
+        }
+    }
+
+    private void addAnnotatedMethodInvoker(ClassWriter cw, String callName, String superClass, List&lt;JavaMethodDescriptor&gt; descs) {
+<span class="nc bnc" id="L1520" title="All 2 branches missed.">        for (JavaMethodDescriptor desc: descs) {</span>
+<span class="nc" id="L1521">            int specificArity = -1;</span>
+<span class="nc bnc" id="L1522" title="All 4 branches missed.">            if (desc.optional == 0 &amp;&amp; !desc.rest) {</span>
+<span class="nc bnc" id="L1523" title="All 2 branches missed.">                if (desc.required == 0) {</span>
+<span class="nc bnc" id="L1524" title="All 2 branches missed.">                    if (desc.actualRequired &lt;= 3) {</span>
+<span class="nc" id="L1525">                        specificArity = desc.actualRequired;</span>
+                    } else {
+<span class="nc" id="L1527">                        specificArity = -1;</span>
+                    }
+<span class="nc bnc" id="L1529" title="All 4 branches missed.">                } else if (desc.required &gt;= 0 &amp;&amp; desc.required &lt;= 3) {</span>
+<span class="nc" id="L1530">                    specificArity = desc.required;</span>
+                }
+            }
+
+<span class="nc" id="L1534">            boolean hasBlock = desc.hasBlock;</span>
+<span class="nc" id="L1535">            SkinnyMethodAdapter mv = null;</span>
+
+<span class="nc" id="L1537">            mv = beginMethod(cw, callName, specificArity, hasBlock);</span>
+<span class="nc" id="L1538">            mv.visitCode();</span>
+
+<span class="nc" id="L1540">            createAnnotatedMethodInvocation(desc, mv, superClass, specificArity, hasBlock);</span>
+
+<span class="nc" id="L1542">            mv.end();</span>
+<span class="nc" id="L1543">        }</span>
+<span class="nc" id="L1544">    }</span>
+
+    private void createAnnotatedMethodInvocation(JavaMethodDescriptor desc, SkinnyMethodAdapter method, String superClass, int specificArity, boolean block) {
+<span class="nc" id="L1547">        String typePath = desc.declaringClassPath;</span>
+<span class="nc" id="L1548">        String javaMethodName = desc.name;</span>
+
+<span class="nc" id="L1550">        checkArity(desc.anno, method, specificArity);</span>
+        
+<span class="nc" id="L1552">        CallConfiguration callConfig = CallConfiguration.getCallConfigByAnno(desc.anno);</span>
+<span class="nc bnc" id="L1553" title="All 2 branches missed.">        if (!callConfig.isNoop()) {</span>
+<span class="nc" id="L1554">            invokeCallConfigPre(method, superClass, specificArity, block, callConfig);</span>
+        }
+
+<span class="nc" id="L1557">        int traceBoolIndex = -1;</span>
+<span class="nc bnc" id="L1558" title="All 2 branches missed.">        if (RubyInstanceConfig.FULL_TRACE_ENABLED) {</span>
+            // load and store trace enabled flag
+<span class="nc bnc" id="L1560" title="All 3 branches missed.">            switch (specificArity) {</span>
+            case -1:
+<span class="nc bnc" id="L1562" title="All 2 branches missed.">                traceBoolIndex = ARGS_INDEX + (block ? 1 : 0) + 1;</span>
+<span class="nc" id="L1563">                break;</span>
+            case 0:
+<span class="nc bnc" id="L1565" title="All 2 branches missed.">                traceBoolIndex = ARGS_INDEX + (block ? 1 : 0);</span>
+<span class="nc" id="L1566">                break;</span>
+            default:
+<span class="nc bnc" id="L1568" title="All 2 branches missed.">                traceBoolIndex = ARGS_INDEX + specificArity + (block ? 1 : 0) + 1;</span>
+            }
+
+<span class="nc" id="L1571">            method.aload(1);</span>
+<span class="nc" id="L1572">            method.invokevirtual(p(ThreadContext.class), &quot;getRuntime&quot;, sig(Ruby.class));</span>
+<span class="nc" id="L1573">            method.invokevirtual(p(Ruby.class), &quot;hasEventHooks&quot;, sig(boolean.class));</span>
+<span class="nc" id="L1574">            method.istore(traceBoolIndex);</span>
+
+            // call trace
+<span class="nc" id="L1577">            invokeCCallTrace(method, traceBoolIndex);</span>
+        }
+
+<span class="nc" id="L1580">        Label tryBegin = new Label();</span>
+<span class="nc" id="L1581">        Label tryEnd = new Label();</span>
+<span class="nc" id="L1582">        Label doFinally = new Label();</span>
+
+<span class="nc bnc" id="L1584" title="All 2 branches missed.">        if (!callConfig.isNoop()) {</span>
+<span class="nc" id="L1585">            method.trycatch(tryBegin, tryEnd, doFinally, null);</span>
+        }
+        
+<span class="nc" id="L1588">        method.label(tryBegin);</span>
+        {
+<span class="nc" id="L1590">            loadReceiver(typePath, desc, method);</span>
+            
+<span class="nc" id="L1592">            loadArguments(method, desc, specificArity);</span>
+            
+<span class="nc" id="L1594">            loadBlock(method, specificArity, block);</span>
+
+<span class="nc bnc" id="L1596" title="All 2 branches missed.">            if (Modifier.isStatic(desc.modifiers)) {</span>
+                // static invocation
+<span class="nc" id="L1598">                method.invokestatic(typePath, javaMethodName, desc.signature);</span>
+            } else {
+                // virtual invocation
+<span class="nc" id="L1601">                method.invokevirtual(typePath, javaMethodName, desc.signature);</span>
+            }
+
+<span class="nc bnc" id="L1604" title="All 2 branches missed.">            if (desc.getReturnClass() == void.class) {</span>
+                // void return type, so we need to load a nil for returning below
+<span class="nc" id="L1606">                method.aload(THREADCONTEXT_INDEX);</span>
+<span class="nc" id="L1607">                method.getfield(p(ThreadContext.class), &quot;nil&quot;, ci(IRubyObject.class));</span>
+            }
+        }
+<span class="nc" id="L1610">        method.label(tryEnd);</span>
+        
+        // normal finally and exit
+        {
+<span class="nc bnc" id="L1614" title="All 2 branches missed.">            if (RubyInstanceConfig.FULL_TRACE_ENABLED) {</span>
+<span class="nc" id="L1615">                invokeCReturnTrace(method, traceBoolIndex);</span>
+            }
+            
+<span class="nc bnc" id="L1618" title="All 2 branches missed.">            if (!callConfig.isNoop()) {</span>
+<span class="nc" id="L1619">                invokeCallConfigPost(method, superClass, callConfig);</span>
+            }
+
+            // return
+<span class="nc" id="L1623">            method.visitInsn(ARETURN);</span>
+        }
+        
+        // these are only needed if we have a non-noop call config
+<span class="nc bnc" id="L1627" title="All 2 branches missed.">        if (!callConfig.isNoop()) {</span>
+            // finally handling for abnormal exit
+            {
+<span class="nc" id="L1630">                method.label(doFinally);</span>
+                
+<span class="nc bnc" id="L1632" title="All 2 branches missed.">                if (RubyInstanceConfig.FULL_TRACE_ENABLED) {</span>
+<span class="nc" id="L1633">                    invokeCReturnTrace(method, traceBoolIndex);</span>
+                }
+
+                //call post method stuff (exception raised)
+<span class="nc bnc" id="L1637" title="All 2 branches missed.">                if (!callConfig.isNoop()) {</span>
+<span class="nc" id="L1638">                    invokeCallConfigPost(method, superClass, callConfig);</span>
+                }
+
+                // rethrow exception
+<span class="nc" id="L1642">                method.athrow(); // rethrow it</span>
+            }
+        }
+<span class="nc" id="L1645">    }</span>
+
+    private void invokeCCallTrace(SkinnyMethodAdapter method, int traceBoolIndex) {
+<span class="nc" id="L1648">        method.aloadMany(0, 1); // method, threadContext</span>
+<span class="nc" id="L1649">        method.iload(traceBoolIndex); // traceEnable</span>
+<span class="nc" id="L1650">        method.aload(4); // invokedName</span>
+<span class="nc" id="L1651">        method.invokevirtual(p(JavaMethod.class), &quot;callTrace&quot;, sig(void.class, ThreadContext.class, boolean.class, String.class));</span>
+<span class="nc" id="L1652">    }</span>
+    
+    private void invokeCReturnTrace(SkinnyMethodAdapter method, int traceBoolIndex) {
+<span class="nc" id="L1655">        method.aloadMany(0, 1); // method, threadContext</span>
+<span class="nc" id="L1656">        method.iload(traceBoolIndex); // traceEnable</span>
+<span class="nc" id="L1657">        method.aload(4); // invokedName</span>
+<span class="nc" id="L1658">        method.invokevirtual(p(JavaMethod.class), &quot;returnTrace&quot;, sig(void.class, ThreadContext.class, boolean.class, String.class));</span>
+<span class="nc" id="L1659">    }</span>
+
+    private void invokeTraceCompiledPre(SkinnyMethodAdapter mv, String superClass, int traceBoolIndex, String filename, int line) {
+<span class="nc" id="L1662">        mv.aloadMany(0, 1); // method, threadContext</span>
+<span class="nc" id="L1663">        mv.iload(traceBoolIndex); // traceEnable</span>
+<span class="nc" id="L1664">        mv.aload(4); // invokedName</span>
+<span class="nc" id="L1665">        mv.ldc(filename);</span>
+<span class="nc" id="L1666">        mv.ldc(line);</span>
+<span class="nc" id="L1667">        mv.invokevirtual(superClass, &quot;callTraceCompiled&quot;, sig(void.class, ThreadContext.class, boolean.class, String.class, String.class, int.class));</span>
+<span class="nc" id="L1668">    }</span>
+
+    private void invokeTraceCompiledPost(SkinnyMethodAdapter mv, String superClass, int traceBoolIndex) {
+<span class="nc" id="L1671">        mv.aloadMany(0, 1); // method, threadContext</span>
+<span class="nc" id="L1672">        mv.iload(traceBoolIndex); // traceEnable</span>
+<span class="nc" id="L1673">        mv.aload(4); // invokedName</span>
+<span class="nc" id="L1674">        mv.invokevirtual(superClass, &quot;returnTraceCompiled&quot;, sig(void.class, ThreadContext.class, boolean.class, String.class));</span>
+<span class="nc" id="L1675">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

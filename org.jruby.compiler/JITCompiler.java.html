@@ -1,0 +1,407 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JITCompiler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.compiler</a> &gt; <span class="el_source">JITCompiler.java</span></div><h1>JITCompiler.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2006-2008 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2008 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.compiler;
+
+
+import org.jruby.MetaClass;
+import org.jruby.Ruby;
+import org.jruby.RubyEncoding;
+import org.jruby.RubyInstanceConfig;
+import org.jruby.RubyModule;
+import org.jruby.ast.util.SexpMaker;
+import org.jruby.internal.runtime.methods.CompiledIRMethod;
+import org.jruby.internal.runtime.methods.InterpretedIRMethod;
+import org.jruby.ir.IRMethod;
+import org.jruby.ir.targets.JVMVisitor;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.threading.DaemonThreadFactory;
+import org.jruby.util.JavaNameMangler;
+import org.jruby.util.OneShotClassLoader;
+import org.jruby.util.cli.Options;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+import org.objectweb.asm.Opcodes;
+
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.lang.reflect.Method;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+
+public class JITCompiler implements JITCompilerMBean {
+<span class="fc" id="L71">    private static final Logger LOG = LoggerFactory.getLogger(&quot;JITCompiler&quot;);</span>
+
+    public static final String RUBY_JIT_PREFIX = &quot;rubyjit&quot;;
+
+    public static final String CLASS_METHOD_DELIMITER = &quot;$$&quot;;
+
+<span class="fc" id="L77">    public static class JITCounts {</span>
+<span class="fc" id="L78">        private final AtomicLong compiledCount = new AtomicLong(0);</span>
+<span class="fc" id="L79">        private final AtomicLong successCount = new AtomicLong(0);</span>
+<span class="fc" id="L80">        private final AtomicLong failCount = new AtomicLong(0);</span>
+<span class="fc" id="L81">        private final AtomicLong abandonCount = new AtomicLong(0);</span>
+<span class="fc" id="L82">        private final AtomicLong compileTime = new AtomicLong(0);</span>
+<span class="fc" id="L83">        private final AtomicLong averageCompileTime = new AtomicLong(0);</span>
+<span class="fc" id="L84">        private final AtomicLong codeSize = new AtomicLong(0);</span>
+<span class="fc" id="L85">        private final AtomicLong averageCodeSize = new AtomicLong(0);</span>
+<span class="fc" id="L86">        private final AtomicLong largestCodeSize = new AtomicLong(0);</span>
+    }
+
+<span class="fc" id="L89">    private final JITCounts counts = new JITCounts();</span>
+    private final ExecutorService executor;
+    
+    private final Ruby runtime;
+    private final RubyInstanceConfig config;
+    
+<span class="fc" id="L95">    public JITCompiler(Ruby runtime) {</span>
+<span class="fc" id="L96">        this.runtime = runtime;</span>
+<span class="fc" id="L97">        this.config = runtime.getInstanceConfig();</span>
+
+<span class="fc" id="L99">        this.executor = new ThreadPoolExecutor(</span>
+                0, // don't start threads until needed
+                2, // two max
+                60, // stop then if no jitting for 60 seconds
+                TimeUnit.SECONDS,
+                new LinkedBlockingQueue&lt;Runnable&gt;(),
+<span class="fc" id="L105">                new DaemonThreadFactory(&quot;Ruby-&quot; + runtime.getRuntimeNumber() + &quot;-JIT&quot;, Thread.MIN_PRIORITY));</span>
+<span class="fc" id="L106">    }</span>
+
+    public long getSuccessCount() {
+<span class="nc" id="L109">        return counts.successCount.get();</span>
+    }
+
+    public long getCompileCount() {
+<span class="nc" id="L113">        return counts.compiledCount.get();</span>
+    }
+
+    public long getFailCount() {
+<span class="nc" id="L117">        return counts.failCount.get();</span>
+    }
+
+    public long getCompileTime() {
+<span class="nc" id="L121">        return counts.compileTime.get() / 1000;</span>
+    }
+
+    public long getAbandonCount() {
+<span class="nc" id="L125">        return counts.abandonCount.get();</span>
+    }
+    
+    public long getCodeSize() {
+<span class="nc" id="L129">        return counts.codeSize.get();</span>
+    }
+    
+    public long getAverageCodeSize() {
+<span class="nc" id="L133">        return counts.averageCodeSize.get();</span>
+    }
+    
+    public long getAverageCompileTime() {
+<span class="nc" id="L137">        return counts.averageCompileTime.get() / 1000;</span>
+    }
+    
+    public long getLargestCodeSize() {
+<span class="nc" id="L141">        return counts.largestCodeSize.get();</span>
+    }
+
+    public void tearDown() {
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (executor != null) {</span>
+            try {
+<span class="nc" id="L147">                executor.shutdown();</span>
+<span class="nc" id="L148">            } catch (SecurityException se) {</span>
+                // ignore, can't shut down executor
+<span class="nc" id="L150">            }</span>
+        }
+<span class="nc" id="L152">    }</span>
+    
+    public void jitThresholdReached(final InterpretedIRMethod method, final RubyInstanceConfig config, ThreadContext context, final String className, final String methodName) {
+        // Disable any other jit tasks from entering queue
+<span class="fc" id="L156">        method.setCallCount(-1);</span>
+        
+<span class="fc" id="L158">        Runnable jitTask = new JITTask(className, method, methodName);</span>
+
+        // if background JIT is enabled and threshold is &gt; 0 and we have an executor...
+<span class="pc bpc" id="L161" title="1 of 2 branches missed.">        if (config.getJitBackground() &amp;&amp;</span>
+<span class="pc bpc" id="L162" title="2 of 4 branches missed.">                config.getJitThreshold() &gt; 0 &amp;&amp;</span>
+                executor != null) {
+            // JIT in background
+            try {
+<span class="fc" id="L166">                executor.submit(jitTask);</span>
+<span class="nc" id="L167">            } catch (RejectedExecutionException ree) {</span>
+                // failed to submit, just run it directly
+<span class="nc" id="L169">                jitTask.run();</span>
+<span class="pc" id="L170">            }</span>
+        } else {
+            // just run directly
+<span class="nc" id="L173">            jitTask.run();</span>
+        }
+<span class="fc" id="L175">    }</span>
+
+<span class="fc" id="L177">    private static final MethodHandles.Lookup PUBLIC_LOOKUP = MethodHandles.publicLookup().in(Ruby.class);</span>
+
+    private class JITTask implements Runnable {
+        private final String className;
+        private final InterpretedIRMethod method;
+        private final String methodName;
+
+<span class="fc" id="L184">        public JITTask(String className, InterpretedIRMethod method, String methodName) {</span>
+<span class="fc" id="L185">            this.className = className;</span>
+<span class="fc" id="L186">            this.method = method;</span>
+<span class="fc" id="L187">            this.methodName = methodName;</span>
+<span class="fc" id="L188">        }</span>
+
+        public void run() {
+            try {
+                // Check if the method has been explicitly excluded
+<span class="pc bpc" id="L193" title="1 of 2 branches missed.">                if (config.getExcludedMethods().size() &gt; 0) {</span>
+<span class="fc" id="L194">                    String excludeModuleName = className;</span>
+<span class="fc bfc" id="L195" title="All 2 branches covered.">                    if (method.getImplementationClass().getMethodLocation().isSingleton()) {</span>
+<span class="fc" id="L196">                        IRubyObject possibleRealClass = ((MetaClass) method.getImplementationClass()).getAttached();</span>
+<span class="pc bpc" id="L197" title="1 of 2 branches missed.">                        if (possibleRealClass instanceof RubyModule) {</span>
+<span class="fc" id="L198">                            excludeModuleName = &quot;Meta:&quot; + ((RubyModule) possibleRealClass).getName();</span>
+                        }
+                    }
+
+<span class="pc bpc" id="L202" title="1 of 2 branches missed.">                    if ((config.getExcludedMethods().contains(excludeModuleName)</span>
+<span class="pc bpc" id="L203" title="1 of 2 branches missed.">                            || config.getExcludedMethods().contains(excludeModuleName + &quot;#&quot; + methodName)</span>
+<span class="pc bpc" id="L204" title="1 of 2 branches missed.">                            || config.getExcludedMethods().contains(methodName))) {</span>
+<span class="nc" id="L205">                        method.setCallCount(-1);</span>
+<span class="nc" id="L206">                        log(method, methodName, &quot;skipping method: &quot; + excludeModuleName + &quot;#&quot; + methodName);</span>
+<span class="nc" id="L207">                        return;</span>
+                    }
+                }
+
+<span class="fc" id="L211">                String key = SexpMaker.sha1(method.getIRMethod());</span>
+<span class="fc" id="L212">                JVMVisitor visitor = new JVMVisitor();</span>
+<span class="fc" id="L213">                JITClassGenerator generator = new JITClassGenerator(className, methodName, key, runtime, method, visitor);</span>
+
+<span class="fc" id="L215">                generator.compile();</span>
+
+                // FIXME: reinstate active bytecode size check
+                // At this point we still need to reinstate the bytecode size check, to ensure we're not loading code
+                // that's so big that JVMs won't even try to compile it. Removed the check because with the new IR JIT
+                // bytecode counts often include all nested scopes, even if they'd be different methods. We need a new
+                // mechanism of getting all method sizes.
+<span class="fc" id="L222">                Class sourceClass = visitor.defineFromBytecode(method.getIRMethod(), generator.bytecode(), new OneShotClassLoader(runtime.getJRubyClassLoader()));</span>
+
+<span class="pc bpc" id="L224" title="1 of 2 branches missed.">                if (sourceClass == null) {</span>
+                    // class could not be found nor generated; give up on JIT and bail out
+<span class="nc" id="L226">                    counts.failCount.incrementAndGet();</span>
+<span class="nc" id="L227">                    return;</span>
+                } else {
+<span class="fc" id="L229">                    generator.updateCounters(counts);</span>
+                }
+
+                // successfully got back a jitted method
+<span class="fc" id="L233">                long methodCount = counts.successCount.incrementAndGet();</span>
+
+                // logEvery n methods based on configuration
+<span class="pc bpc" id="L236" title="1 of 2 branches missed.">                if (config.getJitLogEvery() &gt; 0) {</span>
+<span class="nc bnc" id="L237" title="All 2 branches missed.">                    if (methodCount % config.getJitLogEvery() == 0) {</span>
+<span class="nc" id="L238">                        log(method, methodName, &quot;live compiled methods: &quot; + methodCount);</span>
+                    }
+                }
+
+<span class="pc bpc" id="L242" title="1 of 2 branches missed.">                if (config.isJitLogging()) {</span>
+<span class="nc" id="L243">                    log(method, className + &quot;.&quot; + methodName, &quot;done jitting&quot;);</span>
+                }
+
+<span class="fc" id="L246">                Map&lt;Integer, MethodType&gt; signatures = ((IRMethod)method.getIRMethod()).getNativeSignatures();</span>
+<span class="fc" id="L247">                String jittedName = ((IRMethod)method.getIRMethod()).getJittedName();</span>
+<span class="fc bfc" id="L248" title="All 2 branches covered.">                if (signatures.size() == 1) {</span>
+                    // only variable-arity
+<span class="fc" id="L250">                    method.switchToJitted(</span>
+                            new CompiledIRMethod(
+<span class="fc" id="L252">                                    PUBLIC_LOOKUP.findStatic(sourceClass, jittedName, signatures.get(-1)),</span>
+<span class="fc" id="L253">                                    method.getIRMethod(),</span>
+<span class="fc" id="L254">                                    method.getVisibility(),</span>
+<span class="fc" id="L255">                                    method.getImplementationClass()));</span>
+                } else {
+                    // also specific-arity
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">                    for (Map.Entry&lt;Integer, MethodType&gt; entry : signatures.entrySet()) {</span>
+<span class="fc bfc" id="L259" title="All 2 branches covered.">                        if (entry.getKey() == -1) continue; // variable arity handle pushed above</span>
+
+<span class="fc" id="L261">                        method.switchToJitted(</span>
+                                new CompiledIRMethod(
+<span class="fc" id="L263">                                        PUBLIC_LOOKUP.findStatic(sourceClass, jittedName, signatures.get(-1)),</span>
+<span class="fc" id="L264">                                        PUBLIC_LOOKUP.findStatic(sourceClass, jittedName, entry.getValue()),</span>
+<span class="fc" id="L265">                                        entry.getKey(),</span>
+<span class="fc" id="L266">                                        method.getIRMethod(),</span>
+<span class="fc" id="L267">                                        method.getVisibility(),</span>
+<span class="fc" id="L268">                                        method.getImplementationClass()));</span>
+<span class="fc" id="L269">                        break;</span>
+                    }
+                }
+
+<span class="fc" id="L273">                return;</span>
+<span class="nc" id="L274">            } catch (Throwable t) {</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">                if (config.isJitLogging()) {</span>
+<span class="nc" id="L276">                    log(method, className + &quot;.&quot; + methodName, &quot;Could not compile; passes run: &quot; + method.getIRMethod().getExecutedPasses(), t.getMessage());</span>
+<span class="nc bnc" id="L277" title="All 2 branches missed.">                    if (config.isJitLoggingVerbose()) {</span>
+<span class="nc" id="L278">                        t.printStackTrace();</span>
+                    }
+                }
+
+<span class="nc" id="L282">                counts.failCount.incrementAndGet();</span>
+<span class="nc" id="L283">                return;</span>
+            }
+        }
+    }
+
+    public static String getHashForString(String str) {
+<span class="nc" id="L289">        return getHashForBytes(RubyEncoding.encodeUTF8(str));</span>
+    }
+
+    public static String getHashForBytes(byte[] bytes) {
+        try {
+<span class="nc" id="L294">            MessageDigest sha1 = MessageDigest.getInstance(&quot;SHA1&quot;);</span>
+<span class="nc" id="L295">            sha1.update(bytes);</span>
+<span class="nc" id="L296">            byte[] digest = sha1.digest();</span>
+<span class="nc" id="L297">            StringBuilder builder = new StringBuilder();</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">            for (int i = 0; i &lt; digest.length; i++) {</span>
+<span class="nc" id="L299">                builder.append(Integer.toString( ( digest[i] &amp; 0xff ) + 0x100, 16).substring( 1 ));</span>
+            }
+<span class="nc" id="L301">            return builder.toString().toUpperCase(Locale.ENGLISH);</span>
+<span class="nc" id="L302">        } catch (NoSuchAlgorithmException nsae) {</span>
+<span class="nc" id="L303">            throw new RuntimeException(nsae);</span>
+        }
+    }
+    
+    public static class JITClassGenerator {
+<span class="fc" id="L308">        public JITClassGenerator(String className, String methodName, String key, Ruby ruby, InterpretedIRMethod method, JVMVisitor visitor) {</span>
+<span class="fc" id="L309">            this.packageName = JITCompiler.RUBY_JIT_PREFIX;</span>
+<span class="pc bpc" id="L310" title="3 of 4 branches missed.">            if (RubyInstanceConfig.JAVA_VERSION == Opcodes.V1_7 || Options.COMPILE_INVOKEDYNAMIC.load() == true) {</span>
+                // Some versions of Java 7 seems to have a bug that leaks definitions across cousin classloaders
+                // so we force the class name to be unique to this runtime.
+
+                // Also, invokedynamic forces us to make jitted bytecode unique to each runtime, since the call sites cache
+                // at class level rather than at our runtime level. This makes it impossible to share jitted bytecode
+                // across runtimes.
+                
+<span class="fc" id="L318">                digestString = key + Math.abs(ruby.hashCode());</span>
+            } else {
+<span class="nc" id="L320">                digestString = key;</span>
+            }
+<span class="fc" id="L322">            this.className = packageName + &quot;/&quot; + className.replace('.', '/') + CLASS_METHOD_DELIMITER + JavaNameMangler.mangleMethodName(methodName) + &quot;_&quot; + digestString;</span>
+<span class="fc" id="L323">            this.name = this.className.replaceAll(&quot;/&quot;, &quot;.&quot;);</span>
+<span class="fc" id="L324">            this.methodName = methodName;</span>
+<span class="fc" id="L325">            this.ruby = ruby;</span>
+<span class="fc" id="L326">            this.method = method;</span>
+<span class="fc" id="L327">            this.visitor = visitor;</span>
+<span class="fc" id="L328">        }</span>
+        
+        @SuppressWarnings(&quot;unchecked&quot;)
+        protected void compile() {
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">            if (bytecode != null) return;</span>
+            
+            // Time the compilation
+<span class="fc" id="L335">            long start = System.nanoTime();</span>
+
+<span class="fc" id="L337">            method.ensureInstrsReady();</span>
+
+            // This may not be ok since we'll end up running passes specific to JIT
+            // CON FIXME: Really should clone scope before passes in any case
+<span class="fc" id="L341">            bytecode = visitor.compileToBytecode(method.getIRMethod());</span>
+
+<span class="fc" id="L343">            compileTime = System.nanoTime() - start;</span>
+<span class="fc" id="L344">        }</span>
+
+        void updateCounters(JITCounts counts) {
+<span class="fc" id="L347">            counts.compiledCount.incrementAndGet();</span>
+<span class="fc" id="L348">            counts.compileTime.addAndGet(compileTime);</span>
+<span class="fc" id="L349">            counts.codeSize.addAndGet(bytecode.length);</span>
+<span class="fc" id="L350">            counts.averageCompileTime.set(counts.compileTime.get() / counts.compiledCount.get());</span>
+<span class="fc" id="L351">            counts.averageCodeSize.set(counts.codeSize.get() / counts.compiledCount.get());</span>
+<span class="fc" id="L352">            synchronized (counts) {</span>
+<span class="fc bfc" id="L353" title="All 2 branches covered.">                if (counts.largestCodeSize.get() &lt; bytecode.length) {</span>
+<span class="fc" id="L354">                    counts.largestCodeSize.set(bytecode.length);</span>
+                }
+<span class="pc" id="L356">            }</span>
+<span class="fc" id="L357">        }</span>
+
+        public void generate() {
+<span class="nc" id="L360">            compile();</span>
+<span class="nc" id="L361">        }</span>
+        
+        public byte[] bytecode() {
+<span class="fc" id="L364">            return bytecode;</span>
+        }
+
+        public String name() {
+<span class="nc" id="L368">            return name;</span>
+        }
+
+        @Override
+        public String toString() {
+<span class="nc" id="L373">            return methodName + &quot;() at &quot; + method.getFile() + &quot;:&quot; + method.getLine();</span>
+        }
+
+        private final Ruby ruby;
+        private final String packageName;
+        private final String className;
+        private final String methodName;
+        private final String digestString;
+        private final InterpretedIRMethod method;
+        private final JVMVisitor visitor;
+
+        private byte[] bytecode;
+        private long compileTime;
+        private String name;
+    }
+
+    static void log(InterpretedIRMethod method, String name, String message, String... reason) {
+<span class="nc" id="L390">        String className = method.getImplementationClass().getBaseName();</span>
+        
+<span class="nc bnc" id="L392" title="All 2 branches missed.">        if (className == null) className = &quot;&lt;anon class&gt;&quot;;</span>
+
+<span class="nc" id="L394">        StringBuilder builder = new StringBuilder(message + &quot;:&quot; + className + &quot;.&quot; + name + &quot; at &quot; + method.getIRMethod().getFileName() + &quot;:&quot; + method.getIRMethod().getLineNumber());</span>
+        
+<span class="nc bnc" id="L396" title="All 2 branches missed.">        if (reason.length &gt; 0) {</span>
+<span class="nc" id="L397">            builder.append(&quot; because of: \&quot;&quot;);</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">            for (int i = 0; i &lt; reason.length; i++) {</span>
+<span class="nc" id="L399">                builder.append(reason[i]);</span>
+            }
+<span class="nc" id="L401">            builder.append('&quot;');</span>
+        }
+        
+<span class="nc" id="L404">        LOG.info(builder.toString());</span>
+<span class="nc" id="L405">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

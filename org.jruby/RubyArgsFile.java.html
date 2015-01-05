@@ -1,0 +1,778 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyArgsFile.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyArgsFile.java</span></div><h1>RubyArgsFile.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2002-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2007 Ola Bini &lt;ola@ologix.com&gt;
+ * Copyright (C) 2008-2009 Joseph LaFata &lt;joe@quibb.org&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import java.io.File;
+import java.io.IOException;
+import static org.jruby.RubyEnumerator.enumeratorize;
+
+import org.jruby.anno.JRubyMethod;
+import org.jruby.exceptions.RaiseException;
+import jnr.posix.FileStat;
+import jnr.posix.util.Platform;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.IAccessor;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
+import org.jruby.internal.runtime.GlobalVariable;
+
+<span class="nc" id="L50">public class RubyArgsFile {</span>
+<span class="nc" id="L51">    static final class ArgsFileData {</span>
+        private final Ruby runtime;
+<span class="fc" id="L53">        public ArgsFileData(Ruby runtime) {</span>
+<span class="fc" id="L54">            this.runtime = runtime;</span>
+<span class="fc" id="L55">            this.currentFile = runtime.getNil();</span>
+<span class="fc" id="L56">        }</span>
+
+        public IRubyObject currentFile;
+        public int currentLineNumber;
+        public int minLineNumber;
+<span class="fc" id="L61">        private boolean inited = false;</span>
+<span class="fc" id="L62">        public int next_p = 0;</span>
+
+        public boolean next_argv(ThreadContext context) {
+<span class="fc" id="L65">            RubyArray args = (RubyArray)runtime.getGlobalVariables().get(&quot;$*&quot;);</span>
+<span class="fc bfc" id="L66" title="All 2 branches covered.">            if (!inited) {</span>
+<span class="fc bfc" id="L67" title="All 2 branches covered.">                if (args.getLength() &gt; 0) {</span>
+<span class="fc" id="L68">                    next_p = 1;</span>
+                } else {
+<span class="fc" id="L70">                    next_p = -1;</span>
+                }
+<span class="fc" id="L72">                inited = true;</span>
+<span class="fc" id="L73">                currentLineNumber = 0;</span>
+            }
+
+<span class="fc bfc" id="L76" title="All 2 branches covered.">            if (next_p == 1) {</span>
+<span class="fc" id="L77">                next_p = 0;</span>
+<span class="fc bfc" id="L78" title="All 2 branches covered.">                if (args.getLength() &gt; 0) {</span>
+<span class="fc" id="L79">                    IRubyObject arg = args.shift(context);</span>
+<span class="fc" id="L80">                    RubyString filename = (RubyString)((RubyObject)arg).to_s();</span>
+<span class="fc" id="L81">                    ByteList filenameBytes = filename.getByteList();</span>
+<span class="fc bfc" id="L82" title="All 2 branches covered.">                    if (!filename.op_equal(context, (RubyString) runtime.getGlobalVariables().get(&quot;$FILENAME&quot;)).isTrue()) {</span>
+<span class="fc" id="L83">                        runtime.defineReadonlyVariable(&quot;$FILENAME&quot;, filename, GlobalVariable.Scope.GLOBAL);</span>
+                    }
+
+<span class="pc bpc" id="L86" title="1 of 4 branches missed.">                    if (filenameBytes.length() == 1 &amp;&amp; filenameBytes.get(0) == '-') {</span>
+<span class="fc" id="L87">                        currentFile = runtime.getGlobalVariables().get(&quot;$stdin&quot;);</span>
+                    } else {
+<span class="fc" id="L89">                        currentFile = RubyFile.open(context, runtime.getFile(), new IRubyObject[]{filename}, Block.NULL_BLOCK);</span>
+<span class="fc" id="L90">                        String extension = runtime.getInstanceConfig().getInPlaceBackupExtension();</span>
+<span class="fc bfc" id="L91" title="All 2 branches covered.">                        if (extension != null) {</span>
+<span class="pc bpc" id="L92" title="1 of 2 branches missed.">                            if (Platform.IS_WINDOWS) {</span>
+<span class="nc" id="L93">                                inplaceEditWindows(context, filename.asJavaString(), extension);</span>
+                            } else {
+<span class="fc" id="L95">                                inplaceEdit(context, filename.asJavaString(), extension);</span>
+                            }
+                        }
+<span class="fc" id="L98">                        minLineNumber = currentLineNumber;</span>
+<span class="fc" id="L99">                        currentFile.callMethod(context, &quot;lineno=&quot;, context.runtime.newFixnum(currentLineNumber));</span>
+                    }
+<span class="fc" id="L101">                } else {</span>
+<span class="fc" id="L102">                    next_p = 1;</span>
+<span class="fc" id="L103">                    return false;</span>
+                }
+<span class="fc bfc" id="L105" title="All 2 branches covered.">            } else if (next_p == -1) {</span>
+<span class="fc" id="L106">                currentFile = runtime.getGlobalVariables().get(&quot;$stdin&quot;);</span>
+<span class="pc bpc" id="L107" title="1 of 2 branches missed.">                if(!runtime.getGlobalVariables().get(&quot;$FILENAME&quot;).asJavaString().equals(&quot;-&quot;)) {</span>
+<span class="nc" id="L108">                    runtime.defineReadonlyVariable(&quot;$FILENAME&quot;, runtime.newString(&quot;-&quot;), GlobalVariable.Scope.GLOBAL);</span>
+                }
+            }
+
+<span class="fc" id="L112">            return true;</span>
+        }
+
+        public static ArgsFileData getDataFrom(IRubyObject recv) {
+<span class="fc" id="L116">            ArgsFileData data = (ArgsFileData)recv.dataGetStruct();</span>
+
+<span class="fc bfc" id="L118" title="All 2 branches covered.">            if (data == null) {</span>
+<span class="fc" id="L119">                data = new ArgsFileData(recv.getRuntime());</span>
+<span class="fc" id="L120">                recv.dataWrapStruct(data);</span>
+            }
+
+<span class="fc" id="L123">            return data;</span>
+        }
+
+        private void createNewFile(File file) {
+            try {
+<span class="fc" id="L128">                file.createNewFile();</span>
+<span class="nc" id="L129">            } catch (IOException ex) {</span>
+<span class="nc" id="L130">                throw runtime.newIOErrorFromException(ex);</span>
+<span class="fc" id="L131">            }</span>
+<span class="fc" id="L132">        }</span>
+
+        private void inplaceEditWindows(ThreadContext context, String filename, String extension) throws RaiseException {
+<span class="nc" id="L135">            File file = new File(filename);</span>
+
+<span class="nc bnc" id="L137" title="All 2 branches missed.">            if (!extension.equals(&quot;&quot;)) {</span>
+<span class="nc" id="L138">                String backup = filename + extension;</span>
+<span class="nc" id="L139">                File backupFile = new File(backup);</span>
+
+<span class="nc" id="L141">                ((RubyIO) currentFile).close(); // we can't rename a file while it's open in windows</span>
+<span class="nc" id="L142">                backupFile.delete();</span>
+<span class="nc" id="L143">                file.renameTo(backupFile);</span>
+<span class="nc" id="L144">                currentFile = RubyFile.open(context, runtime.getFile(), //reopen</span>
+<span class="nc" id="L145">                        new IRubyObject[]{runtime.newString(backup)}, Block.NULL_BLOCK);</span>
+<span class="nc" id="L146">            } else {</span>
+<span class="nc" id="L147">                throw runtime.newIOError(&quot;Windows doesn't support inplace editing without a backup&quot;);</span>
+            }
+
+<span class="nc" id="L150">            createNewFile(file);</span>
+
+<span class="nc" id="L152">            runtime.getGlobalVariables().set(&quot;$stdout&quot;, RubyFile.open(context, runtime.getFile(),</span>
+<span class="nc" id="L153">                    new IRubyObject[]{runtime.newString(filename), runtime.newString(&quot;w&quot;)}, Block.NULL_BLOCK));</span>
+<span class="nc" id="L154">        }</span>
+
+        private void inplaceEdit(ThreadContext context, String filename, String extension) throws RaiseException {
+<span class="fc" id="L157">            File file = new File(filename);</span>
+<span class="fc" id="L158">            FileStat stat = runtime.getPosix().stat(filename);</span>
+
+<span class="fc bfc" id="L160" title="All 2 branches covered.">            if (!extension.equals(&quot;&quot;)) {</span>
+<span class="fc" id="L161">                file.renameTo(new File(filename + extension));</span>
+            } else {
+<span class="fc" id="L163">                file.delete();</span>
+            }
+
+<span class="fc" id="L166">            createNewFile(file);</span>
+
+<span class="fc" id="L168">            runtime.getPosix().chmod(filename, stat.mode());</span>
+<span class="fc" id="L169">            runtime.getPosix().chown(filename, stat.uid(), stat.gid());</span>
+<span class="fc" id="L170">            runtime.getGlobalVariables().set(&quot;$stdout&quot;, (RubyIO) RubyFile.open(context, runtime.getFile(),</span>
+<span class="fc" id="L171">                    new IRubyObject[]{runtime.newString(filename), runtime.newString(&quot;w&quot;)}, Block.NULL_BLOCK));</span>
+<span class="fc" id="L172">        }</span>
+    }    
+    
+    public static void setCurrentLineNumber(IRubyObject recv, int newLineNumber) {
+<span class="fc" id="L176">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+
+<span class="pc bpc" id="L178" title="1 of 2 branches missed.">        if (data != null) {</span>
+<span class="fc" id="L179">            data.currentLineNumber = newLineNumber;</span>
+        }
+<span class="fc" id="L181">    }</span>
+
+    public static void initArgsFile(final Ruby runtime) {
+<span class="fc" id="L184">        RubyObject argsFile = new RubyObject(runtime, runtime.getObject());</span>
+
+<span class="fc" id="L186">        runtime.getEnumerable().extend_object(argsFile);</span>
+
+<span class="fc" id="L188">        runtime.setArgsFile(argsFile);</span>
+<span class="fc" id="L189">        runtime.getGlobalVariables().defineReadonly(&quot;$&lt;&quot;, new IAccessor() {</span>
+            @Override
+            public IRubyObject getValue() {
+<span class="nc" id="L192">                return runtime.getArgsFile();</span>
+            }
+
+            @Override
+            public IRubyObject setValue(IRubyObject newValue) {
+<span class="nc" id="L197">                throw new UnsupportedOperationException(&quot;Not supported yet.&quot;);</span>
+            }
+        }, GlobalVariable.Scope.GLOBAL);
+<span class="fc" id="L200">        runtime.defineGlobalConstant(&quot;ARGF&quot;, argsFile);</span>
+        
+<span class="fc" id="L202">        RubyClass argfClass = argsFile.getMetaClass();</span>
+<span class="fc" id="L203">        argfClass.defineAnnotatedMethods(RubyArgsFile.class);</span>
+<span class="fc" id="L204">        runtime.defineReadonlyVariable(&quot;$FILENAME&quot;, runtime.newString(&quot;-&quot;), GlobalVariable.Scope.GLOBAL);</span>
+<span class="fc" id="L205">    }</span>
+
+    @JRubyMethod(name = {&quot;fileno&quot;, &quot;to_i&quot;})
+    public static IRubyObject fileno(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L209">        return ((RubyIO) getData(context, recv, &quot;no stream&quot;).currentFile).fileno(context);</span>
+    }
+
+    @JRubyMethod(name = &quot;to_io&quot;)
+    public static IRubyObject to_io(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L214">        return getData(context, recv, &quot;no stream&quot;).currentFile;</span>
+    }
+    
+    @JRubyMethod
+    public static IRubyObject set_encoding(ThreadContext context, IRubyObject recv, IRubyObject encoding) {
+<span class="fc" id="L219">        return ((RubyIO) getData(context, recv, &quot;no stream to set encoding&quot;).currentFile).set_encoding(context, encoding);</span>
+    }
+    
+    @JRubyMethod
+    public static IRubyObject set_encoding(ThreadContext context, IRubyObject recv, IRubyObject encoding, IRubyObject internalEncoding) {
+<span class="fc" id="L224">        return ((RubyIO) getData(context, recv, &quot;no stream to set encoding&quot;).currentFile).set_encoding(context, encoding, internalEncoding);</span>
+    }
+    
+    @JRubyMethod
+    public static IRubyObject set_encoding(ThreadContext context, IRubyObject recv, IRubyObject encoding, IRubyObject internalEncoding, IRubyObject options) {
+<span class="nc" id="L229">        return ((RubyIO) getData(context, recv, &quot;no stream to set encoding&quot;).currentFile).set_encoding(context, encoding, internalEncoding, options);</span>
+    }
+    
+    @JRubyMethod
+    public static IRubyObject internal_encoding(ThreadContext context, IRubyObject recv) {
+<span class="nc" id="L234">        return ((RubyIO) getData(context, recv, &quot;no stream to set encoding&quot;).currentFile).internal_encoding(context);</span>
+    }
+    
+    @JRubyMethod
+    public static IRubyObject external_encoding(ThreadContext context, IRubyObject recv) {
+<span class="nc" id="L239">        return ((RubyIO) getData(context, recv, &quot;no stream to set encoding&quot;).currentFile).external_encoding(context);</span>
+    }    
+
+    private static IRubyObject argf_getline(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L243">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+
+<span class="fc" id="L245">        boolean retry = true;</span>
+<span class="fc" id="L246">        IRubyObject line = null;</span>
+<span class="fc bfc" id="L247" title="All 2 branches covered.">        while(retry) {</span>
+<span class="fc" id="L248">            retry = false;</span>
+<span class="fc bfc" id="L249" title="All 2 branches covered.">            if (!data.next_argv(context)) return context.runtime.getNil();</span>
+
+<span class="fc" id="L251">            line = data.currentFile.callMethod(context, &quot;gets&quot;, args);</span>
+
+<span class="fc bfc" id="L253" title="All 4 branches covered.">            if (line.isNil() &amp;&amp; data.next_p != -1) {</span>
+<span class="fc" id="L254">                argf_close(context, data.currentFile);</span>
+<span class="fc" id="L255">                data.next_p = 1;</span>
+<span class="fc" id="L256">                retry = true;</span>
+            }
+        }
+        
+<span class="pc bpc" id="L260" title="1 of 4 branches missed.">        if (line != null &amp;&amp; !line.isNil()) {</span>
+<span class="fc" id="L261">            context.runtime.setCurrentLine(data.currentLineNumber);</span>
+        }
+
+<span class="fc" id="L264">        return line;</span>
+    }
+
+    // ARGF methods
+
+    /** Read a line.
+     * 
+     */
+    @JRubyMethod(name = &quot;gets&quot;, optional = 1)
+    public static IRubyObject gets(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L274">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+
+<span class="fc bfc" id="L276" title="All 2 branches covered.">        if (!data.next_argv(context)) return context.runtime.getNil();</span>
+
+        IRubyObject line;
+<span class="pc bpc" id="L279" title="1 of 2 branches missed.">        if (!(data.currentFile instanceof RubyIO)) {</span>
+<span class="nc" id="L280">            line = data.currentFile.callMethod(context, &quot;gets&quot;, args);</span>
+        } else {
+<span class="fc" id="L282">            line = argf_getline(context, recv, args);</span>
+        }
+
+<span class="fc" id="L285">        context.setLastLine(line);</span>
+<span class="fc" id="L286">        context.runtime.getGlobalVariables().set(&quot;$_&quot;, line);</span>
+        
+<span class="fc" id="L288">        return line;</span>
+    }
+    
+    /** Read a line.
+     * 
+     */
+    @JRubyMethod(name = &quot;readline&quot;, optional = 1)
+    public static IRubyObject readline(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L296">        IRubyObject line = gets(context, recv, args);</span>
+
+<span class="fc bfc" id="L298" title="All 2 branches covered.">        if (line.isNil()) throw context.runtime.newEOFError();</span>
+        
+<span class="fc" id="L300">        return line;</span>
+    }
+
+    @JRubyMethod(optional = 1)
+    public static IRubyObject readlines(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L305">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+<span class="fc" id="L306">        Ruby runtime = context.runtime;</span>
+        
+<span class="fc bfc" id="L308" title="All 2 branches covered.">        if (!data.next_argv(context)) {</span>
+<span class="fc" id="L309">            return runtime.newEmptyArray();</span>
+        }
+<span class="pc bpc" id="L311" title="1 of 2 branches missed.">        if (!(data.currentFile instanceof RubyIO)) {</span>
+<span class="nc" id="L312">            return data.currentFile.callMethod(context, &quot;readlines&quot;, args);</span>
+        }
+        
+<span class="fc" id="L315">        RubyArray ary = runtime.newArray();</span>
+        IRubyObject line;
+<span class="fc bfc" id="L317" title="All 2 branches covered.">        while(!(line = argf_getline(context, recv, args)).isNil()) {</span>
+<span class="fc" id="L318">            ary.append(line);</span>
+        }
+<span class="fc" id="L320">        return ary;</span>
+    }
+
+    @JRubyMethod(optional = 1)
+    public static IRubyObject to_a(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L325">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+<span class="fc" id="L326">        Ruby runtime = context.runtime;</span>
+        
+<span class="fc bfc" id="L328" title="All 2 branches covered.">        if (!data.next_argv(context)) {</span>
+<span class="fc" id="L329">            return runtime.newEmptyArray();</span>
+        }
+
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">        if (!(data.currentFile instanceof RubyIO)) {</span>
+<span class="nc" id="L333">            return data.currentFile.callMethod(context, &quot;to_a&quot;, args);</span>
+        }
+        
+<span class="fc" id="L336">        RubyArray ary = runtime.newArray();</span>
+        IRubyObject line;
+<span class="fc bfc" id="L338" title="All 2 branches covered.">        while(!(line = argf_getline(context, recv, args)).isNil()) {</span>
+<span class="fc" id="L339">            ary.append(line);</span>
+        }
+<span class="fc" id="L341">        return ary;</span>
+    }
+    
+    public static IRubyObject each_byte(ThreadContext context, IRubyObject recv, Block block) {
+        IRubyObject bt;
+
+<span class="fc bfc" id="L347" title="All 2 branches covered.">        while(!(bt = getc(context, recv)).isNil()) {</span>
+<span class="fc" id="L348">            block.yield(context, bt);</span>
+        }
+
+<span class="fc" id="L351">        return recv;</span>
+    }
+
+    @JRubyMethod(optional = 1)
+    public static IRubyObject each_byte(final ThreadContext context, IRubyObject recv, IRubyObject[] args, final Block block) {
+<span class="fc bfc" id="L356" title="All 2 branches covered.">        return block.isGiven() ? each_byte(context, recv, block) : enumeratorize(context.runtime, recv, &quot;each_byte&quot;);</span>
+    }
+
+    @JRubyMethod(optional = 1)
+    public static IRubyObject bytes(final ThreadContext context, IRubyObject recv, IRubyObject[] args, final Block block) {
+<span class="fc bfc" id="L361" title="All 2 branches covered.">        return block.isGiven() ? each_byte(context, recv, block) : enumeratorize(context.runtime, recv, &quot;bytes&quot;);</span>
+    }
+
+    @JRubyMethod
+    public static IRubyObject each_char(final ThreadContext context, IRubyObject recv, Block block) {
+<span class="fc bfc" id="L366" title="All 2 branches covered.">        return block.isGiven() ? each_charCommon(context, recv, block) : enumeratorize(context.runtime, recv, &quot;each_char&quot;);</span>
+    }
+
+    @JRubyMethod
+    public static IRubyObject chars(final ThreadContext context, IRubyObject recv, Block block) {
+<span class="fc bfc" id="L371" title="All 2 branches covered.">        return block.isGiven() ? each_charCommon(context, recv, block) : enumeratorize(context.runtime, recv, &quot;chars&quot;);</span>
+    }
+
+    public static IRubyObject each_charCommon(ThreadContext context, IRubyObject recv, Block block) {
+<span class="fc" id="L375">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+<span class="fc" id="L376">        Ruby runtime = context.runtime;</span>
+        IRubyObject ch;
+<span class="fc bfc" id="L378" title="All 2 branches covered.">        while(!(ch = getc(context, recv)).isNil()) {</span>
+<span class="fc" id="L379">            boolean cont = true;</span>
+<span class="fc bfc" id="L380" title="All 2 branches covered.">            while(cont) {</span>
+<span class="fc" id="L381">                cont = false;</span>
+<span class="fc" id="L382">                byte c = (byte)RubyNumeric.fix2int(ch);</span>
+<span class="fc" id="L383">                int n = runtime.getKCode().getEncoding().length(c);</span>
+<span class="fc" id="L384">                IRubyObject file = data.currentFile;</span>
+<span class="fc" id="L385">                RubyString str = runtime.newString();</span>
+<span class="fc" id="L386">                str.setTaint(true);</span>
+<span class="fc" id="L387">                str.cat(c);</span>
+
+<span class="pc bpc" id="L389" title="1 of 2 branches missed.">                while(--n &gt; 0) {</span>
+<span class="nc bnc" id="L390" title="All 2 branches missed.">                    if((ch = getc(context, recv)).isNil()) {</span>
+<span class="nc" id="L391">                        block.yield(context, str);</span>
+<span class="nc" id="L392">                        return recv;</span>
+                    }
+<span class="nc bnc" id="L394" title="All 2 branches missed.">                    if (data.currentFile != file) {</span>
+<span class="nc" id="L395">                        block.yield(context, str);</span>
+<span class="nc" id="L396">                        cont = true;</span>
+<span class="nc" id="L397">                        continue;</span>
+                    }
+<span class="nc" id="L399">                    c = (byte)RubyNumeric.fix2int(ch);</span>
+<span class="nc" id="L400">                    str.cat(c);</span>
+                }
+<span class="fc" id="L402">                block.yield(context, str);</span>
+<span class="fc" id="L403">            }</span>
+<span class="fc" id="L404">        }</span>
+<span class="fc" id="L405">        return recv;</span>
+    }
+
+    /** Invoke a block for each line.
+     *
+     */
+    public static IRubyObject each_line(ThreadContext context, IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="fc bfc" id="L412" title="All 2 branches covered.">        if (!block.isGiven()) return RubyEnumerator.enumeratorize(context.runtime, recv, &quot;each_line&quot;);</span>
+<span class="fc" id="L413">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+<span class="pc bpc" id="L414" title="1 of 2 branches missed.">        if (!data.next_argv(context)) {</span>
+<span class="nc" id="L415">            return context.runtime.getNil();</span>
+        }
+
+<span class="pc bpc" id="L418" title="1 of 2 branches missed.">        if (!(data.currentFile instanceof RubyIO)) {</span>
+<span class="nc bnc" id="L419" title="All 2 branches missed.">            if (!data.next_argv(context)) return recv;</span>
+
+<span class="nc" id="L421">            data.currentFile.callMethod(context, &quot;each&quot;, new IRubyObject[0], block);</span>
+<span class="nc" id="L422">            data.next_p = 1;</span>
+        }
+        IRubyObject str;
+<span class="fc bfc" id="L425" title="All 2 branches covered.">        while(!(str = argf_getline(context, recv, args)).isNil()) {</span>
+<span class="fc" id="L426">        	block.yield(context, str);</span>
+        }
+        
+<span class="fc" id="L429">        return recv;</span>
+    }
+    
+    @JRubyMethod(optional = 1)
+    public static IRubyObject lines(ThreadContext context, IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="fc" id="L434">        return each_line(context, recv, args, block);</span>
+    }
+
+    @JRubyMethod(name = &quot;each_line&quot;, optional = 1)
+    public static IRubyObject each_line19(final ThreadContext context, IRubyObject recv, IRubyObject[] args, final Block block) {
+<span class="fc bfc" id="L439" title="All 2 branches covered.">        return block.isGiven() ? each_line(context, recv, args, block) : enumeratorize(context.runtime, recv, &quot;each_line&quot;, args);</span>
+    }
+
+    @JRubyMethod(name = &quot;each&quot;, optional = 1)
+    public static IRubyObject each19(final ThreadContext context, IRubyObject recv, IRubyObject[] args, final Block block) {
+<span class="fc bfc" id="L444" title="All 2 branches covered.">        return block.isGiven() ? each_line(context, recv, args, block) : enumeratorize(context.runtime, recv, &quot;each&quot;, args);</span>
+    }
+
+    @JRubyMethod(name = &quot;file&quot;)
+    public static IRubyObject file(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L449">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+
+<span class="fc" id="L451">        data.next_argv(context);</span>
+
+<span class="fc" id="L453">        return data.currentFile;</span>
+    }
+
+    @JRubyMethod(name = &quot;skip&quot;)
+    public static IRubyObject skip(IRubyObject recv) {
+<span class="fc" id="L458">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+
+<span class="pc bpc" id="L460" title="1 of 2 branches missed.">        if (data.next_p != -1) {</span>
+<span class="fc" id="L461">            argf_close(recv.getRuntime().getCurrentContext(), data.currentFile);</span>
+<span class="fc" id="L462">            data.next_p = 1;</span>
+        }
+
+<span class="fc" id="L465">        return recv;</span>
+    }
+
+    public static void argf_close(ThreadContext context, IRubyObject file) {
+<span class="pc bpc" id="L469" title="1 of 2 branches missed.">        if(file instanceof RubyIO) {</span>
+<span class="fc" id="L470">            ((RubyIO)file).rbIoClose(context.runtime);</span>
+        } else {
+<span class="nc" id="L472">            file.callMethod(context, &quot;close&quot;);</span>
+        }
+<span class="fc" id="L474">    }</span>
+
+    @JRubyMethod(name = &quot;close&quot;)
+    public static IRubyObject close(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L478">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+
+<span class="fc" id="L480">        data.next_argv(context);</span>
+<span class="fc bfc" id="L481" title="All 2 branches covered.">        if (isClosed(context, data.currentFile)) {</span>
+<span class="fc" id="L482">            throw context.runtime.newIOError(RubyIO.CLOSED_STREAM_MSG);</span>
+        }
+        
+<span class="fc" id="L485">        argf_close(context, data.currentFile);</span>
+
+<span class="pc bpc" id="L487" title="1 of 2 branches missed.">        if (data.next_p != -1) data.next_p = 1;</span>
+
+<span class="fc" id="L489">        data.currentLineNumber = 0;</span>
+<span class="fc" id="L490">        return recv;</span>
+    }
+
+    @JRubyMethod(name = &quot;closed?&quot;)
+    public static IRubyObject closed_p(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L495">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+
+<span class="fc" id="L497">        data.next_argv(context);</span>
+
+<span class="fc" id="L499">        return RubyBoolean.newBoolean(context.runtime, isClosed(context, data.currentFile));</span>
+    }
+    
+    private static boolean isClosed(ThreadContext context, IRubyObject currentFile) {
+<span class="pc bpc" id="L503" title="1 of 2 branches missed.">        if (!(currentFile instanceof RubyIO)) return currentFile.callMethod(context, &quot;closed?&quot;).isTrue();</span>
+            
+<span class="fc" id="L505">        return ((RubyIO)currentFile).closed_p(context).isTrue();</span>
+    }
+
+    @JRubyMethod(name = &quot;binmode&quot;)
+    public static IRubyObject binmode(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L510">        ArgsFileData data = getData(context, recv, &quot;no stream&quot;);</span>
+        
+<span class="fc" id="L512">        ((RubyIO)data.currentFile).binmode();</span>
+<span class="fc" id="L513">        return recv;</span>
+    }
+    
+    @JRubyMethod(name = &quot;binmode?&quot;)
+    public static IRubyObject op_binmode(ThreadContext context, IRubyObject recv) {
+<span class="nc" id="L518">        ArgsFileData data = getData(context, recv, &quot;no stream&quot;);</span>
+        
+<span class="nc" id="L520">        return ((RubyIO)data.currentFile).op_binmode(context);</span>
+    }
+
+    @JRubyMethod(name = &quot;lineno&quot;)
+    public static IRubyObject lineno(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L525">        return recv.getRuntime().newFixnum(ArgsFileData.getDataFrom(recv).currentLineNumber);</span>
+    }
+
+    @JRubyMethod(name = &quot;lineno=&quot;)
+    public static IRubyObject lineno_set(ThreadContext context, IRubyObject recv, IRubyObject line) {
+<span class="fc" id="L530">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+<span class="fc" id="L531">        data.currentLineNumber = RubyNumeric.fix2int(line);</span>
+<span class="fc" id="L532">        context.runtime.setCurrentLine(data.currentLineNumber);</span>
+<span class="fc" id="L533">        return recv.getRuntime().getNil();</span>
+    }
+
+    @JRubyMethod(name = &quot;tell&quot;, alias = {&quot;pos&quot;})
+    public static IRubyObject tell(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L538">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+<span class="fc bfc" id="L539" title="All 2 branches covered.">        if(!data.next_argv(context)) {</span>
+<span class="fc" id="L540">            throw context.runtime.newArgumentError(&quot;no stream to tell&quot;);</span>
+        }
+
+<span class="fc" id="L543">        return ((RubyIO)data.currentFile).pos(context);</span>
+    }
+
+    @JRubyMethod(name = &quot;rewind&quot;)
+    public static IRubyObject rewind(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L548">        ArgsFileData data = getData(context, recv, &quot;no stream to rewind&quot;);</span>
+        
+<span class="fc" id="L550">        RubyFixnum retVal = ((RubyIO)data.currentFile).rewind(context);</span>
+<span class="fc" id="L551">        ((RubyIO)data.currentFile).lineno_set(context, context.runtime.newFixnum(0));</span>
+        
+<span class="fc" id="L553">        data.minLineNumber = 0;</span>
+<span class="fc" id="L554">        data.currentLineNumber = 0;</span>
+<span class="fc" id="L555">        return retVal;</span>
+    }
+
+    @JRubyMethod(name = {&quot;eof&quot;})
+    public static IRubyObject eof(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L560">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+
+<span class="pc bpc" id="L562" title="1 of 2 branches missed.">        if(!data.inited) {</span>
+<span class="nc" id="L563">            return context.runtime.getTrue();</span>
+        }
+<span class="pc bpc" id="L565" title="1 of 2 branches missed.">        if(!(data.currentFile instanceof RubyIO)) return data.currentFile.callMethod(context, &quot;eof&quot;);</span>
+
+<span class="fc" id="L567">        return ((RubyIO) data.currentFile).eof_p(context);</span>
+    }
+
+    @JRubyMethod(name = {&quot;eof?&quot;})
+    public static IRubyObject eof_p(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L572">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+
+<span class="pc bpc" id="L574" title="1 of 2 branches missed.">        if (!data.inited) {</span>
+<span class="nc" id="L575">            return context.runtime.getTrue();</span>
+        }
+<span class="pc bpc" id="L577" title="1 of 2 branches missed.">        if (!(data.currentFile instanceof RubyIO)) return data.currentFile.callMethod(context, &quot;eof?&quot;);</span>
+
+<span class="fc" id="L579">        return ((RubyIO) data.currentFile).eof_p(context);</span>
+    }
+
+    @JRubyMethod(name = &quot;pos=&quot;, required = 1)
+    public static IRubyObject set_pos(ThreadContext context, IRubyObject recv, IRubyObject offset) {
+<span class="fc" id="L584">        ArgsFileData data = getData(context, recv, &quot;no stream to set position&quot;);</span>
+
+<span class="fc" id="L586">        return ((RubyIO)data.currentFile).pos_set(context, offset);</span>
+    }
+
+    @JRubyMethod(name = &quot;seek&quot;, required = 1, optional = 1)
+    public static IRubyObject seek(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L591">        ArgsFileData data = getData(context, recv, &quot;no stream to seek&quot;);</span>
+
+<span class="fc" id="L593">        return ((RubyIO)data.currentFile).seek(context, args);</span>
+    }
+
+    @JRubyMethod(name = &quot;readchar&quot;)
+    public static IRubyObject readchar(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L598">        IRubyObject c = getc(context, recv);</span>
+        
+<span class="fc bfc" id="L600" title="All 2 branches covered.">        if (c.isNil()) {</span>
+<span class="fc" id="L601">            throw context.runtime.newEOFError();</span>
+        }
+
+<span class="fc" id="L604">        return c;</span>
+    }
+    
+    @JRubyMethod
+    public static IRubyObject getbyte(ThreadContext context, IRubyObject recv) {
+<span class="nc" id="L609">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+
+        while(true) {
+<span class="nc bnc" id="L612" title="All 2 branches missed.">            if (!data.next_argv(context)) return context.runtime.getNil();</span>
+            
+            IRubyObject bt;
+<span class="nc bnc" id="L615" title="All 2 branches missed.">            if (!(data.currentFile instanceof RubyFile)) {</span>
+<span class="nc" id="L616">                bt = data.currentFile.callMethod(context, &quot;getbyte&quot;);</span>
+            } else {
+<span class="nc" id="L618">                bt = ((RubyIO)data.currentFile).getbyte(context);</span>
+            }
+
+<span class="nc bnc" id="L621" title="All 2 branches missed.">            if (!bt.isNil()) return bt;</span>
+
+<span class="nc" id="L623">            data.next_p = 1;</span>
+<span class="nc" id="L624">        }</span>
+    }
+    
+    @JRubyMethod(required = 1, optional = 1)
+    public static IRubyObject read_nonblock(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L629">        return getPartial(context, recv, args, true);</span>
+    }
+    
+    @JRubyMethod(required = 1, optional = 1)
+    public static IRubyObject readpartial(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L634">        return getPartial(context, recv, args, false);</span>
+    }
+    
+    private static IRubyObject getPartial(ThreadContext context, IRubyObject recv, IRubyObject[] args, boolean nonBlocking) {
+<span class="nc" id="L638">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+        
+<span class="nc bnc" id="L640" title="All 2 branches missed.">        if (args.length &gt; 1) args[1] = args[1].convertToString();</span>
+        
+<span class="nc bnc" id="L642" title="All 2 branches missed.">        if (!data.next_argv(context)) throw context.runtime.newEOFError();</span>
+        
+        IRubyObject tmp;
+<span class="nc bnc" id="L645" title="All 2 branches missed.">        if (!(data.currentFile instanceof RubyFile)) { // In MRI this is stdin &amp;&amp; !FILE</span>
+<span class="nc" id="L646">            tmp = data.currentFile.callMethod(context, &quot;getpartial&quot;, args);</span>
+        } else {
+            // In MRI io_getpartial.  Not split
+<span class="nc bnc" id="L649" title="All 2 branches missed.">            if (nonBlocking) {</span>
+<span class="nc" id="L650">                tmp = ((RubyIO) data.currentFile).read_nonblock(context, args); </span>
+            } else {
+<span class="nc" id="L652">                tmp = ((RubyIO) data.currentFile).readpartial(context, args);</span>
+            }
+        }
+        
+<span class="nc bnc" id="L656" title="All 2 branches missed.">        if (tmp.isNil()) {</span>
+<span class="nc bnc" id="L657" title="All 2 branches missed.">            if (data.next_p == -1) throw context.runtime.newEOFError();</span>
+                
+<span class="nc" id="L659">            argf_close(context, data.currentFile);</span>
+<span class="nc" id="L660">            data.next_p = 1;</span>
+            // FIXME: Missing EOF error is no more argv element at this point
+
+<span class="nc bnc" id="L663" title="All 4 branches missed.">            if (args.length &gt; 1 &amp;&amp; args[1].isNil()) return context.runtime.newString();</span>
+
+<span class="nc" id="L665">            return args[1];</span>
+        }
+        
+<span class="nc" id="L668">        return tmp;</span>
+    }
+    
+    @JRubyMethod
+    public static IRubyObject readbyte(ThreadContext context, IRubyObject recv) {
+<span class="nc" id="L673">        IRubyObject c = getbyte(context, recv);</span>
+        
+<span class="nc bnc" id="L675" title="All 2 branches missed.">        if (c.isNil()) throw context.runtime.newEOFError();</span>
+        
+<span class="nc" id="L677">        return c;</span>
+    }
+
+    @JRubyMethod(name = &quot;getc&quot;)
+    public static IRubyObject getc(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L682">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+
+        while(true) {
+<span class="fc bfc" id="L685" title="All 2 branches covered.">            if (!data.next_argv(context)) return context.runtime.getNil();</span>
+
+            IRubyObject bt;
+<span class="pc bpc" id="L688" title="1 of 2 branches missed.">            if (!(data.currentFile instanceof RubyFile)) {</span>
+<span class="nc" id="L689">                bt = data.currentFile.callMethod(context,&quot;getc&quot;);</span>
+            } else {
+<span class="fc" id="L691">                bt = ((RubyIO)data.currentFile).getc();</span>
+            }
+
+<span class="fc bfc" id="L694" title="All 2 branches covered.">            if (!bt.isNil()) return bt;</span>
+            
+<span class="fc" id="L696">            data.next_p = 1;</span>
+<span class="fc" id="L697">        }</span>
+    }
+
+    @JRubyMethod(name = &quot;read&quot;, optional = 2)
+    public static IRubyObject read(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L702">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L703">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+        IRubyObject tmp, str, length;
+<span class="fc" id="L705">        long len = 0;</span>
+
+<span class="fc bfc" id="L707" title="All 2 branches covered.">        if (args.length &gt; 0) {</span>
+<span class="fc" id="L708">            length = args[0];</span>
+<span class="fc bfc" id="L709" title="All 2 branches covered.">            str = args.length &gt; 1 ? args[1] : runtime.getNil();</span>
+        } else {
+<span class="fc" id="L711">            length = runtime.getNil();</span>
+<span class="fc" id="L712">            str = runtime.getNil();</span>
+        }
+
+<span class="fc bfc" id="L715" title="All 2 branches covered.">        if (!length.isNil()) len = RubyNumeric.num2long(length);</span>
+
+<span class="fc bfc" id="L717" title="All 2 branches covered.">        if (!str.isNil()) {</span>
+<span class="fc" id="L718">            str = str.convertToString();</span>
+<span class="fc" id="L719">            ((RubyString)str).modify();</span>
+<span class="fc" id="L720">            ((RubyString)str).getByteList().length(0);</span>
+<span class="fc" id="L721">            args[1] = runtime.getNil();</span>
+        }
+
+        while(true) {
+<span class="fc bfc" id="L725" title="All 2 branches covered.">            if (!data.next_argv(context)) return str;</span>
+
+<span class="pc bpc" id="L727" title="1 of 2 branches missed.">            if (!(data.currentFile instanceof RubyIO)) {</span>
+<span class="nc" id="L728">                tmp = data.currentFile.callMethod(context, &quot;read&quot;, args);</span>
+            } else {
+<span class="fc" id="L730">                tmp = ((RubyIO)data.currentFile).read(args);</span>
+            }
+
+<span class="fc bfc" id="L733" title="All 2 branches covered.">            if (str.isNil()) {</span>
+<span class="fc" id="L734">                str = tmp;</span>
+<span class="fc bfc" id="L735" title="All 2 branches covered.">            } else if (!tmp.isNil()) {</span>
+<span class="fc" id="L736">                ((RubyString)str).append(tmp);</span>
+            }
+
+<span class="fc bfc" id="L739" title="All 4 branches covered.">            if (tmp.isNil() || length.isNil()) {</span>
+<span class="fc bfc" id="L740" title="All 2 branches covered.">                if(data.next_p != -1) {</span>
+<span class="fc" id="L741">                    argf_close(context, data.currentFile);</span>
+<span class="fc" id="L742">                    data.next_p = 1;</span>
+<span class="fc" id="L743">                    continue;</span>
+                }
+<span class="pc bpc" id="L745" title="1 of 2 branches missed.">            } else if(args.length &gt;= 1) {</span>
+<span class="fc bfc" id="L746" title="All 2 branches covered.">                if (((RubyString)str).getByteList().length() &lt; len) {</span>
+<span class="fc" id="L747">                    len -= ((RubyString)str).getByteList().length();</span>
+<span class="fc" id="L748">                    args[0] = runtime.newFixnum(len);</span>
+<span class="fc" id="L749">                    continue;</span>
+                }
+            }
+<span class="fc" id="L752">            return str;</span>
+        }
+    }
+
+    @JRubyMethod(name = &quot;filename&quot;, alias = {&quot;path&quot;})
+    public static IRubyObject filename(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L758">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+<span class="fc" id="L759">        data.next_argv(context);</span>
+<span class="fc" id="L760">        return context.runtime.getGlobalVariables().get(&quot;$FILENAME&quot;);</span>
+    }
+
+    @JRubyMethod(name = &quot;to_s&quot;, alias = &quot;inspect&quot;)
+    public static IRubyObject to_s(IRubyObject recv) {
+<span class="fc" id="L765">        return recv.getRuntime().newString(&quot;ARGF&quot;);</span>
+    }
+    
+    private static ArgsFileData getData(ThreadContext context, IRubyObject recv, String errorMessage) {
+<span class="fc" id="L769">        ArgsFileData data = ArgsFileData.getDataFrom(recv);</span>
+        
+<span class="fc bfc" id="L771" title="All 2 branches covered.">        if (!data.next_argv(context)) {</span>
+<span class="fc" id="L772">            throw context.runtime.newArgumentError(errorMessage);</span>
+        }
+
+<span class="fc" id="L775">        return data;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

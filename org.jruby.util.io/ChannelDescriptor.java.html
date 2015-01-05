@@ -1,0 +1,862 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ChannelDescriptor.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util.io</a> &gt; <span class="el_source">ChannelDescriptor.java</span></div><h1>ChannelDescriptor.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2008 Charles O Nutter &lt;headius@headius.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.util.io;
+
+import java.io.FileDescriptor;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.channels.Channel;
+import java.nio.channels.Channels;
+import java.nio.channels.FileChannel;
+import java.nio.channels.ReadableByteChannel;
+import java.nio.channels.WritableByteChannel;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import jnr.posix.POSIX;
+import jnr.posix.POSIXFactory;
+import org.jruby.util.ByteList;
+import org.jruby.util.JRubyFile;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+
+/**
+ * ChannelDescriptor provides an abstraction similar to the concept of a
+ * &quot;file descriptor&quot; on any POSIX system. In our case, it's a numbered object
+ * (fileno) enclosing a Channel (@see java.nio.channels.Channel), FileDescriptor
+ * (@see java.io.FileDescriptor), and flags under which the original open occured
+ * (@see org.jruby.util.io.ModeFlags). Several operations you would normally
+ * expect to use with a POSIX file descriptor are implemented here and used by
+ * higher-level classes to implement higher-level IO behavior.
+ * 
+ * Note that the channel specified when constructing a ChannelDescriptor will
+ * be reference-counted; that is, until all known references to it through this
+ * class have gone away, it will be left open. This is to support operations
+ * like &quot;dup&quot; which must produce two independent ChannelDescriptor instances
+ * that can be closed separately without affecting the other.
+ * 
+ * At present there's no way to simulate the behavior on some platforms where
+ * POSIX dup also allows independent positioning information.
+ */
+@Deprecated
+public class ChannelDescriptor {
+<span class="nc" id="L74">    private static final Logger LOG = LoggerFactory.getLogger(&quot;ChannelDescriptor&quot;);</span>
+
+    /** Whether to log debugging information */
+    private static final boolean DEBUG = false;
+    
+    /** The java.nio.channels.Channel this descriptor wraps. */
+    private Channel channel;
+    /**
+     * The file number (equivalent to the int file descriptor value in POSIX)
+     * for this descriptor. This is generated new for most ChannelDescriptor
+     * instances, except when they need to masquerade as another fileno.
+     */
+    private int internalFileno;
+    /** The java.io.FileDescriptor object for this descriptor. */
+    private FileDescriptor fileDescriptor;
+    /**
+     * The original org.jruby.util.io.ModeFlags with which the specified
+     * channel was opened.
+     */
+    private ModeFlags originalModes;
+    /** 
+     * The reference count for the provided channel.
+     * Only counts references through ChannelDescriptor instances.
+     */
+    private AtomicInteger refCounter;
+
+    /**
+     * Used to work-around blocking problems with STDIN. In most cases &lt;code&gt;null&lt;/code&gt;.
+     * See {@link ChannelDescriptor#ChannelDescriptor(java.io.InputStream, ModeFlags, java.io.FileDescriptor)}
+     * for more details. You probably should not use it.
+     */
+    private InputStream baseInputStream;
+    
+    /**
+     * Process streams get Channel.newChannel()ed into FileChannel but are not actually
+     * seekable. So instead of just the isSeekable check doing instanceof FileChannel,
+     * we must also add this boolean to check, which we set to false when it's known
+     * that the incoming channel is from a process.
+     * 
+     * FIXME: This is gross, and it's NIO's fault for not providing a nice way to
+     * tell if a channel is &quot;really&quot; seekable.
+     */
+<span class="nc" id="L116">    private boolean canBeSeekable = true;</span>
+    
+    /**
+     * If the incoming channel is already in append mode (i.e. it will do the
+     * requisite seeking), we don't want to do our own additional seeks.
+     */
+<span class="nc" id="L122">    private boolean isInAppendMode = false;</span>
+    
+    /**
+     * Whether the current channe is writable or not.
+     */
+    private boolean readableChannel;
+    
+    /**
+     * Whether the current channel is readable or not.
+     */
+    private boolean writableChannel;
+    
+    /**
+     * Whether the current channel is seekable or not.
+     */
+    private boolean seekableChannel;
+    
+    /**
+     * Construct a new ChannelDescriptor with the specified channel, file number,
+     * mode flags, file descriptor object and reference counter. This constructor
+     * is only used when constructing a new copy of an existing ChannelDescriptor
+     * with an existing reference count, to allow the two instances to safely
+     * share and appropriately close  a given channel.
+     * 
+     * @param channel The channel for the new descriptor, which will be shared with another
+     * @param fileno The new file number for the new descriptor
+     * @param originalModes The mode flags to use as the &quot;origina&quot; set for this descriptor
+     * @param fileDescriptor The java.io.FileDescriptor object to associate with this ChannelDescriptor
+     * @param refCounter The reference counter from another ChannelDescriptor being duped.
+     * @param canBeSeekable If the underlying channel can be considered seekable.
+     * @param isInAppendMode If the underlying channel is already in append mode.
+     */
+<span class="nc" id="L154">    private ChannelDescriptor(Channel channel, int fileno, ModeFlags originalModes, FileDescriptor fileDescriptor, AtomicInteger refCounter, boolean canBeSeekable, boolean isInAppendMode) {</span>
+<span class="nc" id="L155">        this.refCounter = refCounter;</span>
+<span class="nc" id="L156">        this.channel = channel;</span>
+<span class="nc" id="L157">        this.internalFileno = fileno;</span>
+<span class="nc" id="L158">        this.originalModes = originalModes;</span>
+<span class="nc" id="L159">        this.fileDescriptor = fileDescriptor;</span>
+<span class="nc" id="L160">        this.canBeSeekable = canBeSeekable;</span>
+<span class="nc" id="L161">        this.isInAppendMode = isInAppendMode;</span>
+        
+<span class="nc" id="L163">        this.readableChannel = channel instanceof ReadableByteChannel;</span>
+<span class="nc" id="L164">        this.writableChannel = channel instanceof WritableByteChannel;</span>
+<span class="nc" id="L165">        this.seekableChannel = channel instanceof FileChannel;</span>
+
+<span class="nc" id="L167">        registerDescriptor(this);</span>
+<span class="nc" id="L168">    }</span>
+
+    private ChannelDescriptor(Channel channel, int fileno, ModeFlags originalModes, FileDescriptor fileDescriptor) {
+<span class="nc" id="L171">        this(channel, fileno, originalModes, fileDescriptor, new AtomicInteger(1), true, false);</span>
+<span class="nc" id="L172">    }</span>
+
+    /**
+     * Construct a new ChannelDescriptor with the given channel, file number, mode flags,
+     * and file descriptor object. The channel will be kept open until all ChannelDescriptor
+     * references to it have been closed.
+     * 
+     * @param channel The channel for the new descriptor
+     * @param originalModes The mode flags for the new descriptor
+     * @param fileDescriptor The java.io.FileDescriptor object for the new descriptor
+     */
+    public ChannelDescriptor(Channel channel, ModeFlags originalModes, FileDescriptor fileDescriptor) {
+<span class="nc" id="L184">        this(channel, getNewFileno(), originalModes, fileDescriptor, new AtomicInteger(1), true, false);</span>
+<span class="nc" id="L185">    }</span>
+
+    /**
+     * Construct a new ChannelDescriptor with the given channel, file number, mode flags,
+     * and file descriptor object. The channel will be kept open until all ChannelDescriptor
+     * references to it have been closed.
+     * 
+     * @param channel The channel for the new descriptor
+     * @param originalModes The mode flags for the new descriptor
+     * @param fileDescriptor The java.io.FileDescriptor object for the new descriptor
+     */
+    public ChannelDescriptor(Channel channel, ModeFlags originalModes, FileDescriptor fileDescriptor, boolean isInAppendMode) {
+<span class="nc" id="L197">        this(channel, getNewFileno(), originalModes, fileDescriptor, new AtomicInteger(1), true, isInAppendMode);</span>
+<span class="nc" id="L198">    }</span>
+
+    /**
+     * Construct a new ChannelDescriptor with the given channel, file number, mode flags,
+     * and file descriptor object. The channel will be kept open until all ChannelDescriptor
+     * references to it have been closed.
+     *
+     * @param channel The channel for the new descriptor
+     * @param originalModes The mode flags for the new descriptor
+     */
+    public ChannelDescriptor(Channel channel, ModeFlags originalModes) {
+<span class="nc" id="L209">        this(channel, getNewFileno(), originalModes, FilenoUtil.getDescriptorFromChannel(channel), new AtomicInteger(1), true, false);</span>
+<span class="nc" id="L210">    }</span>
+
+    /**
+     * Special constructor to create the ChannelDescriptor out of the stream, file number,
+     * mode flags, and file descriptor object. The channel will be created from the
+     * provided stream. The channel will be kept open until all ChannelDescriptor
+     * references to it have been closed. &lt;b&gt;Note:&lt;/b&gt; in most cases, you should not
+     * use this constructor, it's reserved mostly for STDIN.
+     *
+     * @param baseInputStream The stream to create the channel for the new descriptor
+     * @param originalModes The mode flags for the new descriptor
+     * @param fileDescriptor The java.io.FileDescriptor object for the new descriptor
+     */
+    public ChannelDescriptor(InputStream baseInputStream, ModeFlags originalModes, FileDescriptor fileDescriptor) {
+        // The reason why we need the stream is to be able to invoke available() on it.
+        // STDIN in Java is non-interruptible, non-selectable, and attempt to read
+        // on such stream might lead to thread being blocked without *any* way to unblock it.
+        // That's where available() comes it, so at least we could check whether
+        // anything is available to be read without blocking.
+<span class="nc" id="L229">        this(Channels.newChannel(baseInputStream), getNewFileno(), originalModes, fileDescriptor, new AtomicInteger(1), true, false);</span>
+<span class="nc" id="L230">        this.baseInputStream = baseInputStream;</span>
+<span class="nc" id="L231">    }</span>
+
+    /**
+     * Special constructor to create the ChannelDescriptor out of the stream, file number,
+     * mode flags, and file descriptor object. The channel will be created from the
+     * provided stream. The channel will be kept open until all ChannelDescriptor
+     * references to it have been closed. &lt;b&gt;Note:&lt;/b&gt; in most cases, you should not
+     * use this constructor, it's reserved mostly for STDIN.
+     *
+     * @param baseInputStream The stream to create the channel for the new descriptor
+     * @param originalModes The mode flags for the new descriptor
+     */
+    public ChannelDescriptor(InputStream baseInputStream, ModeFlags originalModes) {
+        // The reason why we need the stream is to be able to invoke available() on it.
+        // STDIN in Java is non-interruptible, non-selectable, and attempt to read
+        // on such stream might lead to thread being blocked without *any* way to unblock it.
+        // That's where available() comes it, so at least we could check whether
+        // anything is available to be read without blocking.
+<span class="nc" id="L249">        this(Channels.newChannel(baseInputStream), getNewFileno(), originalModes, new FileDescriptor(), new AtomicInteger(1), true, false);</span>
+<span class="nc" id="L250">        this.baseInputStream = baseInputStream;</span>
+<span class="nc" id="L251">    }</span>
+
+    /**
+     * Construct a new ChannelDescriptor with the given channel, file number,
+     * and file descriptor object. The channel will be kept open until all ChannelDescriptor
+     * references to it have been closed. The channel's capabilities will be used
+     * to determine the &quot;original&quot; set of mode flags.
+     * 
+     * @param channel The channel for the new descriptor
+     * @param fileDescriptor The java.io.FileDescriptor object for the new descriptor
+     */
+    public ChannelDescriptor(Channel channel, FileDescriptor fileDescriptor) throws InvalidValueException {
+<span class="nc" id="L263">        this(channel, ModeFlags.getModesFromChannel(channel), fileDescriptor);</span>
+<span class="nc" id="L264">    }</span>
+    
+    @Deprecated
+    public ChannelDescriptor(Channel channel, int fileno, FileDescriptor fileDescriptor) throws InvalidValueException {
+<span class="nc" id="L268">        this(channel, ModeFlags.getModesFromChannel(channel), fileDescriptor);</span>
+<span class="nc" id="L269">    }</span>
+
+    /**
+     * Construct a new ChannelDescriptor with the given channel, file number,
+     * and file descriptor object. The channel will be kept open until all ChannelDescriptor
+     * references to it have been closed. The channel's capabilities will be used
+     * to determine the &quot;original&quot; set of mode flags. This version generates a
+     * new fileno.
+     *
+     * @param channel The channel for the new descriptor
+     */
+    public ChannelDescriptor(Channel channel) throws InvalidValueException {
+<span class="nc" id="L281">        this(channel, ModeFlags.getModesFromChannel(channel), FilenoUtil.getDescriptorFromChannel(channel));</span>
+<span class="nc" id="L282">    }</span>
+
+    /**
+     * Get this descriptor's file number.
+     * 
+     * @return the fileno for this descriptor
+     */
+    public int getFileno() {
+<span class="nc" id="L290">        return internalFileno;</span>
+    }
+    
+    /**
+     * Get the FileDescriptor object associated with this descriptor. This is
+     * not guaranteed to be a &quot;valid&quot; descriptor in the terms of the Java
+     * implementation, but is provided for completeness and for cases where it
+     * is possible to get a valid FileDescriptor for a given channel.
+     * 
+     * @return the java.io.FileDescriptor object associated with this descriptor
+     */
+    public FileDescriptor getFileDescriptor() {
+<span class="nc" id="L302">        return fileDescriptor;</span>
+    }
+
+    /**
+     * The channel associated with this descriptor. The channel will be reference
+     * counted through ChannelDescriptor and kept open until all ChannelDescriptor
+     * objects have been closed. References that leave ChannelDescriptor through
+     * this method will not be counted.
+     * 
+     * @return the java.nio.channels.Channel associated with this descriptor
+     */
+    public Channel getChannel() {
+<span class="nc" id="L314">        return channel;</span>
+    }
+
+    /**
+     * This is intentionally non-public, since it should not be really
+     * used outside of very limited use case (handling of STDIN).
+     * See {@link ChannelDescriptor#ChannelDescriptor(java.io.InputStream, ModeFlags, java.io.FileDescriptor)}
+     * for more info.
+     */
+    /*package-protected*/ InputStream getBaseInputStream() {
+<span class="nc" id="L324">        return baseInputStream;</span>
+    }
+
+    /**
+     * Whether the channel associated with this descriptor is seekable (i.e.
+     * whether it is instanceof FileChannel).
+     * 
+     * @return true if the associated channel is seekable, false otherwise
+     */
+    public boolean isSeekable() {
+<span class="nc bnc" id="L334" title="All 4 branches missed.">        return canBeSeekable &amp;&amp; seekableChannel;</span>
+    }
+    
+    /**
+     * Set the channel to be explicitly seekable or not, for streams that appear
+     * to be seekable with the instanceof FileChannel check.
+     * 
+     * @param canBeSeekable Whether the channel is seekable or not.
+     */
+    public void setCanBeSeekable(boolean canBeSeekable) {
+<span class="nc" id="L344">        this.canBeSeekable = canBeSeekable;</span>
+<span class="nc" id="L345">    }</span>
+    
+    /**
+     * Whether the channel associated with this descriptor is a NullChannel,
+     * for which many operations are simply noops.
+     */
+    public boolean isNull() {
+<span class="nc" id="L352">        return channel instanceof NullChannel;</span>
+    }
+
+    /**
+     * Whether the channel associated with this descriptor is writable (i.e.
+     * whether it is instanceof WritableByteChannel).
+     * 
+     * @return true if the associated channel is writable, false otherwise
+     */
+    public boolean isWritable() {
+<span class="nc" id="L362">        return writableChannel;</span>
+    }
+
+    /**
+     * Whether the channel associated with this descriptor is readable (i.e.
+     * whether it is instanceof ReadableByteChannel).
+     * 
+     * @return true if the associated channel is readable, false otherwise
+     */
+    public boolean isReadable() {
+<span class="nc" id="L372">        return readableChannel;</span>
+    }
+    
+    /**
+     * Whether the channel associated with this descriptor is open.
+     * 
+     * @return true if the associated channel is open, false otherwise
+     */
+    public boolean isOpen() {
+<span class="nc" id="L381">        return channel.isOpen();</span>
+    }
+    
+    /**
+     * Check whether the isOpen returns true, raising a BadDescriptorException if
+     * it returns false.
+     * 
+     * @throws org.jruby.util.io.BadDescriptorException if isOpen returns false
+     */
+    public void checkOpen() throws BadDescriptorException {
+<span class="nc bnc" id="L391" title="All 2 branches missed.">        if (!isOpen()) {</span>
+<span class="nc" id="L392">            throw new BadDescriptorException();</span>
+        }
+<span class="nc" id="L394">    }</span>
+    
+    /**
+     * Get the original mode flags for the descriptor.
+     * 
+     * @return the original mode flags for the descriptor
+     */
+    public ModeFlags getOriginalModes() {
+<span class="nc" id="L402">        return originalModes;</span>
+    }
+    
+    /**
+     * Check whether a specified set of mode flags is a superset of this
+     * descriptor's original set of mode flags.
+     * 
+     * @param newModes The modes to confirm as superset
+     * @throws org.jruby.util.io.InvalidValueException if the modes are not a superset
+     */
+    public void checkNewModes(ModeFlags newModes) throws InvalidValueException {
+<span class="nc bnc" id="L413" title="All 2 branches missed.">        if (!newModes.isSubsetOf(originalModes)) {</span>
+<span class="nc" id="L414">            throw new InvalidValueException();</span>
+        }
+<span class="nc" id="L416">    }</span>
+    
+    /**
+     * Mimics the POSIX dup(2) function, returning a new descriptor that references
+     * the same open channel.
+     * 
+     * @return A duplicate ChannelDescriptor based on this one
+     */
+    public ChannelDescriptor dup() {
+<span class="nc" id="L425">        synchronized (refCounter) {</span>
+<span class="nc" id="L426">            refCounter.incrementAndGet();</span>
+
+<span class="nc" id="L428">            int newFileno = getNewFileno();</span>
+            
+            if (DEBUG) LOG.info(&quot;Reopen fileno {}, refs now: {}&quot;, newFileno, refCounter.get());
+
+<span class="nc" id="L432">            return new ChannelDescriptor(channel, newFileno, originalModes, fileDescriptor, refCounter, canBeSeekable, isInAppendMode);</span>
+<span class="nc" id="L433">        }</span>
+    }
+    
+    /**
+     * Mimics the POSIX dup2(2) function, returning a new descriptor that references
+     * the same open channel but with a specified fileno.
+     * 
+     * @param fileno The fileno to use for the new descriptor
+     * @return A duplicate ChannelDescriptor based on this one
+     */
+    public ChannelDescriptor dup2(int fileno) {
+<span class="nc" id="L444">        synchronized (refCounter) {</span>
+<span class="nc" id="L445">            refCounter.incrementAndGet();</span>
+
+            if (DEBUG) LOG.info(&quot;Reopen fileno {}, refs now: {}&quot;, fileno, refCounter.get());
+
+<span class="nc" id="L449">            return new ChannelDescriptor(channel, fileno, originalModes, fileDescriptor, refCounter, canBeSeekable, isInAppendMode);</span>
+<span class="nc" id="L450">        }</span>
+    }
+    
+    /**
+     * Mimics the POSIX dup2(2) function, returning a new descriptor that references
+     * the same open channel but with a specified fileno. This differs from the fileno
+     * version by making the target descriptor into a new reference to the current
+     * descriptor's channel, closing what it originally pointed to and preserving
+     * its original fileno.
+     *
+     * @param other the descriptor to dup this one into
+     */
+    public void dup2Into(ChannelDescriptor other) throws BadDescriptorException, IOException {
+<span class="nc" id="L463">        synchronized (refCounter) {</span>
+<span class="nc" id="L464">            refCounter.incrementAndGet();</span>
+
+            if (DEBUG) LOG.info(&quot;Reopen fileno {}, refs now: {}&quot;, internalFileno, refCounter.get());
+
+<span class="nc" id="L468">            other.close();</span>
+            
+<span class="nc" id="L470">            other.channel = channel;</span>
+<span class="nc" id="L471">            other.originalModes = originalModes;</span>
+<span class="nc" id="L472">            other.fileDescriptor = fileDescriptor;</span>
+<span class="nc" id="L473">            other.refCounter = refCounter;</span>
+<span class="nc" id="L474">            other.canBeSeekable = canBeSeekable;</span>
+<span class="nc" id="L475">            other.readableChannel = readableChannel;</span>
+<span class="nc" id="L476">            other.writableChannel = writableChannel;</span>
+<span class="nc" id="L477">            other.seekableChannel = seekableChannel;</span>
+<span class="nc" id="L478">        }</span>
+<span class="nc" id="L479">    }</span>
+
+    public ChannelDescriptor reopen(Channel channel, ModeFlags modes) {
+<span class="nc" id="L482">        return new ChannelDescriptor(channel, internalFileno, modes, fileDescriptor);</span>
+    }
+
+    public ChannelDescriptor reopen(RandomAccessFile file, ModeFlags modes) throws IOException {
+<span class="nc" id="L486">        return new ChannelDescriptor(file.getChannel(), internalFileno, modes, file.getFD());</span>
+    }
+    
+    /**
+     * Perform a low-level seek operation on the associated channel if it is
+     * instanceof FileChannel, or raise PipeException if it is not a FileChannel.
+     * Calls checkOpen to confirm the target channel is open. This is equivalent
+     * to the lseek(2) POSIX function, and like that function it bypasses any
+     * buffer flushing or invalidation as in ChannelStream.fseek.
+     * 
+     * @param offset the offset value to use
+     * @param whence whence to seek
+     * @throws java.io.IOException If there is an exception while seeking
+     * @throws org.jruby.util.io.InvalidValueException If the value specified for
+     * offset or whence is invalid
+     * @throws org.jruby.util.io.PipeException If the target channel is not seekable
+     * @throws org.jruby.util.io.BadDescriptorException If the target channel is
+     * already closed.
+     * @return the new offset into the FileChannel.
+     */
+    public long lseek(long offset, int whence) throws IOException, InvalidValueException, PipeException, BadDescriptorException {
+<span class="nc bnc" id="L507" title="All 2 branches missed.">        if (seekableChannel) {</span>
+<span class="nc" id="L508">            checkOpen();</span>
+            
+<span class="nc" id="L510">            FileChannel fileChannel = (FileChannel)channel;</span>
+            try {
+                long pos;
+<span class="nc bnc" id="L513" title="All 4 branches missed.">                switch (whence) {</span>
+                case PosixShim.SEEK_SET:
+<span class="nc" id="L515">                    pos = offset;</span>
+<span class="nc" id="L516">                    fileChannel.position(pos);</span>
+<span class="nc" id="L517">                    break;</span>
+                case PosixShim.SEEK_CUR:
+<span class="nc" id="L519">                    pos = fileChannel.position() + offset;</span>
+<span class="nc" id="L520">                    fileChannel.position(pos);</span>
+<span class="nc" id="L521">                    break;</span>
+                case PosixShim.SEEK_END:
+<span class="nc" id="L523">                    pos = fileChannel.size() + offset;</span>
+<span class="nc" id="L524">                    fileChannel.position(pos);</span>
+<span class="nc" id="L525">                    break;</span>
+                default:
+<span class="nc" id="L527">                    throw new InvalidValueException();</span>
+                }
+<span class="nc" id="L529">                return pos;</span>
+<span class="nc" id="L530">            } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L531">                throw new InvalidValueException();</span>
+<span class="nc" id="L532">            } catch (IOException ioe) {</span>
+                // &quot;invalid seek&quot; means it's an ESPIPE, so we rethrow as a PipeException()
+<span class="nc bnc" id="L534" title="All 2 branches missed.">                if (ioe.getMessage().equals(&quot;Illegal seek&quot;)) {</span>
+<span class="nc" id="L535">                    throw new PipeException();</span>
+                }
+<span class="nc" id="L537">                throw ioe;</span>
+            }
+        } else {
+<span class="nc" id="L540">            throw new PipeException();</span>
+        }
+    }
+
+    /**
+     * Perform a low-level read of the specified number of bytes into the specified
+     * byte list. The incoming bytes will be appended to the byte list. This is
+     * equivalent to the read(2) POSIX function, and like that function it
+     * ignores read and write buffers defined elsewhere.
+     * 
+     * @param number the number of bytes to read
+     * @param byteList the byte list on which to append the incoming bytes
+     * @return the number of bytes actually read
+     * @throws java.io.IOException if there is an exception during IO
+     * @throws org.jruby.util.io.BadDescriptorException if the associated
+     * channel is already closed.
+     * @see org.jruby.util.ByteList
+     */
+    public int read(int number, ByteList byteList) throws IOException, BadDescriptorException {
+<span class="nc" id="L559">        checkOpen();</span>
+        
+<span class="nc" id="L561">        byteList.ensure(byteList.length() + number);</span>
+<span class="nc" id="L562">        int bytesRead = read(ByteBuffer.wrap(byteList.getUnsafeBytes(),</span>
+<span class="nc" id="L563">                byteList.begin() + byteList.length(), number));</span>
+<span class="nc bnc" id="L564" title="All 2 branches missed.">        if (bytesRead &gt; 0) {</span>
+<span class="nc" id="L565">            byteList.length(byteList.length() + bytesRead);</span>
+        }
+<span class="nc" id="L567">        return bytesRead;</span>
+    }
+    
+    /**
+     * Perform a low-level read of the remaining number of bytes into the specified
+     * byte buffer. The incoming bytes will be used to fill the remaining space in
+     * the target byte buffer. This is equivalent to the read(2) POSIX function,
+     * and like that function it ignores read and write buffers defined elsewhere.
+     * 
+     * @param buffer the java.nio.ByteBuffer in which to put the incoming bytes
+     * @return the number of bytes actually read
+     * @throws java.io.IOException if there is an exception during IO
+     * @throws org.jruby.util.io.BadDescriptorException if the associated
+     * channel is already closed
+     * @see java.nio.ByteBuffer
+     */
+    public int read(ByteBuffer buffer) throws IOException, BadDescriptorException {
+<span class="nc" id="L584">        checkOpen();</span>
+
+        // TODO: It would be nice to throw a better error for this
+<span class="nc bnc" id="L587" title="All 2 branches missed.">        if (!isReadable()) {</span>
+<span class="nc" id="L588">            throw new BadDescriptorException();</span>
+        }
+<span class="nc" id="L590">        ReadableByteChannel readChannel = (ReadableByteChannel) channel;</span>
+<span class="nc" id="L591">        int bytesRead = 0;</span>
+<span class="nc" id="L592">        bytesRead = readChannel.read(buffer);</span>
+
+<span class="nc" id="L594">        return bytesRead;</span>
+    }
+    
+    /**
+     * Write the bytes in the specified byte list to the associated channel.
+     * 
+     * @param buffer the byte list containing the bytes to be written
+     * @return the number of bytes actually written
+     * @throws java.io.IOException if there is an exception during IO
+     * @throws org.jruby.util.io.BadDescriptorException if the associated
+     * channel is already closed
+     */
+    public int internalWrite(ByteBuffer buffer) throws IOException, BadDescriptorException {
+<span class="nc" id="L607">        checkOpen();</span>
+
+        // TODO: It would be nice to throw a better error for this
+<span class="nc bnc" id="L610" title="All 2 branches missed.">        if (!isWritable()) {</span>
+<span class="nc" id="L611">            throw new BadDescriptorException();</span>
+        }
+        
+<span class="nc" id="L614">        WritableByteChannel writeChannel = (WritableByteChannel)channel;</span>
+        
+        // if appendable, we always seek to the end before writing
+<span class="nc bnc" id="L617" title="All 4 branches missed.">        if (isSeekable() &amp;&amp; originalModes.isAppendable()) {</span>
+            // if already in append mode, we don't do our own seeking
+<span class="nc bnc" id="L619" title="All 2 branches missed.">            if (!isInAppendMode) {</span>
+<span class="nc" id="L620">                FileChannel fileChannel = (FileChannel)channel;</span>
+<span class="nc" id="L621">                fileChannel.position(fileChannel.size());</span>
+            }
+        }
+        
+<span class="nc" id="L625">        return writeChannel.write(buffer);</span>
+    }
+    
+    /**
+     * Write the bytes in the specified byte list to the associated channel.
+     * 
+     * @param buffer the byte list containing the bytes to be written
+     * @return the number of bytes actually written
+     * @throws java.io.IOException if there is an exception during IO
+     * @throws org.jruby.util.io.BadDescriptorException if the associated
+     * channel is already closed
+     */
+    public int write(ByteBuffer buffer) throws IOException, BadDescriptorException {
+<span class="nc" id="L638">        checkOpen();</span>
+        
+<span class="nc" id="L640">        return internalWrite(buffer);</span>
+    }
+    
+    /**
+     * Write the bytes in the specified byte list to the associated channel.
+     * 
+     * @param buf the byte list containing the bytes to be written
+     * @return the number of bytes actually written
+     * @throws java.io.IOException if there is an exception during IO
+     * @throws org.jruby.util.io.BadDescriptorException if the associated
+     * channel is already closed
+     */
+    public int write(ByteList buf) throws IOException, BadDescriptorException {
+<span class="nc" id="L653">        checkOpen();</span>
+        
+<span class="nc" id="L655">        return internalWrite(ByteBuffer.wrap(buf.getUnsafeBytes(), buf.begin(), buf.length()));</span>
+    }
+
+    /**
+     * Write the bytes in the specified byte list to the associated channel.
+     * 
+     * @param buf the byte list containing the bytes to be written
+     * @param offset the offset to start at. this is relative to the begin variable in the but
+     * @param len the amount of bytes to write. this should not be longer than the buffer
+     * @return the number of bytes actually written
+     * @throws java.io.IOException if there is an exception during IO
+     * @throws org.jruby.util.io.BadDescriptorException if the associated
+     * channel is already closed
+     */
+    public int write(ByteList buf, int offset, int len) throws IOException, BadDescriptorException {
+<span class="nc" id="L670">        checkOpen();</span>
+        
+<span class="nc" id="L672">        return internalWrite(ByteBuffer.wrap(buf.getUnsafeBytes(), buf.begin()+offset, len));</span>
+    }
+    
+    /**
+     * Write the byte represented by the specified int to the associated channel.
+     * 
+     * @param c The byte to write
+     * @return 1 if the byte was written, 0 if not and -1 if there was an error
+     * (@see java.nio.channels.WritableByteChannel.write(java.nio.ByteBuffer))
+     * @throws java.io.IOException If there was an exception during IO
+     * @throws org.jruby.util.io.BadDescriptorException if the associated
+     * channel is already closed
+     */
+    public int write(int c) throws IOException, BadDescriptorException {
+<span class="nc" id="L686">        checkOpen();</span>
+        
+<span class="nc" id="L688">        ByteBuffer buf = ByteBuffer.allocate(1);</span>
+<span class="nc" id="L689">        buf.put((byte)c);</span>
+<span class="nc" id="L690">        buf.flip();</span>
+        
+<span class="nc" id="L692">        return internalWrite(buf);</span>
+    }
+
+    /**
+     * Open a new descriptor using the given working directory, file path,
+     * mode flags, and file permission. This is equivalent to the open(2)
+     * POSIX function. See org.jruby.util.io.ChannelDescriptor.open(String, String, ModeFlags, int, POSIX)
+     * for the version that also sets file permissions.
+     *
+     * @param cwd the &quot;current working directory&quot; to use when opening the file
+     * @param path the file path to open
+     * @param flags the mode flags to use for opening the file
+     * @return a new ChannelDescriptor based on the specified parameters
+     */
+    @Deprecated
+    public static ChannelDescriptor open(String cwd, String path, ModeFlags flags) throws FileNotFoundException, DirectoryAsFileException, FileExistsException, IOException {
+<span class="nc" id="L708">        return open(cwd, path, flags, 0, POSIXFactory.getPOSIX(), null);</span>
+    }
+
+    /**
+     * Open a new descriptor using the given working directory, file path,
+     * mode flags, and file permission. This is equivalent to the open(2)
+     * POSIX function. See org.jruby.util.io.ChannelDescriptor.open(String, String, ModeFlags, int, POSIX)
+     * for the version that also sets file permissions.
+     *
+     * @param cwd the &quot;current working directory&quot; to use when opening the file
+     * @param path the file path to open
+     * @param flags the mode flags to use for opening the file
+     * @param classLoader a ClassLoader to use for classpath: resources
+     * @return a new ChannelDescriptor based on the specified parameters
+     */
+    @Deprecated
+    public static ChannelDescriptor open(String cwd, String path, ModeFlags flags, ClassLoader classLoader) throws FileNotFoundException, DirectoryAsFileException, FileExistsException, IOException {
+<span class="nc" id="L725">        return open(cwd, path, flags, 0, POSIXFactory.getPOSIX(), classLoader);</span>
+    }
+
+    /**
+     * Open a new descriptor using the given working directory, file path,
+     * mode flags, and file permission. This is equivalent to the open(2)
+     * POSIX function.
+     *
+     * @param cwd the &quot;current working directory&quot; to use when opening the file
+     * @param path the file path to open
+     * @param flags the mode flags to use for opening the file
+     * @param perm the file permissions to use when creating a new file (currently
+     * unobserved)
+     * @param posix a POSIX api implementation, used for setting permissions; if null, permissions are ignored
+     * @return a new ChannelDescriptor based on the specified parameters
+     */
+    @Deprecated
+    public static ChannelDescriptor open(String cwd, String path, ModeFlags flags, int perm, POSIX posix) throws FileNotFoundException, DirectoryAsFileException, FileExistsException, IOException {
+<span class="nc" id="L743">        return open(cwd, path, flags, perm, posix, null);</span>
+    }
+
+    /**
+     * Open a new descriptor using the given working directory, file path,
+     * mode flags, and file permission. This is equivalent to the open(2)
+     * POSIX function.
+     *
+     * @param cwd the &quot;current working directory&quot; to use when opening the file
+     * @param path the file path to open
+     * @param flags the mode flags to use for opening the file
+     * @param perm the file permissions to use when creating a new file (currently
+     * unobserved)
+     * @param posix a POSIX api implementation, used for setting permissions; if null, permissions are ignored
+     * @param classLoader a ClassLoader to use for classpath: resources
+     * @return a new ChannelDescriptor based on the specified parameters
+     */
+    @Deprecated
+    public static ChannelDescriptor open(String cwd, String path, ModeFlags flags, int perm, POSIX posix, ClassLoader classLoader) throws FileNotFoundException, DirectoryAsFileException, FileExistsException, IOException {
+        try {
+<span class="nc bnc" id="L763" title="All 6 branches missed.">            if (path.equals(&quot;/dev/null&quot;) || path.equalsIgnoreCase(&quot;nul:&quot;) || path.equalsIgnoreCase(&quot;nul&quot;)) {</span>
+<span class="nc" id="L764">                Channel nullChannel = new NullChannel();</span>
+                // FIXME: don't use RubyIO for this
+<span class="nc" id="L766">                return new ChannelDescriptor(nullChannel, flags);</span>
+            }
+
+<span class="nc bnc" id="L769" title="All 4 branches missed.">            if (path.startsWith(&quot;classpath:/&quot;) &amp;&amp; classLoader != null) {</span>
+<span class="nc" id="L770">                path = path.substring(&quot;classpath:/&quot;.length());</span>
+<span class="nc" id="L771">                InputStream is = classLoader.getResourceAsStream(path);</span>
+                // FIXME: don't use RubyIO for this
+<span class="nc" id="L773">                return new ChannelDescriptor(Channels.newChannel(is), flags);</span>
+            }
+
+<span class="nc" id="L776">            Channel ch = JRubyFile.createResource(posix, cwd, path).openChannel(flags, perm);</span>
+<span class="nc" id="L777">            return new ChannelDescriptor(ch, flags);</span>
+<span class="nc" id="L778">        } catch (NullPointerException npe) { npe.printStackTrace(); throw npe; }</span>
+    }
+
+    /**
+     * Close this descriptor. If in closing the last ChannelDescriptor reference
+     * to the associate channel is closed, the channel itself will be closed.
+     *
+     * @throws org.jruby.util.io.BadDescriptorException if the associated
+     * channel is already closed
+     * @throws java.io.IOException if there is an exception during IO
+     */
+    public void close() throws BadDescriptorException, IOException {
+        // tidy up
+<span class="nc" id="L791">        finish(true);</span>
+
+<span class="nc" id="L793">    }</span>
+
+    void finish(boolean close) throws BadDescriptorException, IOException {
+<span class="nc" id="L796">        synchronized (refCounter) {</span>
+            // if refcount is at or below zero, we're no longer valid
+<span class="nc bnc" id="L798" title="All 2 branches missed.">            if (refCounter.get() &lt;= 0) {</span>
+<span class="nc" id="L799">                throw new BadDescriptorException();</span>
+            }
+
+            // if channel is already closed, we're no longer valid
+<span class="nc bnc" id="L803" title="All 2 branches missed.">            if (!channel.isOpen()) {</span>
+<span class="nc" id="L804">                throw new BadDescriptorException();</span>
+            }
+
+            // otherwise decrement and possibly close as normal
+<span class="nc bnc" id="L808" title="All 2 branches missed.">            if (close) {</span>
+<span class="nc" id="L809">                int count = refCounter.decrementAndGet();</span>
+
+                if (DEBUG) LOG.info(&quot;Descriptor for fileno {} refs: {}&quot;, internalFileno, count);
+
+<span class="nc bnc" id="L813" title="All 2 branches missed.">                if (count &lt;= 0) {</span>
+                    // if we're the last referrer, close the channel
+                    try {
+<span class="nc" id="L816">                        channel.close();</span>
+                    } finally {
+<span class="nc" id="L818">                        unregisterDescriptor(internalFileno);</span>
+<span class="nc" id="L819">                    }</span>
+                }
+            }
+<span class="nc" id="L822">        }</span>
+<span class="nc" id="L823">    }</span>
+
+    // Choose something sufficiently high so new IO stuff does not trample as soon
+    @Deprecated
+<span class="nc" id="L827">    private static final AtomicInteger NEXT_FILENO = new AtomicInteger(Integer.MAX_VALUE / 2);</span>
+
+    @Deprecated
+<span class="nc" id="L830">    private static final Map&lt;Integer, ChannelDescriptor&gt; FILENO_MAP = Collections.synchronizedMap(new HashMap&lt;Integer, ChannelDescriptor&gt;());</span>
+
+    @Deprecated
+    public static int getNewFileno() {
+<span class="nc" id="L834">        return NEXT_FILENO.getAndIncrement();</span>
+    }
+
+    @Deprecated
+    private static void registerDescriptor(ChannelDescriptor descriptor) {
+<span class="nc" id="L839">        FILENO_MAP.put(descriptor.getFileno(), descriptor);</span>
+<span class="nc" id="L840">    }</span>
+
+    @Deprecated
+    private static void unregisterDescriptor(int aFileno) {
+<span class="nc" id="L844">        FILENO_MAP.remove(aFileno);</span>
+<span class="nc" id="L845">    }</span>
+
+    @Deprecated
+    public static ChannelDescriptor getDescriptorByFileno(int aFileno) {
+<span class="nc" id="L849">        return FILENO_MAP.get(aFileno);</span>
+    }
+
+    @Deprecated
+    public static FileDescriptor getDescriptorFromChannel(Channel channel) {
+<span class="nc" id="L854">        return FilenoUtil.getDescriptorFromChannel(channel);</span>
+    }
+
+    @Deprecated
+    public static int getFilenoFromChannel(Channel channel) {
+<span class="nc" id="L859">        return FilenoUtil.filenoFrom(channel);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

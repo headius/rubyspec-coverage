@@ -1,0 +1,261 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JRubyCallSite.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime.invokedynamic</a> &gt; <span class="el_source">JRubyCallSite.java</span></div><h1>JRubyCallSite.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+
+package org.jruby.runtime.invokedynamic;
+
+import com.headius.invokebinder.Signature;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles.Lookup;
+import java.lang.invoke.MethodType;
+import java.lang.invoke.MutableCallSite;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
+
+import org.jruby.RubyClass;
+import org.jruby.runtime.Block;
+
+import org.jruby.runtime.CallType;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.callsite.CacheEntry;
+
+public class JRubyCallSite extends MutableCallSite {
+    private final Lookup lookup;
+    private final CallType callType;
+<span class="nc" id="L51">    public CacheEntry entry = CacheEntry.NULL_CACHE;</span>
+<span class="nc" id="L52">    private final Set&lt;Integer&gt; seenTypes = new HashSet&lt;Integer&gt;();</span>
+    private final boolean expression;
+    private final String name;
+    private int clearCount;
+<span class="nc" id="L56">    private static final AtomicLong SITE_ID = new AtomicLong(1);</span>
+<span class="nc" id="L57">    private final long siteID = SITE_ID.getAndIncrement();</span>
+    private final String file;
+    private final int line;
+<span class="nc" id="L60">    private boolean boundOnce = false;</span>
+    private final Signature signature;
+    private final Signature fullSignature;
+    private final int arity;
+
+    public JRubyCallSite(Lookup lookup, MethodType type, CallType callType, String file, int line, String name, boolean expression) {
+<span class="nc" id="L66">        super(type);</span>
+
+<span class="nc" id="L68">        this.name = name;</span>
+<span class="nc" id="L69">        this.callType = callType;</span>
+
+        Signature startSig;
+        int argOffset;
+
+<span class="nc bnc" id="L74" title="All 2 branches missed.">        if (callType == CallType.SUPER) {</span>
+            // super calls receive current class argument, so offsets and signature are different
+<span class="nc" id="L76">            startSig = JRubyCallSite.STANDARD_SUPER_SIG;</span>
+<span class="nc" id="L77">            argOffset = 4;</span>
+        } else {
+<span class="nc" id="L79">            startSig = JRubyCallSite.STANDARD_SITE_SIG;</span>
+<span class="nc" id="L80">            argOffset = 3;</span>
+        }
+
+        int arity;
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        if (type.parameterType(type.parameterCount() - 1) == Block.class) {</span>
+<span class="nc" id="L85">            arity = type.parameterCount() - (argOffset + 1);</span>
+
+<span class="nc bnc" id="L87" title="All 4 branches missed.">            if (arity == 1 &amp;&amp; type.parameterType(argOffset) == IRubyObject[].class) {</span>
+<span class="nc" id="L88">                arity = -1;</span>
+<span class="nc" id="L89">                startSig = startSig.appendArg(&quot;args&quot;, IRubyObject[].class);</span>
+            } else {
+<span class="nc bnc" id="L91" title="All 2 branches missed.">                for (int i = 0; i &lt; arity; i++) {</span>
+<span class="nc" id="L92">                    startSig = startSig.appendArg(&quot;arg&quot; + i, IRubyObject.class);</span>
+                }
+            }
+<span class="nc" id="L95">            startSig = startSig.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L96">            fullSignature = signature = startSig;</span>
+        } else {
+<span class="nc" id="L98">            arity = type.parameterCount() - argOffset;</span>
+
+<span class="nc bnc" id="L100" title="All 4 branches missed.">            if (arity == 1 &amp;&amp; type.parameterType(argOffset) == IRubyObject[].class) {</span>
+<span class="nc" id="L101">                arity = -1;</span>
+<span class="nc" id="L102">                startSig = startSig.appendArg(&quot;args&quot;, IRubyObject[].class);</span>
+            } else {
+<span class="nc bnc" id="L104" title="All 2 branches missed.">                for (int i = 0; i &lt; arity; i++) {</span>
+<span class="nc" id="L105">                    startSig = startSig.appendArg(&quot;arg&quot; + i, IRubyObject.class);</span>
+                }
+            }
+<span class="nc" id="L108">            signature = startSig;</span>
+<span class="nc" id="L109">            fullSignature = startSig.appendArg(&quot;block&quot;, Block.class);</span>
+        }
+
+<span class="nc" id="L112">        this.arity = arity;</span>
+
+<span class="nc" id="L114">        this.lookup = lookup;</span>
+<span class="nc" id="L115">        this.expression = expression;</span>
+<span class="nc" id="L116">        this.file = file;</span>
+<span class="nc" id="L117">        this.line = line;</span>
+<span class="nc" id="L118">    }</span>
+    
+    public int arity() {
+<span class="nc" id="L121">        return arity;</span>
+    }
+    
+    public Lookup lookup() {
+<span class="nc" id="L125">        return lookup;</span>
+    }
+
+    public CallType callType() {
+<span class="nc" id="L129">        return callType;</span>
+    }
+
+    public boolean isAttrAssign() {
+<span class="nc" id="L133">        return false;</span>
+    }
+
+    public boolean isIterator() {
+<span class="nc" id="L137">        return false;</span>
+    }
+    
+    public boolean isExpression() {
+<span class="nc" id="L141">        return expression;</span>
+    }
+    
+    public String name() {
+<span class="nc" id="L145">        return name;</span>
+    }
+    
+    public synchronized boolean hasSeenType(int typeCode) {
+<span class="nc" id="L149">        return seenTypes.contains(typeCode);</span>
+    }
+    
+    public synchronized void addType(int typeCode) {
+<span class="nc" id="L153">        seenTypes.add(typeCode);</span>
+<span class="nc" id="L154">    }</span>
+    
+    public synchronized int seenTypesCount() {
+<span class="nc" id="L157">        return seenTypes.size();</span>
+    }
+    
+    public synchronized void clearTypes() {
+<span class="nc" id="L161">        seenTypes.clear();</span>
+<span class="nc" id="L162">        clearCount++;</span>
+<span class="nc" id="L163">    }</span>
+    
+    public int clearCount() {
+<span class="nc" id="L166">        return clearCount;</span>
+    }
+
+    public long siteID() {
+<span class="nc" id="L170">        return siteID;</span>
+    }
+
+    public String file() {
+<span class="nc" id="L174">        return file;</span>
+    }
+
+    public int line() {
+<span class="nc" id="L178">        return line;</span>
+    }
+
+    public boolean boundOnce() {
+<span class="nc" id="L182">        return boundOnce;</span>
+    }
+
+    public void boundOnce(boolean boundOnce) {
+<span class="nc" id="L186">        this.boundOnce = boundOnce;</span>
+<span class="nc" id="L187">    }</span>
+
+    @Override
+    public void setTarget(MethodHandle target) {
+<span class="nc" id="L191">        super.setTarget(target);</span>
+<span class="nc" id="L192">        boundOnce = true;</span>
+<span class="nc" id="L193">    }</span>
+
+    public void setInitialTarget(MethodHandle target) {
+<span class="nc" id="L196">        super.setTarget(target);</span>
+<span class="nc" id="L197">    }</span>
+    
+    /**
+     * Get the actual incoming Signature for this call site.
+     * 
+     * This represents the actual argument list.
+     * 
+     * @return the actual Signature at the call site
+     */
+    public Signature signature() {
+<span class="nc" id="L207">        return signature;</span>
+    }
+    
+    /**
+     * Get the &quot;full&quot; signature equivalent to this call site.
+     * 
+     * The &quot;full&quot; signature always guarantees context, caller, and block args
+     * are provided. It could also be considered the standard intermediate
+     * signature all calls eventually pass through.
+     * 
+     * @return the &quot;full&quot; intermediate signature
+     */
+    public Signature fullSignature() {
+<span class="nc" id="L220">        return fullSignature;</span>
+    }
+    
+<span class="nc" id="L223">    public static final Signature STANDARD_SITE_SIG = Signature</span>
+<span class="nc" id="L224">            .returning(IRubyObject.class)</span>
+<span class="nc" id="L225">            .appendArg(&quot;context&quot;, ThreadContext.class)</span>
+<span class="nc" id="L226">            .appendArg(&quot;caller&quot;, IRubyObject.class)</span>
+<span class="nc" id="L227">            .appendArg(&quot;self&quot;, IRubyObject.class);</span>
+<span class="nc" id="L228">    public static final Signature STANDARD_SITE_SIG_1ARG = STANDARD_SITE_SIG.appendArg(&quot;arg0&quot;, IRubyObject.class);</span>
+<span class="nc" id="L229">    public static final Signature STANDARD_SITE_SIG_2ARG = STANDARD_SITE_SIG_1ARG.appendArg(&quot;arg1&quot;, IRubyObject.class);</span>
+<span class="nc" id="L230">    public static final Signature STANDARD_SITE_SIG_3ARG = STANDARD_SITE_SIG_2ARG.appendArg(&quot;arg2&quot;, IRubyObject.class);</span>
+<span class="nc" id="L231">    public static final Signature STANDARD_SITE_SIG_NARG = STANDARD_SITE_SIG.appendArg(&quot;args&quot;, IRubyObject[].class);</span>
+    
+<span class="nc" id="L233">    public static final Signature[] STANDARD_SITE_SIGS = {</span>
+        STANDARD_SITE_SIG,
+        STANDARD_SITE_SIG_1ARG,
+        STANDARD_SITE_SIG_2ARG,
+        STANDARD_SITE_SIG_3ARG,
+        STANDARD_SITE_SIG_NARG,
+    };
+    
+<span class="nc" id="L241">    public static final Signature STANDARD_SITE_SIG_BLOCK = STANDARD_SITE_SIG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L242">    public static final Signature STANDARD_SITE_SIG_1ARG_BLOCK = STANDARD_SITE_SIG_1ARG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L243">    public static final Signature STANDARD_SITE_SIG_2ARG_BLOCK = STANDARD_SITE_SIG_2ARG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L244">    public static final Signature STANDARD_SITE_SIG_3ARG_BLOCK = STANDARD_SITE_SIG_3ARG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L245">    public static final Signature STANDARD_SITE_SIG_NARG_BLOCK = STANDARD_SITE_SIG_NARG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L246">    public static final Signature[] STANDARD_SITE_SIGS_BLOCK = {</span>
+        STANDARD_SITE_SIG_BLOCK,
+        STANDARD_SITE_SIG_1ARG_BLOCK,
+        STANDARD_SITE_SIG_2ARG_BLOCK,
+        STANDARD_SITE_SIG_3ARG_BLOCK,
+        STANDARD_SITE_SIG_NARG_BLOCK,
+    };
+
+<span class="nc" id="L254">    public static final Signature STANDARD_SUPER_SIG = Signature</span>
+<span class="nc" id="L255">            .returning(IRubyObject.class)</span>
+<span class="nc" id="L256">            .appendArg(&quot;context&quot;, ThreadContext.class)</span>
+<span class="nc" id="L257">            .appendArg(&quot;caller&quot;, IRubyObject.class)</span>
+<span class="nc" id="L258">            .appendArg(&quot;self&quot;, IRubyObject.class)</span>
+<span class="nc" id="L259">            .appendArg(&quot;class&quot;, RubyClass.class);</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

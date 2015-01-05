@@ -1,0 +1,234 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>TranslatorDriver.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.translator</a> &gt; <span class="el_source">TranslatorDriver.java</span></div><h1>TranslatorDriver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2013, 2014 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.translator;
+
+import com.oracle.truffle.api.frame.FrameSlot;
+import com.oracle.truffle.api.frame.MaterializedFrame;
+import com.oracle.truffle.api.source.NullSourceSection;
+import com.oracle.truffle.api.source.Source;
+import com.oracle.truffle.api.source.SourceSection;
+import org.jcodings.Encoding;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.scope.ManyVarsDynamicScope;
+import org.jruby.truffle.nodes.RubyNode;
+import org.jruby.truffle.nodes.RubyRootNode;
+import org.jruby.truffle.nodes.control.SequenceNode;
+import org.jruby.truffle.nodes.literal.ObjectLiteralNode;
+import org.jruby.truffle.nodes.methods.CatchNextNode;
+import org.jruby.truffle.nodes.methods.CatchRetryAsErrorNode;
+import org.jruby.truffle.nodes.methods.CatchReturnAsErrorNode;
+import org.jruby.truffle.nodes.methods.MethodDefinitionNode;
+import org.jruby.truffle.runtime.LexicalScope;
+import org.jruby.truffle.runtime.RubyArguments;
+import org.jruby.truffle.runtime.RubyCallStack;
+import org.jruby.truffle.runtime.RubyContext;
+import org.jruby.truffle.runtime.control.RaiseException;
+import org.jruby.truffle.runtime.core.RubyException;
+import org.jruby.truffle.runtime.core.RubyFile;
+import org.jruby.truffle.runtime.methods.SharedMethodInfo;
+
+import java.io.IOException;
+import java.io.InputStreamReader;
+
+<span class="nc" id="L41">public class TranslatorDriver {</span>
+
+<span class="nc" id="L43">    public static enum ParserContext {</span>
+<span class="nc" id="L44">        TOP_LEVEL, SHELL, MODULE</span>
+    }
+
+<span class="nc" id="L47">    private long nextReturnID = 0;</span>
+
+    public RubyNode parse(RubyContext context, org.jruby.ast.Node parseTree, org.jruby.ast.ArgsNode argsNode, org.jruby.ast.Node bodyNode, RubyNode currentNode) {
+<span class="nc" id="L50">        final SourceSection sourceSection = null;</span>
+
+<span class="nc" id="L52">        final LexicalScope lexicalScope = context.getRootLexicalScope(); // TODO(eregon): figure out how to get the lexical scope from JRuby</span>
+<span class="nc" id="L53">        final SharedMethodInfo sharedMethod = new SharedMethodInfo(sourceSection, lexicalScope, &quot;(unknown)&quot;, false, parseTree, false);</span>
+
+<span class="nc" id="L55">        final TranslatorEnvironment environment = new TranslatorEnvironment(</span>
+<span class="nc" id="L56">                context, environmentForFrame(context, null), this, allocateReturnID(), true, true, sharedMethod, sharedMethod.getName(), false);</span>
+
+        // All parsing contexts have a visibility slot at their top level
+
+<span class="nc" id="L60">        environment.addMethodDeclarationSlots();</span>
+
+        // Translate to Ruby Truffle nodes
+
+        final MethodTranslator translator;
+
+        try {
+<span class="nc" id="L67">            translator = new MethodTranslator(currentNode, context, null, environment, false, false, Source.fromFileName(bodyNode.getPosition().getFile()));</span>
+<span class="nc" id="L68">        } catch (IOException e) {</span>
+<span class="nc" id="L69">            throw new RuntimeException(e);</span>
+<span class="nc" id="L70">        }</span>
+
+<span class="nc" id="L72">        return translator.compileFunctionNode(sourceSection, &quot;(unknown)&quot;, argsNode, bodyNode, false, sharedMethod);</span>
+    }
+
+    public RubyRootNode parse(RubyContext context, Source source, Encoding defaultEncoding, ParserContext parserContext, MaterializedFrame parentFrame, RubyNode currentNode, NodeWrapper wrapper) {
+        // Set up the JRuby parser
+
+<span class="nc" id="L78">        final org.jruby.parser.Parser parser = new org.jruby.parser.Parser(context.getRuntime());</span>
+
+<span class="nc" id="L80">        final StaticScope staticScope = context.getRuntime().getStaticScopeFactory().newLocalScope(null);</span>
+
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        if (parentFrame != null) {</span>
+            /*
+             * Note that jruby-parser will be mistaken about how deep the existing variables are,
+             * but that doesn't matter as we look them up ourselves after being told they're in some
+             * parent scope.
+             */
+
+<span class="nc" id="L89">            MaterializedFrame frame = parentFrame;</span>
+
+<span class="nc bnc" id="L91" title="All 2 branches missed.">            while (frame != null) {</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">                for (FrameSlot slot : frame.getFrameDescriptor().getSlots()) {</span>
+<span class="nc bnc" id="L93" title="All 2 branches missed.">                    if (slot.getIdentifier() instanceof String) {</span>
+<span class="nc" id="L94">                        final String name = (String) slot.getIdentifier();</span>
+<span class="nc" id="L95">                        staticScope.addVariableThisScope(name);</span>
+                    }
+<span class="nc" id="L97">                }</span>
+
+<span class="nc" id="L99">                frame = RubyArguments.getDeclarationFrame(frame.getArguments());</span>
+            }
+        }
+
+<span class="nc bnc" id="L103" title="All 2 branches missed.">        final org.jruby.parser.ParserConfiguration parserConfiguration = new org.jruby.parser.ParserConfiguration(context.getRuntime(), 0, false, parserContext == ParserContext.TOP_LEVEL, true);</span>
+<span class="nc" id="L104">        parserConfiguration.setDefaultEncoding(defaultEncoding);</span>
+
+        // Parse to the JRuby AST
+
+        org.jruby.ast.RootNode node;
+
+        try {
+<span class="nc" id="L111">            node = (org.jruby.ast.RootNode) parser.parse(source.getName(), source.getCode().getBytes(), new ManyVarsDynamicScope(staticScope), parserConfiguration);</span>
+<span class="nc" id="L112">        } catch (Exception e) {</span>
+<span class="nc" id="L113">            String message = e.getMessage();</span>
+
+<span class="nc bnc" id="L115" title="All 2 branches missed.">            if (message == null) {</span>
+<span class="nc" id="L116">                message = &quot;(no message)&quot;;</span>
+            }
+
+<span class="nc" id="L119">            throw new RaiseException(new RubyException(context.getCoreLibrary().getSyntaxErrorClass(), context.makeString(message), RubyCallStack.getBacktrace(currentNode)));</span>
+<span class="nc" id="L120">        }</span>
+
+<span class="nc" id="L122">        return parse(currentNode, context, source, parserContext, parentFrame, node, wrapper);</span>
+    }
+
+    public RubyRootNode parse(RubyNode currentNode, RubyContext context, Source source, ParserContext parserContext, MaterializedFrame parentFrame, org.jruby.ast.RootNode rootNode, NodeWrapper wrapper) {
+<span class="nc" id="L126">        final SourceSection sourceSection = source.createSection(&quot;&lt;main&gt;&quot;, 0, source.getCode().length());</span>
+<span class="nc" id="L127">        final SharedMethodInfo sharedMethodInfo = new SharedMethodInfo(sourceSection, context.getRootLexicalScope(), &quot;&lt;main&gt;&quot;, false, rootNode, false);</span>
+
+<span class="nc" id="L129">        final TranslatorEnvironment environment = new TranslatorEnvironment(context, environmentForFrame(context, parentFrame), this, allocateReturnID(), true, false, sharedMethodInfo, sharedMethodInfo.getName(), false);</span>
+
+        // Get the DATA constant
+
+<span class="nc" id="L133">        final Object data = getData(context);</span>
+
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        if (data != null) {</span>
+<span class="nc" id="L136">            context.getCoreLibrary().getObjectClass().setConstant(currentNode, &quot;DATA&quot;, data);</span>
+        }
+
+        // All parsing contexts have a visibility slot at their top level
+
+<span class="nc" id="L141">        environment.addMethodDeclarationSlots();</span>
+
+        // Translate to Ruby Truffle nodes
+
+        final BodyTranslator translator;
+
+<span class="nc bnc" id="L147" title="All 2 branches missed.">        if (parserContext == TranslatorDriver.ParserContext.MODULE) {</span>
+<span class="nc" id="L148">            translator = new ModuleTranslator(currentNode, context, null, environment, source);</span>
+        } else {
+<span class="nc bnc" id="L150" title="All 2 branches missed.">            translator = new BodyTranslator(currentNode, context, null, environment, source, parserContext == ParserContext.TOP_LEVEL);</span>
+        }
+
+        RubyNode truffleNode;
+
+<span class="nc bnc" id="L155" title="All 4 branches missed.">        if (rootNode.getBodyNode() == null || rootNode.getBodyNode() instanceof org.jruby.ast.NilNode) {</span>
+<span class="nc" id="L156">            translator.parentSourceSection = sharedMethodInfo.getSourceSection();</span>
+            
+            try {
+<span class="nc" id="L159">                truffleNode = new ObjectLiteralNode(context, null, context.getCoreLibrary().getNilObject());</span>
+            } finally {
+<span class="nc" id="L161">                translator.parentSourceSection = null;</span>
+<span class="nc" id="L162">            }</span>
+        } else {
+<span class="nc" id="L164">            truffleNode = rootNode.getBodyNode().accept(translator);</span>
+        }
+
+        // Load flip-flop states
+
+<span class="nc bnc" id="L169" title="All 2 branches missed.">        if (environment.getFlipFlopStates().size() &gt; 0) {</span>
+<span class="nc" id="L170">            truffleNode = SequenceNode.sequence(context, truffleNode.getSourceSection(), translator.initFlipFlopStates(truffleNode.getSourceSection()), truffleNode);</span>
+        }
+
+        // Catch next
+
+<span class="nc" id="L175">        truffleNode = new CatchNextNode(context, truffleNode.getSourceSection(), truffleNode);</span>
+
+        // Catch return
+
+<span class="nc" id="L179">        truffleNode = new CatchReturnAsErrorNode(context, truffleNode.getSourceSection(), truffleNode);</span>
+
+        // Catch retry
+
+<span class="nc" id="L183">        truffleNode = new CatchRetryAsErrorNode(context, truffleNode.getSourceSection(), truffleNode);</span>
+
+        // Custom node wrapper
+
+<span class="nc" id="L187">        truffleNode = wrapper.wrap(truffleNode);</span>
+
+        // Shell result
+
+<span class="nc" id="L191">        return new RubyRootNode(context, truffleNode.getSourceSection(), environment.getFrameDescriptor(), sharedMethodInfo, truffleNode);</span>
+    }
+
+    private Object getData(RubyContext context) {
+        // TODO(CS) how do we know this has been populated already?
+
+        // TODO(CS) rough translation of File object just to get up and running
+
+<span class="nc" id="L199">        final IRubyObject jrubyData = context.getRuntime().getObject().getConstantNoConstMissing(&quot;DATA&quot;, false, false);</span>
+
+<span class="nc bnc" id="L201" title="All 2 branches missed.">        if (jrubyData == null) {</span>
+<span class="nc" id="L202">            return null;</span>
+        }
+
+<span class="nc" id="L205">        final org.jruby.RubyFile jrubyFile = (org.jruby.RubyFile) jrubyData;</span>
+<span class="nc" id="L206">        final RubyFile truffleFile = new RubyFile(context.getCoreLibrary().getFileClass(), new InputStreamReader(jrubyFile.getInStream()), null);</span>
+
+<span class="nc" id="L208">        return truffleFile;</span>
+    }
+
+    public long allocateReturnID() {
+<span class="nc bnc" id="L212" title="All 2 branches missed.">        if (nextReturnID == Long.MAX_VALUE) {</span>
+<span class="nc" id="L213">            throw new RuntimeException(&quot;Return IDs exhausted&quot;);</span>
+        }
+
+<span class="nc" id="L216">        final long allocated = nextReturnID;</span>
+<span class="nc" id="L217">        nextReturnID++;</span>
+<span class="nc" id="L218">        return allocated;</span>
+    }
+
+    private TranslatorEnvironment environmentForFrame(RubyContext context, MaterializedFrame frame) {
+<span class="nc bnc" id="L222" title="All 2 branches missed.">        if (frame == null) {</span>
+<span class="nc" id="L223">            return null;</span>
+        } else {
+<span class="nc" id="L225">            SourceSection sourceSection = new NullSourceSection(&quot;Unknown source section&quot;, &quot;(unknown)&quot;);</span>
+<span class="nc" id="L226">            final SharedMethodInfo sharedMethodInfo = new SharedMethodInfo(sourceSection, context.getRootLexicalScope(), &quot;(unknown)&quot;, false, null, false);</span>
+<span class="nc" id="L227">            final MaterializedFrame parent = RubyArguments.getDeclarationFrame(frame.getArguments());</span>
+            // TODO(CS): how do we know if the frame is a block or not?
+<span class="nc" id="L229">            return new TranslatorEnvironment(context, environmentForFrame(context, parent), frame.getFrameDescriptor(), this, allocateReturnID(), true, true, sharedMethodInfo, sharedMethodInfo.getName(), false);</span>
+        }
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

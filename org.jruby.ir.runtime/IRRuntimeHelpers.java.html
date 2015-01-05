@@ -1,0 +1,1302 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IRRuntimeHelpers.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.runtime</a> &gt; <span class="el_source">IRRuntimeHelpers.java</span></div><h1>IRRuntimeHelpers.java</h1><pre class="source lang-java linenums">package org.jruby.ir.runtime;
+
+import com.headius.invokebinder.Signature;
+import org.jcodings.Encoding;
+import org.jruby.*;
+import org.jruby.common.IRubyWarnings;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.exceptions.Unrescuable;
+import org.jruby.internal.runtime.methods.CompiledIRMetaClassBody;
+import org.jruby.internal.runtime.methods.CompiledIRMethod;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.internal.runtime.methods.InterpretedIRMetaClassBody;
+import org.jruby.internal.runtime.methods.InterpretedIRMethod;
+import org.jruby.internal.runtime.methods.UndefinedMethod;
+import org.jruby.ir.IRClassBody;
+import org.jruby.ir.IRMetaClassBody;
+import org.jruby.ir.IRModuleBody;
+import org.jruby.ir.IRScope;
+import org.jruby.ir.IRScopeType;
+import org.jruby.ir.Interp;
+import org.jruby.ir.JIT;
+import org.jruby.ir.operands.IRException;
+import org.jruby.ir.operands.Operand;
+import org.jruby.ir.operands.Splat;
+import org.jruby.ir.operands.UndefinedValue;
+import org.jruby.javasupport.JavaUtil;
+import org.jruby.parser.StaticScope;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.*;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.callsite.FunctionalCachingCallSite;
+import org.jruby.util.ByteList;
+import org.jruby.util.DefinedMessage;
+import org.jruby.util.RegexpOptions;
+import org.jruby.util.TypeConverter;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+import org.objectweb.asm.Type;
+
+import java.lang.invoke.MethodHandle;
+import java.util.Arrays;
+
+<span class="nc" id="L43">public class IRRuntimeHelpers {</span>
+<span class="fc" id="L44">    private static final Logger LOG = LoggerFactory.getLogger(&quot;IRRuntimeHelpers&quot;);</span>
+
+    public static boolean inProfileMode() {
+<span class="fc" id="L47">        return RubyInstanceConfig.IR_PROFILE;</span>
+    }
+
+    public static boolean isDebug() {
+<span class="fc" id="L51">        return RubyInstanceConfig.IR_DEBUG;</span>
+    }
+
+    public static boolean inNonMethodBodyLambda(StaticScope scope, Block.Type blockType) {
+        // SSS FIXME: Hack! AST interpreter and JIT compiler marks a proc's static scope as
+        // an argument scope if it is used to define a method's body via :define_method.
+        // Since that is exactly what we want to figure out here, am just using that flag here.
+        // But, this is ugly (as is the original hack in the current runtime).  What is really
+        // needed is a new block type -- a block that is used to define a method body.
+<span class="pc bpc" id="L60" title="1 of 4 branches missed.">        return blockType == Block.Type.LAMBDA &amp;&amp; !scope.isArgumentScope();</span>
+    }
+
+    public static boolean inLambda(Block.Type blockType) {
+<span class="fc bfc" id="L64" title="All 2 branches covered.">        return blockType == Block.Type.LAMBDA;</span>
+    }
+
+    public static boolean inProc(Block.Type blockType) {
+<span class="nc bnc" id="L68" title="All 2 branches missed.">        return blockType == Block.Type.PROC;</span>
+    }
+
+    public static void checkForLJE(ThreadContext context, DynamicScope dynScope, boolean maybeLambda, Block.Type blockType) {
+<span class="fc bfc" id="L72" title="All 2 branches covered.">        if (IRRuntimeHelpers.inLambda(blockType)) return;</span>
+
+<span class="fc" id="L74">        StaticScope scope = dynScope.getStaticScope();</span>
+<span class="fc" id="L75">        IRScopeType scopeType = scope.getScopeType();</span>
+<span class="fc" id="L76">        boolean inDefineMethod = false;</span>
+<span class="fc bfc" id="L77" title="All 2 branches covered.">        while (dynScope != null) {</span>
+<span class="fc" id="L78">            StaticScope ss = dynScope.getStaticScope();</span>
+            // SSS FIXME: Why is scopeType empty? Looks like this static-scope
+            // was not associated with the AST scope that got converted to IR.
+            //
+            // Ruby code: lambda { Thread.new { return }.join }.call
+            //
+            // To be investigated.
+<span class="fc" id="L85">            IRScopeType ssType = ss.getScopeType();</span>
+<span class="pc bpc" id="L86" title="1 of 2 branches missed.">            if (ssType != null) {</span>
+<span class="fc bfc" id="L87" title="All 2 branches covered.">                if (ssType.isMethodType()) {</span>
+<span class="fc" id="L88">                    break;</span>
+<span class="pc bpc" id="L89" title="3 of 6 branches missed.">                } else if (ss.isArgumentScope() &amp;&amp; ssType.isClosureType() &amp;&amp; ssType != IRScopeType.EVAL_SCRIPT) {</span>
+<span class="nc" id="L90">                    inDefineMethod = true;</span>
+<span class="nc" id="L91">                    break;</span>
+                }
+            }
+<span class="fc" id="L94">            dynScope = dynScope.getParentScope();</span>
+<span class="fc" id="L95">        }</span>
+
+        // SSS FIXME: Why is scopeType empty? Looks like this static-scope
+        // was not associated with the AST scope that got converted to IR.
+        //
+        // Ruby code: lambda { Thread.new { return }.join }.call
+        //
+        // To be investigated.
+<span class="pc bpc" id="L103" title="3 of 10 branches missed.">        if (   (scopeType == null || (!inDefineMethod &amp;&amp; scopeType.isClosureType() &amp;&amp; scopeType != IRScopeType.EVAL_SCRIPT))</span>
+<span class="fc bfc" id="L104" title="All 2 branches covered.">            &amp;&amp; (maybeLambda || !context.scopeExistsOnCallStack(dynScope)))</span>
+        {
+            // Cannot return from the call that we have long since exited.
+<span class="fc" id="L107">            throw IRException.RETURN_LocalJumpError.getException(context.runtime);</span>
+        }
+<span class="fc" id="L109">    }</span>
+
+    /*
+     * Handle non-local returns (ex: when nested in closures, root scopes of module/class/sclass bodies)
+     */
+    public static IRubyObject initiateNonLocalReturn(ThreadContext context, DynamicScope dynScope, Block.Type blockType, IRubyObject returnValue) {
+        // If not in a lambda, check if this was a non-local return
+<span class="fc bfc" id="L116" title="All 2 branches covered.">        if (IRRuntimeHelpers.inLambda(blockType)) return returnValue;</span>
+
+<span class="fc" id="L118">        IRScopeType scopeType = dynScope.getStaticScope().getScopeType();</span>
+<span class="fc bfc" id="L119" title="All 2 branches covered.">        while (dynScope != null) {</span>
+<span class="fc" id="L120">            StaticScope ss = dynScope.getStaticScope();</span>
+            // SSS FIXME: Why is scopeType empty? Looks like this static-scope
+            // was not associated with the AST scope that got converted to IR.
+            //
+            // Ruby code: lambda { Thread.new { return }.join }.call
+            //
+            // To be investigated.
+<span class="fc" id="L127">            IRScopeType ssType = ss.getScopeType();</span>
+<span class="pc bpc" id="L128" title="1 of 2 branches missed.">            if (ssType != null) {</span>
+<span class="pc bpc" id="L129" title="3 of 8 branches missed.">                if (ssType.isMethodType() || (ss.isArgumentScope() &amp;&amp; ssType.isClosureType() &amp;&amp; ssType != IRScopeType.EVAL_SCRIPT)) {</span>
+<span class="nc" id="L130">                    break;</span>
+                }
+            }
+<span class="fc" id="L133">            dynScope = dynScope.getParentScope();</span>
+<span class="fc" id="L134">        }</span>
+
+        // methodtoReturnFrom will not be -1 for explicit returns from class/module/sclass bodies
+<span class="fc" id="L137">        throw IRReturnJump.create(dynScope, returnValue);</span>
+    }
+
+    @JIT
+    public static IRubyObject handleNonlocalReturn(StaticScope scope, DynamicScope dynScope, Object rjExc, Block.Type blockType) throws RuntimeException {
+<span class="pc bpc" id="L142" title="1 of 2 branches missed.">        if (!(rjExc instanceof IRReturnJump)) {</span>
+<span class="nc" id="L143">            Helpers.throwException((Throwable)rjExc);</span>
+<span class="nc" id="L144">            return null;</span>
+        } else {
+<span class="fc" id="L146">            IRReturnJump rj = (IRReturnJump)rjExc;</span>
+
+            // If we are in a lambda or if we are in the method scope we are supposed to return from, stop propagating.
+<span class="pc bpc" id="L149" title="1 of 4 branches missed.">            if (inNonMethodBodyLambda(scope, blockType) || (rj.methodToReturnFrom == dynScope)) {</span>
+<span class="pc bpc" id="L150" title="3 of 4 branches missed.">                if (isDebug()) System.out.println(&quot;---&gt; Non-local Return reached target in scope: &quot; + dynScope + &quot; matching dynscope? &quot; + (rj.methodToReturnFrom == dynScope));</span>
+<span class="fc" id="L151">                return (IRubyObject) rj.returnValue;</span>
+            }
+
+            // If not, Just pass it along!
+<span class="nc" id="L155">            throw rj;</span>
+        }
+    }
+
+    public static IRubyObject initiateBreak(ThreadContext context, DynamicScope dynScope, IRubyObject breakValue, Block.Type blockType) throws RuntimeException {
+<span class="fc bfc" id="L160" title="All 2 branches covered.">        if (inLambda(blockType)) {</span>
+            // Ensures would already have been run since the IR builder makes
+            // sure that ensure code has run before we hit the break.  Treat
+            // the break as a regular return from the closure.
+<span class="fc" id="L164">            return breakValue;</span>
+        } else {
+<span class="fc" id="L166">            StaticScope scope = dynScope.getStaticScope();</span>
+<span class="fc" id="L167">            IRScopeType scopeType = scope.getScopeType();</span>
+<span class="pc bpc" id="L168" title="1 of 2 branches missed.">            if (!scopeType.isClosureType()) {</span>
+                // Error -- breaks can only be initiated in closures
+<span class="nc" id="L170">                throw IRException.BREAK_LocalJumpError.getException(context.runtime);</span>
+            }
+
+<span class="fc" id="L173">            IRBreakJump bj = IRBreakJump.create(dynScope.getParentScope(), breakValue);</span>
+<span class="pc bpc" id="L174" title="1 of 2 branches missed.">            if (scopeType == IRScopeType.EVAL_SCRIPT) {</span>
+                // If we are in an eval, record it so we can account for it
+<span class="nc" id="L176">                bj.breakInEval = true;</span>
+            }
+
+            // Start the process of breaking through the intermediate scopes
+<span class="fc" id="L180">            throw bj;</span>
+        }
+    }
+
+    @JIT
+    public static IRubyObject handleBreakAndReturnsInLambdas(ThreadContext context, StaticScope scope, DynamicScope dynScope, Object exc, Block.Type blockType) throws RuntimeException {
+<span class="fc bfc" id="L186" title="All 4 branches covered.">        if ((exc instanceof IRBreakJump) &amp;&amp; inNonMethodBodyLambda(scope, blockType)) {</span>
+            // We just unwound all the way up because of a non-local break
+<span class="fc" id="L188">            throw IRException.BREAK_LocalJumpError.getException(context.getRuntime());</span>
+<span class="pc bpc" id="L189" title="1 of 6 branches missed.">        } else if (exc instanceof IRReturnJump &amp;&amp; (blockType == null || inLambda(blockType))) {</span>
+            // Ignore non-local return processing in non-lambda blocks.
+            // Methods have a null blocktype
+<span class="fc" id="L192">            return handleNonlocalReturn(scope, dynScope, exc, blockType);</span>
+        } else {
+            // Propagate
+<span class="nc" id="L195">            Helpers.throwException((Throwable)exc);</span>
+            // should not get here
+<span class="nc" id="L197">            return null;</span>
+        }
+    }
+
+    @JIT
+    public static IRubyObject handlePropagatedBreak(ThreadContext context, DynamicScope dynScope, Object bjExc, Block.Type blockType) {
+<span class="pc bpc" id="L203" title="1 of 2 branches missed.">        if (!(bjExc instanceof IRBreakJump)) {</span>
+<span class="nc" id="L204">            Helpers.throwException((Throwable)bjExc);</span>
+<span class="nc" id="L205">            return null;</span>
+        }
+
+<span class="fc" id="L208">        IRBreakJump bj = (IRBreakJump)bjExc;</span>
+<span class="pc bpc" id="L209" title="1 of 2 branches missed.">        if (bj.breakInEval) {</span>
+            // If the break was in an eval, we pretend as if it was in the containing scope
+<span class="nc" id="L211">            StaticScope scope = dynScope.getStaticScope();</span>
+<span class="nc" id="L212">            IRScopeType scopeType = scope.getScopeType();</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">            if (!scopeType.isClosureType()) {</span>
+                // Error -- breaks can only be initiated in closures
+<span class="nc" id="L215">                throw IRException.BREAK_LocalJumpError.getException(context.getRuntime());</span>
+            } else {
+<span class="nc" id="L217">                bj.breakInEval = false;</span>
+<span class="nc" id="L218">                throw bj;</span>
+            }
+<span class="pc bpc" id="L220" title="1 of 2 branches missed.">        } else if (bj.scopeToReturnTo == dynScope) {</span>
+            // Done!! Hurray!
+<span class="pc bpc" id="L222" title="1 of 2 branches missed.">            if (isDebug()) System.out.println(&quot;---&gt; Break reached target in scope: &quot; + dynScope);</span>
+<span class="fc" id="L223">            return bj.breakValue;</span>
+/* ---------------------------------------------------------------
+ * SSS FIXME: Puzzled .. Why is this not needed?
+        } else if (!context.scopeExistsOnCallStack(bj.scopeToReturnTo.getStaticScope())) {
+            throw IRException.BREAK_LocalJumpError.getException(context.runtime);
+ * --------------------------------------------------------------- */
+        } else {
+            // Propagate
+<span class="nc" id="L231">            throw bj;</span>
+        }
+    }
+
+    @JIT
+    public static void defCompiledIRMethod(ThreadContext context, MethodHandle handle, String rubyName, DynamicScope currDynScope, IRubyObject self, IRScope irScope) {
+<span class="nc" id="L237">        Ruby runtime = context.runtime;</span>
+
+<span class="nc" id="L239">        RubyModule containingClass = IRRuntimeHelpers.findInstanceMethodContainer(context, currDynScope, self);</span>
+<span class="nc" id="L240">        Visibility currVisibility = context.getCurrentVisibility();</span>
+<span class="nc" id="L241">        Visibility newVisibility = Helpers.performNormalMethodChecksAndDetermineVisibility(runtime, containingClass, rubyName, currVisibility);</span>
+
+<span class="nc" id="L243">        DynamicMethod method = new CompiledIRMethod(handle, irScope, newVisibility, containingClass);</span>
+
+<span class="nc" id="L245">        Helpers.addInstanceMethod(containingClass, rubyName, method, currVisibility, context, runtime);</span>
+<span class="nc" id="L246">    }</span>
+
+    @JIT
+    public static void defCompiledIRClassMethod(ThreadContext context, IRubyObject obj, MethodHandle handle, String rubyName, IRScope irScope) {
+<span class="nc" id="L250">        Ruby runtime = context.runtime;</span>
+
+<span class="nc bnc" id="L252" title="All 4 branches missed.">        if (obj instanceof RubyFixnum || obj instanceof RubySymbol) {</span>
+<span class="nc" id="L253">            throw runtime.newTypeError(&quot;can't define singleton method \&quot;&quot; + rubyName + &quot;\&quot; for &quot; + obj.getMetaClass().getBaseName());</span>
+        }
+
+<span class="nc bnc" id="L256" title="All 2 branches missed.">        if (obj.isFrozen()) throw runtime.newFrozenError(&quot;object&quot;);</span>
+
+<span class="nc" id="L258">        RubyClass containingClass = obj.getSingletonClass();</span>
+
+<span class="nc" id="L260">        DynamicMethod method = new CompiledIRMethod(handle, irScope, Visibility.PUBLIC, containingClass);</span>
+
+<span class="nc" id="L262">        containingClass.addMethod(rubyName, method);</span>
+
+<span class="nc" id="L264">        obj.callMethod(context, &quot;singleton_method_added&quot;, runtime.fastNewSymbol(rubyName));</span>
+<span class="nc" id="L265">    }</span>
+
+    // Used by JIT
+    public static IRubyObject undefMethod(ThreadContext context, Object nameArg, DynamicScope currDynScope, IRubyObject self) {
+<span class="nc" id="L269">        RubyModule module = IRRuntimeHelpers.findInstanceMethodContainer(context, currDynScope, self);</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">        String name = (nameArg instanceof String) ?</span>
+<span class="nc" id="L271">                (String) nameArg : nameArg.toString();</span>
+
+<span class="nc bnc" id="L273" title="All 2 branches missed.">        if (module == null) {</span>
+<span class="nc" id="L274">            throw context.runtime.newTypeError(&quot;No class to undef method '&quot; + name + &quot;'.&quot;);</span>
+        }
+
+<span class="nc" id="L277">        module.undef(context, name);</span>
+
+<span class="nc" id="L279">        return context.runtime.getNil();</span>
+    }
+
+    public static double unboxFloat(IRubyObject val) {
+<span class="nc bnc" id="L283" title="All 2 branches missed.">        if (val instanceof RubyFloat) {</span>
+<span class="nc" id="L284">            return ((RubyFloat)val).getValue();</span>
+        } else {
+<span class="nc" id="L286">            return ((RubyFixnum)val).getDoubleValue();</span>
+        }
+    }
+
+    public static long unboxFixnum(IRubyObject val) {
+<span class="nc bnc" id="L291" title="All 2 branches missed.">        if (val instanceof RubyFloat) {</span>
+<span class="nc" id="L292">            return (long)((RubyFloat)val).getValue();</span>
+        } else {
+<span class="nc" id="L294">            return ((RubyFixnum)val).getLongValue();</span>
+        }
+    }
+
+    public static boolean flt(double v1, double v2) {
+<span class="nc bnc" id="L299" title="All 2 branches missed.">        return v1 &lt; v2;</span>
+    }
+
+    public static boolean fgt(double v1, double v2) {
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        return v1 &gt; v2;</span>
+    }
+
+    public static boolean feq(double v1, double v2) {
+<span class="nc bnc" id="L307" title="All 2 branches missed.">        return v1 == v2;</span>
+    }
+
+    public static boolean ilt(long v1, long v2) {
+<span class="nc bnc" id="L311" title="All 2 branches missed.">        return v1 &lt; v2;</span>
+    }
+
+    public static boolean igt(long v1, long v2) {
+<span class="nc bnc" id="L315" title="All 2 branches missed.">        return v1 &gt; v2;</span>
+    }
+
+    public static boolean ieq(long v1, long v2) {
+<span class="nc bnc" id="L319" title="All 2 branches missed.">        return v1 == v2;</span>
+    }
+
+    public static Object unwrapRubyException(Object excObj) {
+        // Unrescuable:
+        //   IRBreakJump, IRReturnJump, ThreadKill, RubyContinuation, MainExitException, etc.
+        //   These cannot be rescued -- only run ensure blocks
+<span class="pc bpc" id="L326" title="1 of 2 branches missed.">        if (excObj instanceof Unrescuable) {</span>
+<span class="nc" id="L327">            Helpers.throwException((Throwable)excObj);</span>
+        }
+        // Ruby exceptions, errors, and other java exceptions.
+        // These can be rescued -- run rescue blocks
+<span class="fc bfc" id="L331" title="All 2 branches covered.">        return (excObj instanceof RaiseException) ? ((RaiseException)excObj).getException() : excObj;</span>
+    }
+
+    private static boolean isJavaExceptionHandled(ThreadContext context, IRubyObject excType, Object excObj, boolean arrayCheck) {
+<span class="pc bpc" id="L335" title="1 of 2 branches missed.">        if (!(excObj instanceof Throwable)) {</span>
+<span class="fc" id="L336">            return false;</span>
+        }
+
+<span class="nc" id="L339">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L340">        Throwable throwable = (Throwable)excObj;</span>
+
+<span class="nc bnc" id="L342" title="All 2 branches missed.">        if (excType instanceof RubyArray) {</span>
+<span class="nc" id="L343">            RubyArray testTypes = (RubyArray)excType;</span>
+<span class="nc bnc" id="L344" title="All 2 branches missed.">            for (int i = 0, n = testTypes.getLength(); i &lt; n; i++) {</span>
+<span class="nc" id="L345">                IRubyObject testType = testTypes.eltInternal(i);</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">                if (IRRuntimeHelpers.isJavaExceptionHandled(context, testType, throwable, true)) {</span>
+                    IRubyObject exceptionObj;
+<span class="nc bnc" id="L348" title="All 4 branches missed.">                    if (n == 1 &amp;&amp; testType == runtime.getNativeException()) {</span>
+                        // wrap Throwable in a NativeException object
+<span class="nc" id="L350">                        exceptionObj = new NativeException(runtime, runtime.getNativeException(), throwable);</span>
+<span class="nc" id="L351">                        ((NativeException)exceptionObj).prepareIntegratedBacktrace(context, throwable.getStackTrace());</span>
+                    } else {
+                        // wrap as normal JI object
+<span class="nc" id="L354">                        exceptionObj = JavaUtil.convertJavaToUsableRubyObject(runtime, throwable);</span>
+                    }
+
+<span class="nc" id="L357">                    runtime.getGlobalVariables().set(&quot;$!&quot;, exceptionObj);</span>
+<span class="nc" id="L358">                    return true;</span>
+                }
+            }
+<span class="nc bnc" id="L361" title="All 2 branches missed.">        } else if (Helpers.checkJavaException(throwable, excType, context)) {</span>
+            IRubyObject exceptionObj;
+<span class="nc bnc" id="L363" title="All 2 branches missed.">            if (excType == runtime.getNativeException()) {</span>
+                // wrap Throwable in a NativeException object
+<span class="nc" id="L365">                exceptionObj = new NativeException(runtime, runtime.getNativeException(), throwable);</span>
+<span class="nc" id="L366">                ((NativeException)exceptionObj).prepareIntegratedBacktrace(context, throwable.getStackTrace());</span>
+            } else {
+                // wrap as normal JI object
+<span class="nc" id="L369">                exceptionObj = JavaUtil.convertJavaToUsableRubyObject(runtime, throwable);</span>
+            }
+
+<span class="nc" id="L372">            runtime.getGlobalVariables().set(&quot;$!&quot;, exceptionObj);</span>
+<span class="nc" id="L373">            return true;</span>
+        }
+
+<span class="nc" id="L376">        return false;</span>
+    }
+
+    private static boolean isRubyExceptionHandled(ThreadContext context, IRubyObject excType, Object excObj) {
+<span class="fc bfc" id="L380" title="All 2 branches covered.">        if (excType instanceof RubyArray) {</span>
+<span class="fc" id="L381">            RubyArray testTypes = (RubyArray)excType;</span>
+<span class="fc bfc" id="L382" title="All 2 branches covered.">            for (int i = 0, n = testTypes.getLength(); i &lt; n; i++) {</span>
+<span class="fc" id="L383">                IRubyObject testType = testTypes.eltInternal(i);</span>
+<span class="fc bfc" id="L384" title="All 2 branches covered.">                if (IRRuntimeHelpers.isRubyExceptionHandled(context, testType, excObj)) {</span>
+<span class="fc" id="L385">                    context.runtime.getGlobalVariables().set(&quot;$!&quot;, (IRubyObject)excObj);</span>
+<span class="fc" id="L386">                    return true;</span>
+                }
+            }
+<span class="pc bpc" id="L389" title="1 of 2 branches missed.">        } else if (excObj instanceof IRubyObject) {</span>
+            // SSS FIXME: Should this check be &quot;runtime.getModule().isInstance(excType)&quot;??
+<span class="pc bpc" id="L391" title="1 of 2 branches missed.">            if (!(excType instanceof RubyModule)) {</span>
+<span class="nc" id="L392">                throw context.runtime.newTypeError(&quot;class or module required for rescue clause. Found: &quot; + excType);</span>
+            }
+
+<span class="fc bfc" id="L395" title="All 2 branches covered.">            if (excType.callMethod(context, &quot;===&quot;, (IRubyObject)excObj).isTrue()) {</span>
+<span class="fc" id="L396">                context.runtime.getGlobalVariables().set(&quot;$!&quot;, (IRubyObject)excObj);</span>
+<span class="fc" id="L397">                return true;</span>
+            }
+        }
+<span class="fc" id="L400">        return false;</span>
+    }
+
+    public static IRubyObject isExceptionHandled(ThreadContext context, IRubyObject excType, Object excObj) {
+        // SSS FIXME: JIT should do an explicit unwrap in code just like in interpreter mode.
+        // This is called once for each RescueEQQ instr and unwrapping each time is unnecessary.
+        // This is not a performance issue, but more a question of where this belongs.
+        // It seems more logical to (a) recv-exc (b) unwrap-exc (c) do all the rescue-eqq checks.
+        //
+        // Unwrap Ruby exceptions
+<span class="fc" id="L410">        excObj = unwrapRubyException(excObj);</span>
+
+<span class="fc bfc" id="L412" title="All 2 branches covered.">        boolean ret = IRRuntimeHelpers.isRubyExceptionHandled(context, excType, excObj)</span>
+<span class="pc bpc" id="L413" title="1 of 2 branches missed.">            || IRRuntimeHelpers.isJavaExceptionHandled(context, excType, excObj, false);</span>
+
+<span class="fc" id="L415">        return context.runtime.newBoolean(ret);</span>
+    }
+
+    public static IRubyObject isEQQ(ThreadContext context, IRubyObject receiver, IRubyObject value) {
+<span class="fc bfc" id="L419" title="All 2 branches covered.">        boolean isUndefValue = value == UndefinedValue.UNDEFINED;</span>
+<span class="fc bfc" id="L420" title="All 2 branches covered.">        if (receiver instanceof RubyArray) {</span>
+<span class="fc" id="L421">            RubyArray testVals = (RubyArray)receiver;</span>
+<span class="fc bfc" id="L422" title="All 2 branches covered.">            for (int i = 0, n = testVals.getLength(); i &lt; n; i++) {</span>
+<span class="fc" id="L423">                IRubyObject v = testVals.eltInternal(i);</span>
+<span class="pc bpc" id="L424" title="1 of 2 branches missed.">                IRubyObject eqqVal = isUndefValue ? v : v.callMethod(context, &quot;===&quot;, value);</span>
+<span class="fc bfc" id="L425" title="All 2 branches covered.">                if (eqqVal.isTrue()) return eqqVal;</span>
+            }
+<span class="fc" id="L427">            return context.runtime.newBoolean(false);</span>
+        } else {
+<span class="fc bfc" id="L429" title="All 2 branches covered.">            return isUndefValue ? receiver : receiver.callMethod(context, &quot;===&quot;, value);</span>
+        }
+    }
+
+    public static IRubyObject newProc(Ruby runtime, Block block) {
+<span class="fc bfc" id="L434" title="All 2 branches covered.">        return (block == Block.NULL_BLOCK) ? runtime.getNil() : runtime.newProc(Block.Type.PROC, block);</span>
+    }
+
+    public static IRubyObject yield(ThreadContext context, Object blk, Object yieldArg, boolean unwrapArray) {
+<span class="fc bfc" id="L438" title="All 2 branches covered.">        if (blk instanceof RubyProc) blk = ((RubyProc)blk).getBlock();</span>
+<span class="fc bfc" id="L439" title="All 2 branches covered.">        if (blk instanceof RubyNil) blk = Block.NULL_BLOCK;</span>
+<span class="fc" id="L440">        Block b = (Block)blk;</span>
+<span class="fc" id="L441">        IRubyObject yieldVal = (IRubyObject)yieldArg;</span>
+<span class="pc bpc" id="L442" title="1 of 4 branches missed.">        return (unwrapArray &amp;&amp; (yieldVal instanceof RubyArray)) ? b.yieldArray(context, yieldVal, null) : b.yield(context, yieldVal);</span>
+    }
+
+    public static IRubyObject yieldSpecific(ThreadContext context, Object blk) {
+<span class="fc bfc" id="L446" title="All 2 branches covered.">        if (blk instanceof RubyProc) blk = ((RubyProc)blk).getBlock();</span>
+<span class="fc bfc" id="L447" title="All 2 branches covered.">        if (blk instanceof RubyNil) blk = Block.NULL_BLOCK;</span>
+<span class="fc" id="L448">        Block b = (Block)blk;</span>
+<span class="fc" id="L449">        return b.yieldSpecific(context);</span>
+    }
+
+    public static IRubyObject[] convertValueIntoArgArray(ThreadContext context, IRubyObject value, Arity arity, boolean argIsArray) {
+        // SSS FIXME: This should not really happen -- so, some places in the runtime library are breaking this contract.
+<span class="pc bpc" id="L454" title="1 of 4 branches missed.">        if (argIsArray &amp;&amp; !(value instanceof RubyArray)) argIsArray = false;</span>
+
+<span class="fc" id="L456">        int blockArity = arity.getValue();</span>
+<span class="fc bfc" id="L457" title="All 4 branches covered.">        switch (blockArity) {</span>
+<span class="fc bfc" id="L458" title="All 2 branches covered.">            case -1 : return argIsArray ? ((RubyArray)value).toJavaArray() : new IRubyObject[] { value };</span>
+<span class="fc" id="L459">            case  0 : return new IRubyObject[] { value };</span>
+            case  1 : {
+<span class="fc bfc" id="L461" title="All 2 branches covered.">               if (argIsArray) {</span>
+<span class="fc" id="L462">                   RubyArray valArray = ((RubyArray)value);</span>
+<span class="fc bfc" id="L463" title="All 2 branches covered.">                   if (valArray.size() == 0) {</span>
+<span class="fc" id="L464">                       value = RubyArray.newEmptyArray(context.runtime);</span>
+                   }
+               }
+<span class="fc" id="L467">               return new IRubyObject[] { value };</span>
+            }
+            default :
+<span class="fc bfc" id="L470" title="All 2 branches covered.">                if (argIsArray) {</span>
+<span class="fc" id="L471">                    RubyArray valArray = (RubyArray)value;</span>
+<span class="pc bpc" id="L472" title="1 of 2 branches missed.">                    if (valArray.size() == 1) value = valArray.eltInternal(0);</span>
+<span class="fc" id="L473">                    value = Helpers.aryToAry(value);</span>
+<span class="pc bpc" id="L474" title="1 of 2 branches missed.">                    return (value instanceof RubyArray) ? ((RubyArray)value).toJavaArray() : new IRubyObject[] { value };</span>
+                } else {
+<span class="fc" id="L476">                    IRubyObject val0 = Helpers.aryToAry(value);</span>
+<span class="pc bpc" id="L477" title="1 of 2 branches missed.">                    if (!(val0 instanceof RubyArray)) {</span>
+<span class="nc" id="L478">                        throw context.runtime.newTypeError(value.getType().getName() + &quot;#to_ary should return Array&quot;);</span>
+                    }
+<span class="fc" id="L480">                    return ((RubyArray)val0).toJavaArray();</span>
+                }
+        }
+    }
+
+    public static Block getBlockFromObject(ThreadContext context, Object value) {
+        Block block;
+<span class="fc bfc" id="L487" title="All 2 branches covered.">        if (value instanceof Block) {</span>
+<span class="fc" id="L488">            block = (Block) value;</span>
+<span class="fc bfc" id="L489" title="All 2 branches covered.">        } else if (value instanceof RubyProc) {</span>
+<span class="fc" id="L490">            block = ((RubyProc) value).getBlock();</span>
+<span class="fc bfc" id="L491" title="All 2 branches covered.">        } else if (value instanceof RubyMethod) {</span>
+<span class="fc" id="L492">            block = ((RubyProc)((RubyMethod)value).to_proc(context, null)).getBlock();</span>
+<span class="pc bpc" id="L493" title="1 of 4 branches missed.">        } else if ((value instanceof IRubyObject) &amp;&amp; ((IRubyObject)value).isNil()) {</span>
+<span class="fc" id="L494">            block = Block.NULL_BLOCK;</span>
+<span class="pc bpc" id="L495" title="1 of 2 branches missed.">        } else if (value instanceof IRubyObject) {</span>
+<span class="fc" id="L496">            block = ((RubyProc) TypeConverter.convertToType((IRubyObject) value, context.runtime.getProc(), &quot;to_proc&quot;, true)).getBlock();</span>
+        } else {
+<span class="nc" id="L498">            throw new RuntimeException(&quot;Unhandled case in CallInstr:prepareBlock.  Got block arg: &quot; + value);</span>
+        }
+<span class="fc" id="L500">        return block;</span>
+    }
+
+    public static void checkArity(ThreadContext context, Object[] args, int required, int opt, int rest,
+                                  boolean receivesKwargs, int restKey) {
+<span class="fc" id="L505">        int argsLength = args.length;</span>
+<span class="fc" id="L506">        RubyHash keywordArgs = (RubyHash) extractKwargsHash(args, required, receivesKwargs);</span>
+
+<span class="fc bfc" id="L508" title="All 4 branches covered.">        if (restKey == -1 &amp;&amp; keywordArgs != null) checkForExtraUnwantedKeywordArgs(context, keywordArgs);</span>
+
+        // keyword arguments value is not used for arity checking.
+<span class="fc bfc" id="L511" title="All 2 branches covered.">        if (keywordArgs != null) argsLength -= 1;</span>
+
+<span class="fc bfc" id="L513" title="All 6 branches covered.">        if (argsLength &lt; required || (rest == -1 &amp;&amp; argsLength &gt; (required + opt))) {</span>
+//            System.out.println(&quot;NUMARGS: &quot; + argsLength + &quot;, REQUIRED: &quot; + required + &quot;, OPT: &quot; + opt + &quot;, AL: &quot; + args.length + &quot;,RKW: &quot; + receivesKwargs );
+//            System.out.println(&quot;ARGS[0]: &quot; + args[0]);
+
+<span class="nc" id="L517">            Arity.raiseArgumentError(context.runtime, argsLength, required, required + opt);</span>
+        }
+<span class="fc" id="L519">    }</span>
+
+    public static RubyHash extractKwargsHash(Object[] args, int requiredArgsCount, boolean receivesKwargs) {
+<span class="fc bfc" id="L522" title="All 2 branches covered.">        if (!receivesKwargs) return null;</span>
+<span class="fc bfc" id="L523" title="All 2 branches covered.">        if (args.length &lt;= requiredArgsCount) return null; // No kwarg because required args slurp them up.</span>
+
+<span class="fc" id="L525">        Object lastArg = args[args.length - 1];</span>
+
+<span class="fc bfc" id="L527" title="All 2 branches covered.">        return !(lastArg instanceof RubyHash) ? null : (RubyHash) lastArg;</span>
+    }
+
+    public static void checkForExtraUnwantedKeywordArgs(final ThreadContext context, RubyHash keywordArgs) {
+<span class="fc" id="L531">        final StaticScope scope = context.getCurrentStaticScope();</span>
+
+<span class="fc" id="L533">        keywordArgs.visitAll(new RubyHash.Visitor() {</span>
+            @Override
+            public void visit(IRubyObject key, IRubyObject value) {
+<span class="fc" id="L536">                String keyAsString = key.asJavaString();</span>
+<span class="fc" id="L537">                int slot = scope.isDefined((keyAsString));</span>
+
+                // Found name in higher variable scope.  Therefore non for this block/method def.
+<span class="pc bpc" id="L540" title="1 of 2 branches missed.">                if ((slot &gt;&gt; 16) &gt; 0) throw context.runtime.newArgumentError(&quot;unknown keyword: &quot; + keyAsString);</span>
+                // Could not find it anywhere.
+<span class="fc bfc" id="L542" title="All 2 branches covered.">                if (((short) (slot &amp; 0xffff)) &lt; 0) throw context.runtime.newArgumentError(&quot;unknown keyword: &quot; + keyAsString);</span>
+<span class="fc" id="L543">            }</span>
+        });
+<span class="fc" id="L545">    }</span>
+
+    public static IRubyObject match3(ThreadContext context, RubyRegexp regexp, IRubyObject argValue) {
+<span class="fc bfc" id="L548" title="All 2 branches covered.">        if (argValue instanceof RubyString) {</span>
+<span class="fc" id="L549">            return regexp.op_match19(context, argValue);</span>
+        } else {
+<span class="fc" id="L551">            return argValue.callMethod(context, &quot;=~&quot;, regexp);</span>
+        }
+    }
+
+    public static IRubyObject extractOptionalArgument(RubyArray rubyArray, int minArgsLength, int index) {
+<span class="nc" id="L556">        int n = rubyArray.getLength();</span>
+<span class="nc bnc" id="L557" title="All 2 branches missed.">        return minArgsLength &lt; n ? rubyArray.entry(index) : UndefinedValue.UNDEFINED;</span>
+    }
+
+    @JIT
+    public static IRubyObject isDefinedBackref(ThreadContext context) {
+<span class="fc bfc" id="L562" title="All 2 branches covered.">        return RubyMatchData.class.isInstance(context.getBackRef()) ?</span>
+<span class="fc" id="L563">                context.runtime.getDefinedMessage(DefinedMessage.GLOBAL_VARIABLE) : context.nil;</span>
+    }
+
+    @JIT
+    public static IRubyObject isDefinedGlobal(ThreadContext context, String name) {
+<span class="fc bfc" id="L568" title="All 2 branches covered.">        return context.runtime.getGlobalVariables().isDefined(name) ?</span>
+<span class="fc" id="L569">                context.runtime.getDefinedMessage(DefinedMessage.GLOBAL_VARIABLE) : context.nil;</span>
+    }
+
+    // FIXME: This checks for match data differently than isDefinedBackref.  Seems like they should use same mechanism?
+    @JIT
+    public static IRubyObject isDefinedNthRef(ThreadContext context, int matchNumber) {
+<span class="fc" id="L575">        IRubyObject backref = context.getBackRef();</span>
+
+<span class="fc bfc" id="L577" title="All 2 branches covered.">        if (backref instanceof RubyMatchData) {</span>
+<span class="fc bfc" id="L578" title="All 2 branches covered.">            if (!((RubyMatchData) backref).group(matchNumber).isNil()) {</span>
+<span class="fc" id="L579">                return context.runtime.getDefinedMessage(DefinedMessage.GLOBAL_VARIABLE);</span>
+            }
+        }
+
+<span class="fc" id="L583">        return context.nil;</span>
+    }
+
+    @JIT
+    public static IRubyObject isDefinedClassVar(ThreadContext context, RubyModule receiver, String name) {
+<span class="fc" id="L588">        boolean defined = receiver.isClassVarDefined(name);</span>
+
+<span class="pc bpc" id="L590" title="1 of 4 branches missed.">        if (!defined &amp;&amp; receiver.isSingleton()) { // Look for class var in singleton if it is one.</span>
+<span class="nc" id="L591">            IRubyObject attached = ((MetaClass) receiver).getAttached();</span>
+
+<span class="nc bnc" id="L593" title="All 2 branches missed.">            if (attached instanceof RubyModule) defined = ((RubyModule) attached).isClassVarDefined(name);</span>
+        }
+
+<span class="fc bfc" id="L596" title="All 2 branches covered.">        return defined ? context.runtime.getDefinedMessage(DefinedMessage.CLASS_VARIABLE) : context.nil;</span>
+    }
+
+    @JIT
+    public static IRubyObject isDefinedInstanceVar(ThreadContext context, IRubyObject receiver, String name) {
+<span class="fc bfc" id="L601" title="All 2 branches covered.">        return receiver.getInstanceVariables().hasInstanceVariable(name) ?</span>
+<span class="fc" id="L602">                context.runtime.getDefinedMessage(DefinedMessage.INSTANCE_VARIABLE) : context.nil;</span>
+    }
+
+    @JIT
+    public static IRubyObject isDefinedCall(ThreadContext context, IRubyObject self, IRubyObject receiver, String name) {
+<span class="fc" id="L607">        RubyString boundValue = Helpers.getDefinedCall(context, self, receiver, name);</span>
+
+<span class="fc bfc" id="L609" title="All 2 branches covered.">        return boundValue == null ? context.nil : boundValue;</span>
+    }
+
+    @JIT
+    public static IRubyObject isDefinedConstantOrMethod(ThreadContext context, IRubyObject receiver, String name) {
+<span class="fc" id="L614">        RubyString definedType = Helpers.getDefinedConstantOrBoundMethod(receiver, name);</span>
+
+<span class="fc bfc" id="L616" title="All 2 branches covered.">        return definedType == null ? context.nil : definedType;</span>
+    }
+
+    @JIT
+    public static IRubyObject isDefinedMethod(ThreadContext context, IRubyObject receiver, String name, boolean checkIfPublic) {
+<span class="fc" id="L621">        DynamicMethod method = receiver.getMetaClass().searchMethod(name);</span>
+
+        // If we find the method we optionally check if it is public before returning &quot;method&quot;.
+<span class="pc bpc" id="L624" title="3 of 6 branches missed.">        if (!method.isUndefined() &amp;&amp;  (!checkIfPublic || method.getVisibility() == Visibility.PUBLIC)) {</span>
+<span class="fc" id="L625">            return context.runtime.getDefinedMessage(DefinedMessage.METHOD);</span>
+        }
+
+<span class="fc" id="L628">        return context.nil;</span>
+    }
+
+    @JIT
+    public static IRubyObject isDefinedSuper(ThreadContext context, IRubyObject receiver) {
+<span class="fc" id="L633">        boolean flag = false;</span>
+<span class="fc" id="L634">        String frameName = context.getFrameName();</span>
+
+<span class="pc bpc" id="L636" title="1 of 2 branches missed.">        if (frameName != null) {</span>
+<span class="fc" id="L637">            RubyModule frameClass = context.getFrameKlazz();</span>
+<span class="pc bpc" id="L638" title="1 of 2 branches missed.">            if (frameClass != null) {</span>
+<span class="fc" id="L639">                flag = Helpers.findImplementerIfNecessary(receiver.getMetaClass(), frameClass).getSuperClass().isMethodBound(frameName, false);</span>
+            }
+        }
+<span class="fc bfc" id="L642" title="All 2 branches covered.">        return flag ? context.runtime.getDefinedMessage(DefinedMessage.SUPER) : context.nil;</span>
+    }
+
+    protected static void checkSuperDisabledOrOutOfMethod(ThreadContext context, RubyModule frameClass, String methodName) {
+        // FIXME: super/zsuper in top-level script still seems to have a frameClass so it will not make it into this if
+<span class="pc bpc" id="L647" title="1 of 2 branches missed.">        if (frameClass == null) {</span>
+<span class="nc bnc" id="L648" title="All 4 branches missed.">            if (methodName == null || !methodName.equals(&quot;&quot;)) {</span>
+<span class="nc" id="L649">                throw context.runtime.newNameError(&quot;superclass method '&quot; + methodName + &quot;' disabled&quot;, methodName);</span>
+            } else {
+<span class="nc" id="L651">                throw context.runtime.newNoMethodError(&quot;super called outside of method&quot;, null, context.runtime.getNil());</span>
+            }
+        }
+<span class="fc" id="L654">    }</span>
+
+    public static IRubyObject nthMatch(ThreadContext context, int matchNumber) {
+<span class="fc" id="L657">        return RubyRegexp.nth_match(matchNumber, context.getBackRef());</span>
+    }
+
+    public static void defineAlias(ThreadContext context, IRubyObject self, DynamicScope currDynScope, String newNameString, String oldNameString) {
+<span class="pc bpc" id="L661" title="1 of 6 branches missed.">        if (self == null || self instanceof RubyFixnum || self instanceof RubySymbol) {</span>
+<span class="fc" id="L662">            throw context.runtime.newTypeError(&quot;no class to make alias&quot;);</span>
+        }
+
+<span class="fc" id="L665">        RubyModule module = findInstanceMethodContainer(context, currDynScope, self);</span>
+<span class="fc" id="L666">        module.defineAlias(newNameString, oldNameString);</span>
+<span class="fc" id="L667">        module.callMethod(context, &quot;method_added&quot;, context.runtime.newSymbol(newNameString));</span>
+<span class="fc" id="L668">    }</span>
+
+    public static RubyModule getModuleFromScope(ThreadContext context, StaticScope scope, IRubyObject arg) {
+<span class="fc" id="L671">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L672">        RubyModule rubyClass = scope.getModule();</span>
+
+        // SSS FIXME: Copied from ASTInterpreter.getClassVariableBase and adapted
+<span class="pc bpc" id="L675" title="3 of 6 branches missed.">        while (scope != null &amp;&amp; (rubyClass.isSingleton() || rubyClass == runtime.getDummy())) {</span>
+<span class="nc" id="L676">            scope = scope.getPreviousCRefScope();</span>
+<span class="nc" id="L677">            rubyClass = scope.getModule();</span>
+<span class="nc bnc" id="L678" title="All 2 branches missed.">            if (scope.getPreviousCRefScope() == null) {</span>
+<span class="nc" id="L679">                runtime.getWarnings().warn(IRubyWarnings.ID.CVAR_FROM_TOPLEVEL_SINGLETON_METHOD, &quot;class variable access from toplevel singleton method&quot;);</span>
+            }
+        }
+
+<span class="pc bpc" id="L683" title="3 of 4 branches missed.">        if ((scope == null) &amp;&amp; (arg != null)) {</span>
+            // We ran out of scopes to check -- look in arg's metaclass
+<span class="nc" id="L685">            rubyClass = arg.getMetaClass();</span>
+        }
+
+<span class="pc bpc" id="L688" title="1 of 2 branches missed.">        if (rubyClass == null) {</span>
+<span class="nc" id="L689">            throw context.runtime.newTypeError(&quot;no class/module to define class variable&quot;);</span>
+        }
+
+<span class="fc" id="L692">        return rubyClass;</span>
+    }
+
+    @JIT
+    public static IRubyObject mergeKeywordArguments(ThreadContext context, IRubyObject restKwarg, IRubyObject explcitKwarg) {
+<span class="nc" id="L697">        return ((RubyHash) TypeConverter.checkHashType(context.runtime, restKwarg)).merge(context, explcitKwarg, Block.NULL_BLOCK);</span>
+    }
+
+    public static RubyModule findInstanceMethodContainer(ThreadContext context, DynamicScope currDynScope, IRubyObject self) {
+<span class="fc" id="L701">        boolean inBindingEval = currDynScope.inBindingEval();</span>
+
+        // Top-level-scripts are special but, not if binding-evals are in force!
+<span class="fc bfc" id="L704" title="All 4 branches covered.">        if (!inBindingEval &amp;&amp; self == context.runtime.getTopSelf()) return self.getType();</span>
+
+<span class="pc bpc" id="L706" title="1 of 2 branches missed.">        for (DynamicScope ds = currDynScope; ds != null; ) {</span>
+<span class="fc" id="L707">            IRScopeType scopeType = ds.getStaticScope().getScopeType();</span>
+<span class="pc bpc" id="L708" title="1 of 5 branches missed.">            switch (ds.getEvalType()) {</span>
+<span class="fc" id="L709">                case MODULE_EVAL  : return (RubyModule) self;</span>
+<span class="fc" id="L710">                case INSTANCE_EVAL: return self.getSingletonClass();</span>
+<span class="fc" id="L711">                case BINDING_EVAL : ds = ds.getParentScope(); break;</span>
+                case NONE:
+<span class="pc bpc" id="L713" title="1 of 4 branches missed.">                    if (scopeType == null || scopeType.isClosureType()) {</span>
+<span class="fc" id="L714">                        ds = ds.getParentScope();</span>
+<span class="fc bfc" id="L715" title="All 2 branches covered.">                    } else if (inBindingEval) {</span>
+                        // Binding evals are special!
+<span class="fc" id="L717">                        return ds.getStaticScope().getModule();</span>
+<span class="pc bpc" id="L718" title="1 of 2 branches missed.">                    } else if (scopeType == IRScopeType.CLASS_METHOD) {</span>
+<span class="nc" id="L719">                        return (RubyModule) self;</span>
+<span class="fc bfc" id="L720" title="All 2 branches covered.">                    } else if (scopeType == IRScopeType.INSTANCE_METHOD) {</span>
+<span class="fc" id="L721">                        return self.getMetaClass();</span>
+                    } else {
+<span class="pc bpc" id="L723" title="1 of 3 branches missed.">                        switch (scopeType) {</span>
+                            case MODULE_BODY:
+                            case CLASS_BODY:
+<span class="fc" id="L726">                                return (RubyModule)self;</span>
+                            case METACLASS_BODY:
+<span class="fc" id="L728">                                return (RubyModule) self;</span>
+
+                            default:
+<span class="nc" id="L731">                                throw new RuntimeException(&quot;Should not get here! scopeType is &quot; + scopeType);</span>
+                        }
+                    }
+                    break;
+            }
+<span class="fc" id="L736">        }</span>
+
+<span class="nc" id="L738">        throw new RuntimeException(&quot;Should not get here!&quot;);</span>
+    }
+
+    public static RubyBoolean isBlockGiven(ThreadContext context, Object blk) {
+<span class="fc bfc" id="L742" title="All 2 branches covered.">        if (blk instanceof RubyProc) blk = ((RubyProc)blk).getBlock();</span>
+<span class="fc bfc" id="L743" title="All 2 branches covered.">        if (blk instanceof RubyNil) blk = Block.NULL_BLOCK;</span>
+<span class="fc" id="L744">        Block b = (Block)blk;</span>
+<span class="fc" id="L745">        return context.runtime.newBoolean(b.isGiven());</span>
+    }
+
+    public static IRubyObject receiveRestArg(ThreadContext context, Object[] args, int required, int argIndex, boolean acceptsKeywordArguments) {
+<span class="fc" id="L749">        RubyHash keywordArguments = extractKwargsHash(args, required, acceptsKeywordArguments);</span>
+<span class="fc" id="L750">        return constructRestArg(context, args, keywordArguments, required, argIndex);</span>
+    }
+
+    public static IRubyObject constructRestArg(ThreadContext context, Object[] args, RubyHash keywordArguments, int required, int argIndex) {
+<span class="fc bfc" id="L754" title="All 2 branches covered.">        int argsLength = keywordArguments != null ? args.length - 1 : args.length;</span>
+<span class="fc" id="L755">        int remainingArguments = argsLength - required;</span>
+
+<span class="fc bfc" id="L757" title="All 2 branches covered.">        if (remainingArguments &lt;= 0) return context.runtime.newArray(IRubyObject.NULL_ARRAY);</span>
+
+<span class="fc" id="L759">        IRubyObject[] restArgs = new IRubyObject[remainingArguments];</span>
+<span class="fc" id="L760">        System.arraycopy(args, argIndex, restArgs, 0, remainingArguments);</span>
+
+<span class="fc" id="L762">        return context.runtime.newArray(restArgs);</span>
+    }
+
+    public static IRubyObject receivePostReqdArg(IRubyObject[] args, int preReqdArgsCount, int postReqdArgsCount, int argIndex, boolean acceptsKeywordArgument) {
+<span class="fc bfc" id="L766" title="All 2 branches covered.">        boolean kwargs = extractKwargsHash(args, preReqdArgsCount + postReqdArgsCount, acceptsKeywordArgument) != null;</span>
+<span class="fc bfc" id="L767" title="All 2 branches covered.">        int n = kwargs ? args.length - 1 : args.length;</span>
+<span class="fc" id="L768">        int remaining = n - preReqdArgsCount;</span>
+<span class="fc bfc" id="L769" title="All 2 branches covered.">        if (remaining &lt;= argIndex) return null;  // For blocks!</span>
+
+<span class="fc bfc" id="L771" title="All 2 branches covered.">        return (remaining &gt; postReqdArgsCount) ? args[n - postReqdArgsCount + argIndex] : args[preReqdArgsCount + argIndex];</span>
+    }
+
+    public static IRubyObject receiveOptArg(IRubyObject[] args, int requiredArgs, int preArgs, int argIndex, boolean acceptsKeywordArgument) {
+<span class="fc" id="L775">        int optArgIndex = argIndex;  // which opt arg we are processing? (first one has index 0, second 1, ...).</span>
+<span class="fc" id="L776">        RubyHash keywordArguments = extractKwargsHash(args, requiredArgs, acceptsKeywordArgument);</span>
+<span class="fc bfc" id="L777" title="All 2 branches covered.">        int argsLength = keywordArguments != null ? args.length - 1 : args.length;</span>
+
+<span class="fc bfc" id="L779" title="All 2 branches covered.">        if (requiredArgs + optArgIndex &gt;= argsLength) return UndefinedValue.UNDEFINED; // No more args left</span>
+
+<span class="fc" id="L781">        return args[preArgs + optArgIndex];</span>
+    }
+
+    public static IRubyObject getPreArgSafe(ThreadContext context, IRubyObject[] args, int argIndex) {
+        IRubyObject result;
+<span class="fc bfc" id="L786" title="All 2 branches covered.">        result = argIndex &lt; args.length ? args[argIndex] : context.nil; // SSS FIXME: This check is only required for closures, not methods</span>
+<span class="fc" id="L787">        return result;</span>
+    }
+
+    public static IRubyObject receiveKeywordArg(ThreadContext context, IRubyObject[] args, int required, String argName, boolean acceptsKeywordArgument) {
+<span class="fc" id="L791">        RubyHash keywordArguments = extractKwargsHash(args, required, acceptsKeywordArgument);</span>
+
+<span class="fc bfc" id="L793" title="All 2 branches covered.">        if (keywordArguments == null) return UndefinedValue.UNDEFINED;</span>
+
+<span class="fc" id="L795">        RubySymbol keywordName = context.getRuntime().newSymbol(argName);</span>
+
+<span class="fc bfc" id="L797" title="All 2 branches covered.">        if (keywordArguments.fastARef(keywordName) == null) return UndefinedValue.UNDEFINED;</span>
+
+        // SSS FIXME: Can we use an internal delete here?
+        // Enebo FIXME: Delete seems wrong if we are doing this for duplication purposes.
+<span class="fc" id="L801">        return keywordArguments.delete(context, keywordName, Block.NULL_BLOCK);</span>
+    }
+
+    public static IRubyObject receiveKeywordRestArg(ThreadContext context, IRubyObject[] args, int required, boolean keywordArgumentSupplied) {
+<span class="fc" id="L805">        RubyHash keywordArguments = extractKwargsHash(args, required, keywordArgumentSupplied);</span>
+
+<span class="fc bfc" id="L807" title="All 2 branches covered.">        return keywordArguments == null ? RubyHash.newSmallHash(context.getRuntime()) : keywordArguments;</span>
+    }
+
+    public static IRubyObject setCapturedVar(ThreadContext context, IRubyObject matchRes, String varName) {
+        IRubyObject val;
+<span class="pc bpc" id="L812" title="1 of 2 branches missed.">        if (matchRes.isNil()) {</span>
+<span class="nc" id="L813">            val = context.nil;</span>
+        } else {
+<span class="fc" id="L815">            IRubyObject backref = context.getBackRef();</span>
+<span class="fc" id="L816">            int n = ((RubyMatchData)backref).getNameToBackrefNumber(varName);</span>
+<span class="fc" id="L817">            val = RubyRegexp.nth_match(n, backref);</span>
+        }
+
+<span class="fc" id="L820">        return val;</span>
+    }
+
+    @JIT // for JVM6
+    public static IRubyObject instanceSuperSplatArgs(ThreadContext context, IRubyObject self, String methodName, RubyModule definingModule, IRubyObject[] args, Block block, boolean[] splatMap) {
+<span class="fc" id="L825">        return instanceSuper(context, self, methodName, definingModule, splatArguments(args, splatMap), block);</span>
+    }
+
+    @Interp
+    public static IRubyObject instanceSuper(ThreadContext context, IRubyObject self, String methodName, RubyModule definingModule, IRubyObject[] args, Block block) {
+<span class="fc" id="L830">        RubyClass superClass = definingModule.getMethodLocation().getSuperClass();</span>
+<span class="pc bpc" id="L831" title="1 of 2 branches missed.">        DynamicMethod method = superClass != null ? superClass.searchMethod(methodName) : UndefinedMethod.INSTANCE;</span>
+<span class="fc bfc" id="L832" title="All 2 branches covered.">        IRubyObject rVal = method.isUndefined() ? Helpers.callMethodMissing(context, self, method.getVisibility(), methodName, CallType.SUPER, args, block)</span>
+<span class="fc" id="L833">                : method.call(context, self, superClass, methodName, args, block);</span>
+<span class="fc" id="L834">        return rVal;</span>
+    }
+
+    @JIT // for JVM6
+    public static IRubyObject classSuperSplatArgs(ThreadContext context, IRubyObject self, String methodName, RubyModule definingModule, IRubyObject[] args, Block block, boolean[] splatMap) {
+<span class="fc" id="L839">        return classSuper(context, self, methodName, definingModule, splatArguments(args, splatMap), block);</span>
+    }
+
+    @Interp
+    public static IRubyObject classSuper(ThreadContext context, IRubyObject self, String methodName, RubyModule definingModule, IRubyObject[] args, Block block) {
+<span class="fc" id="L844">        RubyClass superClass = definingModule.getMetaClass().getSuperClass();</span>
+<span class="pc bpc" id="L845" title="1 of 2 branches missed.">        DynamicMethod method = superClass != null ? superClass.searchMethod(methodName) : UndefinedMethod.INSTANCE;</span>
+<span class="pc bpc" id="L846" title="1 of 2 branches missed.">        IRubyObject rVal = method.isUndefined() ? Helpers.callMethodMissing(context, self, method.getVisibility(), methodName, CallType.SUPER, args, block)</span>
+<span class="fc" id="L847">                : method.call(context, self, superClass, methodName, args, block);</span>
+<span class="fc" id="L848">        return rVal;</span>
+    }
+
+    public static IRubyObject unresolvedSuperSplatArgs(ThreadContext context, IRubyObject self, IRubyObject[] args, Block block, boolean[] splatMap) {
+<span class="nc" id="L852">        return unresolvedSuper(context, self, splatArguments(args, splatMap), block);</span>
+    }
+
+    public static IRubyObject unresolvedSuper(ThreadContext context, IRubyObject self, IRubyObject[] args, Block block) {
+
+        // We have to rely on the frame stack to find the implementation class
+<span class="fc" id="L858">        RubyModule klazz = context.getFrameKlazz();</span>
+<span class="fc" id="L859">        String methodName = context.getCurrentFrame().getName();</span>
+
+<span class="fc" id="L861">        checkSuperDisabledOrOutOfMethod(context, klazz, methodName);</span>
+<span class="fc" id="L862">        RubyModule implMod = Helpers.findImplementerIfNecessary(self.getMetaClass(), klazz);</span>
+<span class="fc" id="L863">        RubyClass superClass = implMod.getSuperClass();</span>
+<span class="pc bpc" id="L864" title="1 of 2 branches missed.">        DynamicMethod method = superClass != null ? superClass.searchMethod(methodName) : UndefinedMethod.INSTANCE;</span>
+
+<span class="fc" id="L866">        IRubyObject rVal = null;</span>
+<span class="pc bpc" id="L867" title="1 of 6 branches missed.">        if (method.isUndefined()|| (superClass.isPrepended() &amp;&amp; (method.isImplementedBy(self.getType())))) {</span>
+<span class="nc" id="L868">            rVal = Helpers.callMethodMissing(context, self, method.getVisibility(), methodName, CallType.SUPER, args, block);</span>
+        } else {
+<span class="fc" id="L870">            rVal = method.call(context, self, superClass, methodName, args, block);</span>
+        }
+
+<span class="fc" id="L873">        return rVal;</span>
+    }
+
+    public static IRubyObject zSuperSplatArgs(ThreadContext context, IRubyObject self, IRubyObject[] args, Block block, boolean[] splatMap) {
+<span class="nc bnc" id="L877" title="All 4 branches missed.">        if (block == null || !block.isGiven()) block = context.getFrameBlock();</span>
+<span class="nc" id="L878">        return unresolvedSuperSplatArgs(context, self, args, block, splatMap);</span>
+    }
+
+    public static IRubyObject[] splatArguments(IRubyObject[] args, boolean[] splatMap) {
+<span class="pc bpc" id="L882" title="1 of 4 branches missed.">        if (splatMap != null &amp;&amp; splatMap.length &gt; 0) {</span>
+<span class="fc" id="L883">            int count = 0;</span>
+<span class="fc bfc" id="L884" title="All 2 branches covered.">            for (int i = 0; i &lt; splatMap.length; i++) {</span>
+<span class="fc bfc" id="L885" title="All 2 branches covered.">                count += splatMap[i] ? ((RubyArray)args[i]).size() : 1;</span>
+            }
+
+<span class="fc" id="L888">            IRubyObject[] newArgs = new IRubyObject[count];</span>
+<span class="fc" id="L889">            int actualOffset = 0;</span>
+<span class="fc bfc" id="L890" title="All 2 branches covered.">            for (int i = 0; i &lt; splatMap.length; i++) {</span>
+<span class="fc bfc" id="L891" title="All 2 branches covered.">                if (splatMap[i]) {</span>
+<span class="fc" id="L892">                    RubyArray ary = (RubyArray) args[i];</span>
+<span class="fc bfc" id="L893" title="All 2 branches covered.">                    for (int j = 0; j &lt; ary.size(); j++) {</span>
+<span class="fc" id="L894">                        newArgs[actualOffset++] = ary.eltOk(j);</span>
+                    }
+<span class="fc" id="L896">                } else {</span>
+<span class="fc" id="L897">                    newArgs[actualOffset++] = args[i];</span>
+                }
+            }
+
+<span class="fc" id="L901">            args = newArgs;</span>
+        }
+<span class="fc" id="L903">        return args;</span>
+    }
+
+    public static String encodeSplatmap(boolean[] splatmap) {
+<span class="pc bpc" id="L907" title="1 of 2 branches missed.">        if (splatmap == null) return &quot;&quot;;</span>
+<span class="fc" id="L908">        StringBuilder builder = new StringBuilder();</span>
+<span class="fc bfc" id="L909" title="All 2 branches covered.">        for (boolean b : splatmap) {</span>
+<span class="fc bfc" id="L910" title="All 2 branches covered.">            builder.append(b ? '1' : '0');</span>
+        }
+<span class="fc" id="L912">        return builder.toString();</span>
+    }
+
+    public static boolean[] decodeSplatmap(String splatmapString) {
+        boolean[] splatMap;
+<span class="fc bfc" id="L917" title="All 2 branches covered.">        if (splatmapString.length() &gt; 0) {</span>
+<span class="fc" id="L918">            splatMap = new boolean[splatmapString.length()];</span>
+
+<span class="fc bfc" id="L920" title="All 2 branches covered.">            for (int i = 0; i &lt; splatmapString.length(); i++) {</span>
+<span class="fc bfc" id="L921" title="All 2 branches covered.">                if (splatmapString.charAt(i) == '1') {</span>
+<span class="fc" id="L922">                    splatMap[i] = true;</span>
+                }
+            }
+        } else {
+<span class="fc" id="L926">            splatMap = new boolean[0];</span>
+        }
+<span class="fc" id="L928">        return splatMap;</span>
+    }
+
+    public static boolean[] buildSplatMap(Operand[] args, boolean containsArgSplat) {
+<span class="fc" id="L932">        boolean[] splatMap = new boolean[args.length];</span>
+
+<span class="fc bfc" id="L934" title="All 2 branches covered.">        if (containsArgSplat) {</span>
+<span class="fc bfc" id="L935" title="All 2 branches covered.">            for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="fc" id="L936">                Operand operand = args[i];</span>
+<span class="fc bfc" id="L937" title="All 2 branches covered.">                if (operand instanceof Splat) {</span>
+<span class="fc" id="L938">                    splatMap[i] = true;</span>
+                }
+            }
+        }
+
+<span class="fc" id="L943">        return splatMap;</span>
+    }
+
+    public static final Type[] typesFromSignature(Signature signature) {
+<span class="fc" id="L947">        Type[] types = new Type[signature.argCount()];</span>
+<span class="fc bfc" id="L948" title="All 2 branches covered.">        for (int i = 0; i &lt; signature.argCount(); i++) {</span>
+<span class="fc" id="L949">            types[i] = Type.getType(signature.argType(i));</span>
+        }
+<span class="fc" id="L951">        return types;</span>
+    }
+
+    // Used by JIT
+    public static RubyString newFrozenStringFromRaw(Ruby runtime, String str, String encoding) {
+<span class="nc" id="L956">        return runtime.freezeAndDedupString(new RubyString(runtime, runtime.getString(), newByteListFromRaw(runtime, str, encoding)));</span>
+    }
+
+    // Used by JIT
+    public static final ByteList newByteListFromRaw(Ruby runtime, String str, String encoding) {
+<span class="fc" id="L961">        return new ByteList(str.getBytes(RubyEncoding.ISO), runtime.getEncodingService().getEncodingFromString(encoding), false);</span>
+    }
+
+    public static RubyRegexp constructRubyRegexp(ThreadContext context, RubyString pattern, RegexpOptions options) {
+<span class="nc" id="L965">        return RubyRegexp.newRegexp(context.runtime, pattern.getByteList(), options);</span>
+    }
+
+    // Used by JIT
+    public static RubyRegexp constructRubyRegexp(ThreadContext context, RubyString pattern, int options) {
+<span class="fc" id="L970">        return RubyRegexp.newRegexp(context.runtime, pattern.getByteList(), RegexpOptions.fromEmbeddedOptions(options));</span>
+    }
+
+    // Used by JIT
+    public static RubyEncoding retrieveEncoding(ThreadContext context, String name) {
+<span class="fc" id="L975">        return context.runtime.getEncodingService().getEncoding(retrieveJCodingsEncoding(context, name));</span>
+    }
+
+    // Used by JIT
+    public static Encoding retrieveJCodingsEncoding(ThreadContext context, String name) {
+<span class="fc" id="L980">        return context.runtime.getEncodingService().findEncodingOrAliasEntry(name.getBytes()).getEncoding();</span>
+    }
+
+    // Used by JIT
+    public static RubyHash constructHashFromArray(Ruby runtime, IRubyObject[] pairs) {
+<span class="fc" id="L985">        RubyHash hash = RubyHash.newHash(runtime);</span>
+<span class="fc bfc" id="L986" title="All 2 branches covered.">        for (int i = 0; i &lt; pairs.length;) {</span>
+<span class="fc" id="L987">            hash.fastASet(runtime, pairs[i++], pairs[i++], true);</span>
+        }
+<span class="fc" id="L989">        return hash;</span>
+    }
+
+    // Used by JIT
+    public static RubyHash dupKwargsHashAndPopulateFromArray(ThreadContext context, RubyHash dupHash, IRubyObject[] pairs) {
+<span class="nc" id="L994">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L995">        RubyHash hash = dupHash.dupFast(context);</span>
+<span class="nc bnc" id="L996" title="All 2 branches missed.">        for (int i = 0; i &lt; pairs.length;) {</span>
+<span class="nc" id="L997">            hash.fastASet(runtime, pairs[i++], pairs[i++], true);</span>
+        }
+<span class="nc" id="L999">        return hash;</span>
+    }
+
+    // Used by JIT
+    public static IRubyObject searchConst(ThreadContext context, StaticScope staticScope, String constName, boolean noPrivateConsts) {
+<span class="fc" id="L1004">        Ruby runtime = context.getRuntime();</span>
+<span class="fc" id="L1005">        RubyModule object = runtime.getObject();</span>
+<span class="pc bpc" id="L1006" title="1 of 2 branches missed.">        IRubyObject constant = (staticScope == null) ? object.getConstant(constName) : staticScope.getConstantInner(constName);</span>
+
+        // Inheritance lookup
+<span class="fc" id="L1009">        RubyModule module = null;</span>
+<span class="fc bfc" id="L1010" title="All 2 branches covered.">        if (constant == null) {</span>
+            // SSS FIXME: Is this null check case correct?
+<span class="pc bpc" id="L1012" title="1 of 2 branches missed.">            module = staticScope == null ? object : staticScope.getModule();</span>
+<span class="pc bpc" id="L1013" title="1 of 2 branches missed.">            constant = noPrivateConsts ? module.getConstantFromNoConstMissing(constName, false) : module.getConstantNoConstMissing(constName);</span>
+        }
+
+        // Call const_missing or cache
+<span class="pc bpc" id="L1017" title="1 of 2 branches missed.">        if (constant == null) {</span>
+<span class="nc" id="L1018">            return module.callMethod(context, &quot;const_missing&quot;, context.runtime.fastNewSymbol(constName));</span>
+        }
+
+<span class="fc" id="L1021">        return constant;</span>
+    }
+
+    // Used by JIT
+    public static IRubyObject inheritedSearchConst(ThreadContext context, IRubyObject cmVal, String constName, boolean noPrivateConsts) {
+<span class="fc" id="L1026">        Ruby runtime = context.runtime;</span>
+        RubyModule module;
+<span class="pc bpc" id="L1028" title="1 of 2 branches missed.">        if (cmVal instanceof RubyModule) {</span>
+<span class="fc" id="L1029">            module = (RubyModule) cmVal;</span>
+        } else {
+<span class="nc" id="L1031">            throw runtime.newTypeError(cmVal + &quot; is not a type/class&quot;);</span>
+        }
+
+<span class="fc bfc" id="L1034" title="All 2 branches covered.">        IRubyObject constant = noPrivateConsts ? module.getConstantFromNoConstMissing(constName, false) : module.getConstantNoConstMissing(constName);</span>
+
+<span class="fc bfc" id="L1036" title="All 2 branches covered.">        if (constant == null) {</span>
+<span class="fc" id="L1037">            constant = UndefinedValue.UNDEFINED;</span>
+        }
+
+<span class="fc" id="L1040">        return constant;</span>
+    }
+
+    // Used by JIT
+    public static IRubyObject lexicalSearchConst(ThreadContext context, StaticScope staticScope, String constName) {
+<span class="fc" id="L1045">        IRubyObject constant = staticScope.getConstantInner(constName);</span>
+
+<span class="pc bpc" id="L1047" title="1 of 2 branches missed.">        if (constant == null) {</span>
+<span class="fc" id="L1048">            constant = UndefinedValue.UNDEFINED;</span>
+        }
+
+<span class="fc" id="L1051">        return constant;</span>
+    }
+
+    public static IRubyObject setInstanceVariable(IRubyObject self, IRubyObject value, String name) {
+<span class="fc" id="L1055">        return self.getInstanceVariables().setInstanceVariable(name, value);</span>
+    }
+
+    /**
+     * Construct a new DynamicMethod to wrap the given IRModuleBody and singletonizable object. Used by interpreter.
+     */
+    @Interp
+    public static DynamicMethod newInterpretedMetaClass(Ruby runtime, IRScope metaClassBody, IRubyObject obj) {
+<span class="fc" id="L1063">        RubyClass singletonClass = newMetaClassFromIR(runtime, metaClassBody, obj);</span>
+
+<span class="fc" id="L1065">        return new InterpretedIRMetaClassBody(metaClassBody, singletonClass);</span>
+    }
+
+    /**
+     * Construct a new DynamicMethod to wrap the given IRModuleBody and singletonizable object. Used by JIT.
+     */
+    @JIT
+    public static DynamicMethod newCompiledMetaClass(ThreadContext context, MethodHandle handle, IRScope metaClassBody, IRubyObject obj) {
+<span class="nc" id="L1073">        RubyClass singletonClass = newMetaClassFromIR(context.runtime, metaClassBody, obj);</span>
+
+<span class="nc" id="L1075">        return new CompiledIRMetaClassBody(handle, metaClassBody, singletonClass);</span>
+    }
+
+    private static RubyClass newMetaClassFromIR(Ruby runtime, IRScope metaClassBody, IRubyObject obj) {
+<span class="fc" id="L1079">        RubyClass singletonClass = Helpers.getSingletonClass(runtime, obj);</span>
+
+<span class="fc" id="L1081">        StaticScope metaClassScope = metaClassBody.getStaticScope();</span>
+
+<span class="fc" id="L1083">        metaClassScope.setModule(singletonClass);</span>
+<span class="fc" id="L1084">        return singletonClass;</span>
+    }
+
+    /**
+     * Construct a new DynamicMethod to wrap the given IRModuleBody and singletonizable object. Used by interpreter.
+     */
+    @Interp
+    public static DynamicMethod newInterpretedModuleBody(ThreadContext context, IRScope irModule, Object rubyContainer) {
+<span class="fc" id="L1092">        RubyModule newRubyModule = newRubyModuleFromIR(context, irModule, rubyContainer);</span>
+<span class="fc" id="L1093">        return new InterpretedIRMethod(irModule, Visibility.PUBLIC, newRubyModule);</span>
+    }
+
+    @JIT
+    public static DynamicMethod newCompiledModuleBody(ThreadContext context, MethodHandle handle, IRScope irModule, Object rubyContainer) {
+<span class="fc" id="L1098">        RubyModule newRubyModule = newRubyModuleFromIR(context, irModule, rubyContainer);</span>
+<span class="fc" id="L1099">        return new CompiledIRMethod(handle, irModule, Visibility.PUBLIC, newRubyModule);</span>
+    }
+
+    private static RubyModule newRubyModuleFromIR(ThreadContext context, IRScope irModule, Object rubyContainer) {
+<span class="pc bpc" id="L1103" title="1 of 2 branches missed.">        if (!(rubyContainer instanceof RubyModule)) {</span>
+<span class="nc" id="L1104">            throw context.runtime.newTypeError(&quot;no outer class/module&quot;);</span>
+        }
+
+<span class="fc" id="L1107">        RubyModule newRubyModule = ((RubyModule) rubyContainer).defineOrGetModuleUnder(irModule.getName());</span>
+<span class="fc" id="L1108">        irModule.getStaticScope().setModule(newRubyModule);</span>
+<span class="fc" id="L1109">        return newRubyModule;</span>
+    }
+
+    @Interp
+    public static DynamicMethod newInterpretedClassBody(ThreadContext context, IRScope irClassBody, Object container, Object superClass) {
+<span class="fc" id="L1114">        RubyModule newRubyClass = newRubyClassFromIR(context.runtime, irClassBody, superClass, container);</span>
+
+<span class="fc" id="L1116">        return new InterpretedIRMethod(irClassBody, Visibility.PUBLIC, newRubyClass);</span>
+    }
+
+    @JIT
+    public static DynamicMethod newCompiledClassBody(ThreadContext context, MethodHandle handle, IRScope irClassBody, Object container, Object superClass) {
+<span class="fc" id="L1121">        RubyModule newRubyClass = newRubyClassFromIR(context.runtime, irClassBody, superClass, container);</span>
+
+<span class="fc" id="L1123">        return new CompiledIRMethod(handle, irClassBody, Visibility.PUBLIC, newRubyClass);</span>
+    }
+
+    public static RubyModule newRubyClassFromIR(Ruby runtime, IRScope irClassBody, Object superClass, Object container) {
+<span class="fc bfc" id="L1127" title="All 2 branches covered.">        if (!(container instanceof RubyModule)) {</span>
+<span class="fc" id="L1128">            throw runtime.newTypeError(&quot;no outer class/module&quot;);</span>
+        }
+
+        RubyModule newRubyClass;
+
+<span class="pc bpc" id="L1133" title="1 of 2 branches missed.">        if (irClassBody instanceof IRMetaClassBody) {</span>
+<span class="nc" id="L1134">            newRubyClass = ((RubyModule)container).getMetaClass();</span>
+        } else {
+            RubyClass sc;
+<span class="fc bfc" id="L1137" title="All 2 branches covered.">            if (superClass == UndefinedValue.UNDEFINED) {</span>
+<span class="fc" id="L1138">                sc = null;</span>
+            } else {
+<span class="fc" id="L1140">                RubyClass.checkInheritable((IRubyObject) superClass);</span>
+
+<span class="fc" id="L1142">                sc = (RubyClass) superClass;</span>
+            }
+
+<span class="fc" id="L1145">            newRubyClass = ((RubyModule)container).defineOrGetClassUnder(irClassBody.getName(), sc);</span>
+        }
+
+<span class="fc" id="L1148">        irClassBody.getStaticScope().setModule(newRubyClass);</span>
+<span class="fc" id="L1149">        return newRubyClass;</span>
+    }
+
+    @Interp
+    public static void defInterpretedClassMethod(ThreadContext context, IRScope method, IRubyObject obj) {
+<span class="fc" id="L1154">        RubyClass rubyClass = checkClassForDef(context, method, obj);</span>
+
+<span class="fc" id="L1156">        rubyClass.addMethod(method.getName(), new InterpretedIRMethod(method, Visibility.PUBLIC, rubyClass));</span>
+<span class="fc" id="L1157">        obj.callMethod(context, &quot;singleton_method_added&quot;, context.runtime.fastNewSymbol(method.getName()));</span>
+<span class="fc" id="L1158">    }</span>
+
+    @JIT
+    public static void defCompiledClassMethod(ThreadContext context, MethodHandle handle, IRScope method, IRubyObject obj) {
+<span class="nc" id="L1162">        RubyClass rubyClass = checkClassForDef(context, method, obj);</span>
+
+<span class="nc" id="L1164">        rubyClass.addMethod(method.getName(), new CompiledIRMethod(handle, method, Visibility.PUBLIC, rubyClass));</span>
+<span class="nc" id="L1165">        obj.callMethod(context, &quot;singleton_method_added&quot;, context.runtime.fastNewSymbol(method.getName()));</span>
+<span class="nc" id="L1166">    }</span>
+
+    @JIT
+    public static void defCompiledClassMethod(ThreadContext context, MethodHandle variable, MethodHandle specific, int specificArity, IRScope method, IRubyObject obj) {
+<span class="nc" id="L1170">        RubyClass rubyClass = checkClassForDef(context, method, obj);</span>
+
+<span class="nc" id="L1172">        rubyClass.addMethod(method.getName(), new CompiledIRMethod(variable, specific, specificArity, method, Visibility.PUBLIC, rubyClass));</span>
+<span class="nc" id="L1173">        obj.callMethod(context, &quot;singleton_method_added&quot;, context.runtime.fastNewSymbol(method.getName()));</span>
+<span class="nc" id="L1174">    }</span>
+
+    private static RubyClass checkClassForDef(ThreadContext context, IRScope method, IRubyObject obj) {
+<span class="pc bpc" id="L1177" title="1 of 6 branches missed.">        if (obj instanceof RubyFixnum || obj instanceof RubySymbol || obj instanceof RubyFloat) {</span>
+<span class="fc" id="L1178">            throw context.runtime.newTypeError(&quot;can't define singleton method \&quot;&quot; + method.getName() + &quot;\&quot; for &quot; + obj.getMetaClass().getBaseName());</span>
+        }
+
+        // if (obj.isFrozen()) throw context.runtime.newFrozenError(&quot;object&quot;);
+
+<span class="fc" id="L1183">        return obj.getSingletonClass();</span>
+    }
+
+    @Interp
+    public static void defInterpretedInstanceMethod(ThreadContext context, IRScope method, DynamicScope currDynScope, IRubyObject self) {
+<span class="fc" id="L1188">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L1189">        RubyModule clazz = findInstanceMethodContainer(context, currDynScope, self);</span>
+
+<span class="fc" id="L1191">        Visibility currVisibility = context.getCurrentVisibility();</span>
+<span class="fc" id="L1192">        Visibility newVisibility = Helpers.performNormalMethodChecksAndDetermineVisibility(runtime, clazz, method.getName(), currVisibility);</span>
+
+<span class="fc" id="L1194">        DynamicMethod newMethod = new InterpretedIRMethod(method, newVisibility, clazz);</span>
+
+<span class="fc" id="L1196">        Helpers.addInstanceMethod(clazz, method.getName(), newMethod, currVisibility, context, runtime);</span>
+<span class="fc" id="L1197">    }</span>
+
+    @JIT
+    public static void defCompiledInstanceMethod(ThreadContext context, MethodHandle handle, IRScope method, DynamicScope currDynScope, IRubyObject self) {
+<span class="nc" id="L1201">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L1202">        RubyModule clazz = findInstanceMethodContainer(context, currDynScope, self);</span>
+
+<span class="nc" id="L1204">        Visibility currVisibility = context.getCurrentVisibility();</span>
+<span class="nc" id="L1205">        Visibility newVisibility = Helpers.performNormalMethodChecksAndDetermineVisibility(runtime, clazz, method.getName(), currVisibility);</span>
+
+<span class="nc" id="L1207">        DynamicMethod newMethod = new CompiledIRMethod(handle, method, newVisibility, clazz);</span>
+
+<span class="nc" id="L1209">        Helpers.addInstanceMethod(clazz, method.getName(), newMethod, currVisibility, context, runtime);</span>
+<span class="nc" id="L1210">    }</span>
+
+    @JIT
+    public static void defCompiledInstanceMethod(ThreadContext context, MethodHandle variable, MethodHandle specific, int specificArity, IRScope method, DynamicScope currDynScope, IRubyObject self) {
+<span class="fc" id="L1214">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L1215">        RubyModule clazz = findInstanceMethodContainer(context, currDynScope, self);</span>
+
+<span class="fc" id="L1217">        Visibility currVisibility = context.getCurrentVisibility();</span>
+<span class="fc" id="L1218">        Visibility newVisibility = Helpers.performNormalMethodChecksAndDetermineVisibility(runtime, clazz, method.getName(), currVisibility);</span>
+
+<span class="fc" id="L1220">        DynamicMethod newMethod = new CompiledIRMethod(variable, specific, specificArity, method, newVisibility, clazz);</span>
+
+<span class="fc" id="L1222">        Helpers.addInstanceMethod(clazz, method.getName(), newMethod, currVisibility, context, runtime);</span>
+<span class="fc" id="L1223">    }</span>
+
+    @JIT
+    public static IRubyObject invokeModuleBody(ThreadContext context, DynamicMethod method) {
+<span class="fc" id="L1227">        RubyModule implClass = method.getImplementationClass();</span>
+
+<span class="fc" id="L1229">        return method.call(context, implClass, implClass, &quot;&quot;);</span>
+    }
+
+    @JIT
+    public static RubyRegexp newDynamicRegexp(ThreadContext context, IRubyObject[] pieces, int embeddedOptions) {
+<span class="fc" id="L1234">        RegexpOptions options = RegexpOptions.fromEmbeddedOptions(embeddedOptions);</span>
+<span class="fc" id="L1235">        RubyString pattern = RubyRegexp.preprocessDRegexp(context.runtime, pieces, options);</span>
+<span class="fc" id="L1236">        RubyRegexp re = RubyRegexp.newDRegexp(context.runtime, pattern, options);</span>
+<span class="fc" id="L1237">        re.setLiteral();</span>
+
+<span class="fc" id="L1239">        return re;</span>
+    }
+
+    @JIT
+    public static RubyArray irSplat(ThreadContext context, IRubyObject maybeAry) {
+<span class="fc" id="L1244">        return Helpers.splatValue19(maybeAry);</span>
+    }
+
+    public static IRubyObject irToAry(ThreadContext context, IRubyObject value) {
+<span class="fc bfc" id="L1248" title="All 2 branches covered.">        if (value instanceof RubyArray) {</span>
+<span class="fc" id="L1249">            return value;</span>
+        } else {
+<span class="fc" id="L1251">            IRubyObject newValue = TypeConverter.convertToType19(value, context.runtime.getArray(), &quot;to_ary&quot;, false);</span>
+<span class="fc bfc" id="L1252" title="All 2 branches covered.">            if (newValue.isNil()) {</span>
+<span class="fc" id="L1253">                return RubyArray.newArrayLight(context.runtime, value);</span>
+            }
+
+            // must be array by now, or error
+<span class="fc bfc" id="L1257" title="All 2 branches covered.">            if (!(newValue instanceof RubyArray)) {</span>
+<span class="fc" id="L1258">                throw context.runtime.newTypeError(newValue.getMetaClass() + &quot;#&quot; + &quot;to_ary&quot; + &quot; should return Array&quot;);</span>
+            }
+
+<span class="fc" id="L1261">            return newValue;</span>
+        }
+    }
+
+    public static int irReqdArgMultipleAsgnIndex(int n,  int preArgsCount, int index, int postArgsCount) {
+<span class="fc bfc" id="L1266" title="All 2 branches covered.">        if (preArgsCount == -1) {</span>
+<span class="fc bfc" id="L1267" title="All 2 branches covered.">            return index &lt; n ? index : -1;</span>
+        } else {
+<span class="fc" id="L1269">            int remaining = n - preArgsCount;</span>
+<span class="fc bfc" id="L1270" title="All 2 branches covered.">            if (remaining &lt;= index) {</span>
+<span class="fc" id="L1271">                return -1;</span>
+            } else {
+<span class="fc bfc" id="L1273" title="All 2 branches covered.">                return (remaining &gt; postArgsCount) ? n - postArgsCount + index : preArgsCount + index;</span>
+            }
+        }
+    }
+
+    public static IRubyObject irReqdArgMultipleAsgn(ThreadContext context, RubyArray rubyArray, int preArgsCount, int index, int postArgsCount) {
+<span class="fc" id="L1279">        int i = irReqdArgMultipleAsgnIndex(rubyArray.getLength(), preArgsCount, index, postArgsCount);</span>
+<span class="fc bfc" id="L1280" title="All 2 branches covered.">        return i == -1 ? context.nil : rubyArray.entry(i);</span>
+    }
+
+    public static IRubyObject irNot(ThreadContext context, IRubyObject obj) {
+<span class="nc bnc" id="L1284" title="All 2 branches missed.">        return context.runtime.newBoolean(!(obj.isTrue()));</span>
+    }
+
+    @JIT
+    public static RaiseException newRequiredKeywordArgumentError(ThreadContext context, String name) {
+<span class="fc" id="L1289">        return context.runtime.newArgumentError(&quot;missing keyword: &quot; + name);</span>
+    }
+
+    @JIT
+    public static void pushExitBlock(ThreadContext context, Block blk) {
+<span class="nc" id="L1294">        context.runtime.pushExitBlock(context.runtime.newProc(Block.Type.LAMBDA, blk));</span>
+<span class="nc" id="L1295">    }</span>
+    
+    @JIT
+    public static FunctionalCachingCallSite newFunctionalCachingCallSite(String name) {
+<span class="fc" id="L1299">        return new FunctionalCachingCallSite(name);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

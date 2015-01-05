@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>InputStreamLexerSource.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.lexer.yacc</a> &gt; <span class="el_source">InputStreamLexerSource.java</span></div><h1>InputStreamLexerSource.java</h1><pre class="source lang-java linenums">
+
+package org.jruby.lexer.yacc;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.List;
+
+import org.jruby.util.ByteList;
+
+public class InputStreamLexerSource extends LexerSource {
+    private static final int INITIAL_PUSHBACK_SIZE = 100;
+    
+    // Where we get our newest char's
+    private final InputStream in;
+    
+    // Our readback/pushback buffer.
+<span class="fc" id="L18">    private char buf[] = new char[INITIAL_PUSHBACK_SIZE];</span>
+    
+    // index of last character in pushback buffer
+<span class="fc" id="L21">    private int bufLength = -1;</span>
+    
+    // Character read before previous read
+<span class="fc" id="L24">    private int oneAgo = '\n';</span>
+<span class="fc" id="L25">    private int twoAgo = 0;</span>
+
+    private final boolean captureSource;
+    
+    /**
+     * Create our food-source for the lexer
+     * 
+     * @param sourceName is the file we are reading
+     * @param in is what represents the contents of file sourceName
+     * @param line starting line number for source (used by eval)
+     */
+    public InputStreamLexerSource(String sourceName, InputStream in, List&lt;String&gt; list, int line) {
+<span class="fc" id="L37">        super(sourceName, list, line);</span>
+        
+<span class="fc" id="L39">        this.in = in;</span>
+<span class="pc bpc" id="L40" title="1 of 2 branches missed.">        this.captureSource = list != null;</span>
+<span class="fc" id="L41">    }</span>
+    
+    /**
+     * Read next character from this source
+     * 
+     * @return next character to viewed by the source
+     */
+    @Override
+    public int read() throws IOException {
+        int c;
+        
+<span class="fc bfc" id="L52" title="All 2 branches covered.">        if (bufLength &gt;= 0) {</span>
+<span class="fc" id="L53">            c = buf[bufLength--];</span>
+        } else {
+<span class="fc" id="L55">            c = wrappedRead();</span>
+            
+<span class="fc bfc" id="L57" title="All 2 branches covered.">            if (c == -1) return RubyLexer.EOF;</span>
+        }
+        
+<span class="fc" id="L60">        advance(c);</span>
+        
+<span class="fc bfc" id="L62" title="All 2 branches covered.">        if (c == '\n') line++;</span>
+            
+<span class="fc" id="L64">        return c; </span>
+    }
+
+    /**
+     * Pushes char back onto this source.  Note, this also
+     * allows us to push whatever is passes back into the source.
+     * 
+     * @param c to be put back onto the source
+     */
+    @Override
+    public void unread(int c) {
+<span class="fc bfc" id="L75" title="All 2 branches covered.">        if (c == RubyLexer.EOF) return;</span>
+        
+<span class="fc" id="L77">        retreat();</span>
+            
+<span class="fc bfc" id="L79" title="All 2 branches covered.">        if (c == '\n') line--;</span>
+
+<span class="fc" id="L81">        buf[++bufLength] = (char) c;</span>
+        
+<span class="fc" id="L83">        growBuf();</span>
+<span class="fc" id="L84">    }</span>
+    
+    /**
+     * Is the next character equal to 'to'
+     * @param to character to compare against
+     * @return true if the same
+     * @throws IOException
+     */
+    @Override
+    public boolean peek(int to) throws IOException {
+        // keep value of twoAgo around so we can restore after we unread
+<span class="fc" id="L95">        int captureTwoAgo = twoAgo;</span>
+<span class="fc" id="L96">        int c = read();</span>
+<span class="fc" id="L97">        unread(c);</span>
+<span class="fc" id="L98">        twoAgo = captureTwoAgo;</span>
+<span class="fc bfc" id="L99" title="All 2 branches covered.">        return c == to;</span>
+    }
+
+    private void advance(int c) {
+<span class="fc" id="L103">        twoAgo = oneAgo;</span>
+<span class="fc" id="L104">        oneAgo = c;</span>
+<span class="fc" id="L105">        offset++;</span>
+<span class="fc" id="L106">    }</span>
+
+    private int carriageReturn(int c) throws IOException {
+<span class="nc bnc" id="L109" title="All 2 branches missed.">        if ((c = in.read()) != '\n') {</span>
+<span class="nc" id="L110">            unread((char) c);</span>
+        } else {
+            // Position within source must reflect the actual offset and column.  Since
+            // we ate an extra character here (this accounting is normally done in read
+            // ), we should update position info.
+<span class="nc" id="L115">            offset++;</span>
+        }
+<span class="nc" id="L117">        return c;</span>
+    }
+
+    private void growBuf() {
+        // If we outgrow our pushback stack then grow it (this should only happen in pretty 
+        // pathological cases).
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">        if (bufLength + 1 == buf.length) {</span>
+<span class="nc" id="L124">            char[] newBuf = new char[buf.length + INITIAL_PUSHBACK_SIZE];</span>
+
+<span class="nc" id="L126">            System.arraycopy(buf, 0, newBuf, 0, buf.length);</span>
+
+<span class="nc" id="L128">            buf = newBuf;</span>
+        }
+<span class="fc" id="L130">    }</span>
+
+    private void retreat() {
+<span class="fc" id="L133">        offset--;</span>
+<span class="fc" id="L134">        oneAgo = twoAgo;</span>
+<span class="fc" id="L135">        twoAgo = 0;</span>
+<span class="fc" id="L136">    }</span>
+    
+    /**
+     * Convenience method to hide exception.  If we do hit an exception
+     * we will pretend we EOF'd.
+     * 
+     * @return the current char or EOF (at EOF or on error)
+     */
+    private int wrappedRead() throws IOException {
+<span class="fc" id="L145">        int c = in.read();</span>
+        
+        // If \r\n then just pass along \n (windows). 
+<span class="pc bpc" id="L148" title="1 of 2 branches missed.">        if (c == '\r') { </span>
+<span class="nc" id="L149">            c = carriageReturn(c);</span>
+        }
+
+<span class="pc bpc" id="L152" title="1 of 2 branches missed.">        if (captureSource) captureFeature(c);</span>
+
+<span class="fc" id="L154">        return c;</span>
+    }
+
+    @Override
+    public ByteList readLineBytes() throws IOException {
+<span class="fc" id="L159">        ByteList bytelist = new ByteList(80);</span>
+
+<span class="pc bpc" id="L161" title="1 of 4 branches missed.">        for (int c = read(); c != '\n' &amp;&amp; c != RubyLexer.EOF; c = read()) {</span>
+<span class="fc" id="L162">            bytelist.append(c);</span>
+        }
+        
+<span class="fc" id="L165">        return bytelist;</span>
+    }
+    
+    @Override
+    public int skipUntil(int marker) throws IOException {
+        int c;
+<span class="fc bfc" id="L171" title="All 4 branches covered.">        for (c = read(); c != marker &amp;&amp; c != RubyLexer.EOF; c = read()) {}</span>
+<span class="fc" id="L172">        return c;</span>
+    }
+
+    @Override
+    public void unreadMany(CharSequence buffer) {
+<span class="fc" id="L177">        int length = buffer.length();</span>
+<span class="fc bfc" id="L178" title="All 2 branches covered.">        for (int i = length - 1; i &gt;= 0; i--) {</span>
+<span class="fc" id="L179">            unread(buffer.charAt(i));</span>
+        }
+<span class="fc" id="L181">    }</span>
+
+    @Override
+    public boolean matchMarker(ByteList match, boolean indent, boolean checkNewline) throws IOException {
+<span class="fc" id="L185">        int length = match.length();</span>
+<span class="fc" id="L186">        ByteList buffer = new ByteList(length + 1);</span>
+        
+<span class="fc bfc" id="L188" title="All 2 branches covered.">        if (indent) {</span>
+<span class="fc" id="L189">            indentLoop(buffer);</span>
+        }
+        
+<span class="fc bfc" id="L192" title="All 2 branches covered.">        if (!matches(match, buffer, length)) return false;</span>
+        
+<span class="fc" id="L194">        return finishMarker(checkNewline, buffer); </span>
+    }
+
+    private void indentLoop(ByteList buffer) throws IOException {
+        int c;
+<span class="pc bpc" id="L199" title="1 of 2 branches missed.">        while ((c = read()) != RubyLexer.EOF) {</span>
+<span class="fc bfc" id="L200" title="All 4 branches covered.">            if (!Character.isWhitespace(c) || c == '\n') {</span>
+<span class="fc" id="L201">                unread(c);</span>
+<span class="fc" id="L202">                break;</span>
+            }
+<span class="fc" id="L204">            buffer.append(c);</span>
+        }
+<span class="fc" id="L206">    }</span>
+    
+    private boolean matches(ByteList match, ByteList buffer, int length) throws IOException {
+        int c;
+<span class="fc bfc" id="L210" title="All 2 branches covered.">        for (int i = 0; i &lt; length; i++) {</span>
+<span class="fc" id="L211">            c = read();</span>
+<span class="fc" id="L212">            buffer.append(c);</span>
+<span class="fc bfc" id="L213" title="All 2 branches covered.">            if (match.charAt(i) != c) {</span>
+<span class="fc" id="L214">                unreadMany(buffer);</span>
+<span class="fc" id="L215">                return false;</span>
+            }
+        }
+<span class="fc" id="L218">        return true;</span>
+    }
+
+    private boolean finishMarker(boolean checkNewline, ByteList buffer) throws IOException {
+
+<span class="fc bfc" id="L223" title="All 2 branches covered.">        if (!checkNewline) {</span>
+<span class="fc" id="L224">            return true;</span>
+        }
+<span class="fc" id="L226">        int c = read();</span>
+
+<span class="pc bpc" id="L228" title="2 of 4 branches missed.">        if (c == RubyLexer.EOF || c == '\n') {</span>
+<span class="fc" id="L229">            return true;</span>
+        }
+<span class="nc" id="L231">        buffer.append(c);</span>
+<span class="nc" id="L232">        unreadMany(buffer);</span>
+
+<span class="nc" id="L234">        return false;</span>
+    }
+    
+    /**
+     * Was the last character read from the stream the first character on a line
+     * 
+     * @return true if so
+     */
+    @Override
+    public boolean wasBeginOfLine() {
+<span class="fc bfc" id="L244" title="All 2 branches covered.">        return twoAgo == '\n';</span>
+    }
+
+    @Override
+    public boolean lastWasBeginOfLine() {
+<span class="fc bfc" id="L249" title="All 2 branches covered.">        return oneAgo == '\n';</span>
+    }
+    
+<span class="fc" id="L252">    static final ByteList EOF_LABEL = new ByteList(new byte[] {'{', 'e', 'o', 'f', '}'});</span>
+
+    @Override
+    public String toString() {
+        try {
+<span class="nc" id="L257">            ByteList buffer = new ByteList(20);</span>
+<span class="nc" id="L258">            ByteList unreadBuffer = new ByteList(20);</span>
+
+<span class="nc bnc" id="L260" title="All 4 branches missed.">            if (twoAgo != -1 &amp;&amp; twoAgo != 0) buffer.append(twoAgo);</span>
+<span class="nc bnc" id="L261" title="All 4 branches missed.">            if (oneAgo != -1 &amp;&amp; oneAgo != 0) buffer.append(oneAgo);</span>
+
+<span class="nc" id="L263">            buffer.append('&lt;');</span>
+
+<span class="nc" id="L265">            int i = 0;</span>
+<span class="nc" id="L266">            int c = read();</span>
+<span class="nc" id="L267">            unreadBuffer.append(c);</span>
+            
+<span class="nc bnc" id="L269" title="All 2 branches missed.">            if (c == -1) {</span>
+<span class="nc" id="L270">                unread(unreadBuffer.charAt(0));</span>
+<span class="nc" id="L271">                buffer.append(EOF_LABEL);</span>
+<span class="nc" id="L272">                buffer.append('&gt;');</span>
+                
+<span class="nc" id="L274">                return buffer.toString();</span>
+            } else {
+<span class="nc" id="L276">                buffer.append(c).append('&gt;');</span>
+            }
+<span class="nc" id="L278">            i = 1;</span>
+            
+<span class="nc bnc" id="L280" title="All 2 branches missed.">            for (; i &lt; 20; i++) {</span>
+<span class="nc" id="L281">                c = read();</span>
+<span class="nc" id="L282">                unreadBuffer.append(c);</span>
+<span class="nc bnc" id="L283" title="All 2 branches missed.">                if (c == -1) {</span>
+<span class="nc" id="L284">                    buffer.append(EOF_LABEL);</span>
+<span class="nc" id="L285">                    i--;</span>
+<span class="nc" id="L286">                    break;</span>
+                }
+<span class="nc" id="L288">                buffer.append(c);</span>
+            }
+<span class="nc bnc" id="L290" title="All 2 branches missed.">            for (; i &gt;= 0; i--) {</span>
+<span class="nc" id="L291">                unread(unreadBuffer.charAt(i));</span>
+            }
+<span class="nc" id="L293">            buffer.append(new byte[] {' ', '.', '.', '.'});</span>
+<span class="nc" id="L294">            return buffer.toString();</span>
+<span class="nc" id="L295">        } catch(Exception e) {</span>
+<span class="nc" id="L296">            return null;</span>
+        }
+    }
+
+    @Override
+    public ByteList readUntil(char marker) throws IOException {
+<span class="fc" id="L302">        ByteList list = new ByteList(20);</span>
+        int c;
+        
+<span class="pc bpc" id="L305" title="1 of 4 branches missed.">        for (c = read(); c != marker &amp;&amp; c != RubyLexer.EOF; c = read()) {</span>
+<span class="fc" id="L306">            list.append(c);</span>
+        }
+        
+<span class="pc bpc" id="L309" title="1 of 2 branches missed.">        if (c == RubyLexer.EOF) return null;</span>
+        
+<span class="fc" id="L311">        unread(c);</span>
+        
+<span class="fc" id="L313">        return list;</span>
+    }
+
+    @Override
+    public InputStream getRemainingAsStream() throws IOException {
+<span class="nc" id="L318">        return in;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

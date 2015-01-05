@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Mutex.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.thread</a> &gt; <span class="el_source">Mutex.java</span></div><h1>Mutex.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2006 MenTaLguY &lt;mental@rydia.net&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.ext.thread;
+
+import java.util.concurrent.locks.ReentrantLock;
+import org.jruby.CompatVersion;
+import org.jruby.Ruby;
+import org.jruby.RubyBoolean;
+import org.jruby.RubyClass;
+import org.jruby.RubyObject;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+
+/**
+ * The &quot;Mutex&quot; class from the 'thread' library.
+ */
+@JRubyClass(name = &quot;Mutex&quot;)
+public class Mutex extends RubyObject {
+<span class="fc" id="L48">    ReentrantLock lock = new ReentrantLock();</span>
+
+    @JRubyMethod(name = &quot;new&quot;, rest = true, meta = true)
+    public static Mutex newInstance(ThreadContext context, IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="fc" id="L52">        Mutex result = new Mutex(context.runtime, (RubyClass) recv);</span>
+<span class="fc" id="L53">        result.callInit(context, args, block);</span>
+<span class="fc" id="L54">        return result;</span>
+    }
+
+    public Mutex(Ruby runtime, RubyClass type) {
+<span class="fc" id="L58">        super(runtime, type);</span>
+<span class="fc" id="L59">    }</span>
+
+    public static void setup(Ruby runtime) {
+<span class="fc" id="L62">        RubyClass cMutex = runtime.defineClass(&quot;Mutex&quot;, runtime.getObject(), new ObjectAllocator() {</span>
+
+            public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L65">                return new Mutex(runtime, klass);</span>
+            }
+        });
+<span class="fc" id="L68">        cMutex.setReifiedClass(Mutex.class);</span>
+<span class="fc" id="L69">        cMutex.defineAnnotatedMethods(Mutex.class);</span>
+<span class="fc" id="L70">    }</span>
+
+    @JRubyMethod(name = &quot;locked?&quot;)
+    public synchronized RubyBoolean locked_p(ThreadContext context) {
+<span class="fc" id="L74">        return context.runtime.newBoolean(lock.isLocked());</span>
+    }
+
+    @JRubyMethod
+    public RubyBoolean try_lock(ThreadContext context) {
+<span class="fc bfc" id="L79" title="All 2 branches covered.">        if (lock.isHeldByCurrentThread()) {</span>
+<span class="fc" id="L80">            return context.runtime.getFalse();</span>
+        }
+<span class="fc" id="L82">        return context.runtime.newBoolean(context.getThread().tryLock(lock));</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject lock(ThreadContext context) {
+        try {
+<span class="fc" id="L88">            context.getThread().enterSleep();</span>
+            try {
+<span class="fc" id="L90">                checkRelocking(context);</span>
+<span class="fc" id="L91">                context.getThread().lockInterruptibly(lock);</span>
+<span class="nc" id="L92">            } catch (InterruptedException ex) {</span>
+<span class="nc" id="L93">                context.pollThreadEvents();</span>
+<span class="nc" id="L94">                throw context.runtime.newConcurrencyError(&quot;interrupted waiting for mutex&quot;);</span>
+<span class="fc" id="L95">            }</span>
+        } finally {
+<span class="fc" id="L97">            context.getThread().exitSleep();</span>
+<span class="fc" id="L98">        }</span>
+<span class="fc" id="L99">        return this;</span>
+    }
+
+    @JRubyMethod
+    public synchronized IRubyObject unlock(ThreadContext context) {
+<span class="fc" id="L104">        Ruby runtime = context.runtime;</span>
+<span class="fc bfc" id="L105" title="All 2 branches covered.">        if (!lock.isLocked()) {</span>
+<span class="fc" id="L106">            throw runtime.newThreadError(&quot;Mutex is not locked&quot;);</span>
+        }
+<span class="fc bfc" id="L108" title="All 2 branches covered.">        if (!lock.isHeldByCurrentThread()) {</span>
+<span class="fc" id="L109">            throw runtime.newThreadError(&quot;Mutex is not owned by calling thread&quot;);</span>
+        }
+        
+<span class="fc" id="L112">        boolean hasQueued = lock.hasQueuedThreads();</span>
+<span class="fc" id="L113">        context.getThread().unlock(lock);</span>
+<span class="fc bfc" id="L114" title="All 2 branches covered.">        return hasQueued ? context.nil : this;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject sleep(ThreadContext context) {
+<span class="fc" id="L119">        long beg = System.currentTimeMillis();</span>
+        try {
+<span class="fc" id="L121">            unlock(context);</span>
+<span class="fc" id="L122">            context.getThread().sleep(0);</span>
+<span class="nc" id="L123">        } catch (InterruptedException ex) {</span>
+            // ignore interrupted
+        } finally {
+<span class="pc" id="L126">            lock(context);</span>
+<span class="pc" id="L127">        }</span>
+<span class="fc" id="L128">        return context.runtime.newFixnum((System.currentTimeMillis() - beg) / 1000);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject sleep(ThreadContext context, IRubyObject timeout) {
+<span class="fc" id="L133">        long beg = System.currentTimeMillis();</span>
+<span class="fc" id="L134">        double t = timeout.convertToFloat().getDoubleValue();</span>
+<span class="fc bfc" id="L135" title="All 2 branches covered.">        if (t &lt; 0) throw context.runtime.newArgumentError(&quot;negative sleep timeout&quot;);</span>
+<span class="fc" id="L136">        unlock(context);</span>
+        try {
+<span class="fc" id="L138">            context.getThread().sleep((long) (t * 1000));</span>
+<span class="nc" id="L139">        } catch (InterruptedException ex) {</span>
+            // ignore interrupted
+        } finally {
+<span class="pc" id="L142">            lock(context);</span>
+<span class="pc" id="L143">        }</span>
+<span class="fc" id="L144">        return context.runtime.newFixnum((System.currentTimeMillis() - beg) / 1000);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject synchronize(ThreadContext context, Block block) {
+<span class="fc" id="L149">        lock(context);</span>
+        try {
+<span class="fc" id="L151">            return block.yield(context, null);</span>
+        } finally {
+<span class="fc" id="L153">            unlock(context);</span>
+        }
+    }
+
+    private void checkRelocking(ThreadContext context) {
+<span class="fc bfc" id="L158" title="All 2 branches covered.">        if (lock.isHeldByCurrentThread()) {</span>
+<span class="fc" id="L159">            throw context.runtime.newThreadError(&quot;Mutex relocking by same thread&quot;);</span>
+        }
+<span class="fc" id="L161">    }</span>
+    
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

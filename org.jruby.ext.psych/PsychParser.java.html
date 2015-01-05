@@ -1,0 +1,388 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PsychParser.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.psych</a> &gt; <span class="el_source">PsychParser.java</span></div><h1>PsychParser.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2010 Charles O Nutter &lt;headius@headius.com&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.ext.psych;
+
+import java.io.ByteArrayInputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.Charset;
+import java.util.Map;
+
+import org.jcodings.Encoding;
+import org.jcodings.specific.UTF8Encoding;
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyClass;
+import org.jruby.RubyEncoding;
+import org.jruby.RubyIO;
+import org.jruby.RubyKernel;
+import org.jruby.RubyModule;
+import org.jruby.RubyObject;
+import org.jruby.RubyString;
+import org.jruby.anno.JRubyMethod;
+import static org.jruby.ext.psych.PsychLibrary.YAMLEncoding.*;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.IOInputStream;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+import org.yaml.snakeyaml.DumperOptions;
+import org.yaml.snakeyaml.error.Mark;
+import org.yaml.snakeyaml.error.MarkedYAMLException;
+import org.yaml.snakeyaml.events.AliasEvent;
+import org.yaml.snakeyaml.events.DocumentEndEvent;
+import org.yaml.snakeyaml.events.DocumentStartEvent;
+import org.yaml.snakeyaml.events.Event;
+import org.yaml.snakeyaml.events.Event.ID;
+import org.yaml.snakeyaml.events.MappingStartEvent;
+import org.yaml.snakeyaml.events.ScalarEvent;
+import org.yaml.snakeyaml.events.SequenceStartEvent;
+import org.yaml.snakeyaml.parser.Parser;
+import org.yaml.snakeyaml.parser.ParserException;
+import org.yaml.snakeyaml.parser.ParserImpl;
+import org.yaml.snakeyaml.reader.ReaderException;
+import org.yaml.snakeyaml.reader.StreamReader;
+import org.yaml.snakeyaml.scanner.ScannerException;
+import static org.jruby.runtime.Helpers.invoke;
+import org.jruby.util.ByteList;
+
+public class PsychParser extends RubyObject {
+
+<span class="nc" id="L78">    private static final Logger LOG = LoggerFactory.getLogger(&quot;PsychParser&quot;);</span>
+    
+    public static void initPsychParser(Ruby runtime, RubyModule psych) {
+<span class="nc" id="L81">        RubyClass psychParser = runtime.defineClassUnder(&quot;Parser&quot;, runtime.getObject(), new ObjectAllocator() {</span>
+            public IRubyObject allocate(Ruby runtime, RubyClass klazz) {
+<span class="nc" id="L83">                return new PsychParser(runtime, klazz);</span>
+            }
+        }, psych);
+
+<span class="nc" id="L87">        RubyKernel.require(runtime.getNil(),</span>
+<span class="nc" id="L88">                runtime.newString(&quot;psych/syntax_error&quot;), Block.NULL_BLOCK);</span>
+<span class="nc" id="L89">        psychParser.defineConstant(&quot;ANY&quot;, runtime.newFixnum(YAML_ANY_ENCODING.ordinal()));</span>
+<span class="nc" id="L90">        psychParser.defineConstant(&quot;UTF8&quot;, runtime.newFixnum(YAML_UTF8_ENCODING.ordinal()));</span>
+<span class="nc" id="L91">        psychParser.defineConstant(&quot;UTF16LE&quot;, runtime.newFixnum(YAML_UTF16LE_ENCODING.ordinal()));</span>
+<span class="nc" id="L92">        psychParser.defineConstant(&quot;UTF16BE&quot;, runtime.newFixnum(YAML_UTF16BE_ENCODING.ordinal()));</span>
+
+<span class="nc" id="L94">        psychParser.defineAnnotatedMethods(PsychParser.class);</span>
+<span class="nc" id="L95">    }</span>
+
+    public PsychParser(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L98">        super(runtime, klass);</span>
+<span class="nc" id="L99">    }</span>
+
+    @JRubyMethod
+    public IRubyObject parse(ThreadContext context, IRubyObject yaml) {
+<span class="nc" id="L103">        Ruby runtime = context.runtime;</span>
+
+<span class="nc" id="L105">        return parse(context, yaml, runtime.getNil());</span>
+    }
+
+    private IRubyObject stringOrNilFor(Ruby runtime, String value, boolean tainted) {
+<span class="nc bnc" id="L109" title="All 2 branches missed.">        if (value == null) return runtime.getNil(); // No need to taint nil</span>
+
+<span class="nc" id="L111">        return stringFor(runtime, value, tainted);</span>
+    }
+    
+    private RubyString stringFor(Ruby runtime, String value, boolean tainted) {
+<span class="nc" id="L115">        Encoding encoding = runtime.getDefaultInternalEncoding();</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        if (encoding == null) {</span>
+<span class="nc" id="L117">            encoding = UTF8Encoding.INSTANCE;</span>
+        }
+
+<span class="nc" id="L120">        Charset charset = RubyEncoding.UTF8;</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">        if (encoding.getCharset() != null) {</span>
+<span class="nc" id="L122">            charset = encoding.getCharset();</span>
+        }
+
+<span class="nc" id="L125">        ByteList bytes = new ByteList(value.getBytes(charset), encoding);</span>
+<span class="nc" id="L126">        RubyString string = RubyString.newString(runtime, bytes);</span>
+        
+<span class="nc" id="L128">        string.setTaint(tainted);</span>
+        
+<span class="nc" id="L130">        return string;</span>
+    }
+    
+    private StreamReader readerFor(ThreadContext context, IRubyObject yaml) {
+<span class="nc" id="L134">        Ruby runtime = context.runtime;</span>
+
+<span class="nc bnc" id="L136" title="All 2 branches missed.">        if (yaml instanceof RubyString) {</span>
+<span class="nc" id="L137">            ByteList byteList = ((RubyString)yaml).getByteList();</span>
+<span class="nc" id="L138">            ByteArrayInputStream bais = new ByteArrayInputStream(byteList.getUnsafeBytes(), byteList.getBegin(), byteList.getRealSize());</span>
+
+<span class="nc" id="L140">            Charset charset = byteList.getEncoding().getCharset();</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">            if (charset == null) charset = Charset.defaultCharset();</span>
+
+<span class="nc" id="L143">            InputStreamReader isr = new InputStreamReader(bais, charset);</span>
+
+<span class="nc" id="L145">            return new StreamReader(isr);</span>
+        }
+
+        // fall back on IOInputStream, using default charset
+<span class="nc bnc" id="L149" title="All 2 branches missed.">        if (yaml.respondsTo(&quot;read&quot;)) {</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">            Charset charset = (yaml instanceof RubyIO)</span>
+<span class="nc" id="L151">                ? ((RubyIO)yaml).getReadEncoding().getCharset()</span>
+<span class="nc" id="L152">                : Charset.defaultCharset();</span>
+<span class="nc" id="L153">            return new StreamReader(new InputStreamReader(new IOInputStream(yaml), charset));</span>
+        } else {
+<span class="nc" id="L155">            throw runtime.newTypeError(yaml, runtime.getIO());</span>
+        }
+    }
+
+    @JRubyMethod
+    public IRubyObject parse(ThreadContext context, IRubyObject yaml, IRubyObject path) {
+<span class="nc" id="L161">        Ruby runtime = context.runtime;</span>
+<span class="nc bnc" id="L162" title="All 4 branches missed.">        boolean tainted = yaml.isTaint() || yaml instanceof RubyIO;</span>
+
+        try {
+<span class="nc" id="L165">            parser = new ParserImpl(readerFor(context, yaml));</span>
+
+<span class="nc bnc" id="L167" title="All 4 branches missed.">            if (path.isNil() &amp;&amp; yaml.respondsTo(&quot;path&quot;)) {</span>
+<span class="nc" id="L168">                path = yaml.callMethod(context, &quot;path&quot;);</span>
+            }
+
+<span class="nc" id="L171">            IRubyObject handler = getInstanceVariable(&quot;@handler&quot;);</span>
+
+            while (true) {
+<span class="nc" id="L174">                event = parser.getEvent();</span>
+
+                // FIXME: Event should expose a getID, so it can be switched
+<span class="nc bnc" id="L177" title="All 2 branches missed.">                if (event.is(ID.StreamStart)) {</span>
+<span class="nc" id="L178">                    invoke(context, handler, &quot;start_stream&quot;, runtime.newFixnum(YAML_ANY_ENCODING.ordinal()));</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">                } else if (event.is(ID.DocumentStart)) {</span>
+<span class="nc" id="L180">                    handleDocumentStart(context, (DocumentStartEvent) event, tainted, handler);</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">                } else if (event.is(ID.DocumentEnd)) {</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">                    IRubyObject notExplicit = runtime.newBoolean(!((DocumentEndEvent) event).getExplicit());</span>
+                    
+<span class="nc" id="L184">                    invoke(context, handler, &quot;end_document&quot;, notExplicit);</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">                } else if (event.is(ID.Alias)) {</span>
+<span class="nc" id="L186">                    IRubyObject alias = stringOrNilFor(runtime, ((AliasEvent)event).getAnchor(), tainted);</span>
+
+<span class="nc" id="L188">                    invoke(context, handler, &quot;alias&quot;, alias);</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">                } else if (event.is(ID.Scalar)) {</span>
+<span class="nc" id="L190">                    handleScalar(context, (ScalarEvent) event, tainted, handler);</span>
+<span class="nc bnc" id="L191" title="All 2 branches missed.">                } else if (event.is(ID.SequenceStart)) {</span>
+<span class="nc" id="L192">                    handleSequenceStart(context,(SequenceStartEvent) event, tainted, handler);</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">                } else if (event.is(ID.SequenceEnd)) {</span>
+<span class="nc" id="L194">                    invoke(context, handler, &quot;end_sequence&quot;);</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">                } else if (event.is(ID.MappingStart)) {</span>
+<span class="nc" id="L196">                    handleMappingStart(context, (MappingStartEvent) event, tainted, handler);</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">                } else if (event.is(ID.MappingEnd)) {</span>
+<span class="nc" id="L198">                    invoke(context, handler, &quot;end_mapping&quot;);</span>
+<span class="nc bnc" id="L199" title="All 2 branches missed.">                } else if (event.is(ID.StreamEnd)) {</span>
+<span class="nc" id="L200">                    invoke(context, handler, &quot;end_stream&quot;);</span>
+                    
+<span class="nc" id="L202">                    break;</span>
+                }
+            }
+<span class="nc" id="L205">        } catch (ParserException pe) {</span>
+<span class="nc" id="L206">            parser = null;</span>
+<span class="nc" id="L207">            raiseParserException(context, yaml, pe, path);</span>
+
+<span class="nc" id="L209">        } catch (ScannerException se) {</span>
+<span class="nc" id="L210">            parser = null;</span>
+<span class="nc" id="L211">            StringBuilder message = new StringBuilder(&quot;syntax error&quot;);</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">            if (se.getProblemMark() != null) {</span>
+<span class="nc" id="L213">                message.append(se.getProblemMark().toString());</span>
+            }
+<span class="nc" id="L215">            raiseParserException(context, yaml, se, path);</span>
+
+<span class="nc" id="L217">        } catch (ReaderException re) {</span>
+<span class="nc" id="L218">            parser = null;</span>
+<span class="nc" id="L219">            raiseParserException(context, yaml, re, path);</span>
+
+<span class="nc" id="L221">        } catch (Throwable t) {</span>
+<span class="nc" id="L222">            Helpers.throwException(t);</span>
+<span class="nc" id="L223">            return this;</span>
+<span class="nc" id="L224">        }</span>
+
+<span class="nc" id="L226">        return this;</span>
+    }
+    
+    private void handleDocumentStart(ThreadContext context, DocumentStartEvent dse, boolean tainted, IRubyObject handler) {
+<span class="nc" id="L230">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L231">        DumperOptions.Version _version = dse.getVersion();</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">        Integer[] versionInts = _version == null ? null : _version.getArray();</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">        IRubyObject version = versionInts == null ?</span>
+<span class="nc" id="L234">            RubyArray.newArray(runtime) :</span>
+<span class="nc" id="L235">            RubyArray.newArray(runtime, runtime.newFixnum(versionInts[0]), runtime.newFixnum(versionInts[1]));</span>
+        
+<span class="nc" id="L237">        Map&lt;String, String&gt; tagsMap = dse.getTags();</span>
+<span class="nc" id="L238">        RubyArray tags = RubyArray.newArray(runtime);</span>
+<span class="nc bnc" id="L239" title="All 4 branches missed.">        if (tagsMap != null &amp;&amp; tagsMap.size() &gt; 0) {</span>
+<span class="nc bnc" id="L240" title="All 2 branches missed.">            for (Map.Entry&lt;String, String&gt; tag : tagsMap.entrySet()) {</span>
+<span class="nc" id="L241">                IRubyObject key   = stringFor(runtime, tag.getKey(), tainted);</span>
+<span class="nc" id="L242">                IRubyObject value = stringFor(runtime, tag.getValue(), tainted);</span>
+
+<span class="nc" id="L244">                tags.append(RubyArray.newArray(runtime, key, value));</span>
+<span class="nc" id="L245">            }</span>
+        }
+<span class="nc bnc" id="L247" title="All 2 branches missed.">        IRubyObject notExplicit = runtime.newBoolean(!dse.getExplicit());</span>
+
+<span class="nc" id="L249">        invoke(context, handler, &quot;start_document&quot;, version, tags, notExplicit);</span>
+<span class="nc" id="L250">    }</span>
+    
+    private void handleMappingStart(ThreadContext context, MappingStartEvent mse, boolean tainted, IRubyObject handler) {
+<span class="nc" id="L253">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L254">        IRubyObject anchor = stringOrNilFor(runtime, mse.getAnchor(), tainted);</span>
+<span class="nc" id="L255">        IRubyObject tag = stringOrNilFor(runtime, mse.getTag(), tainted);</span>
+<span class="nc" id="L256">        IRubyObject implicit = runtime.newBoolean(mse.getImplicit());</span>
+<span class="nc" id="L257">        IRubyObject style = runtime.newFixnum(translateFlowStyle(mse.getFlowStyle()));</span>
+
+<span class="nc" id="L259">        invoke(context, handler, &quot;start_mapping&quot;, anchor, tag, implicit, style);</span>
+<span class="nc" id="L260">    }</span>
+        
+    private void handleScalar(ThreadContext context, ScalarEvent se, boolean tainted, IRubyObject handler) {
+<span class="nc" id="L263">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L264">        IRubyObject anchor = stringOrNilFor(runtime, se.getAnchor(), tainted);</span>
+<span class="nc" id="L265">        IRubyObject tag = stringOrNilFor(runtime, se.getTag(), tainted);</span>
+<span class="nc" id="L266">        IRubyObject plain_implicit = runtime.newBoolean(se.getImplicit().canOmitTagInPlainScalar());</span>
+<span class="nc" id="L267">        IRubyObject quoted_implicit = runtime.newBoolean(se.getImplicit().canOmitTagInNonPlainScalar());</span>
+<span class="nc" id="L268">        IRubyObject style = runtime.newFixnum(translateStyle(se.getStyle()));</span>
+<span class="nc" id="L269">        IRubyObject val = stringFor(runtime, se.getValue(), tainted);</span>
+
+<span class="nc" id="L271">        invoke(context, handler, &quot;scalar&quot;, val, anchor, tag, plain_implicit,</span>
+                quoted_implicit, style);
+<span class="nc" id="L273">    }</span>
+    
+    private void handleSequenceStart(ThreadContext context, SequenceStartEvent sse, boolean tainted, IRubyObject handler) {
+<span class="nc" id="L276">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L277">        IRubyObject anchor = stringOrNilFor(runtime, sse.getAnchor(), tainted);</span>
+<span class="nc" id="L278">        IRubyObject tag = stringOrNilFor(runtime, sse.getTag(), tainted);</span>
+<span class="nc" id="L279">        IRubyObject implicit = runtime.newBoolean(sse.getImplicit());</span>
+<span class="nc" id="L280">        IRubyObject style = runtime.newFixnum(translateFlowStyle(sse.getFlowStyle()));</span>
+
+<span class="nc" id="L282">        invoke(context, handler, &quot;start_sequence&quot;, anchor, tag, implicit, style);</span>
+<span class="nc" id="L283">    }</span>
+
+    private static void raiseParserException(ThreadContext context, IRubyObject yaml, ReaderException re, IRubyObject rbPath) {
+        Ruby runtime;
+        RubyClass se;
+        IRubyObject exception;
+
+<span class="nc" id="L290">        runtime = context.runtime;</span>
+<span class="nc" id="L291">        se = (RubyClass)runtime.getModule(&quot;Psych&quot;).getConstant(&quot;SyntaxError&quot;);</span>
+
+<span class="nc" id="L293">        exception = se.newInstance(context,</span>
+                new IRubyObject[] {
+                    rbPath,
+<span class="nc" id="L296">                    runtime.newFixnum(0),</span>
+<span class="nc" id="L297">                    runtime.newFixnum(0),</span>
+<span class="nc" id="L298">                    runtime.newFixnum(re.getPosition()),</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">                    (null == re.getName() ? runtime.getNil() : runtime.newString(re.getName())),</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">                    (null == re.toString() ? runtime.getNil() : runtime.newString(re.toString()))</span>
+                },
+                Block.NULL_BLOCK);
+
+<span class="nc" id="L304">        RubyKernel.raise(context, runtime.getKernel(), new IRubyObject[] { exception }, Block.NULL_BLOCK);</span>
+<span class="nc" id="L305">    }</span>
+
+    private static void raiseParserException(ThreadContext context, IRubyObject yaml, MarkedYAMLException mye, IRubyObject rbPath) {
+        Ruby runtime;
+        Mark mark;
+        RubyClass se;
+        IRubyObject exception;
+
+<span class="nc" id="L313">        runtime = context.runtime;</span>
+<span class="nc" id="L314">        se = (RubyClass)runtime.getModule(&quot;Psych&quot;).getConstant(&quot;SyntaxError&quot;);</span>
+
+<span class="nc" id="L316">        mark = mye.getProblemMark();</span>
+
+<span class="nc" id="L318">        exception = se.newInstance(context,</span>
+                new IRubyObject[] {
+                    rbPath,
+<span class="nc" id="L321">                    runtime.newFixnum(mark.getLine() + 1),</span>
+<span class="nc" id="L322">                    runtime.newFixnum(mark.getColumn() + 1),</span>
+<span class="nc" id="L323">                    runtime.newFixnum(mark.getIndex()),</span>
+<span class="nc bnc" id="L324" title="All 2 branches missed.">                    (null == mye.getProblem() ? runtime.getNil() : runtime.newString(mye.getProblem())),</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">                    (null == mye.getContext() ? runtime.getNil() : runtime.newString(mye.getContext()))</span>
+                },
+                Block.NULL_BLOCK);
+
+<span class="nc" id="L329">        RubyKernel.raise(context, runtime.getKernel(), new IRubyObject[] { exception }, Block.NULL_BLOCK);</span>
+<span class="nc" id="L330">    }</span>
+
+    private static int translateStyle(Character style) {
+<span class="nc bnc" id="L333" title="All 2 branches missed.">        if (style == null) return 0; // any</span>
+
+<span class="nc bnc" id="L335" title="All 6 branches missed.">        switch (style) {</span>
+<span class="nc" id="L336">            case 0: return 1; // plain</span>
+<span class="nc" id="L337">            case '\'': return 2; // single-quoted</span>
+<span class="nc" id="L338">            case '&quot;': return 3; // double-quoted</span>
+<span class="nc" id="L339">            case '|': return 4; // literal</span>
+<span class="nc" id="L340">            case '&gt;': return 5; // folded</span>
+<span class="nc" id="L341">            default: return 0; // any</span>
+        }
+    }
+    
+    private static int translateFlowStyle(Boolean flowStyle) {
+<span class="nc bnc" id="L346" title="All 2 branches missed.">        if (flowStyle == null) return 0; // any</span>
+
+<span class="nc bnc" id="L348" title="All 2 branches missed.">        if (flowStyle) return 2;</span>
+<span class="nc" id="L349">        return 1;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject mark(ThreadContext context) {
+<span class="nc" id="L354">        Ruby runtime = context.runtime;</span>
+
+<span class="nc" id="L356">        Event event = null;</span>
+
+<span class="nc bnc" id="L358" title="All 2 branches missed.">        if (parser != null) {</span>
+<span class="nc" id="L359">            event = parser.peekEvent();</span>
+
+<span class="nc bnc" id="L361" title="All 2 branches missed.">            if (event == null) event = this.event;</span>
+        }
+
+<span class="nc bnc" id="L364" title="All 2 branches missed.">        if (event == null) {</span>
+<span class="nc" id="L365">            return ((RubyClass)context.runtime.getClassFromPath(&quot;Psych::Parser::Mark&quot;)).newInstance(</span>
+                    context,
+<span class="nc" id="L367">                    runtime.newFixnum(0),</span>
+<span class="nc" id="L368">                    runtime.newFixnum(0),</span>
+<span class="nc" id="L369">                    runtime.newFixnum(0),</span>
+                    Block.NULL_BLOCK
+            );
+        }
+
+<span class="nc" id="L374">        Mark mark = event.getStartMark();</span>
+
+<span class="nc" id="L376">        return ((RubyClass)context.runtime.getClassFromPath(&quot;Psych::Parser::Mark&quot;)).newInstance(</span>
+                context,
+<span class="nc" id="L378">                runtime.newFixnum(mark.getIndex()),</span>
+<span class="nc" id="L379">                runtime.newFixnum(mark.getLine()),</span>
+<span class="nc" id="L380">                runtime.newFixnum(mark.getColumn()),</span>
+                Block.NULL_BLOCK
+        );
+    }
+
+    private Parser parser;
+    private Event event;
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

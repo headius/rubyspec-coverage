@@ -1,0 +1,1668 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>StringNodes.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.nodes.core</a> &gt; <span class="el_source">StringNodes.java</span></div><h1>StringNodes.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2013, 2014 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.nodes.core;
+
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.dsl.Specialization;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.nodes.UnexpectedResultException;
+import com.oracle.truffle.api.source.SourceSection;
+import com.oracle.truffle.api.utilities.BranchProfile;
+import org.jcodings.Encoding;
+import org.jcodings.specific.ASCIIEncoding;
+import org.joni.Matcher;
+import org.joni.Option;
+import org.joni.Region;
+import org.jruby.runtime.Visibility;
+import org.jruby.truffle.nodes.RubyNode;
+import org.jruby.truffle.nodes.dispatch.DispatchHeadNode;
+import org.jruby.truffle.runtime.RubyContext;
+import org.jruby.truffle.runtime.UndefinedPlaceholder;
+import org.jruby.truffle.runtime.control.RaiseException;
+import org.jruby.truffle.runtime.core.*;
+import org.jruby.util.ByteList;
+import org.jruby.util.Pack;
+import org.jruby.util.StringSupport;
+
+import java.math.BigInteger;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.regex.Pattern;
+
+@CoreClass(name = &quot;String&quot;)
+<span class="nc" id="L43">public abstract class StringNodes {</span>
+
+    @CoreMethod(names = &quot;+&quot;, required = 1)
+    public abstract static class AddNode extends CoreMethodNode {
+
+        public AddNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L49">            super(context, sourceSection);</span>
+<span class="nc" id="L50">        }</span>
+
+        public AddNode(AddNode prev) {
+<span class="nc" id="L53">            super(prev);</span>
+<span class="nc" id="L54">        }</span>
+
+        @Specialization
+        public RubyString add(RubyString a, RubyString b) {
+<span class="nc" id="L58">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L60">            return getContext().makeString(a.toString() + b.toString());</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;*&quot;, required = 1, lowerFixnumParameters = 0)
+    public abstract static class MulNode extends CoreMethodNode {
+
+        public MulNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L68">            super(context, sourceSection);</span>
+<span class="nc" id="L69">        }</span>
+
+        public MulNode(MulNode prev) {
+<span class="nc" id="L72">            super(prev);</span>
+<span class="nc" id="L73">        }</span>
+
+        @Specialization
+        public RubyString add(RubyString string, int times) {
+<span class="nc" id="L77">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L79">            final ByteList inputBytes = string.getBytes();</span>
+<span class="nc" id="L80">            final ByteList outputBytes = new ByteList(string.getBytes().length() * times);</span>
+
+<span class="nc bnc" id="L82" title="All 2 branches missed.">            for (int n = 0; n &lt; times; n++) {</span>
+<span class="nc" id="L83">                outputBytes.append(inputBytes);</span>
+            }
+
+<span class="nc" id="L86">            return new RubyString(getContext().getCoreLibrary().getStringClass(), outputBytes);</span>
+        }
+    }
+
+    @CoreMethod(names = {&quot;==&quot;, &quot;===&quot;, &quot;eql?&quot;}, required = 1)
+    public abstract static class EqualNode extends CoreMethodNode {
+
+        public EqualNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L94">            super(context, sourceSection);</span>
+<span class="nc" id="L95">        }</span>
+
+        public EqualNode(EqualNode prev) {
+<span class="nc" id="L98">            super(prev);</span>
+<span class="nc" id="L99">        }</span>
+
+        @Specialization
+        public boolean equal(@SuppressWarnings(&quot;unused&quot;) RubyString a, @SuppressWarnings(&quot;unused&quot;) RubyNilClass b) {
+<span class="nc" id="L103">            return false;</span>
+        }
+
+        @Specialization
+        public boolean equal(RubyString a, RubyString b) {
+<span class="nc" id="L108">            return a.equals(b.toString());</span>
+        }
+
+        @Specialization
+        public boolean equal(RubyString a, Object b) {
+<span class="nc bnc" id="L113" title="All 2 branches missed.">            if (b instanceof RubyString) {</span>
+<span class="nc" id="L114">                return equal(a, (RubyString) b);</span>
+            } else {
+<span class="nc" id="L116">                return false;</span>
+            }
+        }
+    }
+
+    @CoreMethod(names = &quot;&lt;=&gt;&quot;, required = 1)
+    public abstract static class CompareNode extends CoreMethodNode {
+
+        public CompareNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L125">            super(context, sourceSection);</span>
+<span class="nc" id="L126">        }</span>
+
+        public CompareNode(CompareNode prev) {
+<span class="nc" id="L129">            super(prev);</span>
+<span class="nc" id="L130">        }</span>
+
+        @Specialization
+        public int compare(RubyString a, RubyString b) {
+<span class="nc" id="L134">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L136">            return a.toString().compareTo(b.toString());</span>
+        }
+    }
+
+    @CoreMethod(names = { &quot;&lt;&lt;&quot;, &quot;concat&quot; }, required = 1)
+    public abstract static class ConcatNode extends CoreMethodNode {
+
+        public ConcatNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L144">            super(context, sourceSection);</span>
+<span class="nc" id="L145">        }</span>
+
+        public ConcatNode(ConcatNode prev) {
+<span class="nc" id="L148">            super(prev);</span>
+<span class="nc" id="L149">        }</span>
+
+        @Specialization
+        public RubyString concat(RubyString string, RubyString other) {
+<span class="nc" id="L153">            string.getBytes().append(other.getBytes());</span>
+<span class="nc" id="L154">            return string;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;%&quot;, required = 1, argumentsAsArray = true)
+    public abstract static class FormatNode extends CoreMethodNode {
+
+        public FormatNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L162">            super(context, sourceSection);</span>
+<span class="nc" id="L163">        }</span>
+
+        public FormatNode(FormatNode prev) {
+<span class="nc" id="L166">            super(prev);</span>
+<span class="nc" id="L167">        }</span>
+
+<span class="nc" id="L169">        private final BranchProfile singleArrayProfile = BranchProfile.create();</span>
+<span class="nc" id="L170">        private final BranchProfile multipleArgumentsProfile = BranchProfile.create();</span>
+
+        @Specialization
+        public RubyString format(RubyString format, Object[] args) {
+<span class="nc" id="L174">            return formatSlow(format, args);</span>
+        }
+
+        @CompilerDirectives.TruffleBoundary
+        private RubyString formatSlow(RubyString format, Object[] args) {
+<span class="nc" id="L179">            final RubyContext context = getContext();</span>
+
+<span class="nc bnc" id="L181" title="All 4 branches missed.">            if (args.length == 1 &amp;&amp; args[0] instanceof RubyArray) {</span>
+<span class="nc" id="L182">                singleArrayProfile.enter();</span>
+<span class="nc" id="L183">                return context.makeString(StringFormatter.format(getContext(), format.toString(), Arrays.asList(((RubyArray) args[0]).slowToArray())));</span>
+            } else {
+<span class="nc" id="L185">                multipleArgumentsProfile.enter();</span>
+<span class="nc" id="L186">                return context.makeString(StringFormatter.format(getContext(), format.toString(), Arrays.asList(args)));</span>
+            }
+        }
+    }
+
+    @CoreMethod(names = {&quot;[]&quot;, &quot;slice&quot;}, required = 1, optional = 1, lowerFixnumParameters = {0, 1})
+    public abstract static class GetIndexNode extends CoreMethodNode {
+
+        public GetIndexNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L195">            super(context, sourceSection);</span>
+<span class="nc" id="L196">        }</span>
+
+        public GetIndexNode(GetIndexNode prev) {
+<span class="nc" id="L199">            super(prev);</span>
+<span class="nc" id="L200">        }</span>
+
+        @Specialization(rewriteOn = UnexpectedResultException.class)
+        public RubyString getIndexInBounds(RubyString string, int index, UndefinedPlaceholder undefined) throws UnexpectedResultException {
+<span class="nc" id="L204">            final int normalisedIndex = string.normaliseIndex(index);</span>
+<span class="nc" id="L205">            final ByteList bytes = string.getBytes();</span>
+
+<span class="nc bnc" id="L207" title="All 4 branches missed.">            if (normalisedIndex &lt; 0 || normalisedIndex &gt;= bytes.length()) {</span>
+<span class="nc" id="L208">                throw new UnexpectedResultException(getContext().getCoreLibrary().getNilObject());</span>
+            } else {
+<span class="nc" id="L210">                return getContext().makeString(bytes.charAt(normalisedIndex));</span>
+            }
+        }
+
+        @Specialization(contains = &quot;getIndexInBounds&quot;)
+        public Object getIndex(RubyString string, int index, UndefinedPlaceholder undefined) {
+<span class="nc" id="L216">            int normalisedIndex = string.normaliseIndex(index);</span>
+<span class="nc" id="L217">            final ByteList bytes = string.getBytes();</span>
+
+<span class="nc bnc" id="L219" title="All 4 branches missed.">            if (normalisedIndex &lt; 0 || normalisedIndex &gt;= bytes.length()) {</span>
+<span class="nc" id="L220">                return getContext().getCoreLibrary().getNilObject();</span>
+            } else {
+<span class="nc" id="L222">                return getContext().makeString(bytes.charAt(normalisedIndex));</span>
+            }
+        }
+
+        @Specialization
+        public Object getIndex(RubyString string, RubyRange.IntegerFixnumRange range, UndefinedPlaceholder undefined) {
+<span class="nc" id="L228">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L230">            final String javaString = string.toString();</span>
+<span class="nc" id="L231">            final int begin = string.normaliseIndex(range.getBegin());</span>
+
+<span class="nc bnc" id="L233" title="All 4 branches missed.">            if (begin &lt; 0 || begin &gt;= javaString.length()) {</span>
+<span class="nc" id="L234">                return getContext().getCoreLibrary().getNilObject();</span>
+            } else {
+<span class="nc" id="L236">                final int end = string.normaliseIndex(range.getEnd());</span>
+<span class="nc bnc" id="L237" title="All 2 branches missed.">                final int excludingEnd = string.clampExclusiveIndex(range.doesExcludeEnd() ? end : end+1);</span>
+
+<span class="nc" id="L239">                return getContext().makeString(javaString.substring(begin, excludingEnd));</span>
+            }
+        }
+
+        @Specialization
+        public RubyString getIndex(RubyString string, int start, int length) {
+            // TODO(CS): not sure if this is right - encoding
+            // TODO(CS): why does subSequence return CharSequence?
+<span class="nc" id="L247">            final int begin = string.normaliseIndex(start);</span>
+<span class="nc" id="L248">            final int exclusiveEnd = string.normaliseIndex(begin + length);</span>
+<span class="nc" id="L249">            return new RubyString(getContext().getCoreLibrary().getStringClass(), (ByteList) string.getBytes().subSequence(begin, exclusiveEnd - begin));</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;=~&quot;, required = 1)
+    public abstract static class MatchOperatorNode extends CoreMethodNode {
+
+        public MatchOperatorNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L258">            super(context, sourceSection);</span>
+<span class="nc" id="L259">        }</span>
+
+        public MatchOperatorNode(MatchOperatorNode prev) {
+<span class="nc" id="L262">            super(prev);</span>
+<span class="nc" id="L263">        }</span>
+
+        @Specialization
+        public Object match(RubyString string, RubyRegexp regexp) {
+<span class="nc" id="L267">            return regexp.matchCommon(string.getBytes(), true, false);</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;b&quot;)
+    public abstract static class BNode extends CoreMethodNode {
+
+        public BNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L275">            super(context, sourceSection);</span>
+<span class="nc" id="L276">        }</span>
+
+        public BNode(BNode prev) {
+<span class="nc" id="L279">            super(prev);</span>
+<span class="nc" id="L280">        }</span>
+
+        @Specialization
+        public RubyString b(RubyString string) {
+<span class="nc" id="L284">            final ByteList bytes = string.getBytes().dup();</span>
+<span class="nc" id="L285">            bytes.setEncoding(ASCIIEncoding.INSTANCE);</span>
+<span class="nc" id="L286">            return getContext().makeString(bytes);</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;bytes&quot;)
+    public abstract static class BytesNode extends CoreMethodNode {
+
+        public BytesNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L295">            super(context, sourceSection);</span>
+<span class="nc" id="L296">        }</span>
+
+        public BytesNode(BytesNode prev) {
+<span class="nc" id="L299">            super(prev);</span>
+<span class="nc" id="L300">        }</span>
+
+        @Specialization
+        public RubyArray bytes(RubyString string) {
+<span class="nc" id="L304">            final byte[] bytes = string.getBytes().bytes();</span>
+
+<span class="nc" id="L306">            final int[] store = new int[bytes.length];</span>
+
+<span class="nc bnc" id="L308" title="All 2 branches missed.">            for (int n = 0; n &lt; store.length; n++) {</span>
+<span class="nc" id="L309">                store[n] = toUnsignedInt(bytes[n]);</span>
+            }
+
+<span class="nc" id="L312">            return new RubyArray(getContext().getCoreLibrary().getArrayClass(), store, bytes.length);</span>
+        }
+
+        public static int toUnsignedInt(byte x) {
+<span class="nc" id="L316">            return ((int) x) &amp; 0xff;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;chomp&quot;, optional=1)
+    public abstract static class ChompNode extends CoreMethodNode {
+
+        public ChompNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L325">            super(context, sourceSection);</span>
+<span class="nc" id="L326">        }</span>
+
+        public ChompNode(ChompNode prev) {
+<span class="nc" id="L329">            super(prev);</span>
+<span class="nc" id="L330">        }</span>
+
+        @Specialization
+        public RubyString chomp(RubyString string, UndefinedPlaceholder undefined) {
+<span class="nc" id="L334">            notDesignedForCompilation();</span>
+<span class="nc" id="L335">            return string.getContext().makeString(StringNodesHelper.chomp(string));</span>
+        }
+
+        @Specialization
+        public RubyString chompWithString(RubyString string, RubyString stringToChomp) {
+<span class="nc" id="L340">            notDesignedForCompilation();</span>
+<span class="nc" id="L341">            return getContext().makeString(StringNodesHelper.chompWithString(string, stringToChomp));</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;chomp!&quot;)
+    public abstract static class ChompBangNode extends CoreMethodNode {
+
+        public ChompBangNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L350">            super(context, sourceSection);</span>
+<span class="nc" id="L351">        }</span>
+
+        public ChompBangNode(ChompBangNode prev) {
+<span class="nc" id="L354">            super(prev);</span>
+<span class="nc" id="L355">        }</span>
+
+        @Specialization
+        public RubyString chompBang(RubyString string) {
+<span class="nc" id="L359">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L361">            string.set(StringNodesHelper.chomp(string));</span>
+<span class="nc" id="L362">            return string;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;count&quot;, argumentsAsArray = true)
+    public abstract static class CountNode extends CoreMethodNode {
+
+        @Child protected DispatchHeadNode toStr;
+
+        public CountNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L372">            super(context, sourceSection);</span>
+<span class="nc" id="L373">            toStr = new DispatchHeadNode(context);</span>
+<span class="nc" id="L374">        }</span>
+
+        public CountNode(CountNode prev) {
+<span class="nc" id="L377">            super(prev);</span>
+<span class="nc" id="L378">            toStr = prev.toStr;</span>
+<span class="nc" id="L379">        }</span>
+
+        @Specialization
+        public int count(VirtualFrame frame, RubyString string, Object[] otherStrings) {
+<span class="nc" id="L383">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L385" title="All 2 branches missed.">            if (otherStrings.length == 0) {</span>
+<span class="nc" id="L386">                throw new RaiseException(getContext().getCoreLibrary().argumentErrorEmptyVarargs(this));</span>
+            }
+
+<span class="nc" id="L389">            return countSlow(frame, string, otherStrings);</span>
+        }
+
+        @CompilerDirectives.TruffleBoundary
+        private int countSlow(VirtualFrame frame, RubyString string, Object[] args) {
+<span class="nc" id="L394">            RubyString[] otherStrings = new RubyString[args.length];</span>
+
+<span class="nc bnc" id="L396" title="All 2 branches missed.">            for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">                if (args[i] instanceof RubyString) {</span>
+<span class="nc" id="L398">                    otherStrings[i] = (RubyString) args[i];</span>
+                } else {
+                    Object coerced;
+
+                    try {
+<span class="nc" id="L403">                        coerced = toStr.call(frame, args[i], &quot;to_str&quot;, null);</span>
+<span class="nc" id="L404">                    } catch (RaiseException e) {</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">                        if (e.getRubyException().getLogicalClass() == getContext().getCoreLibrary().getNoMethodErrorClass()) {</span>
+<span class="nc" id="L406">                            throw new RaiseException(</span>
+<span class="nc" id="L407">                                    getContext().getCoreLibrary().typeErrorNoImplicitConversion(args[i], &quot;String&quot;, this));</span>
+                        } else {
+<span class="nc" id="L409">                            throw e;</span>
+                        }
+<span class="nc" id="L411">                    }</span>
+
+<span class="nc bnc" id="L413" title="All 2 branches missed.">                    if (coerced instanceof RubyString) {</span>
+<span class="nc" id="L414">                        otherStrings[i] = (RubyString) coerced;</span>
+                    } else {
+<span class="nc" id="L416">                        throw new RaiseException(</span>
+<span class="nc" id="L417">                                getContext().getCoreLibrary().typeErrorBadCoercion(args[i], &quot;String&quot;, &quot;to_str&quot;, coerced, this));</span>
+
+                    }
+                }
+            }
+
+<span class="nc" id="L423">            return string.count(otherStrings);</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;downcase&quot;)
+    public abstract static class DowncaseNode extends CoreMethodNode {
+
+        public DowncaseNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L431">            super(context, sourceSection);</span>
+<span class="nc" id="L432">        }</span>
+
+        public DowncaseNode(DowncaseNode prev) {
+<span class="nc" id="L435">            super(prev);</span>
+<span class="nc" id="L436">        }</span>
+
+        @Specialization
+        public RubyString downcase(RubyString string) {
+<span class="nc" id="L440">            notDesignedForCompilation();</span>
+<span class="nc" id="L441">            ByteList newByteList = StringNodesHelper.downcase(string);</span>
+
+<span class="nc" id="L443">            return string.getContext().makeString(newByteList);</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;downcase!&quot;)
+    public abstract static class DowncaseBangNode extends CoreMethodNode {
+
+        public DowncaseBangNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L451">            super(context, sourceSection);</span>
+<span class="nc" id="L452">        }</span>
+
+        public DowncaseBangNode(DowncaseBangNode prev) {
+<span class="nc" id="L455">            super(prev);</span>
+<span class="nc" id="L456">        }</span>
+
+        @Specialization
+        public RubyBasicObject downcase(RubyString string) {
+<span class="nc" id="L460">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L462">            ByteList newByteList = StringNodesHelper.downcase(string);</span>
+
+<span class="nc bnc" id="L464" title="All 2 branches missed.">            if (newByteList.equals(string.getBytes())) {</span>
+<span class="nc" id="L465">                return getContext().getCoreLibrary().getNilObject();</span>
+            } else {
+<span class="nc" id="L467">                string.set(newByteList);</span>
+<span class="nc" id="L468">                return string;</span>
+            }
+        }
+    }
+
+    @CoreMethod(names = &quot;each_line&quot;)
+    public abstract static class EachLineNode extends YieldingCoreMethodNode {
+
+        public EachLineNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L477">            super(context, sourceSection);</span>
+<span class="nc" id="L478">        }</span>
+
+        public EachLineNode(EachLineNode prev) {
+<span class="nc" id="L481">            super(prev);</span>
+<span class="nc" id="L482">        }</span>
+
+        @Specialization
+        public RubyArray eachLine(RubyString string) {
+<span class="nc" id="L486">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L488">            final List&lt;Object&gt; lines = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L490">            String str = string.toString();</span>
+<span class="nc" id="L491">            int start = 0;</span>
+
+<span class="nc bnc" id="L493" title="All 2 branches missed.">            while (start &lt; str.length()) {</span>
+<span class="nc" id="L494">                int end = str.indexOf('\n', start);</span>
+
+<span class="nc bnc" id="L496" title="All 2 branches missed.">                if (end == -1) {</span>
+<span class="nc" id="L497">                    lines.add(getContext().makeString(str.substring(start)));</span>
+<span class="nc" id="L498">                    break;</span>
+                }
+
+<span class="nc" id="L501">                String line = str.substring(start, end+1);</span>
+<span class="nc" id="L502">                start = end+1;</span>
+
+<span class="nc" id="L504">                lines.add(getContext().makeString(line));</span>
+<span class="nc" id="L505">            }</span>
+
+<span class="nc" id="L507">            return RubyArray.fromObjects(getContext().getCoreLibrary().getArrayClass(), lines.toArray(new Object[lines.size()]));</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;empty?&quot;)
+    public abstract static class EmptyNode extends CoreMethodNode {
+
+        public EmptyNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L516">            super(context, sourceSection);</span>
+<span class="nc" id="L517">        }</span>
+
+        public EmptyNode(EmptyNode prev) {
+<span class="nc" id="L520">            super(prev);</span>
+<span class="nc" id="L521">        }</span>
+
+        @Specialization
+        public boolean empty(RubyString string) {
+<span class="nc" id="L525">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L527">            return string.toString().isEmpty();</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;encode&quot;, required = 1)
+    public abstract static class EncodeNode extends CoreMethodNode {
+
+        public EncodeNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L535">            super(context, sourceSection);</span>
+<span class="nc" id="L536">        }</span>
+
+        public EncodeNode(EncodeNode prev) {
+<span class="nc" id="L539">            super(prev);</span>
+<span class="nc" id="L540">        }</span>
+
+        @Specialization
+        public RubyString encode(RubyString string, RubyString encoding) {
+<span class="nc" id="L544">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L546">            final org.jruby.RubyString jrubyString = getContext().toJRuby(string);</span>
+<span class="nc" id="L547">            final org.jruby.RubyString jrubyEncodingString = getContext().toJRuby(encoding);</span>
+<span class="nc" id="L548">            final org.jruby.RubyString jrubyTranscoded = (org.jruby.RubyString) jrubyString.encode(getContext().getRuntime().getCurrentContext(), jrubyEncodingString);</span>
+
+<span class="nc" id="L550">            return getContext().toTruffle(jrubyTranscoded);</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;encoding&quot;)
+    public abstract static class EncodingNode extends CoreMethodNode {
+
+        public EncodingNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L558">            super(context, sourceSection);</span>
+<span class="nc" id="L559">        }</span>
+
+        public EncodingNode(EncodingNode prev) {
+<span class="nc" id="L562">            super(prev);</span>
+<span class="nc" id="L563">        }</span>
+
+        @Specialization
+        public RubyEncoding encoding(RubyString string) {
+<span class="nc" id="L567">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L569">            return RubyEncoding.getEncoding(getContext(), string.getBytes().getEncoding());</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;end_with?&quot;, required = 1)
+    public abstract static class EndWithNode extends CoreMethodNode {
+
+        public EndWithNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L577">            super(context, sourceSection);</span>
+<span class="nc" id="L578">        }</span>
+
+        public EndWithNode(EndWithNode prev) {
+<span class="nc" id="L581">            super(prev);</span>
+<span class="nc" id="L582">        }</span>
+
+        @Specialization
+        public boolean endWith(RubyString string, RubyString b) {
+<span class="nc" id="L586">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L588">            return string.toString().endsWith(b.toString());</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;force_encoding&quot;, required = 1)
+    public abstract static class ForceEncodingNode extends CoreMethodNode {
+
+        public ForceEncodingNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L596">            super(context, sourceSection);</span>
+<span class="nc" id="L597">        }</span>
+
+        public ForceEncodingNode(ForceEncodingNode prev) {
+<span class="nc" id="L600">            super(prev);</span>
+<span class="nc" id="L601">        }</span>
+
+        @Specialization
+        public RubyString forceEncoding(RubyString string, RubyString encodingName) {
+<span class="nc" id="L605">            notDesignedForCompilation();</span>
+<span class="nc" id="L606">            final RubyEncoding encoding = RubyEncoding.getEncoding(getContext(), encodingName.toString());</span>
+<span class="nc" id="L607">            return forceEncoding(string, encoding);</span>
+        }
+
+        @Specialization
+        public RubyString forceEncoding(RubyString string, RubyEncoding encoding) {
+<span class="nc" id="L612">            notDesignedForCompilation();</span>
+<span class="nc" id="L613">            string.forceEncoding(encoding.getEncoding());</span>
+<span class="nc" id="L614">            return string;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;gsub&quot;, required = 1, optional = 1, needsBlock = true)
+    public abstract static class GsubNode extends RegexpNodes.EscapingYieldingNode {
+
+        @Child protected DispatchHeadNode toS;
+
+        public GsubNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L625">            super(context, sourceSection);</span>
+<span class="nc" id="L626">            toS = new DispatchHeadNode(context);</span>
+<span class="nc" id="L627">        }</span>
+
+        public GsubNode(GsubNode prev) {
+<span class="nc" id="L630">            super(prev);</span>
+<span class="nc" id="L631">            toS = prev.toS;</span>
+<span class="nc" id="L632">        }</span>
+
+        @Specialization
+        public RubyString gsub(VirtualFrame frame, RubyString string, RubyString regexpString, RubyString replacement, UndefinedPlaceholder block) {
+<span class="nc" id="L636">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L638">            final RubyRegexp regexp = new RubyRegexp(this, getContext().getCoreLibrary().getRegexpClass(), escape(frame, regexpString).getBytes(), Option.DEFAULT);</span>
+<span class="nc" id="L639">            return gsub(string, regexp, replacement, block);</span>
+        }
+
+        @Specialization
+        public RubyString gsub(RubyString string, RubyRegexp regexp, RubyString replacement, @SuppressWarnings(&quot;unused&quot;) UndefinedPlaceholder block) {
+<span class="nc" id="L644">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L646">            return regexp.gsub(string, replacement.toString());</span>
+        }
+
+        @Specialization
+        public RubyString gsub(VirtualFrame frame, RubyString string, RubyString regexpString, RubyString replacement, RubyProc block) {
+<span class="nc" id="L651">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L653">            final RubyRegexp regexp = new RubyRegexp(this, getContext().getCoreLibrary().getRegexpClass(), escape(frame, regexpString).getBytes(), Option.DEFAULT);</span>
+<span class="nc" id="L654">            return gsub(string, regexp, replacement, block);</span>
+        }
+
+        @Specialization
+        public RubyString gsub(RubyString string, RubyRegexp regexp, RubyString replacement, @SuppressWarnings(&quot;unused&quot;) RubyProc block) {
+<span class="nc" id="L659">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L661">            return regexp.gsub(string, replacement.toString());</span>
+        }
+
+        @Specialization
+        public RubyString gsub(VirtualFrame frame, RubyString string, RubyString regexpString, @SuppressWarnings(&quot;unused&quot;) UndefinedPlaceholder replacement, RubyProc block) {
+<span class="nc" id="L666">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L668">            final RubyRegexp regexp = new RubyRegexp(this, getContext().getCoreLibrary().getRegexpClass(), escape(frame, regexpString).getBytes(), Option.DEFAULT);</span>
+<span class="nc" id="L669">            return gsub(frame, string, regexp, replacement, block);</span>
+        }
+
+        @Specialization
+        public RubyString gsub(VirtualFrame frame, RubyString string, RubyRegexp regexp, @SuppressWarnings(&quot;unused&quot;) UndefinedPlaceholder replacement, RubyProc block) {
+<span class="nc" id="L674">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L676">            final RubyContext context = getContext();</span>
+
+<span class="nc" id="L678">            final byte[] stringBytes = string.getBytes().bytes();</span>
+<span class="nc" id="L679">            final Encoding encoding = string.getBytes().getEncoding();</span>
+<span class="nc" id="L680">            final Matcher matcher = regexp.getRegex().matcher(stringBytes);</span>
+
+<span class="nc" id="L682">            int p = string.getBytes().getBegin();</span>
+<span class="nc" id="L683">            int end = 0;</span>
+<span class="nc" id="L684">            int range = p + string.getBytes().getRealSize();</span>
+<span class="nc" id="L685">            int lastMatchEnd = 0;</span>
+
+            // We only ever care about the entire matched string, not each of the matched parts, so we can hard-code the index.
+<span class="nc" id="L688">            int matchedStringIndex = 0;</span>
+
+<span class="nc" id="L690">            final StringBuilder builder = new StringBuilder();</span>
+
+            while (true) {
+<span class="nc" id="L693">                Object matchData = regexp.matchCommon(string.getBytes(), false, true, matcher, p + end, range);</span>
+
+<span class="nc bnc" id="L695" title="All 2 branches missed.">                if (matchData == context.getCoreLibrary().getNilObject()) {</span>
+<span class="nc" id="L696">                    builder.append(StandardCharsets.UTF_8.decode(ByteBuffer.wrap(stringBytes, lastMatchEnd, range - lastMatchEnd)));</span>
+
+<span class="nc" id="L698">                    break;</span>
+                }
+
+<span class="nc" id="L701">                Region region = matcher.getEagerRegion();</span>
+
+<span class="nc" id="L703">                RubyMatchData md = (RubyMatchData) matchData;</span>
+<span class="nc" id="L704">                Object[] values = md.getValues();</span>
+
+<span class="nc" id="L706">                int regionStart = region.beg[matchedStringIndex];</span>
+<span class="nc" id="L707">                int regionEnd = region.end[matchedStringIndex];</span>
+
+                // TODO (nirvdrum Dec. 24, 2014): There's probably a better way of doing this than converting back and forth between String and RubyString.
+<span class="nc" id="L710">                builder.append(StandardCharsets.UTF_8.decode(ByteBuffer.wrap(stringBytes, lastMatchEnd, regionStart - lastMatchEnd)));</span>
+
+<span class="nc" id="L712">                Object yieldResult = yield(frame, block, values[matchedStringIndex]);</span>
+<span class="nc" id="L713">                builder.append(toS.call(frame, yieldResult, &quot;to_s&quot;, null).toString());</span>
+
+<span class="nc" id="L715">                lastMatchEnd = regionEnd;</span>
+<span class="nc" id="L716">                end = StringSupport.positionEndForScan(string.getBytes(), matcher, encoding, p, range);</span>
+<span class="nc" id="L717">            }</span>
+
+<span class="nc" id="L719">            return context.makeString(builder.toString());</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;getbyte&quot;, required = 1)
+    public abstract static class GetByteNode extends CoreMethodNode {
+
+        public GetByteNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L727">            super(context, sourceSection);</span>
+<span class="nc" id="L728">        }</span>
+
+        public GetByteNode(GetByteNode prev) {
+<span class="nc" id="L731">            super(prev);</span>
+<span class="nc" id="L732">        }</span>
+
+        @Specialization
+        public int getByte(RubyString string, int index) {
+<span class="nc" id="L736">            return string.getBytes().get(index);</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;include?&quot;, required = 1)
+    public abstract static class IncludeQueryNode extends CoreMethodNode {
+
+        public IncludeQueryNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L744">            super(context, sourceSection);</span>
+<span class="nc" id="L745">        }</span>
+
+        public IncludeQueryNode(IncludeQueryNode prev) {
+<span class="nc" id="L748">            super(prev);</span>
+<span class="nc" id="L749">        }</span>
+
+        @Specialization
+        public boolean includeQuery(RubyString string, RubyString otherString) {
+<span class="nc" id="L753">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L755">            int foundIndex = StringSupport.index(string, string.getBytes(), string.length(),</span>
+<span class="nc" id="L756">                                                 otherString, otherString.getBytes(), otherString.length(),</span>
+<span class="nc" id="L757">                                                 0, string.getBytes().getEncoding());</span>
+
+<span class="nc bnc" id="L759" title="All 2 branches missed.">            return foundIndex != -1;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;inspect&quot;)
+    public abstract static class InspectNode extends CoreMethodNode {
+
+        public InspectNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L767">            super(context, sourceSection);</span>
+<span class="nc" id="L768">        }</span>
+
+        public InspectNode(InspectNode prev) {
+<span class="nc" id="L771">            super(prev);</span>
+<span class="nc" id="L772">        }</span>
+
+        @Specialization
+        public RubyString inspect(RubyString string) {
+<span class="nc" id="L776">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L778">            final org.jruby.RubyString inspected = (org.jruby.RubyString) org.jruby.RubyString.inspect19(getContext().getRuntime(), string.getBytes());</span>
+<span class="nc" id="L779">            return getContext().makeString(inspected.getByteList());</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;initialize&quot;, required = 1)
+    public abstract static class InitializeNode extends CoreMethodNode {
+
+        public InitializeNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L787">            super(context, sourceSection);</span>
+<span class="nc" id="L788">        }</span>
+
+        public InitializeNode(InitializeNode prev) {
+<span class="nc" id="L791">            super(prev);</span>
+<span class="nc" id="L792">        }</span>
+
+        @Specialization
+        public RubyString initialize(RubyString self, UndefinedPlaceholder from) {
+<span class="nc" id="L796">            return self;</span>
+        }
+
+        @Specialization
+        public RubyString initialize(RubyString self, RubyString from) {
+<span class="nc" id="L801">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L803">            self.set(from.getBytes());</span>
+<span class="nc" id="L804">            return self;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;initialize_copy&quot;, visibility = Visibility.PRIVATE, required = 1)
+    public abstract static class InitializeCopyNode extends CoreMethodNode {
+
+        public InitializeCopyNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L812">            super(context, sourceSection);</span>
+<span class="nc" id="L813">        }</span>
+
+        public InitializeCopyNode(InitializeCopyNode prev) {
+<span class="nc" id="L816">            super(prev);</span>
+<span class="nc" id="L817">        }</span>
+
+        @Specialization
+        public Object initializeCopy(RubyString self, RubyString from) {
+<span class="nc" id="L821">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L823" title="All 2 branches missed.">            if (self == from) {</span>
+<span class="nc" id="L824">                return self;</span>
+            }
+
+<span class="nc" id="L827">            self.getBytes().replace(from.getBytes().bytes());</span>
+
+<span class="nc" id="L829">            return self;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;insert&quot;, required = 2, lowerFixnumParameters = 0)
+    public abstract static class InsertNode extends CoreMethodNode {
+
+        @Child protected ConcatNode concatNode;
+        @Child protected GetIndexNode getIndexNode;
+
+        public InsertNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L841">            super(context, sourceSection);</span>
+<span class="nc" id="L842">            concatNode = StringNodesFactory.ConcatNodeFactory.create(context, sourceSection, new RubyNode[]{});</span>
+<span class="nc" id="L843">            getIndexNode = StringNodesFactory.GetIndexNodeFactory.create(context, sourceSection, new RubyNode[]{});</span>
+<span class="nc" id="L844">        }</span>
+
+        public InsertNode(InsertNode prev) {
+<span class="nc" id="L847">            super(prev);</span>
+<span class="nc" id="L848">            concatNode = prev.concatNode;</span>
+<span class="nc" id="L849">            getIndexNode = prev.getIndexNode;</span>
+<span class="nc" id="L850">        }</span>
+
+        @Specialization
+        public RubyString insert(RubyString string, int index, RubyString otherString) {
+<span class="nc" id="L854">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L856" title="All 2 branches missed.">            if (string.isFrozen()) {</span>
+<span class="nc" id="L857">                CompilerDirectives.transferToInterpreter();</span>
+
+<span class="nc" id="L859">                throw new RaiseException(getContext().getCoreLibrary().frozenError(&quot;String&quot;, this));</span>
+            }
+
+<span class="nc bnc" id="L862" title="All 2 branches missed.">            if (index == -1) {</span>
+<span class="nc" id="L863">                concatNode.concat(string, otherString);</span>
+
+<span class="nc" id="L865">                return string;</span>
+
+<span class="nc bnc" id="L867" title="All 2 branches missed.">            } else if (index &lt; 0) {</span>
+                // Incrementing first seems weird, but MRI does it and it's significant because it uses the modified
+                // index value in its error messages.  This seems wrong, but we should be compatible.
+<span class="nc" id="L870">                index++;</span>
+
+<span class="nc bnc" id="L872" title="All 2 branches missed.">                if (-index &gt; string.length()) {</span>
+<span class="nc" id="L873">                    CompilerDirectives.transferToInterpreter();</span>
+
+<span class="nc" id="L875">                    throw new RaiseException(getContext().getCoreLibrary().indexError(String.format(&quot;index %d out of string&quot;, index), this));</span>
+                }
+
+<span class="nc" id="L878">                index = index + string.length();</span>
+
+<span class="nc bnc" id="L880" title="All 2 branches missed.">            } else if (index &gt; string.length()) {</span>
+<span class="nc" id="L881">                CompilerDirectives.transferToInterpreter();</span>
+
+<span class="nc" id="L883">                throw new RaiseException(getContext().getCoreLibrary().indexError(String.format(&quot;index %d out of string&quot;, index), this));</span>
+            }
+
+<span class="nc" id="L886">            RubyString firstPart = getIndexNode.getIndex(string, 0, index);</span>
+<span class="nc" id="L887">            RubyString secondPart = getIndexNode.getIndex(string, index, string.length());</span>
+
+<span class="nc" id="L889">            RubyString concatenated = concatNode.concat(concatNode.concat(firstPart, otherString), secondPart);</span>
+
+<span class="nc" id="L891">            string.set(concatenated.getBytes());</span>
+
+<span class="nc" id="L893">            return string;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;ljust&quot;, required = 1, optional = 1, lowerFixnumParameters = 0)
+    public abstract static class LjustNode extends CoreMethodNode {
+
+        public LjustNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L901">            super(context, sourceSection);</span>
+<span class="nc" id="L902">        }</span>
+
+        public LjustNode(LjustNode prev) {
+<span class="nc" id="L905">            super(prev);</span>
+<span class="nc" id="L906">        }</span>
+
+        @Specialization
+        public RubyString ljust(RubyString string, int length, @SuppressWarnings(&quot;unused&quot;) UndefinedPlaceholder padding) {
+<span class="nc" id="L910">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L912">            return getContext().makeString(RubyString.ljust(string.toString(), length, &quot; &quot;));</span>
+        }
+
+        @Specialization
+        public RubyString ljust(RubyString string, int length, RubyString padding) {
+<span class="nc" id="L917">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L919">            return getContext().makeString(RubyString.ljust(string.toString(), length, padding.toString()));</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;match&quot;, required = 1)
+    public abstract static class MatchNode extends CoreMethodNode {
+
+        public MatchNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L928">            super(context, sourceSection);</span>
+<span class="nc" id="L929">        }</span>
+
+        public MatchNode(MatchNode prev) {
+<span class="nc" id="L932">            super(prev);</span>
+<span class="nc" id="L933">        }</span>
+
+        @Specialization
+        public Object match(RubyString string, RubyString regexpString) {
+<span class="nc" id="L937">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L939">            final RubyRegexp regexp = new RubyRegexp(this, getContext().getCoreLibrary().getRegexpClass(), regexpString.getBytes(), Option.DEFAULT);</span>
+<span class="nc" id="L940">            return regexp.matchCommon(string.getBytes(), false, false);</span>
+        }
+
+        @Specialization
+        public Object match(RubyString string, RubyRegexp regexp) {
+<span class="nc" id="L945">            return regexp.matchCommon(string.getBytes(), false, false);</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;ord&quot;)
+    public abstract static class OrdNode extends CoreMethodNode {
+
+        public OrdNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L953">            super(context, sourceSection);</span>
+<span class="nc" id="L954">        }</span>
+
+        public OrdNode(OrdNode prev) {
+<span class="nc" id="L957">            super(prev);</span>
+<span class="nc" id="L958">        }</span>
+
+        @Specialization
+        public int ord(RubyString string) {
+<span class="nc" id="L962">            notDesignedForCompilation();</span>
+<span class="nc" id="L963">            return ((org.jruby.RubyFixnum) getContext().toJRuby(string).ord(getContext().getRuntime().getCurrentContext())).getIntValue();</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;rindex&quot;, required = 1, optional = 1, lowerFixnumParameters = 1)
+    public abstract static class RindexNode extends CoreMethodNode {
+
+        public RindexNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L971">            super(context, sourceSection);</span>
+<span class="nc" id="L972">        }</span>
+
+        public RindexNode(RindexNode prev) {
+<span class="nc" id="L975">            super(prev);</span>
+<span class="nc" id="L976">        }</span>
+
+        @Specialization
+        public Object rindex(RubyString string, RubyString subString, @SuppressWarnings(&quot;unused&quot;) UndefinedPlaceholder endPosition) {
+<span class="nc" id="L980">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L982">            return rindex(string, subString, string.length());</span>
+        }
+
+        @Specialization
+        public Object rindex(RubyString string, RubyString subString, int endPosition) {
+<span class="nc" id="L987">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L989">            int normalizedEndPosition = endPosition;</span>
+
+<span class="nc bnc" id="L991" title="All 2 branches missed.">            if (endPosition &lt; 0) {</span>
+<span class="nc" id="L992">                normalizedEndPosition = endPosition + string.length();</span>
+
+<span class="nc bnc" id="L994" title="All 2 branches missed.">                if (normalizedEndPosition &lt; 0) {</span>
+<span class="nc" id="L995">                    return getContext().getCoreLibrary().getNilObject();</span>
+                }
+<span class="nc bnc" id="L997" title="All 2 branches missed.">            } else if (endPosition &gt; string.length()) {</span>
+<span class="nc" id="L998">                normalizedEndPosition = string.length();</span>
+            }
+
+<span class="nc" id="L1001">            int result = StringSupport.rindex(string.getBytes(), string.length(), subString.getBytes(), subString.length(),</span>
+<span class="nc" id="L1002">                    normalizedEndPosition, subString, string.getBytes().getEncoding()</span>
+            );
+
+<span class="nc bnc" id="L1005" title="All 2 branches missed.">            if (result &gt;= 0) {</span>
+<span class="nc" id="L1006">                return result;</span>
+            } else {
+<span class="nc" id="L1008">                return getContext().getCoreLibrary().getNilObject();</span>
+            }
+        }
+    }
+
+    @CoreMethod(names = &quot;rjust&quot;, required = 1, optional = 1, lowerFixnumParameters = 0)
+    public abstract static class RjustNode extends CoreMethodNode {
+
+        public RjustNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1017">            super(context, sourceSection);</span>
+<span class="nc" id="L1018">        }</span>
+
+        public RjustNode(RjustNode prev) {
+<span class="nc" id="L1021">            super(prev);</span>
+<span class="nc" id="L1022">        }</span>
+
+        @Specialization
+        public RubyString rjust(RubyString string, int length, @SuppressWarnings(&quot;unused&quot;) UndefinedPlaceholder padding) {
+<span class="nc" id="L1026">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1028">            return getContext().makeString(RubyString.rjust(string.toString(), length, &quot; &quot;));</span>
+        }
+
+        @Specialization
+        public RubyString rjust(RubyString string, int length, RubyString padding) {
+<span class="nc" id="L1033">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1035">            return getContext().makeString(RubyString.rjust(string.toString(), length, padding.toString()));</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;rstrip&quot;)
+    public abstract static class RStripNode extends CoreMethodNode {
+
+        public RStripNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1044">            super(context, sourceSection);</span>
+<span class="nc" id="L1045">        }</span>
+
+        public RStripNode(RStripNode prev) {
+<span class="nc" id="L1048">            super(prev);</span>
+<span class="nc" id="L1049">        }</span>
+
+        @Specialization
+        public RubyString rstrip(RubyString string) {
+<span class="nc" id="L1053">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1055">            String str = string.toString();</span>
+<span class="nc" id="L1056">            int last = str.length()-1;</span>
+<span class="nc bnc" id="L1057" title="All 4 branches missed.">            while (last &gt;= 0 &amp;&amp; &quot; \r\n\t&quot;.indexOf(str.charAt(last)) != -1) {</span>
+<span class="nc" id="L1058">                last--;</span>
+            }
+
+<span class="nc" id="L1061">            return getContext().makeString(str.substring(0, last+1));</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;dump&quot;)
+    public abstract static class DumpNode extends CoreMethodNode {
+
+        public DumpNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1070">            super(context, sourceSection);</span>
+<span class="nc" id="L1071">        }</span>
+
+        public DumpNode(DumpNode prev) {
+<span class="nc" id="L1074">            super(prev);</span>
+<span class="nc" id="L1075">        }</span>
+
+        @Specialization
+        public RubyString rstrip(RubyString string) {
+<span class="nc" id="L1079">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1081">            return string.dump();</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;scan&quot;, required = 1, needsBlock = true)
+    public abstract static class ScanNode extends YieldingCoreMethodNode {
+
+        public ScanNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1090">            super(context, sourceSection);</span>
+<span class="nc" id="L1091">        }</span>
+
+        public ScanNode(ScanNode prev) {
+<span class="nc" id="L1094">            super(prev);</span>
+<span class="nc" id="L1095">        }</span>
+
+        @Specialization
+        public RubyArray scan(RubyString string, RubyString regexpString, UndefinedPlaceholder block) {
+<span class="nc" id="L1099">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1101">            final RubyRegexp regexp = new RubyRegexp(this, getContext().getCoreLibrary().getRegexpClass(), regexpString.getBytes(), Option.DEFAULT);</span>
+<span class="nc" id="L1102">            return scan(string, regexp, block);</span>
+        }
+
+        @Specialization
+        public RubyString scan(VirtualFrame frame, RubyString string, RubyString regexpString, RubyProc block) {
+<span class="nc" id="L1107">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1109">            final RubyRegexp regexp = new RubyRegexp(this, getContext().getCoreLibrary().getRegexpClass(), regexpString.getBytes(), Option.DEFAULT);</span>
+<span class="nc" id="L1110">            return scan(frame, string, regexp, block);</span>
+        }
+
+        @Specialization
+        public RubyArray scan(RubyString string, RubyRegexp regexp, UndefinedPlaceholder block) {
+<span class="nc" id="L1115">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1117">            return RubyArray.fromObjects(getContext().getCoreLibrary().getArrayClass(), (Object[]) regexp.scan(string));</span>
+        }
+
+        @Specialization
+        public RubyString scan(VirtualFrame frame, RubyString string, RubyRegexp regexp, RubyProc block) {
+<span class="nc" id="L1122">            notDesignedForCompilation();</span>
+
+            // TODO (nirvdrum Dec. 18, 2014): Find a way to yield results without needing to materialize as an array first.
+<span class="nc" id="L1125">            Object[] matches = (Object[]) regexp.scan(string);</span>
+<span class="nc bnc" id="L1126" title="All 2 branches missed.">            for (Object match : matches) {</span>
+<span class="nc" id="L1127">                yield(frame, block, match);</span>
+            }
+
+<span class="nc" id="L1130">            return string;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;setbyte&quot;, required = 2)
+    public abstract static class SetByteNode extends CoreMethodNode {
+
+        public SetByteNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1138">            super(context, sourceSection);</span>
+<span class="nc" id="L1139">        }</span>
+
+        public SetByteNode(SetByteNode prev) {
+<span class="nc" id="L1142">            super(prev);</span>
+<span class="nc" id="L1143">        }</span>
+
+        @Specialization
+        public Object setByte(RubyString string, int index, Object value) {
+<span class="nc" id="L1147">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1149">            throw new UnsupportedOperationException(&quot;getbyte not implemented&quot;);</span>
+        }
+    }
+
+    @CoreMethod(names = {&quot;size&quot;, &quot;length&quot;})
+    public abstract static class SizeNode extends CoreMethodNode {
+
+        public SizeNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1157">            super(context, sourceSection);</span>
+<span class="nc" id="L1158">        }</span>
+
+        public SizeNode(SizeNode prev) {
+<span class="nc" id="L1161">            super(prev);</span>
+<span class="nc" id="L1162">        }</span>
+
+        @Specialization
+        public int size(RubyString string) {
+<span class="nc" id="L1166">            return string.length();</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;split&quot;, required = 1)
+    public abstract static class SplitNode extends CoreMethodNode {
+
+        public SplitNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1174">            super(context, sourceSection);</span>
+<span class="nc" id="L1175">        }</span>
+
+        public SplitNode(SplitNode prev) {
+<span class="nc" id="L1178">            super(prev);</span>
+<span class="nc" id="L1179">        }</span>
+
+        @Specialization
+        public RubyArray split(RubyString string, RubyString sep) {
+<span class="nc" id="L1183">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1185">            final String[] components = string.toString().split(Pattern.quote(sep.toString()));</span>
+
+<span class="nc" id="L1187">            final Object[] objects = new Object[components.length];</span>
+
+<span class="nc bnc" id="L1189" title="All 2 branches missed.">            for (int n = 0; n &lt; objects.length; n++) {</span>
+<span class="nc" id="L1190">                objects[n] = getContext().makeString(components[n]);</span>
+            }
+
+<span class="nc" id="L1193">            return RubyArray.fromObjects(getContext().getCoreLibrary().getArrayClass(), objects);</span>
+        }
+
+        @Specialization
+        public RubyArray split(RubyString string, RubyRegexp sep) {
+<span class="nc" id="L1198">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1200">            return RubyArray.fromObjects(getContext().getCoreLibrary().getArrayClass(), (Object[]) sep.split(string.toString()));</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;start_with?&quot;, required = 1)
+    public abstract static class StartWithNode extends CoreMethodNode {
+
+        public StartWithNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1208">            super(context, sourceSection);</span>
+<span class="nc" id="L1209">        }</span>
+
+        public StartWithNode(StartWithNode prev) {
+<span class="nc" id="L1212">            super(prev);</span>
+<span class="nc" id="L1213">        }</span>
+
+        @Specialization
+        public boolean endWith(RubyString string, RubyString b) {
+<span class="nc" id="L1217">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1219">            return string.toString().startsWith(b.toString());</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;sub&quot;, required = 2)
+    public abstract static class SubNode extends RegexpNodes.EscapingNode {
+
+        public SubNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1227">            super(context, sourceSection);</span>
+<span class="nc" id="L1228">        }</span>
+
+        public SubNode(SubNode prev) {
+<span class="nc" id="L1231">            super(prev);</span>
+<span class="nc" id="L1232">        }</span>
+
+        @Specialization
+        public RubyString sub(VirtualFrame frame, RubyString string, RubyString regexpString, RubyString replacement) {
+<span class="nc" id="L1236">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1238">            final RubyRegexp regexp = new RubyRegexp(this, getContext().getCoreLibrary().getRegexpClass(), escape(frame, regexpString).getBytes(), Option.DEFAULT);</span>
+<span class="nc" id="L1239">            return sub(string, regexp, replacement);</span>
+        }
+
+        @Specialization
+        public RubyString sub(RubyString string, RubyRegexp regexp, RubyString replacement) {
+<span class="nc" id="L1244">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1246">            return regexp.sub(string.toString(), replacement.toString());</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;succ&quot;)
+    public abstract static class SuccNode extends CoreMethodNode {
+
+        public SuccNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1254">            super(context, sourceSection);</span>
+<span class="nc" id="L1255">        }</span>
+
+        public SuccNode(SuccNode prev) {
+<span class="nc" id="L1258">            super(prev);</span>
+<span class="nc" id="L1259">        }</span>
+
+        @Specialization
+        public RubyString succ(RubyString string) {
+<span class="nc" id="L1263">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L1265" title="All 2 branches missed.">            if (string.length() &gt; 0) {</span>
+<span class="nc" id="L1266">                return getContext().makeString(StringSupport.succCommon(string.getBytes()));</span>
+            } else {
+<span class="nc" id="L1268">                return getContext().makeString(&quot;&quot;);</span>
+            }
+        }
+    }
+
+    @CoreMethod(names = &quot;succ!&quot;)
+    public abstract static class SuccBangNode extends CoreMethodNode {
+
+        public SuccBangNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1277">            super(context, sourceSection);</span>
+<span class="nc" id="L1278">        }</span>
+
+        public SuccBangNode(SuccBangNode prev) {
+<span class="nc" id="L1281">            super(prev);</span>
+<span class="nc" id="L1282">        }</span>
+
+        @Specialization
+        public RubyString succBang(RubyString string) {
+<span class="nc" id="L1286">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L1288" title="All 2 branches missed.">            if (string.isFrozen()) {</span>
+<span class="nc" id="L1289">                CompilerDirectives.transferToInterpreter();</span>
+
+<span class="nc" id="L1291">                throw new RaiseException(getContext().getCoreLibrary().frozenError(&quot;String&quot;, this));</span>
+            }
+
+<span class="nc bnc" id="L1294" title="All 2 branches missed.">            if (string.length() &gt; 0) {</span>
+<span class="nc" id="L1295">                string.set(StringSupport.succCommon(string.getBytes()));</span>
+            }
+
+<span class="nc" id="L1298">            return string;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;sum&quot;)
+    public abstract static class SumNode extends CoreMethodNode {
+
+        public SumNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1306">            super(context, sourceSection);</span>
+<span class="nc" id="L1307">        }</span>
+
+        public SumNode(SumNode prev) {
+<span class="nc" id="L1310">            super(prev);</span>
+<span class="nc" id="L1311">        }</span>
+
+        @Specialization
+        public int sum(RubyString string) {
+<span class="nc" id="L1315">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1317">            return (int) getContext().toTruffle(getContext().toJRuby(string).sum(getContext().getRuntime().getCurrentContext()));</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;to_f&quot;)
+    public abstract static class ToFNode extends CoreMethodNode {
+
+        public ToFNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1325">            super(context, sourceSection);</span>
+<span class="nc" id="L1326">        }</span>
+
+        public ToFNode(ToFNode prev) {
+<span class="nc" id="L1329">            super(prev);</span>
+<span class="nc" id="L1330">        }</span>
+
+        @Specialization
+        public double toF(RubyString string) {
+<span class="nc" id="L1334">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1336">            return Double.parseDouble(string.toString());</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;to_i&quot;)
+    public abstract static class ToINode extends CoreMethodNode {
+
+        public ToINode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1344">            super(context, sourceSection);</span>
+<span class="nc" id="L1345">        }</span>
+
+        public ToINode(ToINode prev) {
+<span class="nc" id="L1348">            super(prev);</span>
+<span class="nc" id="L1349">        }</span>
+
+        @Specialization
+        public Object toI(RubyString string) {
+<span class="nc" id="L1353">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L1355" title="All 2 branches missed.">            if (string.toString().length() == 0) {</span>
+<span class="nc" id="L1356">                return 0;</span>
+            }
+
+            try {
+<span class="nc" id="L1360">                return Integer.parseInt(string.toString());</span>
+<span class="nc" id="L1361">            } catch (NumberFormatException e) {</span>
+<span class="nc" id="L1362">                return bignum(new BigInteger(string.toString()));</span>
+            }
+        }
+    }
+
+    @CoreMethod(names = &quot;to_s&quot;)
+    public abstract static class ToSNode extends CoreMethodNode {
+
+        public ToSNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1371">            super(context, sourceSection);</span>
+<span class="nc" id="L1372">        }</span>
+
+        public ToSNode(ToSNode prev) {
+<span class="nc" id="L1375">            super(prev);</span>
+<span class="nc" id="L1376">        }</span>
+
+        @Specialization
+        public RubyString toS(RubyString string) {
+<span class="nc" id="L1380">            return string;</span>
+        }
+    }
+
+    @CoreMethod(names = {&quot;to_sym&quot;, &quot;intern&quot;})
+    public abstract static class ToSymNode extends CoreMethodNode {
+
+        public ToSymNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1388">            super(context, sourceSection);</span>
+<span class="nc" id="L1389">        }</span>
+
+        public ToSymNode(ToSymNode prev) {
+<span class="nc" id="L1392">            super(prev);</span>
+<span class="nc" id="L1393">        }</span>
+
+        @Specialization
+        public RubySymbol toSym(RubyString string) {
+<span class="nc" id="L1397">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1399">            return getContext().newSymbol(string.toString());</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;reverse&quot;)
+    public abstract static class ReverseNode extends CoreMethodNode {
+
+        public ReverseNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1407">            super(context, sourceSection);</span>
+<span class="nc" id="L1408">        }</span>
+
+        public ReverseNode(ReverseNode prev) {
+<span class="nc" id="L1411">            super(prev);</span>
+<span class="nc" id="L1412">        }</span>
+
+        @Specialization
+        public RubyString reverse(RubyString string) {
+<span class="nc" id="L1416">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1418">            return RubyString.fromByteList(string.getLogicalClass(), StringNodesHelper.reverse(string));</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;reverse!&quot;)
+    public abstract static class ReverseBangNode extends CoreMethodNode {
+
+        public ReverseBangNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1426">            super(context, sourceSection);</span>
+<span class="nc" id="L1427">        }</span>
+
+        public ReverseBangNode(ReverseBangNode prev) {
+<span class="nc" id="L1430">            super(prev);</span>
+<span class="nc" id="L1431">        }</span>
+
+        @Specialization
+        public RubyString reverse(RubyString string) {
+<span class="nc" id="L1435">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1437">            string.set(StringNodesHelper.reverse(string));</span>
+<span class="nc" id="L1438">            return string;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;unpack&quot;, required = 1)
+    public abstract static class UnpackNode extends ArrayCoreMethodNode {
+
+        public UnpackNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1446">            super(context, sourceSection);</span>
+<span class="nc" id="L1447">        }</span>
+
+        public UnpackNode(UnpackNode prev) {
+<span class="nc" id="L1450">            super(prev);</span>
+<span class="nc" id="L1451">        }</span>
+
+        @CompilerDirectives.TruffleBoundary
+        @Specialization
+        public RubyArray unpack(RubyString string, RubyString format) {
+<span class="nc" id="L1456">            final org.jruby.RubyArray jrubyArray = Pack.unpack(getContext().getRuntime(), string.getBytes(), format.getBytes());</span>
+<span class="nc" id="L1457">            return RubyArray.fromObjects(getContext().getCoreLibrary().getArrayClass(), jrubyArray.toArray());</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;upcase&quot;)
+    public abstract static class UpcaseNode extends CoreMethodNode {
+
+        public UpcaseNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1466">            super(context, sourceSection);</span>
+<span class="nc" id="L1467">        }</span>
+
+        public UpcaseNode(UpcaseNode prev) {
+<span class="nc" id="L1470">            super(prev);</span>
+<span class="nc" id="L1471">        }</span>
+
+        @Specialization
+        public RubyString upcase(RubyString string) {
+<span class="nc" id="L1475">            notDesignedForCompilation();</span>
+<span class="nc" id="L1476">            final ByteList byteListString = StringNodesHelper.upcase(string);</span>
+
+<span class="nc" id="L1478">            return string.getContext().makeString(byteListString);</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;upcase!&quot;)
+    public abstract static class UpcaseBangNode extends CoreMethodNode {
+
+        public UpcaseBangNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1487">            super(context, sourceSection);</span>
+<span class="nc" id="L1488">        }</span>
+
+        public UpcaseBangNode(UpcaseBangNode prev) {
+<span class="nc" id="L1491">            super(prev);</span>
+<span class="nc" id="L1492">        }</span>
+
+        @Specialization
+        public RubyString upcaseBang(RubyString string) {
+<span class="nc" id="L1496">            notDesignedForCompilation();</span>
+<span class="nc" id="L1497">            final ByteList byteListString = StringNodesHelper.upcase(string);</span>
+<span class="nc" id="L1498">            string.set(byteListString);</span>
+
+<span class="nc" id="L1500">            return string;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;capitalize!&quot;)
+    public abstract static class CapitalizeBangNode extends CoreMethodNode {
+
+        public CapitalizeBangNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1508">            super(context, sourceSection);</span>
+<span class="nc" id="L1509">        }</span>
+
+        public CapitalizeBangNode(CapitalizeBangNode prev) {
+<span class="nc" id="L1512">            super(prev);</span>
+<span class="nc" id="L1513">        }</span>
+
+        @Specialization
+        public RubyString capitalizeBang(RubyString string) {
+<span class="nc" id="L1517">            notDesignedForCompilation();</span>
+<span class="nc" id="L1518">            String javaString = string.toString();</span>
+<span class="nc bnc" id="L1519" title="All 2 branches missed.">            if (javaString.isEmpty()) {</span>
+<span class="nc" id="L1520">                return string;</span>
+            } else {
+<span class="nc" id="L1522">                final ByteList byteListString = StringNodesHelper.capitalize(string);</span>
+
+<span class="nc" id="L1524">                string.set(byteListString);</span>
+<span class="nc" id="L1525">                return string;</span>
+            }
+        }
+    }
+
+    @CoreMethod(names = &quot;capitalize&quot;)
+    public abstract static class CapitalizeNode extends CoreMethodNode {
+
+        public CapitalizeNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1534">            super(context, sourceSection);</span>
+<span class="nc" id="L1535">        }</span>
+
+        public CapitalizeNode(CapitalizeNode prev) {
+<span class="nc" id="L1538">            super(prev);</span>
+<span class="nc" id="L1539">        }</span>
+
+        @Specialization
+        public RubyString capitalize(RubyString string) {
+<span class="nc" id="L1543">            notDesignedForCompilation();</span>
+<span class="nc" id="L1544">            String javaString = string.toString();</span>
+
+<span class="nc bnc" id="L1546" title="All 2 branches missed.">            if (javaString.isEmpty()) {</span>
+<span class="nc" id="L1547">                return string;</span>
+            } else {
+<span class="nc" id="L1549">                final ByteList byteListString = StringNodesHelper.capitalize(string);</span>
+<span class="nc" id="L1550">                return string.getContext().makeString(byteListString);</span>
+            }
+        }
+
+    }
+
+    @CoreMethod(names = &quot;clear&quot;)
+    public abstract static class ClearNode extends CoreMethodNode {
+
+        public ClearNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1560">            super(context, sourceSection);</span>
+<span class="nc" id="L1561">        }</span>
+
+        public ClearNode(ClearNode prev) {
+<span class="nc" id="L1564">            super(prev);</span>
+<span class="nc" id="L1565">        }</span>
+
+        @Specialization
+        public RubyString clear(RubyString string) {
+<span class="nc" id="L1569">            notDesignedForCompilation();</span>
+<span class="nc" id="L1570">            ByteList empty = ByteList.EMPTY_BYTELIST;</span>
+<span class="nc" id="L1571">            empty.setEncoding(string.getBytes().getEncoding());</span>
+
+<span class="nc" id="L1573">            string.set(empty);</span>
+<span class="nc" id="L1574">            return string;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;chr&quot;)
+    public abstract static class ChrNode extends CoreMethodNode {
+
+        public ChrNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1582">            super(context, sourceSection);</span>
+<span class="nc" id="L1583">        }</span>
+
+        public ChrNode(ChrNode prev) {
+<span class="nc" id="L1586">            super(prev);</span>
+<span class="nc" id="L1587">        }</span>
+
+        @Specialization
+        public RubyString chr(RubyString string) {
+<span class="nc" id="L1591">            notDesignedForCompilation();</span>
+<span class="nc bnc" id="L1592" title="All 2 branches missed.">            if (string.toString().isEmpty()) {</span>
+<span class="nc" id="L1593">                return string;</span>
+            } else {
+<span class="nc" id="L1595">                String head = string.toString().substring(0, 1);</span>
+<span class="nc" id="L1596">                ByteList byteString = ByteList.create(head);</span>
+<span class="nc" id="L1597">                byteString.setEncoding(string.getBytes().getEncoding());</span>
+
+<span class="nc" id="L1599">                return string.getContext().makeString(byteString);</span>
+            }
+        }
+    }
+
+<span class="nc" id="L1604">    static class StringNodesHelper {</span>
+
+        public static ByteList capitalize(RubyString string) {
+<span class="nc" id="L1607">            String javaString = string.toString();</span>
+<span class="nc" id="L1608">            String head = javaString.substring(0, 1).toUpperCase();</span>
+<span class="nc" id="L1609">            String tail = javaString.substring(1, javaString.length()).toLowerCase();</span>
+<span class="nc" id="L1610">            ByteList byteListString = ByteList.create(head + tail);</span>
+<span class="nc" id="L1611">            byteListString.setEncoding(string.getBytes().getEncoding());</span>
+<span class="nc" id="L1612">            return byteListString;</span>
+        }
+
+        public static ByteList upcase(RubyString string) {
+<span class="nc" id="L1616">            ByteList byteListString = ByteList.create(string.toString().toUpperCase());</span>
+<span class="nc" id="L1617">            byteListString.setEncoding(string.getBytes().getEncoding());</span>
+<span class="nc" id="L1618">            return byteListString;</span>
+        }
+
+        public static ByteList downcase(RubyString string) {
+<span class="nc" id="L1622">            ByteList newByteList = ByteList.create(string.toString().toLowerCase());</span>
+<span class="nc" id="L1623">            newByteList.setEncoding(string.getBytes().getEncoding());</span>
+
+<span class="nc" id="L1625">            return newByteList;</span>
+        }
+
+        public static ByteList chomp(RubyString string) {
+<span class="nc" id="L1629">            String javaString = string.toString();</span>
+<span class="nc bnc" id="L1630" title="All 2 branches missed.">            if (javaString.endsWith(&quot;\r&quot;)) {</span>
+<span class="nc" id="L1631">                String newString = javaString.substring(0, javaString.length()-1);</span>
+<span class="nc" id="L1632">                ByteList byteListString = ByteList.create(newString);</span>
+<span class="nc" id="L1633">                byteListString.setEncoding(string.getBytes().getEncoding());</span>
+
+<span class="nc" id="L1635">                return byteListString;</span>
+            } else {
+<span class="nc" id="L1637">                ByteList byteListString = ByteList.create(javaString.trim());</span>
+<span class="nc" id="L1638">                byteListString.setEncoding(string.getBytes().getEncoding());</span>
+
+<span class="nc" id="L1640">                return byteListString;</span>
+            }
+
+        }
+
+        public static ByteList chompWithString(RubyString string, RubyString stringToChomp) {
+
+<span class="nc" id="L1647">            String tempString = string.toString();</span>
+
+<span class="nc bnc" id="L1649" title="All 2 branches missed.">            if (tempString.endsWith(stringToChomp.toString())) {</span>
+<span class="nc" id="L1650">                tempString = tempString.substring(0, tempString.length() - stringToChomp.toString().length());</span>
+            }
+
+<span class="nc" id="L1653">            ByteList byteList = ByteList.create(tempString);</span>
+<span class="nc" id="L1654">            byteList.setEncoding(string.getBytes().getEncoding());</span>
+
+<span class="nc" id="L1656">            return byteList;</span>
+        }
+
+        public static ByteList reverse(RubyString string) {
+<span class="nc" id="L1660">            ByteList byteListString = ByteList.create(new StringBuilder(string.toString()).reverse().toString());</span>
+<span class="nc" id="L1661">            byteListString.setEncoding(string.getBytes().getEncoding());</span>
+
+<span class="nc" id="L1663">            return byteListString;</span>
+        }
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

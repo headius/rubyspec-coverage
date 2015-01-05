@@ -1,0 +1,203 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Instr.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.instructions</a> &gt; <span class="el_source">Instr.java</span></div><h1>Instr.java</h1><pre class="source lang-java linenums">package org.jruby.ir.instructions;
+
+// A generic IR instruction is of the form: v = OP(arg_array, attribute_array)
+
+import org.jruby.ir.IRScope;
+import org.jruby.ir.IRVisitor;
+import org.jruby.ir.Interp;
+import org.jruby.ir.Operation;
+import org.jruby.ir.operands.LocalVariable;
+import org.jruby.ir.operands.Operand;
+import org.jruby.ir.operands.Variable;
+import org.jruby.ir.transformations.inlining.CloneInfo;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.DynamicScope;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+//
+// Specialized forms:
+//   v = OP(arg1, arg2, attribute_array); Ex: v = ADD(v1, v2)
+//   v = OP(arg, attribute_array);        Ex: v = NOT(v1)
+//
+// _attributes store information about the operands of the instruction that have
+// been collected as part of analysis.  For more information, see documentation
+// in Attribute.java
+//
+// Ex: v = BOXED_FIXNUM(n)
+//     v = HAS_TYPE(Fixnum)
+public abstract class Instr {
+<span class="fc" id="L34">    public static final Operand[] EMPTY_OPERANDS = new Operand[] {};</span>
+
+    private int ipc; // Interpreter-only: instruction pointer
+    private int rpc; // Interpreter-only: rescue pointer
+    private final Operation operation;
+    // Is this instruction live or dead?  During optimization passes, if this instruction
+    // causes no side-effects and the result of the instruction is not needed by anyone else,
+    // we can remove this instruction altogether without affecting program correctness.
+    private boolean isDead;
+
+<span class="fc" id="L44">    public Instr(Operation operation) {</span>
+<span class="fc" id="L45">        this.ipc = -1;</span>
+<span class="fc" id="L46">        this.rpc = -1;</span>
+<span class="fc" id="L47">        this.operation = operation;</span>
+<span class="fc" id="L48">    }</span>
+
+    @Override
+    public String toString() {
+<span class="nc bnc" id="L52" title="All 4 branches missed.">        return &quot;&quot; + (isDead() ? &quot;[DEAD]&quot; : &quot;&quot;) + ((this instanceof ResultInstr) ? ((ResultInstr)this).getResult() + &quot; = &quot; : &quot;&quot;) + operation;</span>
+    }
+
+    @Interp
+    public Operation getOperation() {
+<span class="fc" id="L57">        return operation;</span>
+    }
+
+    @Interp
+<span class="nc" id="L61">    public int getIPC() { return ipc; }</span>
+
+    @Interp
+<span class="fc" id="L64">    public void setIPC(int ipc) { this.ipc = ipc; }</span>
+
+    @Interp
+<span class="fc" id="L67">    public int getRPC() { return rpc; }</span>
+
+    @Interp
+<span class="fc" id="L70">    public void setRPC(int rpc) { this.rpc = rpc; }</span>
+
+    // Does this instruction have side effects as a result of its operation
+    // This information is used in optimization phases to impact dead code elimination
+    // and other optimization passes
+    public boolean hasSideEffects() {
+<span class="fc" id="L76">        return operation.hasSideEffects();</span>
+    }
+
+    // Can this instruction raise exceptions -- this superclass method has to be conservative and cannot affect program correctness.
+    public boolean canRaiseException() {
+<span class="fc" id="L81">        return operation.canRaiseException();</span>
+    }
+
+    // Can this instruction raise exceptions -- this superclass method has to be conservative and cannot affect program correctness.
+    public boolean transfersControl() {
+<span class="fc" id="L86">        return operation.transfersControl();</span>
+    }
+
+    /**
+     * Does this instruction do anything the scope is interested in?
+     * @return true if it modified the scope.
+     */
+    public boolean computeScopeFlags(IRScope scope) {
+<span class="fc" id="L94">        return false;</span>
+    }
+
+    public boolean canBeDeleted(IRScope s) {
+<span class="fc bfc" id="L98" title="All 8 branches covered.">         if (hasSideEffects() || operation.isDebugOp() || canRaiseException() || transfersControl()) return false;</span>
+
+<span class="pc bpc" id="L100" title="1 of 2 branches missed.">         if (this instanceof ResultInstr) {</span>
+<span class="fc" id="L101">             Variable r = ((ResultInstr) this).getResult();</span>
+
+             // %block must stay if this scope or nested scope has an eval which might yield. Safe, but conservative.
+<span class="pc bpc" id="L104" title="1 of 4 branches missed.">             if (r.isBlock()) return !s.usesEval();</span>
+
+             // If scope's binding escaped, then preserve lvars since consumers of the escaped binding may access those
+             // lvars.  Safe, but extremely conservative.
+<span class="fc bfc" id="L108" title="All 4 branches covered.">             if (s.bindingHasEscaped()) return !(r instanceof LocalVariable);</span>
+         }
+
+<span class="fc" id="L111">        return true;</span>
+    }
+
+    public void markDead() {
+<span class="fc" id="L115">        isDead = true;</span>
+<span class="fc" id="L116">    }</span>
+
+    @Interp
+    public boolean isDead() {
+<span class="fc" id="L120">        return isDead;</span>
+    }
+
+    /* Array of all operands for this instruction */
+    @Interp
+    public abstract Operand[] getOperands();
+
+    /* List of all variables used by all operands of this instruction */
+    public List&lt;Variable&gt; getUsedVariables() {
+<span class="fc" id="L129">        ArrayList&lt;Variable&gt; vars = new ArrayList&lt;Variable&gt;();</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">        for (Operand o : getOperands()) {</span>
+<span class="fc" id="L131">            o.addUsedVariables(vars);</span>
+        }
+
+<span class="fc" id="L134">        return vars;</span>
+    }
+
+    public void renameVars(Map&lt;Operand, Operand&gt; renameMap) {
+<span class="fc" id="L138">        simplifyOperands(renameMap, true);</span>
+<span class="fc bfc" id="L139" title="All 2 branches covered.">        if (this instanceof ResultInstr) {</span>
+<span class="fc" id="L140">            ResultInstr ri = (ResultInstr)this;</span>
+<span class="fc" id="L141">            Variable oldVar = ri.getResult();</span>
+<span class="fc" id="L142">            Variable newVar = (Variable)renameMap.get(oldVar);</span>
+<span class="fc bfc" id="L143" title="All 2 branches covered.">            if (newVar != null) ri.updateResult(newVar);</span>
+        }
+<span class="fc" id="L145">    }</span>
+
+    /**
+     * Clone the instruction for use in an inlining context (either when a scope is inlined into
+     * another scope, or when a block has to be cloned because its associated call belongs to
+     * an inlined scope). This might renaming variables and labels to eliminate naming conflicts.
+     *
+     * The implementation might vary on the cloning mode.
+     *
+     * @param info This object manages renaming of variables and labels, handles
+     *                    args and return values.
+     * @return a new instruction that can be used in the target scope.
+     */
+    public abstract Instr clone(CloneInfo info);
+
+    /**
+     * This method takes as input a map of operands to their values, and outputs
+     *
+     * If the value map provides a value for any of the instruction's operands
+     * this method is expected to replace the original operands with the simplified values.
+     * It is not required that it do so -- code correctness is not compromised by failure
+     * to simplify
+     */
+    public void simplifyOperands(Map&lt;Operand, Operand&gt; valueMap, boolean force) {
+<span class="fc" id="L169">    }</span>
+
+    /**
+     * This method takes as input a map of operands to their values, and outputs
+     * the result of this instruction.
+     *
+     * If the value map provides a value for any of the instruction's operands
+     * the expectation is that the operand will be replaced with the simplified value.
+     * It is not required that it do so -- code correctness is not compromised by failure
+     * to simplify.
+     *
+     * @param valueMap Mapping from operands to their simplified values
+     * @returns simplified result / output of this instruction
+     */
+    public Operand simplifyAndGetResult(IRScope scope, Map&lt;Operand, Operand&gt; valueMap) {
+<span class="fc" id="L184">        simplifyOperands(valueMap, false);</span>
+
+<span class="fc" id="L186">        return null; // By default, no simplifications!</span>
+    }
+
+    @Interp
+    public Object interpret(ThreadContext context, StaticScope currScope, DynamicScope currDynScope, IRubyObject self, Object[] temp) {
+<span class="nc" id="L191">        throw new RuntimeException(this.getClass().getSimpleName() + &quot; should not be directly interpreted&quot;);</span>
+    }
+
+    @Interp
+    public int interpretAndGetNewIPC(ThreadContext context, DynamicScope currDynScope, StaticScope currScope, IRubyObject self, Object[] temp, int ipc) {
+<span class="nc" id="L196">        throw new RuntimeException(this.getClass().getSimpleName() + &quot; should not be directly interpreted&quot;);</span>
+    }
+
+    public void visit(IRVisitor visitor) {
+<span class="nc" id="L200">        throw new RuntimeException(this.getClass().getSimpleName() + &quot; has no compile logic&quot;);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

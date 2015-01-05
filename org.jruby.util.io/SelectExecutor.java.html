@@ -1,0 +1,575 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SelectExecutor.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util.io</a> &gt; <span class="el_source">SelectExecutor.java</span></div><h1>SelectExecutor.java</h1><pre class="source lang-java linenums">package org.jruby.util.io;
+
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyIO;
+import org.jruby.RubyThread;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.TypeConverter;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.Pipe;
+import java.nio.channels.SelectableChannel;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.spi.SelectorProvider;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+
+/**
+ * Created by headius on 6/3/14.
+ */
+public class SelectExecutor {
+<span class="fc" id="L29">    public SelectExecutor(IRubyObject read, IRubyObject write, IRubyObject except, Long timeout) {</span>
+<span class="fc" id="L30">        this.read = read;</span>
+<span class="fc" id="L31">        this.write = write;</span>
+<span class="fc" id="L32">        this.except = except;</span>
+<span class="fc" id="L33">        this.timeout = timeout;</span>
+<span class="fc" id="L34">        this.runtime = read.getRuntime();</span>
+<span class="fc" id="L35">    }</span>
+
+    public IRubyObject go(ThreadContext context) {
+        try {
+<span class="fc" id="L39">            return selectCall(context);</span>
+<span class="nc" id="L40">        } catch (IOException ioe) {</span>
+<span class="nc" id="L41">            throw context.runtime.newIOErrorFromException(ioe);</span>
+        } finally {
+<span class="pc" id="L43">            try {selectEnd(context);} catch (IOException ioe) {}</span>
+        }
+    }
+
+    IRubyObject selectCall(ThreadContext context) throws IOException {
+<span class="fc" id="L48">        return selectInternal(context);</span>
+    }
+
+    IRubyObject selectEnd(ThreadContext context) throws IOException {
+<span class="fc" id="L52">        fdTerm(readKeyList);</span>
+<span class="fc" id="L53">        fdTerm(writeKeyList);</span>
+<span class="fc" id="L54">        fdTerm(errorKeyList);</span>
+
+<span class="fc bfc" id="L56" title="All 2 branches covered.">        if (selectors != null) {</span>
+<span class="fc bfc" id="L57" title="All 2 branches covered.">            for (int i = 0; i &lt; selectors.size(); i++) {</span>
+<span class="fc" id="L58">                Selector selector = selectors.get(i);</span>
+                // if it is a JDK selector, cache it
+<span class="pc bpc" id="L60" title="1 of 2 branches missed.">                if (selector.provider() == SelectorProvider.provider()) {</span>
+                    // clear cancelled keys (with selectNow) and return to pool
+<span class="fc" id="L62">                    selector.selectNow();</span>
+<span class="fc" id="L63">                    context.runtime.getSelectorPool().put(selector);</span>
+                } else {
+<span class="nc" id="L65">                    selector.close();</span>
+                }
+            }
+
+            // TODO: pool ENXIOSelector impls
+<span class="pc bpc" id="L70" title="1 of 2 branches missed.">            for (ENXIOSelector enxioSelector : enxioSelectors) {</span>
+<span class="nc" id="L71">                enxioSelector.pipe.sink().close();</span>
+<span class="nc" id="L72">                enxioSelector.pipe.source().close();</span>
+<span class="nc" id="L73">            }</span>
+        }
+
+        // TODO: reset blocking status
+//        if (readBlocking != null) {
+//            for (int i = 0; i &lt; readBlocking.length; i++) {
+//                if (readBlocking[i] != null) {
+//                    try {
+//                        ((SelectableChannel) readIOs[i].getChannel()).configureBlocking(readBlocking[i]);
+//                    } catch (IllegalBlockingModeException ibme) {
+//                        throw runtime.newConcurrencyError(&quot;can not set IO blocking after select; concurrent select detected?&quot;);
+//                    }
+//                }
+//            }
+//        }
+//        if (writeBlocking != null) {
+//            for (int i = 0; i &lt; writeBlocking.length; i++) {
+//                if (writeBlocking[i] != null) {
+//                    try {
+//                        ((SelectableChannel) writeIOs[i].getChannel()).configureBlocking(writeBlocking[i]);
+//                    } catch (IllegalBlockingModeException ibme) {
+//                        throw runtime.newConcurrencyError(&quot;can not set IO blocking after select; concurrent select detected?&quot;);
+//                    }
+//                }
+//            }
+//        }
+
+<span class="fc" id="L100">        return context.nil;</span>
+    }
+
+    IRubyObject selectInternal(ThreadContext context) throws IOException {
+<span class="fc" id="L104">        Ruby runtime = context.runtime;</span>
+        RubyArray res, list;
+        OpenFile fptr;
+        long i;
+
+<span class="fc" id="L109">        RubyArray readAry = null;</span>
+<span class="fc bfc" id="L110" title="All 2 branches covered.">        if (!read.isNil()) {</span>
+<span class="fc" id="L111">            readAry = read.convertToArray();</span>
+<span class="fc bfc" id="L112" title="All 2 branches covered.">            for (i = 0; i &lt; readAry.size(); i++) {</span>
+<span class="fc" id="L113">                fptr = TypeConverter.ioGetIO(runtime, readAry.eltOk(i)).getOpenFileChecked();</span>
+<span class="fc" id="L114">                fdSetRead(context, fptr.fd(), readAry.size());</span>
+<span class="pc bpc" id="L115" title="2 of 4 branches missed.">                if (fptr.READ_DATA_PENDING() || fptr.READ_CHAR_PENDING()) { /* check for buffered data */</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">                    if (pendingReadFDs == null) pendingReadFDs = new ArrayList(1);</span>
+<span class="nc" id="L117">                    pendingReadFDs.add(fptr.fd());</span>
+                }
+            }
+<span class="pc bpc" id="L120" title="1 of 2 branches missed.">            if (pendingReadFDs != null) {		/* no blocking if there's buffered data */</span>
+<span class="nc" id="L121">                timeout = (long) 0;</span>
+            }
+        }
+
+<span class="fc" id="L125">        RubyArray writeAry = null;</span>
+<span class="fc bfc" id="L126" title="All 2 branches covered.">        if (!write.isNil()) {</span>
+<span class="fc" id="L127">            writeAry = write.convertToArray();</span>
+<span class="fc bfc" id="L128" title="All 2 branches covered.">            for (i = 0; i &lt; writeAry.size(); i++) {</span>
+<span class="fc" id="L129">                RubyIO write_io = TypeConverter.ioGetIO(runtime, writeAry.eltOk(i)).GetWriteIO();</span>
+<span class="fc" id="L130">                fptr = write_io.getOpenFileChecked();</span>
+<span class="fc" id="L131">                fdSetWrite(context, fptr.fd(), writeAry.size());</span>
+            }
+        }
+
+<span class="fc" id="L135">        RubyArray exceptAry = null;</span>
+<span class="pc bpc" id="L136" title="1 of 2 branches missed.">        if (!except.isNil()) {</span>
+            // This does not actually register anything because we do not have a way to select for error on JDK.
+            // We make the calls for their side effects.
+<span class="nc" id="L139">            exceptAry = except.convertToArray();</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">            for (i = 0; i &lt; exceptAry.size(); i++) {</span>
+<span class="nc" id="L141">                RubyIO io = TypeConverter.ioGetIO(runtime, exceptAry.eltOk(i));</span>
+<span class="nc" id="L142">                RubyIO write_io = io.GetWriteIO();</span>
+<span class="nc" id="L143">                fptr = io.getOpenFileChecked();</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">                if (io != write_io) {</span>
+<span class="nc" id="L145">                    fptr = write_io.getOpenFileChecked();</span>
+                }
+            }
+        }
+
+<span class="fc" id="L150">        int n = threadFdSelect(context);</span>
+
+<span class="pc bpc" id="L152" title="3 of 10 branches missed.">        if (n == 0 &amp;&amp; pendingReadFDs == null &amp;&amp; n == 0 &amp;&amp; unselectableReadFDs == null &amp;&amp; unselectableWriteFDs == null) return context.nil; /* returns nil on timeout */</span>
+
+<span class="fc" id="L154">        res = RubyArray.newArray(runtime, 3);</span>
+<span class="fc" id="L155">        res.push(runtime.newArray(Math.min(n, maxReadReadySize())));</span>
+<span class="fc" id="L156">        res.push(runtime.newArray(Math.min(n, maxWriteReadySize())));</span>
+        // we never add anything for error since JDK does not provide a way to select for error
+<span class="fc" id="L158">        res.push(runtime.newArray(0));</span>
+
+<span class="fc bfc" id="L160" title="All 2 branches covered.">        if (readKeyList != null) {</span>
+<span class="fc" id="L161">            list = (RubyArray) res.eltOk(0);</span>
+<span class="fc bfc" id="L162" title="All 2 branches covered.">            for (i = 0; i &lt; readAry.size(); i++) {</span>
+<span class="fc" id="L163">                IRubyObject obj = readAry.eltOk(i);</span>
+<span class="fc" id="L164">                RubyIO io = TypeConverter.ioGetIO(runtime, obj);</span>
+<span class="fc" id="L165">                fptr = io.getOpenFileChecked();</span>
+<span class="pc bpc" id="L166" title="3 of 6 branches missed.">                if (fdIsSet(readKeyList, fptr.fd(), READ_ACCEPT_OPS) || (pendingReadFDs != null &amp;&amp; pendingReadFDs.contains(fptr.fd()))) {</span>
+<span class="fc" id="L167">                    list.push(obj);</span>
+                }
+            }
+        }
+<span class="fc bfc" id="L171" title="All 2 branches covered.">        if (unselectableReadFDs != null) {</span>
+<span class="fc" id="L172">            list = (RubyArray) res.eltOk(0);</span>
+<span class="fc bfc" id="L173" title="All 2 branches covered.">            for (i = 0; i &lt; readAry.size(); i++) {</span>
+<span class="fc" id="L174">                IRubyObject obj = readAry.eltOk(i);</span>
+<span class="fc" id="L175">                RubyIO io = TypeConverter.ioGetIO(runtime, obj);</span>
+<span class="fc" id="L176">                fptr = io.getOpenFileChecked();</span>
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">                if (unselectableReadFDs.contains(fptr.fd())) {</span>
+<span class="fc" id="L178">                    list.push(obj);</span>
+                }
+            }
+        }
+
+<span class="fc bfc" id="L183" title="All 2 branches covered.">        if (writeKeyList != null) {</span>
+<span class="fc" id="L184">            list = (RubyArray) res.eltOk(1);</span>
+<span class="fc bfc" id="L185" title="All 2 branches covered.">            for (i = 0; i &lt; writeAry.size(); i++) {</span>
+<span class="fc" id="L186">                IRubyObject obj = writeAry.eltOk(i);</span>
+<span class="fc" id="L187">                RubyIO io = TypeConverter.ioGetIO(runtime, obj);</span>
+<span class="fc" id="L188">                RubyIO write_io = io.GetWriteIO();</span>
+<span class="fc" id="L189">                fptr = write_io.getOpenFileChecked();</span>
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">                if (fdIsSet(writeKeyList, fptr.fd(), WRITE_CONNECT_OPS)) {</span>
+<span class="fc" id="L191">                    list.push(obj);</span>
+                }
+            }
+        }
+<span class="fc bfc" id="L195" title="All 2 branches covered.">        if (unselectableWriteFDs != null) {</span>
+<span class="fc" id="L196">            list = (RubyArray) res.eltOk(1);</span>
+<span class="fc bfc" id="L197" title="All 2 branches covered.">            for (i = 0; i &lt; writeAry.size(); i++) {</span>
+<span class="fc" id="L198">                IRubyObject obj = writeAry.eltOk(i);</span>
+<span class="fc" id="L199">                RubyIO io = TypeConverter.ioGetIO(runtime, obj);</span>
+<span class="fc" id="L200">                fptr = io.getOpenFileChecked();</span>
+<span class="pc bpc" id="L201" title="1 of 2 branches missed.">                if (unselectableWriteFDs.contains(fptr.fd())) {</span>
+<span class="fc" id="L202">                    list.push(obj);</span>
+                }
+            }
+        }
+
+<span class="pc bpc" id="L207" title="1 of 2 branches missed.">        if (errorKeyList != null) {</span>
+<span class="nc" id="L208">            list = (RubyArray) res.eltOk(2);</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">            for (i = 0; i &lt; exceptAry.size(); i++) {</span>
+<span class="nc" id="L210">                IRubyObject obj = exceptAry.eltOk(i);</span>
+<span class="nc" id="L211">                RubyIO io = TypeConverter.ioGetIO(runtime, obj);</span>
+<span class="nc" id="L212">                RubyIO write_io = io.GetWriteIO();</span>
+<span class="nc" id="L213">                fptr = io.getOpenFileChecked();</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">                if (errorKeyList.contains(fptr.fd())) {</span>
+<span class="nc" id="L215">                    list.push(obj);</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">                } else if (io != write_io) {</span>
+<span class="nc" id="L217">                    fptr = write_io.getOpenFileChecked();</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">                    if (errorKeyList.contains(fptr.fd())) {</span>
+<span class="nc" id="L219">                        list.push(obj);</span>
+                    }
+                }
+            }
+        }
+
+<span class="fc" id="L225">        return res;			/* returns an empty array on interrupt */</span>
+    }
+
+    private int maxReadReadySize() {
+<span class="fc" id="L229">        int size = 0;</span>
+<span class="fc bfc" id="L230" title="All 2 branches covered.">        if (readKeyList != null) size += readKeyList.size();</span>
+<span class="fc bfc" id="L231" title="All 2 branches covered.">        if (unselectableReadFDs != null) size += unselectableReadFDs.size();</span>
+<span class="fc" id="L232">        return size;</span>
+    }
+
+    private int maxWriteReadySize() {
+<span class="fc" id="L236">        int size = 0;</span>
+<span class="fc bfc" id="L237" title="All 2 branches covered.">        if (writeKeyList != null) size += writeKeyList.size();</span>
+<span class="fc bfc" id="L238" title="All 2 branches covered.">        if (unselectableWriteFDs != null) size += unselectableWriteFDs.size();</span>
+<span class="fc" id="L239">        return size;</span>
+    }
+
+    private void fdSetRead(ThreadContext context, ChannelFD fd, int maxSize) throws IOException {
+<span class="pc bpc" id="L243" title="1 of 4 branches missed.">        if (fd.chFile != null || fd.isNativeFile) {</span>
+            // files are not selectable, so we treat them as ready
+<span class="pc bpc" id="L245" title="1 of 2 branches missed.">            if (unselectableReadFDs == null) unselectableReadFDs = new ArrayList(1);</span>
+<span class="fc" id="L246">            unselectableReadFDs.add(fd);</span>
+<span class="fc" id="L247">            return;</span>
+        }
+<span class="fc" id="L249">        SelectionKey key = trySelectRead(context, fd);</span>
+<span class="pc bpc" id="L250" title="1 of 2 branches missed.">        if (key == null) return;</span>
+<span class="fc bfc" id="L251" title="All 2 branches covered.">        if (readKeyList == null) readKeyList = new ArrayList(1);</span>
+<span class="fc" id="L252">        readKeyList.add(key);</span>
+<span class="fc" id="L253">    }</span>
+
+    private void fdSetWrite(ThreadContext context, ChannelFD fd, int maxSize) throws IOException {
+<span class="pc bpc" id="L256" title="1 of 4 branches missed.">        if (fd.chFile != null || fd.isNativeFile) {</span>
+            // files are not selectable, so we treat them as ready
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">            if (unselectableWriteFDs == null) unselectableWriteFDs = new ArrayList(1);</span>
+<span class="fc" id="L259">            unselectableWriteFDs.add(fd);</span>
+<span class="fc" id="L260">            return;</span>
+        }
+<span class="fc" id="L262">        SelectionKey key = trySelectWrite(context, fd);</span>
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">        if (key == null) return;</span>
+<span class="pc bpc" id="L264" title="1 of 2 branches missed.">        if (writeKeyList == null) writeKeyList = new ArrayList(1);</span>
+<span class="fc" id="L265">        writeKeyList.add(key);</span>
+<span class="fc" id="L266">    }</span>
+
+    private boolean fdIsSet(List&lt;SelectionKey&gt; fds, ChannelFD fd, int operations) {
+<span class="pc bpc" id="L269" title="1 of 2 branches missed.">        if (fds == null) return false;</span>
+
+<span class="fc bfc" id="L271" title="All 2 branches covered.">        for (SelectionKey key : fds) {</span>
+<span class="pc bpc" id="L272" title="1 of 6 branches missed.">            if (key.isValid() &amp;&amp; (key.readyOps() &amp; operations) != 0 &amp;&amp; ((List&lt;ChannelFD&gt;)key.attachment()).contains(fd)) return true;</span>
+<span class="fc" id="L273">        }</span>
+<span class="fc" id="L274">        return false;</span>
+    }
+
+    private void fdTerm(List&lt;SelectionKey&gt; keys) {
+<span class="fc bfc" id="L278" title="All 2 branches covered.">        if (keys == null) return;</span>
+<span class="fc bfc" id="L279" title="All 2 branches covered.">        for (int i = 0; i &lt; keys.size(); i++) {</span>
+<span class="fc" id="L280">            SelectionKey key = keys.get(i);</span>
+<span class="fc" id="L281">            killKey(key);</span>
+        }
+<span class="fc" id="L283">    }</span>
+
+    private void killKey(SelectionKey key) {
+        try {
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">            if (key.isValid()) key.cancel();</span>
+<span class="pc" id="L288">        } catch (Exception e) {}</span>
+<span class="fc" id="L289">    }</span>
+
+    private SelectionKey trySelectRead(ThreadContext context, ChannelFD fd) throws IOException {
+<span class="pc bpc" id="L292" title="1 of 2 branches missed.">        if (fd.chSelect != null) {</span>
+<span class="fc" id="L293">            return registerSelect(getSelector(context, fd.chSelect), fd, fd.chSelect, READ_ACCEPT_OPS);</span>
+        }
+<span class="nc" id="L295">        return null;</span>
+    }
+
+    private SelectionKey trySelectWrite(ThreadContext context, ChannelFD fd) throws IOException {
+<span class="pc bpc" id="L299" title="1 of 2 branches missed.">        if (fd.chSelect != null) {</span>
+<span class="fc" id="L300">            return registerSelect(getSelector(context, fd.chSelect), fd, fd.chSelect, WRITE_CONNECT_OPS);</span>
+        }
+<span class="nc" id="L302">        return null;</span>
+    }
+
+    private Selector getSelector(ThreadContext context, SelectableChannel channel) throws IOException {
+<span class="fc" id="L306">        Selector selector = null;</span>
+        // using a linear search because there should never be more than a couple selector providers in flight
+<span class="fc bfc" id="L308" title="All 2 branches covered.">        if (selectors == null) {</span>
+<span class="fc" id="L309">            selectors = new ArrayList&lt;&gt;(1);</span>
+        } else {
+<span class="pc bpc" id="L311" title="1 of 2 branches missed.">            for (int i = 0; i &lt; selectors.size(); i++) {</span>
+<span class="fc" id="L312">                Selector sel = selectors.get(i);</span>
+<span class="pc bpc" id="L313" title="1 of 2 branches missed.">                if (sel.provider() == channel.provider()) {</span>
+<span class="fc" id="L314">                    selector = sel;</span>
+<span class="fc" id="L315">                    break;</span>
+                }
+            }
+        }
+
+<span class="fc bfc" id="L320" title="All 2 branches covered.">        if (selector == null) {</span>
+<span class="fc" id="L321">            selector = context.runtime.getSelectorPool().get(channel.provider());</span>
+<span class="fc" id="L322">            selectors.add(selector);</span>
+
+<span class="pc bpc" id="L324" title="1 of 2 branches missed.">            if (!selector.provider().equals(SelectorProvider.provider())) {</span>
+                // need to create pipe between alt impl selector and native NIO selector
+<span class="nc" id="L326">                Pipe pipe = Pipe.open();</span>
+<span class="nc" id="L327">                ENXIOSelector enxioSelector = new ENXIOSelector(selector, pipe);</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">                if (enxioSelectors.isEmpty()) enxioSelectors = new ArrayList&lt;ENXIOSelector&gt;();</span>
+<span class="nc" id="L329">                enxioSelectors.add(enxioSelector);</span>
+<span class="nc" id="L330">                pipe.source().configureBlocking(false);</span>
+<span class="nc" id="L331">                pipe.source().register(getSelector(context, pipe.source()), SelectionKey.OP_READ, enxioSelector);</span>
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">            } else if (mainSelector == null) {</span>
+<span class="fc" id="L333">                mainSelector = selector;</span>
+            }
+        }
+
+<span class="fc" id="L337">        return selector;</span>
+    }
+
+    private static SelectionKey registerSelect(Selector selector, ChannelFD attachment, SelectableChannel channel, int ops) throws IOException {
+<span class="fc" id="L341">        channel.configureBlocking(false); // FIXME: I'm not sure we ever set it back to old blocking mode</span>
+
+<span class="fc" id="L343">        int real_ops = channel.validOps() &amp; ops;</span>
+
+<span class="fc" id="L345">        SelectionKey key = channel.keyFor(selector);</span>
+        List&lt;ChannelFD&gt; attachmentSet;
+<span class="pc bpc" id="L347" title="1 of 2 branches missed.">        if (key != null) {</span>
+<span class="nc" id="L348">            key.interestOps(key.interestOps() | real_ops);</span>
+<span class="nc" id="L349">            attachmentSet = (List&lt;ChannelFD&gt;)key.attachment();</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">            if (!attachmentSet.contains(attachment)) attachmentSet.add(attachment);</span>
+<span class="nc" id="L351">            return key;</span>
+        } else {
+<span class="fc" id="L353">            attachmentSet = new ArrayList(1);</span>
+<span class="fc" id="L354">            attachmentSet.add(attachment);</span>
+<span class="fc" id="L355">            return channel.register(selector, real_ops, attachmentSet);</span>
+        }
+    }
+
+    // MRI: rb_thread_fd_select
+    private int threadFdSelect(ThreadContext context) throws IOException {
+<span class="pc bpc" id="L361" title="1 of 6 branches missed.">        if (readKeyList == null &amp;&amp; writeKeyList == null &amp;&amp; errorKeyList == null) {</span>
+<span class="fc bfc" id="L362" title="All 2 branches covered.">            if (timeout == null) { // sleep forever</span>
+                try {
+<span class="nc" id="L364">                    context.getThread().sleep(0);</span>
+<span class="nc" id="L365">                } catch (InterruptedException ie) {}</span>
+<span class="nc" id="L366">                return 0;</span>
+            }
+
+            // 0 means &quot;forever&quot; for sleep below, but &quot;zero&quot; here
+<span class="pc bpc" id="L370" title="1 of 2 branches missed.">            if (timeout == 0) return 0;</span>
+
+            try {
+<span class="nc" id="L373">                context.getThread().sleep(timeout);</span>
+<span class="nc" id="L374">            } catch (InterruptedException ie) {}</span>
+<span class="nc" id="L375">            return 0;</span>
+        }
+
+<span class="fc bfc" id="L378" title="All 2 branches covered.">        if (readKeyList != null) {</span>
+//            rb_fd_resize(max - 1, read);
+        }
+<span class="fc bfc" id="L381" title="All 2 branches covered.">        if (writeKeyList != null) {</span>
+//            rb_fd_resize(max - 1, write);
+        }
+<span class="pc bpc" id="L384" title="1 of 2 branches missed.">        if (errorKeyList != null) {</span>
+//            rb_fd_resize(max - 1, except);
+        }
+<span class="fc" id="L387">        return doSelect(context);</span>
+    }
+
+    private int doSelect(ThreadContext context) {
+        int result;
+        int lerrno;
+<span class="fc" id="L393">        double limit = 0;</span>
+        long wait_rest;
+<span class="fc" id="L395">        RubyThread th = context.getThread();</span>
+
+        // Sets up a specific time by which select should timeout
+//        if (timeout != null) {
+//            limit = timeofday();
+//            limit += (double)timeout-&gt;tv_sec+(double)timeout-&gt;tv_usec*1e-6;
+//            wait_rest = *timeout;
+//            timeout = &amp;wait_rest;
+//        }
+
+        retry:
+<span class="fc" id="L406">        lerrno = 0;</span>
+
+        try {
+<span class="fc" id="L409">            result = th.executeTask(context, this, SelectTask);</span>
+<span class="nc" id="L410">        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L411">            throw context.runtime.newErrnoEINTRError();</span>
+<span class="fc" id="L412">        }</span>
+
+<span class="fc" id="L414">        context.pollThreadEvents();</span>
+
+//        errno = lerrno;
+
+//        if (result &lt; 0) {
+//            switch (errno) {
+//                case EINTR:
+//                    #ifdef ERESTART
+//                case ERESTART:
+//                    #endif
+//                    if (read)
+//                        rb_fd_dup(read, &amp;orig_read);
+//                    if (write)
+//                        rb_fd_dup(write, &amp;orig_write);
+//                    if (except)
+//                        rb_fd_dup(except, &amp;orig_except);
+//
+//                    if (timeout) {
+//                        double d = limit - timeofday();
+//
+//                        wait_rest.tv_sec = (time_t)d;
+//                        wait_rest.tv_usec = (int)((d-(double)wait_rest.tv_sec)*1e6);
+//                        if (wait_rest.tv_sec &lt; 0)  wait_rest.tv_sec = 0;
+//                        if (wait_rest.tv_usec &lt; 0) wait_rest.tv_usec = 0;
+//                    }
+//
+//                    goto retry;
+//                default:
+//                    break;
+//            }
+//        }
+
+        // we don't kill the keys here because that breaks them
+//        if (readKeyList != null)
+//            fdTerm(readKeyList);
+//        if (writeKeyList != null)
+//            fdTerm(writeKeyList);
+//        if (errorKeyList != null);
+//            fdTerm(errorKeyList);
+
+<span class="fc" id="L454">        return result;</span>
+    }
+
+<span class="fc" id="L457">    private static RubyThread.Task&lt;SelectExecutor, Integer&gt; SelectTask = new RubyThread.Task&lt;SelectExecutor, Integer&gt;() {</span>
+        @Override
+        public Integer run(ThreadContext context, SelectExecutor s) throws InterruptedException {
+<span class="fc" id="L460">            int ready = 0;</span>
+            try {
+<span class="pc bpc" id="L462" title="1 of 2 branches missed.">                if (s.mainSelector != null) {</span>
+<span class="pc bpc" id="L463" title="1 of 2 branches missed.">                    if (s.pendingReadFDs == null) {</span>
+<span class="fc bfc" id="L464" title="All 4 branches covered.">                        if (s.timeout != null &amp;&amp; s.timeout == 0) {</span>
+<span class="fc bfc" id="L465" title="All 2 branches covered.">                            for (int i = 0; i &lt; s.selectors.size(); i++) {</span>
+<span class="fc" id="L466">                                Selector selector = s.selectors.get(i);</span>
+<span class="fc" id="L467">                                ready += selector.selectNow();</span>
+                            }
+                        } else {
+<span class="fc" id="L470">                            List&lt;Future&gt; futures = new ArrayList&lt;Future&gt;(s.enxioSelectors.size());</span>
+<span class="pc bpc" id="L471" title="1 of 2 branches missed.">                            for (int i = 0; i &lt; s.enxioSelectors.size(); i++) {</span>
+<span class="nc" id="L472">                                ENXIOSelector enxioSelector = s.enxioSelectors.get(i);</span>
+<span class="nc" id="L473">                                futures.add(context.runtime.getExecutor().submit(enxioSelector));</span>
+                            }
+
+<span class="fc bfc" id="L476" title="All 2 branches covered.">                            ready += s.mainSelector.select(s.timeout == null ? 0 : s.timeout);</span>
+
+                            // enxio selectors use a thread pool, since we can't select on multiple types
+                            // of selector at once.
+<span class="pc bpc" id="L480" title="1 of 2 branches missed.">                            for (int i = 0; i &lt; s.enxioSelectors.size(); i++) {</span>
+<span class="nc" id="L481">                                ENXIOSelector enxioSelector = s.enxioSelectors.get(i);</span>
+<span class="nc" id="L482">                                enxioSelector.selector.wakeup();</span>
+                            }
+
+                            // ensure all the enxio threads have finished
+<span class="pc bpc" id="L486" title="1 of 2 branches missed.">                            for (int i = 0; i &lt; futures.size(); i++) try {</span>
+<span class="nc" id="L487">                                Future f = futures.get(i);</span>
+<span class="nc" id="L488">                                f.get();</span>
+<span class="nc" id="L489">                            } catch (InterruptedException iex) {</span>
+<span class="nc" id="L490">                            } catch (ExecutionException eex) {</span>
+<span class="nc bnc" id="L491" title="All 2 branches missed.">                                if (eex.getCause() instanceof IOException) {</span>
+<span class="nc" id="L492">                                    throw (IOException) eex.getCause();</span>
+                                }
+<span class="nc" id="L494">                            }</span>
+<span class="fc" id="L495">                        }</span>
+                    } else {
+<span class="nc bnc" id="L497" title="All 2 branches missed.">                        for (int i = 0; i &lt; s.selectors.size(); i++) {</span>
+<span class="nc" id="L498">                            Selector selector = s.selectors.get(i);</span>
+<span class="nc" id="L499">                            ready += selector.selectNow();</span>
+                        }
+                    }
+                }
+
+                // If any enxio selectors woke up, remove them from the selected key set of the main selector
+<span class="pc bpc" id="L505" title="1 of 2 branches missed.">                for (int i = 0; i &lt; s.enxioSelectors.size(); i++) {</span>
+<span class="nc" id="L506">                    ENXIOSelector enxioSelector = s.enxioSelectors.get(i);</span>
+<span class="nc" id="L507">                    Pipe.SourceChannel source = enxioSelector.pipe.source();</span>
+<span class="nc" id="L508">                    SelectionKey key = source.keyFor(s.mainSelector);</span>
+<span class="nc bnc" id="L509" title="All 4 branches missed.">                    if (key != null &amp;&amp; s.mainSelector.selectedKeys().contains(key)) {</span>
+<span class="nc" id="L510">                        s.mainSelector.selectedKeys().remove(key);</span>
+<span class="nc" id="L511">                        ByteBuffer buf = ByteBuffer.allocate(1);</span>
+<span class="nc" id="L512">                        source.read(buf);</span>
+                    }
+                }
+<span class="nc" id="L515">            } catch (IOException ioe) {</span>
+<span class="nc" id="L516">                throw context.runtime.newIOErrorFromException(ioe);</span>
+<span class="fc" id="L517">            }</span>
+
+<span class="fc" id="L519">            return ready;</span>
+        }
+
+        @Override
+        public void wakeup(RubyThread thread, SelectExecutor selectExecutor) {
+            // Should be ok to interrupt selectors or pipes used for selection
+<span class="nc" id="L525">            thread.getNativeThread().interrupt();</span>
+
+            // wake up all selectors too
+<span class="nc bnc" id="L528" title="All 2 branches missed.">            for (int i = 0; i &lt; selectExecutor.selectors.size(); i++) {</span>
+<span class="nc" id="L529">                Selector selector = selectExecutor.selectors.get(i);</span>
+<span class="nc" id="L530">                selector.wakeup();</span>
+            }
+<span class="nc" id="L532">        }</span>
+    };
+
+    private static final class ENXIOSelector implements Callable&lt;Object&gt; {
+        private final Selector selector;
+        private final Pipe pipe;
+
+<span class="nc" id="L539">        private ENXIOSelector(Selector selector, Pipe pipe) {</span>
+<span class="nc" id="L540">            this.selector = selector;</span>
+<span class="nc" id="L541">            this.pipe = pipe;</span>
+<span class="nc" id="L542">        }</span>
+
+        public Object call() throws Exception {
+            try {
+<span class="nc" id="L546">                selector.select();</span>
+            } finally {
+<span class="nc" id="L548">                ByteBuffer buf = ByteBuffer.allocate(1);</span>
+<span class="nc" id="L549">                buf.put((byte) 0);</span>
+<span class="nc" id="L550">                buf.flip();</span>
+<span class="nc" id="L551">                pipe.sink().write(buf);</span>
+<span class="nc" id="L552">            }</span>
+
+<span class="nc" id="L554">            return null;</span>
+        }
+    }
+
+    final IRubyObject read, write, except;
+    List&lt;SelectionKey&gt; readKeyList;
+    List&lt;SelectionKey&gt; writeKeyList;
+    List&lt;SelectionKey&gt; errorKeyList;
+    List&lt;ChannelFD&gt; unselectableReadFDs;
+    List&lt;ChannelFD&gt; unselectableWriteFDs;
+    List&lt;ChannelFD&gt; pendingReadFDs;
+<span class="fc" id="L565">    Selector mainSelector = null;</span>
+<span class="fc" id="L566">    List&lt;Selector&gt; selectors = null;</span>
+<span class="fc" id="L567">    List&lt;ENXIOSelector&gt; enxioSelectors = Collections.emptyList();</span>
+
+    Long timeout;
+    final Ruby runtime;
+
+    public static final int READ_ACCEPT_OPS = SelectionKey.OP_READ | SelectionKey.OP_ACCEPT;
+    public static final int WRITE_CONNECT_OPS = SelectionKey.OP_WRITE | SelectionKey.OP_CONNECT;
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

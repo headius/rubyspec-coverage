@@ -1,0 +1,239 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Binding.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime</a> &gt; <span class="el_source">Binding.java</span></div><h1>Binding.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2001-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002 Benoit Cerrina &lt;b.cerrina@wanadoo.fr&gt;
+ * Copyright (C) 2004-2007 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.runtime;
+
+import org.jruby.Ruby;
+import org.jruby.runtime.backtrace.BacktraceElement;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.scope.ManyVarsDynamicScope;
+
+/**
+ *  Internal live representation of a block ({...} or do ... end).
+ */
+public class Binding {
+    
+    /**
+     * frame of method which defined this block
+     */
+    private final Frame frame;
+    private final BacktraceElement backtrace;
+
+    private Visibility visibility;
+    /**
+     * 'self' at point when the block is defined
+     */
+    private IRubyObject self;
+    
+    /**
+     * A reference to all variable values (and names) that are in-scope for this block.
+     */
+    private final DynamicScope dynamicScope;
+
+    /**
+     * Binding-local scope for 1.9 mode.
+     */
+    private DynamicScope evalScope;
+
+    /**
+     * Location of eval scope.
+     *
+     *
+     * Because bindings are usually cloned before used for eval, we indirect
+     * the reference of the eval scope through another Binding reference,
+     * allowing us to share the same eval scope across multiple cloned Binding
+     * instances.
+     */
+<span class="fc" id="L77">    private Binding evalScopeBinding = this;</span>
+    
+    public Binding(IRubyObject self, Frame frame,
+<span class="fc" id="L80">                   Visibility visibility, DynamicScope dynamicScope, BacktraceElement backtrace) {</span>
+<span class="fc" id="L81">        this.self = self;</span>
+<span class="fc" id="L82">        this.frame = frame;</span>
+<span class="fc" id="L83">        this.visibility = visibility;</span>
+<span class="fc" id="L84">        this.dynamicScope = dynamicScope;</span>
+<span class="fc" id="L85">        this.backtrace = backtrace;</span>
+<span class="fc" id="L86">    }</span>
+
+    private Binding(IRubyObject self, Frame frame,
+<span class="fc" id="L89">                    Visibility visibility, DynamicScope dynamicScope, BacktraceElement backtrace, DynamicScope dummyScope) {</span>
+<span class="fc" id="L90">        this.self = self;</span>
+<span class="fc" id="L91">        this.frame = frame;</span>
+<span class="fc" id="L92">        this.visibility = visibility;</span>
+<span class="fc" id="L93">        this.dynamicScope = dynamicScope;</span>
+<span class="fc" id="L94">        this.backtrace = backtrace;</span>
+<span class="fc" id="L95">        this.dummyScope = dummyScope;</span>
+<span class="fc" id="L96">    }</span>
+    
+<span class="fc" id="L98">    public Binding(Frame frame, DynamicScope dynamicScope, BacktraceElement backtrace) {</span>
+<span class="fc" id="L99">        this.self = frame.getSelf();</span>
+<span class="fc" id="L100">        this.frame = frame;</span>
+<span class="fc" id="L101">        this.visibility = frame.getVisibility();</span>
+<span class="fc" id="L102">        this.dynamicScope = dynamicScope;</span>
+<span class="fc" id="L103">        this.backtrace = backtrace;</span>
+<span class="fc" id="L104">    }</span>
+    
+    private Binding(Binding other) {
+<span class="fc" id="L107">        this(other.self, other.frame, other.visibility, other.dynamicScope, other.backtrace, other.dummyScope);</span>
+<span class="fc" id="L108">    }</span>
+
+    /**
+     * Clone the binding, but maintain a reference to the original &quot;eval
+     * binding&quot; to continue sharing eval context.
+     * 
+     * @return a new Binding with shared eval context
+     */
+    public Binding cloneForEval() {
+<span class="fc" id="L117">        Binding clone = new Binding(this);</span>
+<span class="fc" id="L118">        clone.evalScopeBinding = this;</span>
+<span class="fc" id="L119">        return clone;</span>
+    }
+
+    /**
+     * Clone the binding. The frame will be duplicated, and eval context will
+     * point to the new binding, but other fields will be copied as-is.
+     * 
+     * @return a new cloned Binding
+     */
+    public Binding clone() {
+<span class="fc" id="L129">        return new Binding(this);</span>
+    }
+
+    public Visibility getVisibility() {
+<span class="fc" id="L133">        return visibility;</span>
+    }
+
+    public void setVisibility(Visibility visibility) {
+<span class="fc" id="L137">        this.visibility = visibility;</span>
+<span class="fc" id="L138">    }</span>
+    
+    public IRubyObject getSelf() {
+<span class="fc" id="L141">        return self;</span>
+    }
+    
+    public void setSelf(IRubyObject self) {
+<span class="fc" id="L145">        this.self = self;</span>
+<span class="fc" id="L146">    }</span>
+
+    /**
+     * Gets the dynamicVariables that are local to this block.   Parent dynamic scopes are also
+     * accessible via the current dynamic scope.
+     * 
+     * @return Returns all relevent variable scoping information
+     */
+    public DynamicScope getDynamicScope() {
+<span class="fc" id="L155">        return dynamicScope;</span>
+    }
+
+    private DynamicScope dummyScope;
+
+    public DynamicScope getDummyScope(StaticScope staticScope) {
+<span class="pc bpc" id="L161" title="1 of 4 branches missed.">        if (dummyScope == null || dummyScope.getStaticScope() != staticScope) {</span>
+<span class="fc" id="L162">            return dummyScope = DynamicScope.newDummyScope(staticScope, dynamicScope);</span>
+        }
+<span class="fc" id="L164">        return dummyScope;</span>
+    }
+
+    /**
+     * Gets the frame.
+     * 
+     * @return Returns a RubyFrame
+     */
+    public Frame getFrame() {
+<span class="fc" id="L173">        return frame;</span>
+    }
+
+    public BacktraceElement getBacktrace() {
+<span class="fc" id="L177">        return backtrace;</span>
+    }
+
+    public String getFile() {
+<span class="fc" id="L181">        return backtrace.filename;</span>
+    }
+
+    public void setFile(String file) {
+<span class="fc" id="L185">        backtrace.filename = file;</span>
+<span class="fc" id="L186">    }</span>
+
+    public int getLine() {
+<span class="fc" id="L189">        return backtrace.line;</span>
+    }
+
+    public void setLine(int line) {
+<span class="fc" id="L193">        backtrace.line = line;</span>
+<span class="fc" id="L194">    }</span>
+
+    public String getMethod() {
+<span class="fc" id="L197">        return backtrace.method;</span>
+    }
+
+    public void setMethod(String method) {
+<span class="fc" id="L201">        backtrace.method = method;</span>
+<span class="fc" id="L202">    }</span>
+
+    public boolean equals(Object other) {
+<span class="pc bpc" id="L205" title="1 of 2 branches missed.">        if(this == other) {</span>
+<span class="nc" id="L206">            return true;</span>
+        }
+
+<span class="pc bpc" id="L209" title="1 of 2 branches missed.">        if(!(other instanceof Binding)) {</span>
+<span class="nc" id="L210">            return false;</span>
+        }
+
+<span class="fc" id="L213">        Binding bOther = (Binding)other;</span>
+
+<span class="pc bpc" id="L215" title="2 of 4 branches missed.">        return this.self == bOther.self &amp;&amp;</span>
+            this.dynamicScope == bOther.dynamicScope;
+    }
+
+    // FIXME: This is because we clone the same explicit binding whenever we execute because both the captured Frame
+    // and the binding gets mutated during execution.  This means that we cannot share the same instance across
+    // concurrent evals of the same binding.  The mutated Frames I think can become new frames during execution and
+    // most of the binding clone can probably go away and we can push the values stored in a binding through the execution
+    // path.
+    public final DynamicScope getEvalScope(Ruby runtime) {
+        // We create one extra dynamicScope on a binding so that when we 'eval &quot;b=1&quot;, binding' the
+        // 'b' will get put into this new dynamic scope.  The original scope does not see the new
+        // 'b' and successive evals with this binding will.  Note: This only happens for explicit
+        // bindings.  Implicit bindings will always dispose of the scope they create.
+
+        // No eval scope set, so we create one
+<span class="fc bfc" id="L231" title="All 2 branches covered.">        if (evalScopeBinding.evalScope == null) {</span>
+            // bindings scopes must always be ManyVars scopes since evals can grow them
+<span class="fc" id="L233">            evalScopeBinding.evalScope = new ManyVarsDynamicScope(runtime.getStaticScopeFactory().newEvalScope(dynamicScope.getStaticScope()), dynamicScope);</span>
+        }
+
+<span class="fc" id="L236">        return evalScopeBinding.evalScope;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

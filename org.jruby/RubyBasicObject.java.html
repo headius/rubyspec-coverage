@@ -1,0 +1,3084 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyBasicObject.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyBasicObject.java</span></div><h1>RubyBasicObject.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2008 Thomas E Enebo &lt;enebo@acm.org&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import org.jcodings.Encoding;
+import org.jruby.ir.interpreter.Interpreter;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.ivars.VariableAccessor;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import org.jruby.anno.JRubyMethod;
+import org.jruby.common.IRubyWarnings.ID;
+import org.jruby.exceptions.JumpException;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.javasupport.JavaObject;
+import org.jruby.javasupport.JavaUtil;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.CallType;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.Visibility;
+
+import static org.jruby.anno.FrameField.*;
+import static org.jruby.runtime.Visibility.*;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.builtin.InstanceVariables;
+import org.jruby.runtime.builtin.InternalVariables;
+import org.jruby.runtime.builtin.Variable;
+import org.jruby.runtime.component.VariableEntry;
+import org.jruby.runtime.marshal.CoreObjectType;
+import org.jruby.util.IdUtil;
+import org.jruby.util.TypeConverter;
+import org.jruby.util.io.EncodingUtils;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+import org.jruby.util.unsafe.UnsafeHolder;
+
+import static org.jruby.runtime.Helpers.invokedynamic;
+import static org.jruby.runtime.invokedynamic.MethodNames.OP_EQUAL;
+import static org.jruby.runtime.invokedynamic.MethodNames.OP_CMP;
+import static org.jruby.runtime.invokedynamic.MethodNames.EQL;
+import static org.jruby.runtime.invokedynamic.MethodNames.INSPECT;
+import org.jruby.runtime.ivars.VariableTableManager;
+
+/**
+ * RubyBasicObject is the only implementation of the
+ * {@link org.jruby.runtime.builtin.IRubyObject}. Every Ruby object in JRuby
+ * is represented by something that is an instance of RubyBasicObject. In
+ * the core class implementations, this means doing a subclass
+ * that extends RubyBasicObject. In other cases it means using a simple
+ * RubyBasicObject instance and its data fields to store specific
+ * information about the Ruby object.
+ *
+ * Some care has been taken to make the implementation be as
+ * monomorphic as possible, so that the Java Hotspot engine can
+ * improve performance of it. That is the reason for several patterns
+ * that might seem odd in this class.
+ *
+ * The IRubyObject interface used to have lots of methods for
+ * different things, but these have now mostly been refactored into
+ * several interfaces that gives access to that specific part of the
+ * object. This gives us the possibility to switch out that subsystem
+ * without changing interfaces again. For example, instance variable
+ * and internal variables are handled this way, but the implementation
+ * in RubyObject only returns &quot;this&quot; in {@link #getInstanceVariables()} and
+ * {@link #getInternalVariables()}.
+ * 
+ * Methods that are implemented here, such as &quot;initialize&quot; should be implemented
+ * with care; reification of Ruby classes into Java classes can produce
+ * conflicting method names in rare cases. See JRUBY-5906 for an example.
+ */
+<span class="pc bpc" id="L109" title="1 of 2 branches missed.">public class RubyBasicObject implements Cloneable, IRubyObject, Serializable, Comparable&lt;IRubyObject&gt;, CoreObjectType, InstanceVariables, InternalVariables {</span>
+
+<span class="fc" id="L111">    private static final Logger LOG = LoggerFactory.getLogger(&quot;RubyBasicObject&quot;);</span>
+
+    private static final boolean DEBUG = false;
+    
+    /** The class of this object */
+    protected transient RubyClass metaClass;
+
+    /** object flags */
+    protected int flags;
+
+    /** variable table, lazily allocated as needed (if needed) */
+    public transient Object[] varTable;
+    
+    /** locking stamp for Unsafe ops updating the vartable */
+    public transient volatile int varTableStamp;
+    
+    /** offset of the varTable field in RubyBasicObject */
+<span class="fc" id="L128">    public static final long VAR_TABLE_OFFSET = UnsafeHolder.fieldOffset(RubyBasicObject.class, &quot;varTable&quot;);</span>
+    
+    /** offset of the varTableTamp field in RubyBasicObject */
+<span class="fc" id="L131">    public static final long STAMP_OFFSET = UnsafeHolder.fieldOffset(RubyBasicObject.class, &quot;varTableStamp&quot;);</span>
+
+    /**
+     * The error message used when some one tries to modify an
+     * instance variable in a high security setting.
+     */
+    public static final String ERR_INSECURE_SET_INST_VAR  = &quot;Insecure: can't modify instance variable&quot;;
+
+    public static final int ALL_F = -1;
+    public static final int FALSE_F = 1 &lt;&lt; 0;
+    /**
+     * This flag is a bit funny. It's used to denote that this value
+     * is nil. It's a bit counterintuitive for a Java programmer to
+     * not use subclassing to handle this case, since we have a
+     * RubyNil subclass anyway. Well, the reason for it being a flag
+     * is that the {@link #isNil()} method is called extremely often. So often
+     * that it gives a good speed boost to make it monomorphic and
+     * final. It turns out using a flag for this actually gives us
+     * better performance than having a polymorphic {@link #isNil()} method.
+     */
+    public static final int NIL_F = 1 &lt;&lt; 1;
+    public static final int FROZEN_F = 1 &lt;&lt; 2;
+    public static final int TAINTED_F = 1 &lt;&lt; 3;
+
+    public static final int FL_USHIFT = 4;
+
+    public static final int USER0_F = (1&lt;&lt;(FL_USHIFT+0));
+    public static final int USER1_F = (1&lt;&lt;(FL_USHIFT+1));
+    public static final int USER2_F = (1&lt;&lt;(FL_USHIFT+2));
+    public static final int USER3_F = (1&lt;&lt;(FL_USHIFT+3));
+    public static final int USER4_F = (1&lt;&lt;(FL_USHIFT+4));
+    public static final int USER5_F = (1&lt;&lt;(FL_USHIFT+5));
+    public static final int USER6_F = (1&lt;&lt;(FL_USHIFT+6));
+    public static final int USER7_F = (1&lt;&lt;(FL_USHIFT+7));
+    public static final int USER8_F = (1&lt;&lt;(FL_USHIFT+8));
+
+    public static final int COMPARE_BY_IDENTITY_F = USER8_F;
+
+    /**
+     *  A value that is used as a null sentinel in among other places
+     *  the RubyArray implementation. It will cause large problems to
+     *  call any methods on this object.
+     */
+<span class="fc" id="L174">    public static final IRubyObject NEVER = new RubyBasicObject();</span>
+
+    /**
+     * A value that specifies an undefined value. This value is used
+     * as a sentinel for undefined constant values, and other places
+     * where neither null nor NEVER makes sense.
+     */
+<span class="fc" id="L181">    public static final IRubyObject UNDEF = new RubyBasicObject();</span>
+
+    /**
+     * It's not valid to create a totally empty RubyObject. Since the
+     * RubyObject is always defined in relation to a runtime, that
+     * means that creating RubyObjects from outside the class might
+     * cause problems.
+     */
+<span class="fc" id="L189">    private RubyBasicObject(){};</span>
+
+    /**
+     * Default allocator instance for all Ruby objects. The only
+     * reason to not use this allocator is if you actually need to
+     * have all instances of something be a subclass of RubyObject.
+     *
+     * @see org.jruby.runtime.ObjectAllocator
+     */
+<span class="fc" id="L198">    public static final ObjectAllocator BASICOBJECT_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L201">            return new RubyBasicObject(runtime, klass);</span>
+        }
+    };
+
+    /**
+     * Will create the Ruby class Object in the runtime
+     * specified. This method needs to take the actual class as an
+     * argument because of the Object class' central part in runtime
+     * initialization.
+     */
+    public static RubyClass createBasicObjectClass(Ruby runtime, RubyClass objectClass) {
+<span class="fc" id="L212">        objectClass.setClassIndex(ClassIndex.OBJECT);</span>
+
+<span class="fc" id="L214">        objectClass.defineAnnotatedMethods(RubyBasicObject.class);</span>
+
+<span class="fc" id="L216">        recacheBuiltinMethods(runtime);</span>
+
+<span class="fc" id="L218">        return objectClass;</span>
+    }
+
+    static void recacheBuiltinMethods(Ruby runtime) {
+<span class="fc" id="L222">        RubyModule objectClass = runtime.getBasicObject();</span>
+
+<span class="fc" id="L224">        runtime.setDefaultMethodMissing(objectClass.searchMethod(&quot;method_missing&quot;));</span>
+<span class="fc" id="L225">    }</span>
+
+    @JRubyMethod(name = &quot;initialize&quot;, visibility = PRIVATE)
+    public IRubyObject initialize19(ThreadContext context) {
+<span class="fc" id="L229">        return context.nil;</span>
+    }
+
+    /**
+     * Standard path for object creation. Objects are entered into ObjectSpace
+     * only if ObjectSpace is enabled.
+     */
+<span class="fc" id="L236">    public RubyBasicObject(Ruby runtime, RubyClass metaClass) {</span>
+<span class="fc" id="L237">        this.metaClass = metaClass;</span>
+
+<span class="fc" id="L239">        runtime.addToObjectSpace(true, this);</span>
+<span class="fc" id="L240">    }</span>
+
+    /**
+     * Path for objects that don't taint and don't enter objectspace.
+     */
+<span class="fc" id="L245">    public RubyBasicObject(RubyClass metaClass) {</span>
+<span class="fc" id="L246">        this.metaClass = metaClass;</span>
+<span class="fc" id="L247">    }</span>
+
+    /**
+     * Path for objects who want to decide whether they don't want to be in
+     * ObjectSpace even when it is on. (notably used by objects being
+     * considered immediate, they'll always pass false here)
+     */
+<span class="fc" id="L254">    protected RubyBasicObject(Ruby runtime, RubyClass metaClass, boolean useObjectSpace) {</span>
+<span class="fc" id="L255">        this.metaClass = metaClass;</span>
+
+<span class="fc" id="L257">        runtime.addToObjectSpace(useObjectSpace, this);</span>
+<span class="fc" id="L258">    }</span>
+
+    protected void taint(Ruby runtime) {
+<span class="fc bfc" id="L261" title="All 2 branches covered.">        if (!isTaint()) {</span>
+<span class="fc" id="L262">        	testFrozen();</span>
+<span class="fc" id="L263">            setTaint(true);</span>
+        }
+<span class="fc" id="L265">    }</span>
+
+    /** rb_frozen_class_p
+     *
+     * Helper to test whether this object is frozen, and if it is will
+     * throw an exception based on the message.
+     */
+   protected final void testFrozen(String message) {
+<span class="fc bfc" id="L273" title="All 2 branches covered.">       if (isFrozen()) {</span>
+<span class="fc" id="L274">           throw getRuntime().newFrozenError(message);</span>
+       }
+<span class="fc" id="L276">   }</span>
+
+    /** rb_frozen_class_p
+     *
+     * Helper to test whether this object is frozen, and if it is will
+     * throw an exception based on the message.
+     */
+   protected final void testFrozen() {
+<span class="fc bfc" id="L284" title="All 2 branches covered.">       if (isFrozen()) {</span>
+<span class="fc" id="L285">           throw getRuntime().newFrozenError(&quot;object&quot;);</span>
+       }
+<span class="fc" id="L287">   }</span>
+
+    /**
+     * Sets or unsets a flag on this object. The only flags that are
+     * guaranteed to be valid to use as the first argument is:
+     *
+     * &lt;ul&gt;
+     *  &lt;li&gt;{@link #FALSE_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #NIL_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #FROZEN_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #TAINTED_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER0_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER1_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER2_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER3_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER4_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER5_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER6_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER7_F}&lt;/li&gt;
+     * &lt;/ul&gt;
+     *
+     * @param flag the actual flag to set or unset.
+     * @param set if true, the flag will be set, if false, the flag will be unset.
+     */
+    public final void setFlag(int flag, boolean set) {
+<span class="fc bfc" id="L312" title="All 2 branches covered.">        if (set) {</span>
+<span class="fc" id="L313">            flags |= flag;</span>
+        } else {
+<span class="fc" id="L315">            flags &amp;= ~flag;</span>
+        }
+<span class="fc" id="L317">    }</span>
+
+    /**
+     * Get the value of a custom flag on this object. The only
+     * guaranteed flags that can be sent in to this method is:
+     *
+     * &lt;ul&gt;
+     *  &lt;li&gt;{@link #FALSE_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #NIL_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #FROZEN_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #TAINTED_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER0_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER1_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER2_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER3_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER4_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER5_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER6_F}&lt;/li&gt;
+     *  &lt;li&gt;{@link #USER7_F}&lt;/li&gt;
+     * &lt;/ul&gt;
+     *
+     * @param flag the flag to get
+     * @return true if the flag is set, false otherwise
+     */
+    public final boolean getFlag(int flag) {
+<span class="fc bfc" id="L342" title="All 2 branches covered.">        return (flags &amp; flag) != 0;</span>
+    }
+
+    /**
+     * Will invoke a named method with no arguments and no block if that method or a custom
+     * method missing exists. Otherwise returns null. 1.9: rb_check_funcall
+     */
+    @Override
+    public final IRubyObject checkCallMethod(ThreadContext context, String name) {
+<span class="fc" id="L351">        return Helpers.invokeChecked(context, this, name);</span>
+    }
+
+    /**
+     * Will invoke a named method with no arguments and no block.
+     */
+    @Override
+    public final IRubyObject callMethod(ThreadContext context, String name) {
+<span class="fc" id="L359">        return Helpers.invoke(context, this, name);</span>
+    }
+
+    /**
+     * Will invoke a named method with one argument and no block with
+     * functional invocation.
+     */
+    @Override
+     public final IRubyObject callMethod(ThreadContext context, String name, IRubyObject arg) {
+<span class="fc" id="L368">        return Helpers.invoke(context, this, name, arg);</span>
+    }
+
+    /**
+     * Will invoke a named method with the supplied arguments and no
+     * block with functional invocation.
+     */
+    @Override
+    public final IRubyObject callMethod(ThreadContext context, String name, IRubyObject[] args) {
+<span class="fc" id="L377">        return Helpers.invoke(context, this, name, args);</span>
+    }
+
+    public final IRubyObject callMethod(String name, IRubyObject... args) {
+<span class="nc" id="L381">        return Helpers.invoke(getRuntime().getCurrentContext(), this, name, args);</span>
+    }
+
+    public final IRubyObject callMethod(String name) {
+<span class="fc" id="L385">        return Helpers.invoke(getRuntime().getCurrentContext(), this, name);</span>
+    }
+
+    /**
+     * Will invoke a named method with the supplied arguments and
+     * supplied block with functional invocation.
+     */
+    @Override
+    public final IRubyObject callMethod(ThreadContext context, String name, IRubyObject[] args, Block block) {
+<span class="fc" id="L394">        return Helpers.invoke(context, this, name, args, block);</span>
+    }
+
+    /**
+     * Does this object represent nil? See the docs for the {@link
+     * #NIL_F} flag for more information.
+     */
+    @Override
+    public final boolean isNil() {
+<span class="fc bfc" id="L403" title="All 2 branches covered.">        return (flags &amp; NIL_F) != 0;</span>
+    }
+
+    /**
+     * Is this value a truthy value or not? Based on the {@link #FALSE_F} flag.
+     */
+    @Override
+    public final boolean isTrue() {
+<span class="fc bfc" id="L411" title="All 2 branches covered.">        return (flags &amp; FALSE_F) == 0;</span>
+    }
+
+    /**
+     * Is this value a falsey value or not? Based on the {@link #FALSE_F} flag.
+     */
+    public final boolean isFalse() {
+<span class="fc bfc" id="L418" title="All 2 branches covered.">        return (flags &amp; FALSE_F) != 0;</span>
+    }
+
+    /**
+     * Gets the taint. Shortcut for getFlag(TAINTED_F).
+     *
+     * @return true if this object is tainted
+     */
+    @Override
+    public boolean isTaint() {
+<span class="fc bfc" id="L428" title="All 2 branches covered.">        return (flags &amp; TAINTED_F) != 0;</span>
+    }
+
+    /**
+     * Sets the taint flag. Shortcut for setFlag(TAINTED_F, taint)
+     *
+     * @param taint should this object be tainted or not?
+     */
+    @Override
+    public void setTaint(boolean taint) {
+        // JRUBY-4113: callers should not call setTaint on immediate objects
+<span class="fc bfc" id="L439" title="All 2 branches covered.">        if (isImmediate()) return;</span>
+        
+<span class="fc bfc" id="L441" title="All 2 branches covered.">        if (taint) {</span>
+<span class="fc" id="L442">            flags |= TAINTED_F;</span>
+        } else {
+<span class="fc" id="L444">            flags &amp;= ~TAINTED_F;</span>
+        }
+<span class="fc" id="L446">    }</span>
+
+
+    /** OBJ_INFECT
+     *
+     * Infects this object with traits from the argument obj. In real
+     * terms this currently means that if obj is tainted, this object
+     * will get tainted too. It's possible to hijack this method to do
+     * other infections if that would be interesting.
+     */
+    @Override
+    public IRubyObject infectBy(IRubyObject obj) {
+<span class="fc bfc" id="L458" title="All 2 branches covered.">        if (obj.isTaint()) setTaint(true);</span>
+<span class="fc" id="L459">        return this;</span>
+    }
+
+    final RubyBasicObject infectBy(RubyBasicObject obj) {
+<span class="fc" id="L463">        flags |= (obj.flags &amp; TAINTED_F);</span>
+<span class="fc" id="L464">        return this;</span>
+    }
+
+    final RubyBasicObject infectBy(int tuFlags) {
+<span class="fc" id="L468">        flags |= (tuFlags &amp; TAINTED_F);</span>
+<span class="fc" id="L469">        return this;</span>
+    }
+
+    /**
+     * Is this value frozen or not? Shortcut for doing
+     * getFlag(FROZEN_F).
+     *
+     * @return true if this object is frozen, false otherwise
+     */
+    @Override
+    public boolean isFrozen() {
+<span class="fc bfc" id="L480" title="All 2 branches covered.">        return (flags &amp; FROZEN_F) != 0;</span>
+    }
+
+    /**
+     * Sets whether this object is frozen or not. Shortcut for doing
+     * setFlag(FROZEN_F, frozen).
+     *
+     * @param frozen should this object be frozen?
+     */
+    @Override
+    public void setFrozen(boolean frozen) {
+<span class="pc bpc" id="L491" title="1 of 2 branches missed.">        if (frozen) {</span>
+<span class="fc" id="L492">            flags |= FROZEN_F;</span>
+        } else {
+<span class="nc" id="L494">            flags &amp;= ~FROZEN_F;</span>
+        }
+<span class="fc" id="L496">    }</span>
+
+    /**
+     *  Is object immediate (def: Fixnum, Symbol, true, false, nil?).
+     */
+    @Override
+    public boolean isImmediate() {
+<span class="fc" id="L503">    	return false;</span>
+    }
+
+    @Override
+    public boolean isSpecialConst() {
+<span class="pc bpc" id="L508" title="1 of 4 branches missed.">        return isImmediate() || !isTrue();</span>
+    }
+
+    /**
+     * if exist return the meta-class else return the type of the object.
+     *
+     */
+    @Override
+    public final RubyClass getMetaClass() {
+<span class="fc" id="L517">        return metaClass;</span>
+    }
+
+    /** rb_singleton_class
+     *
+     * Note: this method is specialized for RubyFixnum, RubySymbol,
+     * RubyNil and RubyBoolean
+     *
+     * Will either return the existing singleton class for this
+     * object, or create a new one and return that.
+     */
+    @Override
+    public RubyClass getSingletonClass() {
+        RubyClass klass;
+
+<span class="fc bfc" id="L532" title="All 4 branches covered.">        if (getMetaClass().isSingleton() &amp;&amp; ((MetaClass)getMetaClass()).getAttached() == this) {</span>
+<span class="fc" id="L533">            klass = getMetaClass();</span>
+        } else {
+<span class="fc" id="L535">            klass = makeMetaClass(getMetaClass());</span>
+        }
+
+<span class="fc" id="L538">        klass.setTaint(isTaint());</span>
+<span class="fc bfc" id="L539" title="All 2 branches covered.">        if (isFrozen()) klass.setFrozen(true);</span>
+
+<span class="fc" id="L541">        return klass;</span>
+    }
+
+    /** rb_make_metaclass
+     *
+     * Will create a new meta class, insert this in the chain of
+     * classes for this specific object, and return the generated meta
+     * class.
+     */
+    public RubyClass makeMetaClass(RubyClass superClass) {
+<span class="fc" id="L551">        MetaClass klass = new MetaClass(getRuntime(), superClass, this); // rb_class_boot</span>
+<span class="fc" id="L552">        setMetaClass(klass);</span>
+
+<span class="fc" id="L554">        klass.setMetaClass(superClass.getRealClass().getMetaClass());</span>
+
+<span class="fc" id="L556">        superClass.addSubclass(klass);</span>
+
+<span class="fc" id="L558">        return klass;</span>
+    }
+
+    /**
+     * Makes it possible to change the metaclass of an object. In
+     * practice, this is a simple version of Smalltalks Become, except
+     * that it doesn't work when we're dealing with subclasses. In
+     * practice it's used to change the singleton/meta class used,
+     * without changing the &quot;real&quot; inheritance chain.
+     */
+    public void setMetaClass(RubyClass metaClass) {
+<span class="fc" id="L569">        this.metaClass = metaClass;</span>
+<span class="fc" id="L570">    }</span>
+
+    /**
+     * @see org.jruby.runtime.builtin.IRubyObject#getType()
+     */
+    @Override
+    public RubyClass getType() {
+<span class="fc" id="L577">        return getMetaClass().getRealClass();</span>
+    }
+
+    /**
+     * Does this object respond to the specified message? Uses a
+     * shortcut if it can be proved that respond_to? haven't been
+     * overridden.
+     */
+    @Override
+    public final boolean respondsTo(String name) {
+<span class="fc" id="L587">        Ruby runtime = getRuntime();</span>
+
+<span class="fc" id="L589">        DynamicMethod method = getMetaClass().searchMethod(&quot;respond_to?&quot;);</span>
+<span class="fc bfc" id="L590" title="All 2 branches covered.">        if(method.equals(runtime.getRespondToMethod())) {</span>
+            // fastest path; builtin respond_to? which just does isMethodBound
+<span class="fc" id="L592">            return getMetaClass().isMethodBound(name, false);</span>
+<span class="pc bpc" id="L593" title="1 of 2 branches missed.">        } else if (!method.isUndefined()) {</span>
+            // medium path, invoke user's respond_to? if defined
+
+            // We have to check and enforce arity
+<span class="fc" id="L597">            Arity arity = method.getArity();</span>
+<span class="fc" id="L598">            ThreadContext context = runtime.getCurrentContext();</span>
+<span class="pc bpc" id="L599" title="3 of 4 branches missed.">            if (arity.isFixed() &amp;&amp; arity.required() == 1) {</span>
+<span class="nc" id="L600">                return method.call(context, this, metaClass, &quot;respond_to?&quot;, runtime.newSymbol(name)).isTrue();</span>
+<span class="pc bpc" id="L601" title="3 of 4 branches missed.">            } else if (arity.isFixed() &amp;&amp; arity.required() != 2) {</span>
+<span class="nc" id="L602">                throw runtime.newArgumentError(&quot;respond_to? must accept 1 or 2 arguments (requires &quot; + arity.getValue() + &quot;)&quot;);</span>
+            } else {
+
+            }
+
+<span class="fc" id="L607">            return method.call(context, this, metaClass, &quot;respond_to?&quot;, runtime.newSymbol(name), runtime.newBoolean(true)).isTrue();</span>
+
+        } else {
+            // slowest path, full callMethod to hit method_missing if present, or produce error
+<span class="nc" id="L611">            return callMethod(runtime.getCurrentContext(), &quot;respond_to?&quot;, runtime.newSymbol(name)).isTrue();</span>
+        }
+    }
+
+    /**
+     * Does this object respond to the specified message via &quot;method_missing?&quot;
+     */
+    @Override
+    public final boolean respondsToMissing(String name) {
+<span class="fc" id="L620">        return respondsToMissing(name, true);</span>
+    }
+
+    /**
+     * Does this object respond to the specified message via &quot;method_missing?&quot;
+     */
+    @Override
+    public final boolean respondsToMissing(String name, boolean priv) {
+<span class="fc" id="L628">        DynamicMethod method = getMetaClass().searchMethod(&quot;respond_to_missing?&quot;);</span>
+        // perhaps should try a smart version as for respondsTo above?
+<span class="pc bpc" id="L630" title="1 of 2 branches missed.">        if(method.isUndefined()) {</span>
+<span class="nc" id="L631">            return false;</span>
+        } else {
+<span class="fc" id="L633">            return method.call(</span>
+<span class="fc" id="L634">                    getRuntime().getCurrentContext(),</span>
+                    this,
+                    metaClass,
+                    &quot;respond_to_missing?&quot;,
+<span class="fc" id="L638">                    getRuntime().newSymbol(name),</span>
+<span class="fc" id="L639">                    getRuntime().newBoolean(priv)).isTrue();</span>
+        }
+    }
+
+    /**
+     * Will return the runtime that this object is associated with.
+     *
+     * @return current runtime
+     */
+    @Override
+    public final Ruby getRuntime() {
+<span class="fc" id="L650">        return getMetaClass().getClassRuntime();</span>
+    }
+
+    /**
+     * Will return the Java interface that most closely can represent
+     * this object, when working through JAva integration
+     * translations.
+     */
+    @Override
+    public Class getJavaClass() {
+<span class="nc" id="L660">        Object obj = dataGetStruct();</span>
+<span class="nc bnc" id="L661" title="All 2 branches missed.">        if (obj instanceof JavaObject) {</span>
+<span class="nc" id="L662">            return ((JavaObject)obj).getValue().getClass();</span>
+        }
+<span class="nc" id="L664">        return getClass();</span>
+    }
+
+    /** rb_to_id
+     *
+     * Will try to convert this object to a String using the Ruby
+     * &quot;to_str&quot; if the object isn't already a String. If this still
+     * doesn't work, will throw a Ruby TypeError.
+     *
+     */
+    @Override
+    public String asJavaString() {
+<span class="fc" id="L676">        IRubyObject asString = checkStringType();</span>
+<span class="fc bfc" id="L677" title="All 2 branches covered.">        if(!asString.isNil()) return ((RubyString)asString).asJavaString();</span>
+<span class="fc" id="L678">        throw getRuntime().newTypeError(inspect().toString() + &quot; is not a string&quot;);</span>
+    }
+
+    /** rb_obj_as_string
+     *
+     * First converts this object into a String using the &quot;to_s&quot;
+     * method, infects it with the current taint and returns it. If
+     * to_s doesn't return a Ruby String, {@link #anyToString} is used
+     * instead.
+     */
+    @Override
+    public RubyString asString() {
+<span class="fc" id="L690">        IRubyObject str = Helpers.invoke(getRuntime().getCurrentContext(), this, &quot;to_s&quot;);</span>
+
+<span class="fc bfc" id="L692" title="All 2 branches covered.">        if (!(str instanceof RubyString)) return (RubyString)anyToString();</span>
+<span class="fc bfc" id="L693" title="All 2 branches covered.">        if (isTaint()) str.setTaint(true);</span>
+<span class="fc" id="L694">        return (RubyString) str;</span>
+    }
+
+ /**
+     * Tries to convert this object to a Ruby Array using the &quot;to_ary&quot;
+     * method.
+     */
+    @Override
+    public RubyArray convertToArray() {
+<span class="fc" id="L703">        return (RubyArray) TypeConverter.convertToType(this, getRuntime().getArray(), &quot;to_ary&quot;);</span>
+    }
+
+    /**
+     * Tries to convert this object to a Ruby Hash using the &quot;to_hash&quot;
+     * method.
+     */
+    @Override
+    public RubyHash convertToHash() {
+<span class="fc" id="L712">        return (RubyHash)TypeConverter.convertToType(this, getRuntime().getHash(), &quot;to_hash&quot;);</span>
+    }
+
+    /**
+     * Tries to convert this object to a Ruby Float using the &quot;to_f&quot;
+     * method.
+     */
+    @Override
+    public RubyFloat convertToFloat() {
+<span class="fc" id="L721">        return (RubyFloat) TypeConverter.convertToType(this, getRuntime().getFloat(), &quot;to_f&quot;);</span>
+    }
+
+    /**
+     * Tries to convert this object to a Ruby Integer using the &quot;to_int&quot;
+     * method.
+     */
+    @Override
+    public RubyInteger convertToInteger() {
+<span class="fc" id="L730">        return convertToInteger(&quot;to_int&quot;);</span>
+    }
+
+    /**
+     * Tries to convert this object to a Ruby Integer using the
+     * supplied conversion method.
+     */
+    @Override
+    public RubyInteger convertToInteger(String convertMethod) {
+<span class="fc" id="L739">        IRubyObject val = TypeConverter.convertToType(this, getRuntime().getInteger(), convertMethod, true);</span>
+<span class="fc bfc" id="L740" title="All 2 branches covered.">        if (!(val instanceof RubyInteger)) throw getRuntime().newTypeError(getMetaClass().getName() + &quot;#&quot; + convertMethod + &quot; should return Integer&quot;);</span>
+<span class="fc" id="L741">        return (RubyInteger)val;</span>
+    }
+
+    /**
+     * Tries to convert this object to a Ruby String using the
+     * &quot;to_str&quot; method.
+     */
+    @Override
+    public RubyString convertToString() {
+<span class="fc" id="L750">        return (RubyString) TypeConverter.convertToType(this, getRuntime().getString(), &quot;to_str&quot;);</span>
+    }
+
+    /**
+     * Internal method that helps to convert any object into the
+     * format of a class name and a hex string inside of #&lt;&gt;.
+     */
+    @Override
+    public IRubyObject anyToString() {
+<span class="fc" id="L759">        String cname = getMetaClass().getRealClass().getName();</span>
+        /* 6:tags 16:addr 1:eos */
+<span class="fc" id="L761">        RubyString str = getRuntime().newString(&quot;#&lt;&quot; + cname + &quot;:0x&quot; + Integer.toHexString(System.identityHashCode(this)) + &quot;&gt;&quot;);</span>
+<span class="fc" id="L762">        str.setTaint(isTaint());</span>
+<span class="fc" id="L763">        return str;</span>
+    }
+
+    /** rb_check_string_type
+     *
+     * Tries to return a coerced string representation of this object,
+     * using &quot;to_str&quot;. If that returns something other than a String
+     * or nil, an empty String will be returned.
+     *
+     */
+    @Override
+    public IRubyObject checkStringType() {
+<span class="fc" id="L775">        IRubyObject str = TypeConverter.convertToTypeWithCheck(this, getRuntime().getString(), &quot;to_str&quot;);</span>
+<span class="pc bpc" id="L776" title="1 of 4 branches missed.">        if(!str.isNil() &amp;&amp; !(str instanceof RubyString)) {</span>
+<span class="nc" id="L777">            str = RubyString.newEmptyString(getRuntime());</span>
+        }
+<span class="fc" id="L779">        return str;</span>
+    }
+
+    /** rb_check_string_type
+     *
+     * Tries to return a coerced string representation of this object,
+     * using &quot;to_str&quot;. If that returns something other than a String
+     * or nil, an empty String will be returned.
+     *
+     */
+    @Override
+    public IRubyObject checkStringType19() {
+<span class="fc" id="L791">        IRubyObject str = TypeConverter.convertToTypeWithCheck19(this, getRuntime().getString(), &quot;to_str&quot;);</span>
+<span class="pc bpc" id="L792" title="1 of 4 branches missed.">        if(!str.isNil() &amp;&amp; !(str instanceof RubyString)) {</span>
+<span class="nc" id="L793">            str = RubyString.newEmptyString(getRuntime());</span>
+        }
+<span class="fc" id="L795">        return str;</span>
+    }
+
+    /** rb_check_array_type
+    *
+    * Returns the result of trying to convert this object to an Array
+    * with &quot;to_ary&quot;.
+    */
+    @Override
+    public IRubyObject checkArrayType() {
+<span class="fc" id="L805">        return TypeConverter.convertToTypeWithCheck(this, getRuntime().getArray(), &quot;to_ary&quot;);</span>
+    }
+
+    /**
+     * @see IRubyObject#toJava
+     */
+    @Override
+    public Object toJava(Class target) {
+        // for callers that unconditionally pass null retval type (JRUBY-4737)
+<span class="nc bnc" id="L814" title="All 2 branches missed.">        if (target == void.class) return null;</span>
+
+<span class="nc bnc" id="L816" title="All 2 branches missed.">        if (dataGetStruct() instanceof JavaObject) {</span>
+            // for interface impls
+
+<span class="nc" id="L819">            JavaObject innerWrapper = (JavaObject)dataGetStruct();</span>
+
+            // ensure the object is associated with the wrapper we found it in,
+            // so that if it comes back we don't re-wrap it
+<span class="nc bnc" id="L823" title="All 2 branches missed.">            if (target.isAssignableFrom(innerWrapper.getValue().getClass())) {</span>
+<span class="nc" id="L824">                getRuntime().getJavaSupport().getObjectProxyCache().put(innerWrapper.getValue(), this);</span>
+
+<span class="nc" id="L826">                return innerWrapper.getValue();</span>
+            }
+<span class="nc bnc" id="L828" title="All 2 branches missed.">        } else if (JavaUtil.isDuckTypeConvertable(getClass(), target)) {</span>
+<span class="nc bnc" id="L829" title="All 2 branches missed.">            if (!respondsTo(&quot;java_object&quot;)) {</span>
+<span class="nc" id="L830">                return JavaUtil.convertProcToInterface(getRuntime().getCurrentContext(), this, target);</span>
+            }
+<span class="nc bnc" id="L832" title="All 2 branches missed.">        } else if (target.isAssignableFrom(getClass())) {</span>
+<span class="nc" id="L833">            return this;</span>
+        }
+        
+<span class="nc" id="L836">        throw getRuntime().newTypeError(&quot;cannot convert instance of &quot; + getClass() + &quot; to &quot; + target);</span>
+    }
+
+    @Override
+    public IRubyObject dup() {
+<span class="fc" id="L841">        Ruby runtime = getRuntime();</span>
+
+<span class="fc bfc" id="L843" title="All 2 branches covered.">        if (isImmediate()) throw runtime.newTypeError(&quot;can't dup &quot; + getMetaClass().getName());</span>
+
+<span class="fc" id="L845">        IRubyObject dup = getMetaClass().getRealClass().allocate();</span>
+<span class="fc bfc" id="L846" title="All 2 branches covered.">        if (isTaint()) dup.setTaint(true);</span>
+
+<span class="fc" id="L848">        initCopy(dup, this, &quot;initialize_dup&quot;);</span>
+
+<span class="fc" id="L850">        return dup;</span>
+    }
+
+    /** init_copy
+     *
+     * Initializes a copy with variable and special instance variable
+     * information, and then call the initialize_copy Ruby method.
+     */
+    private static void initCopy(IRubyObject clone, IRubyObject original, String method) {
+<span class="pc bpc" id="L859" title="3 of 4 branches missed.">        assert !clone.isFrozen() : &quot;frozen object (&quot; + clone.getMetaClass().getName() + &quot;) allocated&quot;;</span>
+
+<span class="fc" id="L861">        original.copySpecialInstanceVariables(clone);</span>
+
+<span class="fc bfc" id="L863" title="All 2 branches covered.">        if (original.hasVariables()) clone.syncVariables(original);</span>
+<span class="fc bfc" id="L864" title="All 2 branches covered.">        if (original instanceof RubyModule) {</span>
+<span class="fc" id="L865">            RubyModule cloneMod = (RubyModule)clone;</span>
+<span class="fc" id="L866">            cloneMod.syncConstants((RubyModule)original);</span>
+<span class="fc" id="L867">            cloneMod.syncClassVariables((RubyModule)original);</span>
+        }
+
+        /* FIXME: finalizer should be dupped here */
+<span class="fc" id="L871">        clone.callMethod(clone.getRuntime().getCurrentContext(), method, original);</span>
+<span class="fc" id="L872">    }</span>
+
+    protected static boolean OBJ_INIT_COPY(IRubyObject obj, IRubyObject orig) {
+<span class="pc bpc" id="L875" title="1 of 2 branches missed.">        if (obj == orig) return false;</span>
+
+<span class="fc" id="L877">        objInitCopy(obj, orig);</span>
+<span class="fc" id="L878">        return true;</span>
+    }
+
+    protected static void objInitCopy(IRubyObject obj, IRubyObject orig) {
+<span class="pc bpc" id="L882" title="1 of 2 branches missed.">        if (obj == orig) return;</span>
+        // FIXME: booooo!
+<span class="fc" id="L884">        ((RubyBasicObject)obj).checkFrozen();</span>
+        // Not implemented
+//        checkTrusted();
+<span class="pc bpc" id="L887" title="2 of 4 branches missed.">        if (obj.getClass() != orig.getClass() || obj.getMetaClass().getRealClass() != orig.getMetaClass().getRealClass()) {</span>
+<span class="nc" id="L888">            throw obj.getRuntime().newTypeError(&quot;initialize_copy should take same class object&quot;);</span>
+        }
+<span class="fc" id="L890">    }</span>
+
+    /**
+     * Lots of MRI objects keep their state in non-lookupable ivars
+     * (e:g. Range, Struct, etc). This method is responsible for
+     * dupping our java field equivalents
+     */
+    @Override
+    public void copySpecialInstanceVariables(IRubyObject clone) {
+<span class="fc" id="L899">    }</span>
+
+    /** rb_inspect
+     *
+     * The internal helper that ensures a RubyString instance is returned
+     * so dangerous casting can be omitted
+     * Prefered over callMethod(context, &quot;inspect&quot;)
+     */
+    static RubyString inspect(ThreadContext context, IRubyObject object) {
+<span class="nc" id="L908">        return RubyString.objAsString(context, invokedynamic(context, object, INSPECT));</span>
+    }
+
+    @Override
+    public IRubyObject rbClone() {
+<span class="fc" id="L913">        Ruby runtime = getRuntime();</span>
+
+<span class="fc bfc" id="L915" title="All 2 branches covered.">        if (isImmediate()) throw runtime.newTypeError(&quot;can't clone &quot; + getMetaClass().getName());</span>
+
+        // We're cloning ourselves, so we know the result should be a RubyObject
+<span class="fc" id="L918">        RubyBasicObject clone = (RubyBasicObject)getMetaClass().getRealClass().allocate();</span>
+<span class="fc" id="L919">        clone.setMetaClass(getSingletonClassClone());</span>
+<span class="fc bfc" id="L920" title="All 2 branches covered.">        if (isTaint()) clone.setTaint(true);</span>
+
+<span class="fc" id="L922">        initCopy(clone, this, &quot;initialize_clone&quot;);</span>
+
+<span class="fc bfc" id="L924" title="All 2 branches covered.">        if (isFrozen()) clone.setFrozen(true);</span>
+<span class="fc" id="L925">        return clone;</span>
+    }
+
+    /** rb_singleton_class_clone
+     *
+     * Will make sure that if the current objects class is a
+     * singleton, it will get cloned.
+     *
+     * @return either a real class, or a clone of the current singleton class
+     */
+    protected RubyClass getSingletonClassClone() {
+<span class="fc" id="L936">        RubyClass klass = getMetaClass();</span>
+
+<span class="fc bfc" id="L938" title="All 2 branches covered.">        if (!klass.isSingleton()) {</span>
+<span class="fc" id="L939">            return klass;</span>
+        }
+
+<span class="fc" id="L942">        MetaClass clone = new MetaClass(getRuntime(), klass.getSuperClass(), ((MetaClass) klass).getAttached());</span>
+<span class="fc" id="L943">        clone.flags = flags;</span>
+
+<span class="fc bfc" id="L945" title="All 2 branches covered.">        if (this instanceof RubyClass) {</span>
+<span class="fc" id="L946">            clone.setMetaClass(clone);</span>
+        } else {
+<span class="fc" id="L948">            clone.setMetaClass(klass.getSingletonClassClone());</span>
+        }
+
+<span class="pc bpc" id="L951" title="1 of 2 branches missed.">        if (klass.hasVariables()) {</span>
+<span class="nc" id="L952">            clone.syncVariables(klass);</span>
+        }
+<span class="fc" id="L954">        clone.syncConstants(klass);</span>
+
+<span class="fc" id="L956">        klass.cloneMethods(clone);</span>
+
+<span class="fc" id="L958">        ((MetaClass) clone.getMetaClass()).setAttached(clone);</span>
+
+<span class="fc" id="L960">        return clone;</span>
+    }
+
+    /**
+     * Specifically polymorphic method that are meant to be overridden
+     * by modules to specify that they are modules in an easy way.
+     */
+    @Override
+    public boolean isModule() {
+<span class="fc" id="L969">        return false;</span>
+    }
+
+    /**
+     * Specifically polymorphic method that are meant to be overridden
+     * by classes to specify that they are classes in an easy way.
+     */
+    @Override
+    public boolean isClass() {
+<span class="nc" id="L978">        return false;</span>
+    }
+
+
+    /**
+     * @see org.jruby.runtime.builtin.IRubyObject#dataWrapStruct(Object)
+     */
+    @Override
+    public synchronized void dataWrapStruct(Object obj) {
+<span class="pc bpc" id="L987" title="1 of 2 branches missed.">        if (obj == null) {</span>
+<span class="nc" id="L988">            removeInternalVariable(&quot;__wrap_struct__&quot;);</span>
+        } else {
+<span class="fc" id="L990">            fastSetInternalVariable(&quot;__wrap_struct__&quot;, obj);</span>
+        }
+<span class="fc" id="L992">    }</span>
+
+    // The dataStruct is a place where custom information can be
+    // contained for core implementations that doesn't necessarily
+    // want to go to the trouble of creating a subclass of
+    // RubyObject. The OpenSSL implementation uses this heavily to
+    // save holder objects containing Java cryptography objects.
+    // Java integration uses this to store the Java object ref.
+    //protected transient Object dataStruct;
+    /**
+     * @see org.jruby.runtime.builtin.IRubyObject#dataGetStruct()
+     */
+    @Override
+    public synchronized Object dataGetStruct() {
+<span class="fc" id="L1006">        return getInternalVariable(&quot;__wrap_struct__&quot;);</span>
+    }
+
+    // Equivalent of Data_Get_Struct
+    // This will first check that the object in question is actually a T_DATA equivalent.
+    @Override
+    public synchronized Object dataGetStructChecked() {
+<span class="nc" id="L1013">        TypeConverter.checkData(this);</span>
+<span class="nc" id="L1014">        return getInternalVariable(&quot;__wrap_struct__&quot;);</span>
+    }
+
+    /** rb_obj_id
+     *
+     * Return the internal id of an object.
+     */
+    @JRubyMethod(name = {&quot;object_id&quot;, &quot;__id__&quot;})
+    @Override
+    public IRubyObject id() {
+<span class="fc" id="L1024">        return getRuntime().newFixnum(getObjectId());</span>
+    }
+
+    /** rb_obj_itself
+     *
+     * Identity method for the object.
+     */
+    @JRubyMethod
+    public IRubyObject itself() {
+<span class="fc" id="L1033">        return this;</span>
+    }
+
+    /**
+     * The logic here is to use the special objectId accessor slot from the
+     * parent as a lazy store for an object ID. IDs are generated atomically,
+     * in serial, and guaranteed unique for up to 2^63 objects. The special
+     * objectId slot is managed separately from the &quot;normal&quot; vars so it
+     * does not marshal, clone/dup, or refuse to be initially set when the
+     * object is frozen.
+     */
+    protected long getObjectId() {
+<span class="fc" id="L1045">        return metaClass.getRealClass().getVariableTableManager().getObjectId(this);</span>
+    }
+
+    /** rb_obj_inspect
+     *
+     *  call-seq:
+     *     obj.inspect   =&gt; string
+     *
+     *  Returns a string containing a human-readable representation of
+     *  &lt;i&gt;obj&lt;/i&gt;. If not overridden, uses the &lt;code&gt;to_s&lt;/code&gt; method to
+     *  generate the string.
+     *
+     *     [ 1, 2, 3..4, 'five' ].inspect   #=&gt; &quot;[1, 2, 3..4, \&quot;five\&quot;]&quot;
+     *     Time.new.inspect                 #=&gt; &quot;Wed Apr 09 08:54:39 CDT 2003&quot;
+     */
+    @Override
+    public IRubyObject inspect() {
+<span class="fc" id="L1062">        Ruby runtime = getRuntime();</span>
+<span class="fc bfc" id="L1063" title="All 6 branches covered.">        if ((!isImmediate()) &amp;&amp; !(this instanceof RubyModule) &amp;&amp; hasVariables()) {</span>
+<span class="fc" id="L1064">            return hashyInspect();</span>
+        } else {
+<span class="fc bfc" id="L1066" title="All 2 branches covered.">            if (isNil()) return RubyNil.inspect(runtime.getCurrentContext(), this);</span>
+<span class="fc" id="L1067">            return to_s();</span>
+        }
+    }
+
+    public IRubyObject hashyInspect() {
+<span class="fc" id="L1072">        Ruby runtime = getRuntime();</span>
+<span class="fc" id="L1073">        StringBuilder part = new StringBuilder();</span>
+<span class="fc" id="L1074">        String cname = getMetaClass().getRealClass().getName();</span>
+<span class="fc" id="L1075">        part.append(&quot;#&lt;&quot;).append(cname).append(&quot;:0x&quot;);</span>
+<span class="fc" id="L1076">        part.append(Integer.toHexString(inspectHashCode()));</span>
+
+<span class="pc bpc" id="L1078" title="1 of 2 branches missed.">        if (runtime.isInspecting(this)) {</span>
+            /* 6:tags 16:addr 1:eos */
+<span class="nc" id="L1080">            part.append(&quot; ...&gt;&quot;);</span>
+<span class="nc" id="L1081">            return runtime.newString(part.toString());</span>
+        }
+        try {
+<span class="fc" id="L1084">            runtime.registerInspecting(this);</span>
+<span class="fc" id="L1085">            return runtime.newString(inspectObj(part).toString());</span>
+        } finally {
+<span class="pc" id="L1087">            runtime.unregisterInspecting(this);</span>
+        }
+    }
+
+    // MRI: rb_inspect, which does dispatch
+    public static IRubyObject rbInspect(ThreadContext context, IRubyObject obj) {
+<span class="fc" id="L1093">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L1094">        RubyString str = obj.callMethod(context, &quot;inspect&quot;).asString();</span>
+<span class="fc" id="L1095">        Encoding ext = EncodingUtils.defaultExternalEncoding(runtime);</span>
+<span class="pc bpc" id="L1096" title="1 of 2 branches missed.">        if (!ext.isAsciiCompatible()) {</span>
+<span class="nc bnc" id="L1097" title="All 2 branches missed.">            if (!str.isAsciiOnly())</span>
+<span class="nc" id="L1098">                throw runtime.newEncodingCompatibilityError(&quot;inspected result must be ASCII only if default external encoding is ASCII incompatible&quot;);</span>
+<span class="nc" id="L1099">            return str;</span>
+        }
+<span class="pc bpc" id="L1101" title="1 of 4 branches missed.">        if (str.getEncoding() != ext &amp;&amp; !str.isAsciiOnly())</span>
+<span class="nc" id="L1102">            throw runtime.newEncodingCompatibilityError(&quot;inspected result must be ASCII only or use the default external encoding&quot;);</span>
+<span class="fc" id="L1103">        return str;</span>
+    }
+    /**
+     * For most objects, the hash used in the default #inspect is just the
+     * identity hashcode of the actual object.
+     *
+     * See org.jruby.java.proxies.JavaProxy for a divergent case.
+     *
+     * @return The identity hashcode of this object
+     */
+    protected int inspectHashCode() {
+<span class="fc" id="L1114">        return System.identityHashCode(this);</span>
+    }
+
+    /** inspect_obj
+     *
+     * The internal helper method that takes care of the part of the
+     * inspection that inspects instance variables.
+     */
+    private StringBuilder inspectObj(StringBuilder part) {
+<span class="fc" id="L1123">        ThreadContext context = getRuntime().getCurrentContext();</span>
+<span class="fc" id="L1124">        String sep = &quot;&quot;;</span>
+
+<span class="fc bfc" id="L1126" title="All 2 branches covered.">        for (Map.Entry&lt;String, VariableAccessor&gt; entry : metaClass.getVariableTableManager().getVariableAccessorsForRead().entrySet()) {</span>
+<span class="fc" id="L1127">            Object value = entry.getValue().get(this);</span>
+<span class="pc bpc" id="L1128" title="2 of 6 branches missed.">            if (value == null || !(value instanceof IRubyObject) || !IdUtil.isInstanceVariable(entry.getKey())) continue;</span>
+            
+<span class="fc" id="L1130">            part.append(sep).append(&quot; &quot;).append(entry.getKey()).append(&quot;=&quot;);</span>
+<span class="fc" id="L1131">            part.append(invokedynamic(context, (IRubyObject)value, INSPECT));</span>
+<span class="fc" id="L1132">            sep = &quot;,&quot;;</span>
+<span class="fc" id="L1133">        }</span>
+<span class="fc" id="L1134">        part.append(&quot;&gt;&quot;);</span>
+<span class="fc" id="L1135">        return part;</span>
+    }
+
+    // Methods of the Object class (rb_obj_*):
+
+
+    @JRubyMethod(name = &quot;!&quot;)
+    public IRubyObject op_not(ThreadContext context) {
+<span class="fc bfc" id="L1143" title="All 2 branches covered.">        return context.runtime.newBoolean(!this.isTrue());</span>
+    }
+
+    @JRubyMethod(name = &quot;!=&quot;, required = 1)
+    public IRubyObject op_not_equal(ThreadContext context, IRubyObject other) {
+<span class="fc bfc" id="L1148" title="All 2 branches covered.">        return context.runtime.newBoolean(!invokedynamic(context, this, OP_EQUAL, other).isTrue());</span>
+    }
+
+    /**
+     * Compares this Ruby object with another.
+     *
+     * @param other another IRubyObject
+     * @return 0 if equal,
+     *         &amp;lt; 0 if this is less than other,
+     *         &amp;gt; 0 if this is greater than other
+     * @throws IllegalArgumentException if the objects cannot be compared.
+     */
+    @Override
+    public int compareTo(IRubyObject other) {
+        // SSS FIXME: How do we get access to the runtime here?
+        // IRubyObject oldExc = runtime.getGlobalVariables().get(&quot;$!&quot;);
+        try {
+<span class="nc" id="L1165">            IRubyObject cmp = invokedynamic(getRuntime().getCurrentContext(),</span>
+                    this, OP_CMP, other);
+            
+            // if RubyBasicObject#op_cmp is used, the result may be nil
+<span class="nc bnc" id="L1169" title="All 2 branches missed.">            if (!cmp.isNil()) {</span>
+<span class="nc" id="L1170">                return (int) cmp.convertToInteger().getLongValue();</span>
+            }
+<span class="nc" id="L1172">        } catch (RaiseException ex) {</span>
+            // runtime.getGlobalVariables().set(&quot;$!&quot;, oldExc);
+<span class="nc" id="L1174">        }</span>
+        
+        /* We used to raise an error if two IRubyObject were not comparable, but
+         * in order to support the new ConcurrentHashMapV8 and other libraries
+         * and containers that arbitrarily call compareTo expecting it to always
+         * succeed, we have opted to return 0 here. This will allow all
+         * RubyBasicObject subclasses to be compared, but if the comparison is
+         * not valid we they will appear the same for sorting purposes.
+         * 
+         * See https://jira.codehaus.org/browse/JRUBY-7013
+         */
+<span class="nc" id="L1185">        return 0;</span>
+    }
+
+    @Override
+    public IRubyObject op_equal(ThreadContext context, IRubyObject obj) {
+<span class="fc" id="L1190">        return op_equal_19(context, obj);</span>
+    }
+
+    /** rb_obj_equal
+     *
+     * Will by default use identity equality to compare objects. This
+     * follows the Ruby semantics.
+     *
+     * The name of this method doesn't follow the convention because hierarchy problems
+     */
+    @JRubyMethod(name = &quot;==&quot;)
+    public IRubyObject op_equal_19(ThreadContext context, IRubyObject obj) {
+<span class="fc bfc" id="L1202" title="All 2 branches covered.">        return this == obj ? context.runtime.getTrue() : context.runtime.getFalse();</span>
+    }
+
+    @Override
+    public IRubyObject op_eqq(ThreadContext context, IRubyObject other) {
+        // Remain unimplemented due to problems with the double java hierarchy
+<span class="nc" id="L1208">        return context.runtime.getNil();</span>
+    }
+
+    @JRubyMethod(name = &quot;equal?&quot;, required = 1)
+    public IRubyObject equal_p19(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L1213">        return op_equal_19(context, other);</span>
+    }
+
+    /**
+     * Helper method for checking equality, first using Java identity
+     * equality, and then calling the &quot;==&quot; method.
+     */
+    protected static boolean equalInternal(final ThreadContext context, final IRubyObject that, final IRubyObject other){
+<span class="fc bfc" id="L1221" title="All 4 branches covered.">        return that == other || invokedynamic(context, that, OP_EQUAL, other).isTrue();</span>
+    }
+
+    /** method used for Hash key comparison (specialized for String, Symbol and Fixnum)
+     *
+     * Will by default just call the Ruby method &quot;eql?&quot;
+     */
+    @Override
+    public boolean eql(IRubyObject other) {
+<span class="fc" id="L1230">        return invokedynamic(getRuntime().getCurrentContext(), this, EQL, other).isTrue();</span>
+    }
+
+    /**
+     * Adds the specified object as a finalizer for this object.
+     */
+    @Override
+    public void addFinalizer(IRubyObject f) {
+<span class="fc" id="L1238">        Finalizer finalizer = (Finalizer)getInternalVariable(&quot;__finalizer__&quot;);</span>
+<span class="pc bpc" id="L1239" title="1 of 2 branches missed.">        if (finalizer == null) {</span>
+            // since this is the first time we're registering a finalizer, we
+            // must also register this object in ObjectSpace, so that future
+            // calls to undefine_finalizer, which takes an object ID, can
+            // locate the object properly. See JRUBY-4839.
+<span class="fc" id="L1244">            long id = getObjectId();</span>
+<span class="fc" id="L1245">            RubyFixnum fixnumId = (RubyFixnum)id();</span>
+
+<span class="fc" id="L1247">            getRuntime().getObjectSpace().registerObjectId(id, this);</span>
+
+<span class="fc" id="L1249">            finalizer = new Finalizer(fixnumId);</span>
+<span class="fc" id="L1250">            fastSetInternalVariable(&quot;__finalizer__&quot;, finalizer);</span>
+<span class="fc" id="L1251">            getRuntime().addFinalizer(finalizer);</span>
+        }
+<span class="fc" id="L1253">        finalizer.addFinalizer(f);</span>
+<span class="fc" id="L1254">    }</span>
+
+    /**
+     * Remove all the finalizers for this object.
+     */
+    @Override
+    public void removeFinalizers() {
+<span class="nc" id="L1261">        Finalizer finalizer = (Finalizer)getInternalVariable(&quot;__finalizer__&quot;);</span>
+<span class="nc bnc" id="L1262" title="All 2 branches missed.">        if (finalizer != null) {</span>
+<span class="nc" id="L1263">            finalizer.removeFinalizers();</span>
+<span class="nc" id="L1264">            removeInternalVariable(&quot;__finalizer__&quot;);</span>
+<span class="nc" id="L1265">            getRuntime().removeFinalizer(finalizer);</span>
+        }
+<span class="nc" id="L1267">    }</span>
+
+    @Override
+    public Object getVariable(int index) {
+<span class="nc" id="L1271">        return VariableAccessor.getVariable(this, index);</span>
+    }
+    
+    @Override
+    public void setVariable(int index, Object value) {
+<span class="nc" id="L1276">        ensureInstanceVariablesSettable();</span>
+<span class="nc bnc" id="L1277" title="All 2 branches missed.">        if (index &lt; 0) return;</span>
+<span class="nc" id="L1278">        metaClass.getVariableTableManager().setVariableInternal(this, index, value);</span>
+<span class="nc" id="L1279">    }</span>
+
+    public final Object getFFIHandle() {
+<span class="fc" id="L1282">        return metaClass.getVariableTableManager().getFFIHandle(this);</span>
+    }
+
+    public final void setFFIHandle(Object value) {
+<span class="fc" id="L1286">        metaClass.getVariableTableManager().setFFIHandle(this, value);</span>
+<span class="fc" id="L1287">    }</span>
+
+    //
+    // COMMON VARIABLE METHODS
+    //
+
+    /**
+     * Returns true if object has any variables
+     * 
+     * @see VariableTableManager#hasVariables(org.jruby.RubyBasicObject) 
+     */
+    @Override
+    public boolean hasVariables() {
+<span class="fc" id="L1300">        return metaClass.getVariableTableManager().hasVariables(this);</span>
+    }
+
+    /**
+     * Gets a list of all variables in this object.
+     */
+    // TODO: must override in RubyModule to pick up constants
+    @Override
+    public List&lt;Variable&lt;Object&gt;&gt; getVariableList() {
+<span class="fc" id="L1309">        Map&lt;String, VariableAccessor&gt; ivarAccessors = metaClass.getVariableAccessorsForRead();</span>
+<span class="fc" id="L1310">        ArrayList&lt;Variable&lt;Object&gt;&gt; list = new ArrayList&lt;Variable&lt;Object&gt;&gt;();</span>
+<span class="fc bfc" id="L1311" title="All 2 branches covered.">        for (Map.Entry&lt;String, VariableAccessor&gt; entry : ivarAccessors.entrySet()) {</span>
+<span class="fc" id="L1312">            Object value = entry.getValue().get(this);</span>
+<span class="fc bfc" id="L1313" title="All 2 branches covered.">            if (value == null) continue;</span>
+<span class="fc" id="L1314">            list.add(new VariableEntry&lt;Object&gt;(entry.getKey(), value));</span>
+<span class="fc" id="L1315">        }</span>
+<span class="fc" id="L1316">        return list;</span>
+    }
+
+    /**
+     * Gets a name list of all variables in this object.
+     */
+   // TODO: must override in RubyModule to pick up constants
+    @Override
+   public List&lt;String&gt; getVariableNameList() {
+<span class="nc" id="L1325">        Map&lt;String, VariableAccessor&gt; ivarAccessors = metaClass.getVariableAccessorsForRead();</span>
+<span class="nc" id="L1326">        ArrayList&lt;String&gt; list = new ArrayList&lt;String&gt;();</span>
+<span class="nc bnc" id="L1327" title="All 2 branches missed.">        for (Map.Entry&lt;String, VariableAccessor&gt; entry : ivarAccessors.entrySet()) {</span>
+<span class="nc" id="L1328">            Object value = entry.getValue().get(this);</span>
+<span class="nc bnc" id="L1329" title="All 2 branches missed.">            if (value == null) continue;</span>
+<span class="nc" id="L1330">            list.add(entry.getKey());</span>
+<span class="nc" id="L1331">        }</span>
+<span class="nc" id="L1332">        return list;</span>
+    }
+
+    /**
+     * Checks if the variable table contains a variable of the
+     * specified name.
+     */
+    protected boolean variableTableContains(String name) {
+<span class="fc bfc" id="L1340" title="All 2 branches covered.">        return metaClass.getVariableAccessorForRead(name).get(this) != null;</span>
+    }
+
+    /**
+     * Fetch an object from the variable table based on the name.
+     *
+     * @return the object or null if not found
+     */
+    protected Object variableTableFetch(String name) {
+<span class="fc" id="L1349">        return metaClass.getVariableAccessorForRead(name).get(this);</span>
+    }
+
+    /**
+     * Store a value in the variable store under the specific name.
+     */
+    protected Object variableTableStore(String name, Object value) {
+<span class="fc" id="L1356">        metaClass.getVariableAccessorForWrite(name).set(this, value);</span>
+<span class="fc" id="L1357">        return value;</span>
+    }
+
+    /**
+     * Removes the entry with the specified name from the variable
+     * table, and returning the removed value.
+     */
+    protected Object variableTableRemove(String name) {
+<span class="fc" id="L1365">        return metaClass.getVariableTableManager().clearVariable(this, name);</span>
+    }
+
+    /**
+     * Synchronize the variable table with the argument. In real terms
+     * this means copy all entries into a newly allocated table.
+     */
+    protected void variableTableSync(List&lt;Variable&lt;Object&gt;&gt; vars) {
+<span class="nc" id="L1373">        synchronized(this) {</span>
+<span class="nc bnc" id="L1374" title="All 2 branches missed.">            for (Variable&lt;Object&gt; var : vars) {</span>
+<span class="nc" id="L1375">                variableTableStore(var.getName(), var.getValue());</span>
+<span class="nc" id="L1376">            }</span>
+<span class="nc" id="L1377">        }</span>
+<span class="nc" id="L1378">    }</span>
+
+    //
+    // INTERNAL VARIABLE METHODS
+    //
+
+    /**
+     * Dummy method to avoid a cast, and to avoid polluting the
+     * IRubyObject interface with all the instance variable management
+     * methods.
+     */
+    @Override
+    public InternalVariables getInternalVariables() {
+<span class="fc" id="L1391">        return this;</span>
+    }
+
+    /**
+     * @see org.jruby.runtime.builtin.InternalVariables#hasInternalVariable
+     */
+    @Override
+    public boolean hasInternalVariable(String name) {
+<span class="pc bpc" id="L1399" title="3 of 4 branches missed.">        assert !IdUtil.isRubyVariable(name);</span>
+<span class="fc" id="L1400">        return variableTableContains(name);</span>
+    }
+
+    /**
+     * @see org.jruby.runtime.builtin.InternalVariables#getInternalVariable
+     */
+    @Override
+    public Object getInternalVariable(String name) {
+<span class="pc bpc" id="L1408" title="3 of 4 branches missed.">        assert !IdUtil.isRubyVariable(name);</span>
+<span class="fc" id="L1409">        return variableTableFetch(name);</span>
+    }
+
+    /**
+     * @see org.jruby.runtime.builtin.InternalVariables#setInternalVariable
+     */
+    @Override
+    public void setInternalVariable(String name, Object value) {
+<span class="pc bpc" id="L1417" title="3 of 4 branches missed.">        assert !IdUtil.isRubyVariable(name);</span>
+<span class="fc" id="L1418">        variableTableStore(name, value);</span>
+<span class="fc" id="L1419">    }</span>
+
+    /**
+     * @see org.jruby.runtime.builtin.InternalVariables#removeInternalVariable
+     */
+    @Override
+    public Object removeInternalVariable(String name) {
+<span class="pc bpc" id="L1426" title="3 of 4 branches missed.">        assert !IdUtil.isRubyVariable(name);</span>
+<span class="fc" id="L1427">        return variableTableRemove(name);</span>
+    }
+    
+    /**
+     * Sync one this object's variables with other's - this is used to make
+     * rbClone work correctly.
+     */
+    @Override
+    public void syncVariables(IRubyObject other) {
+<span class="fc" id="L1436">        metaClass.getVariableTableManager().syncVariables(this, other);</span>
+<span class="fc" id="L1437">    }</span>
+    
+    //
+    // INSTANCE VARIABLE API METHODS
+    //
+
+    /**
+     * Dummy method to avoid a cast, and to avoid polluting the
+     * IRubyObject interface with all the instance variable management
+     * methods.
+     */
+    @Override
+    public InstanceVariables getInstanceVariables() {
+<span class="fc" id="L1450">        return this;</span>
+    }
+
+    /**
+     * @see org.jruby.runtime.builtin.InstanceVariables#hasInstanceVariable
+     */
+    @Override
+    public boolean hasInstanceVariable(String name) {
+<span class="fc" id="L1458">        return variableTableContains(name);</span>
+    }
+
+    /**
+     * @see org.jruby.runtime.builtin.InstanceVariables#getInstanceVariable
+     */
+    @Override
+    public IRubyObject getInstanceVariable(String name) {
+<span class="fc" id="L1466">        return (IRubyObject)variableTableFetch(name);</span>
+    }
+
+    /** rb_iv_set / rb_ivar_set
+    *
+    * @see org.jruby.runtime.builtin.InstanceVariables#setInstanceVariable
+    */
+    @Override
+    public IRubyObject setInstanceVariable(String name, IRubyObject value) {
+<span class="pc bpc" id="L1475" title="3 of 4 branches missed.">        assert value != null;</span>
+<span class="fc" id="L1476">        ensureInstanceVariablesSettable();</span>
+<span class="fc" id="L1477">        return (IRubyObject)variableTableStore(name, value);</span>
+    }
+
+    /**
+     * @see org.jruby.runtime.builtin.InstanceVariables#removeInstanceVariable
+     */
+    @Override
+    public IRubyObject removeInstanceVariable(String name) {
+<span class="nc" id="L1485">        ensureInstanceVariablesSettable();</span>
+<span class="nc" id="L1486">        return (IRubyObject)variableTableRemove(name);</span>
+    }
+
+    /**
+     * Gets a list of all variables in this object.
+     */
+    // TODO: must override in RubyModule to pick up constants
+    @Override
+    public List&lt;Variable&lt;IRubyObject&gt;&gt; getInstanceVariableList() {
+<span class="fc" id="L1495">        Map&lt;String, VariableAccessor&gt; ivarAccessors = metaClass.getVariableAccessorsForRead();</span>
+<span class="fc" id="L1496">        ArrayList&lt;Variable&lt;IRubyObject&gt;&gt; list = new ArrayList&lt;Variable&lt;IRubyObject&gt;&gt;();</span>
+<span class="fc bfc" id="L1497" title="All 2 branches covered.">        for (Map.Entry&lt;String, VariableAccessor&gt; entry : ivarAccessors.entrySet()) {</span>
+<span class="fc" id="L1498">            Object value = entry.getValue().get(this);</span>
+<span class="pc bpc" id="L1499" title="1 of 6 branches missed.">            if (value == null || !(value instanceof IRubyObject) || !IdUtil.isInstanceVariable(entry.getKey())) continue;</span>
+<span class="fc" id="L1500">            list.add(new VariableEntry&lt;IRubyObject&gt;(entry.getKey(), (IRubyObject)value));</span>
+<span class="fc" id="L1501">        }</span>
+<span class="fc" id="L1502">        return list;</span>
+    }
+
+    /**
+     * Gets a name list of all variables in this object.
+     */
+   // TODO: must override in RubyModule to pick up constants
+    @Override
+   public List&lt;String&gt; getInstanceVariableNameList() {
+<span class="fc" id="L1511">        Map&lt;String, VariableAccessor&gt; ivarAccessors = metaClass.getVariableAccessorsForRead();</span>
+<span class="fc" id="L1512">        ArrayList&lt;String&gt; list = new ArrayList&lt;String&gt;();</span>
+<span class="fc bfc" id="L1513" title="All 2 branches covered.">        for (Map.Entry&lt;String, VariableAccessor&gt; entry : ivarAccessors.entrySet()) {</span>
+<span class="fc" id="L1514">            Object value = entry.getValue().get(this);</span>
+<span class="pc bpc" id="L1515" title="1 of 6 branches missed.">            if (value == null || !(value instanceof IRubyObject) || !IdUtil.isInstanceVariable(entry.getKey())) continue;</span>
+<span class="fc" id="L1516">            list.add(entry.getKey());</span>
+<span class="fc" id="L1517">        }</span>
+<span class="fc" id="L1518">        return list;</span>
+    }
+
+    /**
+     * @see org.jruby.runtime.builtin.InstanceVariables#getInstanceVariableNameList
+     */
+    @Override
+    public void copyInstanceVariablesInto(final InstanceVariables other) {
+<span class="fc bfc" id="L1526" title="All 2 branches covered.">        for (Variable&lt;IRubyObject&gt; var : getInstanceVariableList()) {</span>
+<span class="fc" id="L1527">            synchronized (this) {</span>
+<span class="fc" id="L1528">                other.setInstanceVariable(var.getName(), var.getValue());</span>
+<span class="pc" id="L1529">            }</span>
+<span class="fc" id="L1530">        }</span>
+<span class="fc" id="L1531">    }</span>
+
+    /**
+     * Makes sure that instance variables can be set on this object,
+     * including information about whether this object is frozen, or
+     * tainted. Will throw a suitable exception in that case.
+     */
+    public final void ensureInstanceVariablesSettable() {
+<span class="pc bpc" id="L1539" title="3 of 4 branches missed.">        if (!isFrozen() || isImmediate()) {</span>
+<span class="fc" id="L1540">            return;</span>
+        }
+<span class="nc" id="L1542">        raiseFrozenError();</span>
+<span class="nc" id="L1543">    }</span>
+
+    private void raiseFrozenError() throws RaiseException {
+<span class="pc bpc" id="L1546" title="1 of 2 branches missed.">        if (this instanceof RubyModule) {</span>
+<span class="nc" id="L1547">            throw getRuntime().newFrozenError(&quot;class/module &quot;);</span>
+        } else {
+<span class="fc" id="L1549">            throw getRuntime().newFrozenError(getMetaClass().toString());</span>
+        }
+    }
+
+    @Deprecated
+    @Override
+    public final int getNativeTypeIndex() {
+<span class="nc" id="L1556">        return getNativeClassIndex().ordinal();</span>
+    }
+    
+    @Override
+    public ClassIndex getNativeClassIndex() {
+<span class="fc" id="L1561">        return ClassIndex.BASICOBJECT;</span>
+    }
+
+    /**
+     * A method to determine whether the method named by methodName is a builtin
+     * method.  This means a method with a JRubyMethod annotation written in
+     * Java.
+     *
+     * @param methodName to look for.
+     * @return true if so
+     */
+    public boolean isBuiltin(String methodName) {
+<span class="fc" id="L1573">        return getMetaClass().isMethodBuiltin(methodName);</span>
+    }
+
+    @JRubyMethod(name = &quot;singleton_method_added&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject singleton_method_added19(ThreadContext context, IRubyObject recv, IRubyObject symbolId, Block block) {
+<span class="fc" id="L1578">        return context.runtime.getNil();</span>
+    }
+
+    @JRubyMethod(name = &quot;singleton_method_removed&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject singleton_method_removed19(ThreadContext context, IRubyObject recv, IRubyObject symbolId, Block block) {
+<span class="fc" id="L1583">        return context.runtime.getNil();</span>
+    }
+
+    @JRubyMethod(name = &quot;singleton_method_undefined&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject singleton_method_undefined19(ThreadContext context, IRubyObject recv, IRubyObject symbolId, Block block) {
+<span class="fc" id="L1588">        return context.runtime.getNil();</span>
+    }
+
+    @JRubyMethod(name = &quot;method_missing&quot;, rest = true, module = true, visibility = PRIVATE)
+    public static IRubyObject method_missing19(ThreadContext context, IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="nc" id="L1593">        Visibility lastVis = context.getLastVisibility();</span>
+<span class="nc" id="L1594">        CallType lastCallType = context.getLastCallType();</span>
+
+<span class="nc bnc" id="L1596" title="All 4 branches missed.">        if (args.length == 0 || !(args[0] instanceof RubySymbol)) {</span>
+<span class="nc" id="L1597">            throw context.runtime.newArgumentError(&quot;no id given&quot;);</span>
+        }
+
+<span class="nc" id="L1600">        return RubyKernel.methodMissingDirect(context, recv, (RubySymbol)args[0], lastVis, lastCallType, args, block);</span>
+    }
+
+    @JRubyMethod(name = &quot;__send__&quot;, omit = true)
+    public IRubyObject send19(ThreadContext context, IRubyObject arg0, Block block) {
+<span class="fc" id="L1605">        String name = RubySymbol.objectToSymbolString(arg0);</span>
+
+<span class="fc" id="L1607">        return getMetaClass().finvoke(context, this, name, block);</span>
+    }
+    @JRubyMethod(name = &quot;__send__&quot;, omit = true)
+    public IRubyObject send19(ThreadContext context, IRubyObject arg0, IRubyObject arg1, Block block) {
+<span class="fc" id="L1611">        String name = RubySymbol.objectToSymbolString(arg0);</span>
+
+<span class="fc" id="L1613">        return getMetaClass().finvoke(context, this, name, arg1, block);</span>
+    }
+    @JRubyMethod(name = &quot;__send__&quot;, omit = true)
+    public IRubyObject send19(ThreadContext context, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="fc" id="L1617">        String name = RubySymbol.objectToSymbolString(arg0);</span>
+
+<span class="fc" id="L1619">        return getMetaClass().finvoke(context, this, name, arg1, arg2, block);</span>
+    }
+    @JRubyMethod(name = &quot;__send__&quot;, required = 1, rest = true, omit = true)
+    public IRubyObject send19(ThreadContext context, IRubyObject[] args, Block block) {
+<span class="fc" id="L1623">        String name = RubySymbol.objectToSymbolString(args[0]);</span>
+<span class="fc" id="L1624">        int newArgsLength = args.length - 1;</span>
+
+        IRubyObject[] newArgs;
+<span class="fc bfc" id="L1627" title="All 2 branches covered.">        if (newArgsLength == 0) {</span>
+<span class="fc" id="L1628">            newArgs = IRubyObject.NULL_ARRAY;</span>
+        } else {
+<span class="fc" id="L1630">            newArgs = new IRubyObject[newArgsLength];</span>
+<span class="fc" id="L1631">            System.arraycopy(args, 1, newArgs, 0, newArgs.length);</span>
+        }
+
+<span class="fc" id="L1634">        return getMetaClass().finvoke(context, this, name, newArgs, block);</span>
+    }
+    
+    @JRubyMethod(name = &quot;instance_eval&quot;,
+            reads = {LASTLINE, BACKREF, VISIBILITY, BLOCK, SELF, METHODNAME, LINE, JUMPTARGET, CLASS, FILENAME, SCOPE},
+            writes = {LASTLINE, BACKREF, VISIBILITY, BLOCK, SELF, METHODNAME, LINE, JUMPTARGET, CLASS, FILENAME, SCOPE})
+    public IRubyObject instance_eval19(ThreadContext context, Block block) {
+<span class="fc" id="L1641">        return specificEval(context, getInstanceEvalClass(), block, EvalType.INSTANCE_EVAL);</span>
+    }
+    @JRubyMethod(name = &quot;instance_eval&quot;,
+            reads = {LASTLINE, BACKREF, VISIBILITY, BLOCK, SELF, METHODNAME, LINE, JUMPTARGET, CLASS, FILENAME, SCOPE},
+            writes = {LASTLINE, BACKREF, VISIBILITY, BLOCK, SELF, METHODNAME, LINE, JUMPTARGET, CLASS, FILENAME, SCOPE})
+    public IRubyObject instance_eval19(ThreadContext context, IRubyObject arg0, Block block) {
+<span class="fc" id="L1647">        return specificEval(context, getInstanceEvalClass(), arg0, block, EvalType.INSTANCE_EVAL);</span>
+    }
+    @JRubyMethod(name = &quot;instance_eval&quot;,
+            reads = {LASTLINE, BACKREF, VISIBILITY, BLOCK, SELF, METHODNAME, LINE, JUMPTARGET, CLASS, FILENAME, SCOPE},
+            writes = {LASTLINE, BACKREF, VISIBILITY, BLOCK, SELF, METHODNAME, LINE, JUMPTARGET, CLASS, FILENAME, SCOPE})
+    public IRubyObject instance_eval19(ThreadContext context, IRubyObject arg0, IRubyObject arg1, Block block) {
+<span class="nc" id="L1653">        return specificEval(context, getInstanceEvalClass(), arg0, arg1, block, EvalType.INSTANCE_EVAL);</span>
+    }
+    @JRubyMethod(name = &quot;instance_eval&quot;,
+            reads = {LASTLINE, BACKREF, VISIBILITY, BLOCK, SELF, METHODNAME, LINE, JUMPTARGET, CLASS, FILENAME, SCOPE},
+            writes = {LASTLINE, BACKREF, VISIBILITY, BLOCK, SELF, METHODNAME, LINE, JUMPTARGET, CLASS, FILENAME, SCOPE})
+    public IRubyObject instance_eval19(ThreadContext context, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="nc" id="L1659">        return specificEval(context, getInstanceEvalClass(), arg0, arg1, arg2, block, EvalType.INSTANCE_EVAL);</span>
+    }
+
+    @JRubyMethod(name = &quot;instance_exec&quot;, optional = 3, rest = true,
+            reads = {LASTLINE, BACKREF, VISIBILITY, BLOCK, SELF, METHODNAME, LINE, JUMPTARGET, CLASS, FILENAME, SCOPE},
+            writes = {LASTLINE, BACKREF, VISIBILITY, BLOCK, SELF, METHODNAME, LINE, JUMPTARGET, CLASS, FILENAME, SCOPE})
+    public IRubyObject instance_exec19(ThreadContext context, IRubyObject[] args, Block block) {
+<span class="fc bfc" id="L1666" title="All 2 branches covered.">        if (!block.isGiven()) {</span>
+<span class="fc" id="L1667">            throw context.runtime.newLocalJumpErrorNoBlock();</span>
+        }
+
+        RubyModule klazz;
+<span class="fc bfc" id="L1671" title="All 2 branches covered.">        if (isImmediate()) {</span>
+            // Ruby uses Qnil here, we use &quot;dummy&quot; because we need a class
+<span class="fc" id="L1673">            klazz = context.runtime.getDummy();</span>
+        } else {
+<span class="fc" id="L1675">            klazz = getSingletonClass();</span>
+        }
+
+<span class="fc" id="L1678">        return yieldUnder(context, klazz, args, block, EvalType.INSTANCE_EVAL);</span>
+    }
+
+    /**
+     * Will yield to the specific block changing the self to be the
+     * current object instead of the self that is part of the frame
+     * saved in the block frame. This method is the basis for the Ruby
+     * instance_eval and module_eval methods. The arguments sent in to
+     * it in the args array will be yielded to the block. This makes
+     * it possible to emulate both instance_eval and instance_exec
+     * with this implementation.
+     */
+    protected IRubyObject yieldUnder(final ThreadContext context, RubyModule under, IRubyObject[] args, Block block, EvalType evalType) {
+<span class="fc" id="L1691">        context.preExecuteUnder(this, under, block);</span>
+
+<span class="fc" id="L1693">        IRubyObject savedBindingSelf = block.getBinding().getSelf();</span>
+<span class="fc" id="L1694">        IRubyObject savedFrameSelf = block.getBinding().getFrame().getSelf();</span>
+<span class="fc" id="L1695">        Visibility savedVisibility = block.getBinding().getVisibility();</span>
+<span class="fc" id="L1696">        block.getBinding().setVisibility(PUBLIC);</span>
+
+        try {
+<span class="fc bfc" id="L1699" title="All 2 branches covered.">            if (args.length == 1) {</span>
+<span class="fc" id="L1700">                IRubyObject valueInYield = args[0];</span>
+<span class="fc" id="L1701">                return setupBlock(block, evalType).yieldNonArray(context, valueInYield, this); // context.getRubyClass());</span>
+            } else {
+<span class="fc" id="L1703">                IRubyObject valueInYield = RubyArray.newArrayNoCopy(context.runtime, args);</span>
+<span class="fc" id="L1704">                return setupBlock(block, evalType).yieldArray(context, valueInYield, this);  // context.getRubyClass());</span>
+            }
+            //TODO: Should next and return also catch here?
+<span class="nc" id="L1707">        } catch (JumpException.BreakJump bj) {</span>
+<span class="nc" id="L1708">            return (IRubyObject) bj.getValue();</span>
+        } finally {
+<span class="pc" id="L1710">            block.getBinding().setVisibility(savedVisibility);</span>
+<span class="pc" id="L1711">            block.getBinding().setSelf(savedBindingSelf);</span>
+<span class="pc" id="L1712">            block.getBinding().getFrame().setSelf(savedFrameSelf);</span>
+
+<span class="pc" id="L1714">            context.postExecuteUnder();</span>
+        }
+    }
+
+    private Block setupBlock(Block block, EvalType evalType) {
+        // FIXME: This is an ugly hack to resolve JRUBY-1381; I'm not proud of it
+<span class="fc" id="L1720">        return block.cloneBlockForEval(this, evalType);</span>
+    }
+
+    /**
+     * Will yield to the specific block changing the self to be the
+     * current object instead of the self that is part of the frame
+     * saved in the block frame. This method is the basis for the Ruby
+     * instance_eval and module_eval methods. The arguments sent in to
+     * it in the args array will be yielded to the block. This makes
+     * it possible to emulate both instance_eval and instance_exec
+     * with this implementation.
+     */
+    protected IRubyObject yieldUnder(final ThreadContext context, RubyModule under, Block block, EvalType evalType) {
+<span class="fc" id="L1733">        context.preExecuteUnder(this, under, block);</span>
+
+<span class="fc" id="L1735">        IRubyObject savedBindingSelf = block.getBinding().getSelf();</span>
+<span class="fc" id="L1736">        IRubyObject savedFrameSelf = block.getBinding().getFrame().getSelf();</span>
+<span class="fc" id="L1737">        Visibility savedVisibility = block.getBinding().getVisibility();</span>
+<span class="fc" id="L1738">        block.getBinding().setVisibility(PUBLIC);</span>
+
+        try {
+<span class="fc" id="L1741">            return setupBlock(block, evalType).yieldNonArray(context, this, this); //, context.getRubyClass());</span>
+            //TODO: Should next and return also catch here?
+<span class="nc" id="L1743">        } catch (JumpException.BreakJump bj) {</span>
+<span class="nc" id="L1744">            return (IRubyObject) bj.getValue();</span>
+        } finally {
+<span class="pc" id="L1746">            block.getBinding().setVisibility(savedVisibility);</span>
+<span class="pc" id="L1747">            block.getBinding().setSelf(savedBindingSelf);</span>
+<span class="pc" id="L1748">            block.getBinding().getFrame().setSelf(savedFrameSelf);</span>
+
+<span class="pc" id="L1750">            context.postExecuteUnder();</span>
+        }
+    }
+
+
+    /** specific_eval
+     *
+     * Evaluates the block or string inside of the context of this
+     * object, using the supplied arguments. If a block is given, this
+     * will be yielded in the specific context of this object. If no
+     * block is given then a String-like object needs to be the first
+     * argument, and this string will be evaluated. Second and third
+     * arguments in the args-array is optional, but can contain the
+     * filename and line of the string under evaluation.
+     */
+    public IRubyObject specificEval(ThreadContext context, RubyModule mod, Block block, EvalType evalType) {
+<span class="fc bfc" id="L1766" title="All 2 branches covered.">        if (block.isGiven()) {</span>
+<span class="fc" id="L1767">            return yieldUnder(context, mod, block, evalType);</span>
+        } else {
+<span class="fc" id="L1769">            throw context.runtime.newArgumentError(&quot;block not supplied&quot;);</span>
+        }
+    }
+
+    /** specific_eval
+     *
+     * Evaluates the block or string inside of the context of this
+     * object, using the supplied arguments. If a block is given, this
+     * will be yielded in the specific context of this object. If no
+     * block is given then a String-like object needs to be the first
+     * argument, and this string will be evaluated. Second and third
+     * arguments in the args-array is optional, but can contain the
+     * filename and line of the string under evaluation.
+     */
+    public IRubyObject specificEval(ThreadContext context, RubyModule mod, IRubyObject arg, Block block, EvalType evalType) {
+<span class="fc bfc" id="L1784" title="All 2 branches covered.">        if (block.isGiven()) {</span>
+<span class="fc" id="L1785">            throw context.runtime.newArgumentError(1, 0);</span>
+        }
+
+        // We just want the TypeError if the argument doesn't convert to a String (JRUBY-386)
+        RubyString evalStr;
+<span class="fc bfc" id="L1790" title="All 2 branches covered.">        if (arg instanceof RubyString) {</span>
+<span class="fc" id="L1791">            evalStr = (RubyString)arg;</span>
+        } else {
+<span class="fc" id="L1793">            evalStr = arg.convertToString();</span>
+        }
+
+<span class="fc" id="L1796">        String file = &quot;(eval)&quot;;</span>
+<span class="fc" id="L1797">        int line = 0;</span>
+
+<span class="fc" id="L1799">        return evalUnder(context, mod, evalStr, file, line, evalType);</span>
+    }
+
+    /** specific_eval
+     *
+     * Evaluates the block or string inside of the context of this
+     * object, using the supplied arguments. If a block is given, this
+     * will be yielded in the specific context of this object. If no
+     * block is given then a String-like object needs to be the first
+     * argument, and this string will be evaluated. Second and third
+     * arguments in the args-array is optional, but can contain the
+     * filename and line of the string under evaluation.
+     */
+    public IRubyObject specificEval(ThreadContext context, RubyModule mod, IRubyObject arg0, IRubyObject arg1, Block block, EvalType evalType) {
+<span class="fc bfc" id="L1813" title="All 2 branches covered.">        if (block.isGiven()) {</span>
+<span class="fc" id="L1814">            throw context.runtime.newArgumentError(2, 0);</span>
+        }
+
+        // We just want the TypeError if the argument doesn't convert to a String (JRUBY-386)
+        RubyString evalStr;
+<span class="pc bpc" id="L1819" title="1 of 2 branches missed.">        if (arg0 instanceof RubyString) {</span>
+<span class="fc" id="L1820">            evalStr = (RubyString)arg0;</span>
+        } else {
+<span class="nc" id="L1822">            evalStr = arg0.convertToString();</span>
+        }
+
+<span class="fc" id="L1825">        String file = arg1.convertToString().asJavaString();</span>
+<span class="fc" id="L1826">        int line = 0;</span>
+
+<span class="fc" id="L1828">        return evalUnder(context, mod, evalStr, file, line, evalType);</span>
+    }
+
+    /** specific_eval
+     *
+     * Evaluates the block or string inside of the context of this
+     * object, using the supplied arguments. If a block is given, this
+     * will be yielded in the specific context of this object. If no
+     * block is given then a String-like object needs to be the first
+     * argument, and this string will be evaluated. Second and third
+     * arguments in the args-array is optional, but can contain the
+     * filename and line of the string under evaluation.
+     */
+    public IRubyObject specificEval(ThreadContext context, RubyModule mod, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block, EvalType evalType) {
+<span class="pc bpc" id="L1842" title="1 of 2 branches missed.">        if (block.isGiven()) {</span>
+<span class="nc" id="L1843">            throw context.runtime.newArgumentError(2, 0);</span>
+        }
+
+        // We just want the TypeError if the argument doesn't convert to a String (JRUBY-386)
+        RubyString evalStr;
+<span class="pc bpc" id="L1848" title="1 of 2 branches missed.">        if (arg0 instanceof RubyString) {</span>
+<span class="fc" id="L1849">            evalStr = (RubyString)arg0;</span>
+        } else {
+<span class="nc" id="L1851">            evalStr = arg0.convertToString();</span>
+        }
+
+<span class="fc" id="L1854">        String file = arg1.convertToString().asJavaString();</span>
+<span class="fc" id="L1855">        int line = (int)(arg2.convertToInteger().getLongValue() - 1);</span>
+
+<span class="fc" id="L1857">        return evalUnder(context, mod, evalStr, file, line, evalType);</span>
+    }
+
+    protected RubyModule getInstanceEvalClass() {
+<span class="fc bfc" id="L1861" title="All 2 branches covered.">        if (isImmediate()) {</span>
+            // Ruby uses Qnil here, we use &quot;dummy&quot; because we need a class
+<span class="fc" id="L1863">            return getRuntime().getDummy();</span>
+        } else {
+<span class="fc" id="L1865">            return getSingletonClass();</span>
+        }
+    }
+
+    /**
+     * Evaluates the string src with self set to the current object,
+     * using the module under as the context.
+     */
+    public IRubyObject evalUnder(final ThreadContext context, RubyModule under, RubyString src, String file, int line, EvalType evalType) {
+<span class="fc" id="L1874">        return Interpreter.evalSimple(context, under, this, src, file, line, evalType);</span>
+    }
+
+    /**
+     * Class that keeps track of the finalizers for the object under
+     * operation.
+     */
+    public static class Finalizer implements Finalizable {
+        private RubyFixnum id;
+        private IRubyObject firstFinalizer;
+        private List&lt;IRubyObject&gt; finalizers;
+        private AtomicBoolean finalized;
+
+<span class="fc" id="L1887">        public Finalizer(RubyFixnum id) {</span>
+<span class="fc" id="L1888">            this.id = id;</span>
+<span class="fc" id="L1889">            this.finalized = new AtomicBoolean(false);</span>
+<span class="fc" id="L1890">        }</span>
+
+        public void addFinalizer(IRubyObject finalizer) {
+<span class="pc bpc" id="L1893" title="1 of 2 branches missed.">            if (firstFinalizer == null) {</span>
+<span class="fc" id="L1894">                firstFinalizer = finalizer;</span>
+            } else {
+<span class="nc bnc" id="L1896" title="All 2 branches missed.">                if (finalizers == null) finalizers = new ArrayList&lt;IRubyObject&gt;(4);</span>
+<span class="nc" id="L1897">                finalizers.add(finalizer);</span>
+            }
+<span class="fc" id="L1899">        }</span>
+
+        public void removeFinalizers() {
+<span class="nc" id="L1902">            firstFinalizer = null;</span>
+<span class="nc" id="L1903">            finalizers = null;</span>
+<span class="nc" id="L1904">        }</span>
+
+        @Override
+        public void finalize() {
+<span class="pc bpc" id="L1908" title="1 of 2 branches missed.">            if (finalized.compareAndSet(false, true)) {</span>
+<span class="pc bpc" id="L1909" title="1 of 2 branches missed.">                if (firstFinalizer != null) callFinalizer(firstFinalizer);</span>
+<span class="pc bpc" id="L1910" title="1 of 2 branches missed.">                if (finalizers != null) {</span>
+<span class="nc bnc" id="L1911" title="All 2 branches missed.">                    for (int i = 0; i &lt; finalizers.size(); i++) {</span>
+<span class="nc" id="L1912">                        callFinalizer(finalizers.get(i));</span>
+                    }
+                }
+            }
+<span class="fc" id="L1916">        }</span>
+        
+        private void callFinalizer(IRubyObject finalizer) {
+<span class="fc" id="L1919">            Helpers.invoke(</span>
+<span class="fc" id="L1920">                    finalizer.getRuntime().getCurrentContext(),</span>
+                    finalizer, &quot;call&quot;, id);
+<span class="fc" id="L1922">        }</span>
+    }
+
+    // These are added to allow their being called against BasicObject and
+    // subclass instances. Because Kernel can be included into BasicObject and
+    // subclasses, there's a possibility of calling them from Ruby.
+    // See JRUBY-4871
+
+    /** rb_obj_equal
+     *
+     * Will use Java identity equality.
+     */
+    public IRubyObject equal_p(ThreadContext context, IRubyObject obj) {
+<span class="nc bnc" id="L1935" title="All 2 branches missed.">        return this == obj ? context.runtime.getTrue() : context.runtime.getFalse();</span>
+    }
+
+    /** rb_obj_equal
+     *
+     * Just like &quot;==&quot; and &quot;equal?&quot;, &quot;eql?&quot; will use identity equality for Object.
+     */
+    public IRubyObject eql_p(IRubyObject obj) {
+<span class="fc bfc" id="L1943" title="All 2 branches covered.">        return this == obj ? getRuntime().getTrue() : getRuntime().getFalse();</span>
+    }
+
+    public IRubyObject op_cmp(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L1947">        Ruby runtime = context.runtime;</span>
+<span class="fc bfc" id="L1948" title="All 4 branches covered.">        if (this == other || invokedynamic(context, this, OP_EQUAL, other).isTrue()){</span>
+<span class="fc" id="L1949">            return RubyFixnum.zero(runtime);</span>
+        }
+<span class="fc" id="L1951">        return runtime.getNil();</span>
+    }
+
+    /** rb_obj_init_copy
+     *
+     * Initializes this object as a copy of the original, that is the
+     * parameter to this object. Will make sure that the argument
+     * actually has the same real class as this object. It shouldn't
+     * be possible to initialize an object with something totally
+     * different.
+     */
+    public IRubyObject initialize_copy(IRubyObject original) {
+<span class="pc bpc" id="L1963" title="1 of 2 branches missed.">        if (this == original) {</span>
+<span class="nc" id="L1964">            return this;</span>
+        }
+<span class="fc" id="L1966">        checkFrozen();</span>
+
+<span class="pc bpc" id="L1968" title="1 of 2 branches missed.">        if (getMetaClass().getRealClass() != original.getMetaClass().getRealClass()) {</span>
+<span class="nc" id="L1969">            throw getRuntime().newTypeError(&quot;initialize_copy should take same class object&quot;);</span>
+        }
+
+<span class="fc" id="L1972">        return this;</span>
+    }
+
+    /**
+     * The actual method that checks frozen with the default frozen message from MRI.
+     * If possible, call this instead of {@link #testFrozen}.
+     */
+    public void checkFrozen() {
+<span class="fc" id="L1980">        testFrozen();</span>
+<span class="fc" id="L1981">    }</span>
+
+    /** obj_respond_to
+     *
+     * respond_to?( aSymbol, includePriv=false ) -&gt; true or false
+     *
+     * Returns true if this object responds to the given method. Private
+     * methods are included in the search only if the optional second
+     * parameter evaluates to true.
+     *
+     * @return true if this responds to the given method
+     *
+     * !!! For some reason MRI shows the arity of respond_to? as -1, when it should be -2; that's why this is rest instead of required, optional = 1
+     *
+     * Going back to splitting according to method arity. MRI is wrong
+     * about most of these anyway, and since we have arity splitting
+     * in both the compiler and the interpreter, the performance
+     * benefit is important for this method.
+     */
+    public RubyBoolean respond_to_p(IRubyObject mname) {
+<span class="nc" id="L2001">        String name = mname.asJavaString();</span>
+<span class="nc" id="L2002">        return getRuntime().newBoolean(getMetaClass().isMethodBound(name, true));</span>
+    }
+
+    public IRubyObject respond_to_p19(IRubyObject mname) {
+<span class="fc" id="L2006">        String name = mname.asJavaString();</span>
+<span class="fc" id="L2007">        IRubyObject respond = getRuntime().newBoolean(getMetaClass().isMethodBound(name, true, true));</span>
+<span class="fc bfc" id="L2008" title="All 2 branches covered.">        if (!respond.isTrue()) {</span>
+<span class="fc" id="L2009">            respond = Helpers.invoke(getRuntime().getCurrentContext(), this, &quot;respond_to_missing?&quot;, mname, getRuntime().getFalse());</span>
+<span class="fc" id="L2010">            respond = getRuntime().newBoolean(respond.isTrue());</span>
+        }
+<span class="fc" id="L2012">        return respond;</span>
+    }
+
+    /** obj_respond_to
+     *
+     * respond_to?( aSymbol, includePriv=false ) -&gt; true or false
+     *
+     * Returns true if this object responds to the given method. Private
+     * methods are included in the search only if the optional second
+     * parameter evaluates to true.
+     *
+     * @return true if this responds to the given method
+     *
+     * !!! For some reason MRI shows the arity of respond_to? as -1, when it should be -2; that's why this is rest instead of required, optional = 1
+     *
+     * Going back to splitting according to method arity. MRI is wrong
+     * about most of these anyway, and since we have arity splitting
+     * in both the compiler and the interpreter, the performance
+     * benefit is important for this method.
+     */
+    public RubyBoolean respond_to_p(IRubyObject mname, IRubyObject includePrivate) {
+<span class="nc" id="L2033">        String name = mname.asJavaString();</span>
+<span class="nc bnc" id="L2034" title="All 2 branches missed.">        return getRuntime().newBoolean(getMetaClass().isMethodBound(name, !includePrivate.isTrue()));</span>
+    }
+
+    public IRubyObject respond_to_p19(IRubyObject mname, IRubyObject includePrivate) {
+<span class="fc" id="L2038">        String name = mname.asJavaString();</span>
+<span class="fc bfc" id="L2039" title="All 2 branches covered.">        IRubyObject respond = getRuntime().newBoolean(getMetaClass().isMethodBound(name, !includePrivate.isTrue()));</span>
+<span class="fc bfc" id="L2040" title="All 2 branches covered.">        if (!respond.isTrue()) {</span>
+<span class="fc" id="L2041">            respond = Helpers.invoke(getRuntime().getCurrentContext(), this, &quot;respond_to_missing?&quot;, mname, includePrivate);</span>
+<span class="fc" id="L2042">            respond = getRuntime().newBoolean(respond.isTrue());</span>
+        }
+<span class="fc" id="L2044">        return respond;</span>
+    }
+
+    /** rb_obj_id_obsolete
+     *
+     * Old id version. This one is bound to the &quot;id&quot; name and will emit a deprecation warning.
+     */
+    public IRubyObject id_deprecated() {
+<span class="nc" id="L2052">        getRuntime().getWarnings().warn(ID.DEPRECATED_METHOD, &quot;Object#id will be deprecated; use Object#object_id&quot;);</span>
+<span class="nc" id="L2053">        return id();</span>
+    }
+
+    /** rb_obj_id
+     *
+     * Will return the hash code of this object. In comparison to MRI,
+     * this method will use the Java identity hash code instead of
+     * using rb_obj_id, since the usage of id in JRuby will incur the
+     * cost of some. ObjectSpace maintenance.
+     */
+    public RubyFixnum hash() {
+<span class="fc" id="L2064">        return getRuntime().newFixnum(super.hashCode());</span>
+    }
+
+    /** rb_obj_class
+     *
+     * Returns the real class of this object, excluding any
+     * singleton/meta class in the inheritance chain.
+     */
+    public RubyClass type() {
+<span class="fc" id="L2073">        return getMetaClass().getRealClass();</span>
+    }
+
+    /** rb_obj_type
+     *
+     * The deprecated version of type, that emits a deprecation
+     * warning.
+     */
+    public RubyClass type_deprecated() {
+<span class="nc" id="L2082">        getRuntime().getWarnings().warn(ID.DEPRECATED_METHOD, &quot;Object#type is deprecated; use Object#class&quot;);</span>
+<span class="nc" id="L2083">        return type();</span>
+    }
+
+    /** rb_obj_display
+     *
+     *  call-seq:
+     *     obj.display(port=$&gt;)    =&gt; nil
+     *
+     *  Prints &lt;i&gt;obj&lt;/i&gt; on the given port (default &lt;code&gt;$&gt;&lt;/code&gt;).
+     *  Equivalent to:
+     *
+     *     def display(port=$&gt;)
+     *       port.write self
+     *     end
+     *
+     *  For example:
+     *
+     *     1.display
+     *     &quot;cat&quot;.display
+     *     [ 4, 5, 6 ].display
+     *     puts
+     *
+     *  &lt;em&gt;produces:&lt;/em&gt;
+     *
+     *     1cat456
+     *
+     */
+    public IRubyObject display(ThreadContext context, IRubyObject[] args) {
+<span class="nc bnc" id="L2111" title="All 2 branches missed.">        IRubyObject port = args.length == 0 ? context.runtime.getGlobalVariables().get(&quot;$&gt;&quot;) : args[0];</span>
+
+<span class="nc" id="L2113">        port.callMethod(context, &quot;write&quot;, this);</span>
+
+<span class="nc" id="L2115">        return context.runtime.getNil();</span>
+    }
+
+    /** rb_obj_tainted
+     *
+     *  call-seq:
+     *     obj.tainted?    =&gt; true or false
+     *
+     *  Returns &lt;code&gt;true&lt;/code&gt; if the object is tainted.
+     *
+     */
+    public RubyBoolean tainted_p(ThreadContext context) {
+<span class="fc" id="L2127">        return context.runtime.newBoolean(isTaint());</span>
+    }
+
+    /** rb_obj_taint
+     *
+     *  call-seq:
+     *     obj.taint -&gt; obj
+     *
+     *  Marks &lt;i&gt;obj&lt;/i&gt; as tainted---if the &lt;code&gt;$SAFE&lt;/code&gt; level is
+     *  set appropriately, many method calls which might alter the running
+     *  programs environment will refuse to accept tainted strings.
+     */
+    public IRubyObject taint(ThreadContext context) {
+<span class="fc" id="L2140">        taint(context.runtime);</span>
+<span class="fc" id="L2141">        return this;</span>
+    }
+
+    /** rb_obj_untaint
+     *
+     *  call-seq:
+     *     obj.untaint    =&gt; obj
+     *
+     *  Removes the taint from &lt;i&gt;obj&lt;/i&gt;.
+     *
+     *  Only callable in if more secure than 3.
+     */
+    public IRubyObject untaint(ThreadContext context) {
+<span class="fc bfc" id="L2154" title="All 2 branches covered.">        if (isTaint()) {</span>
+<span class="fc" id="L2155">            testFrozen();</span>
+<span class="fc" id="L2156">            setTaint(false);</span>
+        }
+
+<span class="fc" id="L2159">        return this;</span>
+    }
+
+    /** rb_obj_freeze
+     *
+     *  call-seq:
+     *     obj.freeze    =&gt; obj
+     *
+     *  Prevents further modifications to &lt;i&gt;obj&lt;/i&gt;. A
+     *  &lt;code&gt;TypeError&lt;/code&gt; will be raised if modification is attempted.
+     *  There is no way to unfreeze a frozen object. See also
+     *  &lt;code&gt;Object#frozen?&lt;/code&gt;.
+     *
+     *     a = [ &quot;a&quot;, &quot;b&quot;, &quot;c&quot; ]
+     *     a.freeze
+     *     a &lt;&lt; &quot;z&quot;
+     *
+     *  &lt;em&gt;produces:&lt;/em&gt;
+     *
+     *     prog.rb:3:in `&lt;&lt;': can't modify frozen array (TypeError)
+     *     	from prog.rb:3
+     */
+    public IRubyObject freeze(ThreadContext context) {
+<span class="fc" id="L2182">        Ruby runtime = context.runtime;</span>
+<span class="fc bfc" id="L2183" title="All 2 branches covered.">        if ((flags &amp; FROZEN_F) == 0) {</span>
+<span class="fc" id="L2184">            flags |= FROZEN_F;</span>
+        }
+<span class="fc" id="L2186">        return this;</span>
+    }
+
+    /** rb_obj_frozen_p
+     *
+     *  call-seq:
+     *     obj.frozen?    =&gt; true or false
+     *
+     *  Returns the freeze status of &lt;i&gt;obj&lt;/i&gt;.
+     *
+     *     a = [ &quot;a&quot;, &quot;b&quot;, &quot;c&quot; ]
+     *     a.freeze    #=&gt; [&quot;a&quot;, &quot;b&quot;, &quot;c&quot;]
+     *     a.frozen?   #=&gt; true
+     */
+    public RubyBoolean frozen_p(ThreadContext context) {
+<span class="fc" id="L2201">        return context.runtime.newBoolean(isFrozen());</span>
+    }
+
+    /** rb_obj_is_instance_of
+     *
+     *  call-seq:
+     *     obj.instance_of?(class)    =&gt; true or false
+     *
+     *  Returns &lt;code&gt;true&lt;/code&gt; if &lt;i&gt;obj&lt;/i&gt; is an instance of the given
+     *  class. See also &lt;code&gt;Object#kind_of?&lt;/code&gt;.
+     */
+    public RubyBoolean instance_of_p(ThreadContext context, IRubyObject type) {
+<span class="fc bfc" id="L2213" title="All 2 branches covered.">        if (type() == type) {</span>
+<span class="fc" id="L2214">            return context.runtime.getTrue();</span>
+<span class="fc bfc" id="L2215" title="All 2 branches covered.">        } else if (!(type instanceof RubyModule)) {</span>
+<span class="fc" id="L2216">            throw context.runtime.newTypeError(&quot;class or module required&quot;);</span>
+        } else {
+<span class="fc" id="L2218">            return context.runtime.getFalse();</span>
+        }
+    }
+
+
+    /** rb_obj_is_kind_of
+     *
+     *  call-seq:
+     *     obj.is_a?(class)       =&gt; true or false
+     *     obj.kind_of?(class)    =&gt; true or false
+     *
+     *  Returns &lt;code&gt;true&lt;/code&gt; if &lt;i&gt;class&lt;/i&gt; is the class of
+     *  &lt;i&gt;obj&lt;/i&gt;, or if &lt;i&gt;class&lt;/i&gt; is one of the superclasses of
+     *  &lt;i&gt;obj&lt;/i&gt; or modules included in &lt;i&gt;obj&lt;/i&gt;.
+     *
+     *     module M;    end
+     *     class A
+     *       include M
+     *     end
+     *     class B &lt; A; end
+     *     class C &lt; B; end
+     *     b = B.new
+     *     b.instance_of? A   #=&gt; false
+     *     b.instance_of? B   #=&gt; true
+     *     b.instance_of? C   #=&gt; false
+     *     b.instance_of? M   #=&gt; false
+     *     b.kind_of? A       #=&gt; true
+     *     b.kind_of? B       #=&gt; true
+     *     b.kind_of? C       #=&gt; false
+     *     b.kind_of? M       #=&gt; true
+     */
+    public RubyBoolean kind_of_p(ThreadContext context, IRubyObject type) {
+        // TODO: Generalize this type-checking code into IRubyObject helper.
+<span class="fc bfc" id="L2251" title="All 2 branches covered.">        if (!(type instanceof RubyModule)) {</span>
+            // TODO: newTypeError does not offer enough for ruby error string...
+<span class="fc" id="L2253">            throw context.runtime.newTypeError(&quot;class or module required&quot;);</span>
+        }
+
+<span class="fc" id="L2256">        return context.runtime.newBoolean(((RubyModule) type).isInstance(this));</span>
+    }
+
+    /** rb_obj_methods
+     *
+     *  call-seq:
+     *     obj.methods    =&gt; array
+     *
+     *  Returns a list of the names of methods publicly accessible in
+     *  &lt;i&gt;obj&lt;/i&gt;. This will include all the methods accessible in
+     *  &lt;i&gt;obj&lt;/i&gt;'s ancestors.
+     *
+     *     class Klass
+     *       def kMethod()
+     *       end
+     *     end
+     *     k = Klass.new
+     *     k.methods[0..9]    #=&gt; [&quot;kMethod&quot;, &quot;freeze&quot;, &quot;nil?&quot;, &quot;is_a?&quot;,
+     *                             &quot;class&quot;, &quot;instance_variable_set&quot;,
+     *                              &quot;methods&quot;, &quot;extend&quot;, &quot;__send__&quot;, &quot;instance_eval&quot;]
+     *     k.methods.length   #=&gt; 42
+     */
+    public IRubyObject methods(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L2279">        return methods(context, args, false);</span>
+    }
+    public IRubyObject methods19(ThreadContext context, IRubyObject[] args) {
+<span class="fc" id="L2282">        return methods(context, args, true);</span>
+    }
+
+    public IRubyObject methods(ThreadContext context, IRubyObject[] args, boolean useSymbols) {
+<span class="fc bfc" id="L2286" title="All 2 branches covered.">        boolean all = args.length == 1 ? args[0].isTrue() : true;</span>
+<span class="fc" id="L2287">        Ruby runtime = getRuntime();</span>
+<span class="fc" id="L2288">        RubyArray methods = runtime.newArray();</span>
+<span class="fc" id="L2289">        Set&lt;String&gt; seen = new HashSet&lt;String&gt;();</span>
+
+<span class="fc bfc" id="L2291" title="All 2 branches covered.">        if (getMetaClass().isSingleton()) {</span>
+<span class="fc" id="L2292">            getMetaClass().populateInstanceMethodNames(seen, methods, PRIVATE, true, useSymbols, false);</span>
+<span class="fc bfc" id="L2293" title="All 2 branches covered.">            if (all) {</span>
+<span class="fc" id="L2294">                getMetaClass().getSuperClass().populateInstanceMethodNames(seen, methods, PRIVATE, true, useSymbols, true);</span>
+            }
+<span class="fc bfc" id="L2296" title="All 2 branches covered.">        } else if (all) {</span>
+<span class="fc" id="L2297">            getMetaClass().populateInstanceMethodNames(seen, methods, PRIVATE, true, useSymbols, true);</span>
+        } else {
+            // do nothing, leave empty
+        }
+
+<span class="fc" id="L2302">        return methods;</span>
+    }
+
+    /** rb_obj_public_methods
+     *
+     *  call-seq:
+     *     obj.public_methods(all=true)   =&gt; array
+     *
+     *  Returns the list of public methods accessible to &lt;i&gt;obj&lt;/i&gt;. If
+     *  the &lt;i&gt;all&lt;/i&gt; parameter is set to &lt;code&gt;false&lt;/code&gt;, only those methods
+     *  in the receiver will be listed.
+     */
+    public IRubyObject public_methods(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L2315">        return getMetaClass().public_instance_methods(trueIfNoArgument(context, args));</span>
+    }
+
+    public IRubyObject public_methods19(ThreadContext context, IRubyObject[] args) {
+<span class="fc" id="L2319">        return getMetaClass().public_instance_methods19(trueIfNoArgument(context, args));</span>
+    }
+
+    /** rb_obj_protected_methods
+     *
+     *  call-seq:
+     *     obj.protected_methods(all=true)   =&gt; array
+     *
+     *  Returns the list of protected methods accessible to &lt;i&gt;obj&lt;/i&gt;. If
+     *  the &lt;i&gt;all&lt;/i&gt; parameter is set to &lt;code&gt;false&lt;/code&gt;, only those methods
+     *  in the receiver will be listed.
+     *
+     *  Internally this implementation uses the
+     *  {@link RubyModule#protected_instance_methods} method.
+     */
+    public IRubyObject protected_methods(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L2335">        return getMetaClass().protected_instance_methods(trueIfNoArgument(context, args));</span>
+    }
+
+    public IRubyObject protected_methods19(ThreadContext context, IRubyObject[] args) {
+<span class="fc" id="L2339">        return getMetaClass().protected_instance_methods19(trueIfNoArgument(context, args));</span>
+    }
+
+    /** rb_obj_private_methods
+     *
+     *  call-seq:
+     *     obj.private_methods(all=true)   =&gt; array
+     *
+     *  Returns the list of private methods accessible to &lt;i&gt;obj&lt;/i&gt;. If
+     *  the &lt;i&gt;all&lt;/i&gt; parameter is set to &lt;code&gt;false&lt;/code&gt;, only those methods
+     *  in the receiver will be listed.
+     *
+     *  Internally this implementation uses the
+     *  {@link RubyModule#private_instance_methods} method.
+     */
+    public IRubyObject private_methods(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L2355">        return getMetaClass().private_instance_methods(trueIfNoArgument(context, args));</span>
+    }
+
+    public IRubyObject private_methods19(ThreadContext context, IRubyObject[] args) {
+<span class="fc" id="L2359">        return getMetaClass().private_instance_methods19(trueIfNoArgument(context, args));</span>
+    }
+
+    // FIXME: If true array is common enough we should pre-allocate and stick somewhere
+    private IRubyObject[] trueIfNoArgument(ThreadContext context, IRubyObject[] args) {
+<span class="fc bfc" id="L2364" title="All 2 branches covered.">        return args.length == 0 ? new IRubyObject[] { context.runtime.getTrue() } : args;</span>
+    }
+
+    /** rb_obj_singleton_methods
+     *
+     *  call-seq:
+     *     obj.singleton_methods(all=true)    =&gt; array
+     *
+     *  Returns an array of the names of singleton methods for &lt;i&gt;obj&lt;/i&gt;.
+     *  If the optional &lt;i&gt;all&lt;/i&gt; parameter is true, the list will include
+     *  methods in modules included in &lt;i&gt;obj&lt;/i&gt;.
+     *
+     *     module Other
+     *       def three() end
+     *     end
+     *
+     *     class Single
+     *       def Single.four() end
+     *     end
+     *
+     *     a = Single.new
+     *
+     *     def a.one()
+     *     end
+     *
+     *     class &lt;&lt; a
+     *       include Other
+     *       def two()
+     *       end
+     *     end
+     *
+     *     Single.singleton_methods    #=&gt; [&quot;four&quot;]
+     *     a.singleton_methods(false)  #=&gt; [&quot;two&quot;, &quot;one&quot;]
+     *     a.singleton_methods         #=&gt; [&quot;two&quot;, &quot;one&quot;, &quot;three&quot;]
+     */
+    // TODO: This is almost RubyModule#instance_methods on the metaClass.  Perhaps refactor.
+    public RubyArray singleton_methods(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L2401">        return singletonMethods(context, args, methodsCollector);</span>
+    }
+
+    public RubyArray singleton_methods19(ThreadContext context, IRubyObject[] args) {
+<span class="fc" id="L2405">        return singletonMethods(context, args, methodsCollector19);</span>
+    }
+
+    private RubyArray singletonMethods(ThreadContext context, IRubyObject[] args, MethodsCollector collect) {
+<span class="fc" id="L2409">        boolean all = true;</span>
+<span class="fc bfc" id="L2410" title="All 2 branches covered.">        if(args.length == 1) {</span>
+<span class="fc" id="L2411">            all = args[0].isTrue();</span>
+        }
+
+<span class="fc bfc" id="L2414" title="All 2 branches covered.">        if (getMetaClass().isSingleton()) {</span>
+<span class="fc" id="L2415">            IRubyObject[] methodsArgs = new IRubyObject[]{context.runtime.getFalse()};</span>
+<span class="fc" id="L2416">            RubyArray singletonMethods = collect.instanceMethods(getMetaClass(), methodsArgs);</span>
+
+<span class="fc bfc" id="L2418" title="All 2 branches covered.">            if (all) {</span>
+<span class="fc" id="L2419">                RubyClass superClass = getMetaClass().getSuperClass();</span>
+<span class="fc bfc" id="L2420" title="All 4 branches covered.">                while (superClass.isSingleton() || superClass.isIncluded()) {</span>
+<span class="fc" id="L2421">                    singletonMethods.concat(collect.instanceMethods(superClass, methodsArgs));</span>
+<span class="fc" id="L2422">                    superClass = superClass.getSuperClass();</span>
+                }
+            }
+
+<span class="fc" id="L2426">            singletonMethods.uniq_bang(context);</span>
+<span class="fc" id="L2427">            return singletonMethods;</span>
+        }
+
+<span class="fc" id="L2430">        return context.runtime.newEmptyArray();</span>
+    }
+
+<span class="fc" id="L2433">    private abstract static class MethodsCollector {</span>
+        public abstract RubyArray instanceMethods(RubyClass rubyClass, IRubyObject[] args);
+    };
+
+<span class="fc" id="L2437">    private static final MethodsCollector methodsCollector = new MethodsCollector() {</span>
+        @Override
+        public RubyArray instanceMethods(RubyClass rubyClass, IRubyObject[] args) {
+<span class="nc" id="L2440">            return rubyClass.instance_methods(args);</span>
+        }
+    };
+
+<span class="fc" id="L2444">    private static final MethodsCollector methodsCollector19 = new MethodsCollector() {</span>
+        @Override
+        public RubyArray instanceMethods(RubyClass rubyClass, IRubyObject[] args) {
+<span class="fc" id="L2447">            return rubyClass.instance_methods19(args);</span>
+        }
+    };
+
+    /** rb_obj_method
+     *
+     *  call-seq:
+     *     obj.method(sym)    =&gt; method
+     *
+     *  Looks up the named method as a receiver in &lt;i&gt;obj&lt;/i&gt;, returning a
+     *  &lt;code&gt;Method&lt;/code&gt; object (or raising &lt;code&gt;NameError&lt;/code&gt;). The
+     *  &lt;code&gt;Method&lt;/code&gt; object acts as a closure in &lt;i&gt;obj&lt;/i&gt;'s object
+     *  instance, so instance variables and the value of &lt;code&gt;self&lt;/code&gt;
+     *  remain available.
+     *
+     *     class Demo
+     *       def initialize(n)
+     *         @iv = n
+     *       end
+     *       def hello()
+     *         &quot;Hello, @iv = #{@iv}&quot;
+     *       end
+     *     end
+     *
+     *     k = Demo.new(99)
+     *     m = k.method(:hello)
+     *     m.call   #=&gt; &quot;Hello, @iv = 99&quot;
+     *
+     *     l = Demo.new('Fred')
+     *     m = l.method(&quot;hello&quot;)
+     *     m.call   #=&gt; &quot;Hello, @iv = Fred&quot;
+     */
+    public IRubyObject method(IRubyObject symbol) {
+<span class="nc" id="L2480">        return getMetaClass().newMethod(this, symbol.asJavaString(), true, null);</span>
+    }
+
+    public IRubyObject method19(IRubyObject symbol) {
+<span class="fc" id="L2484">        return getMetaClass().newMethod(this, symbol.asJavaString(), true, null, true);</span>
+    }
+
+    /** rb_any_to_s
+     *
+     *  call-seq:
+     *     obj.to_s    =&gt; string
+     *
+     *  Returns a string representing &lt;i&gt;obj&lt;/i&gt;. The default
+     *  &lt;code&gt;to_s&lt;/code&gt; prints the object's class and an encoding of the
+     *  object id. As a special case, the top-level object that is the
+     *  initial execution context of Ruby programs returns ``main.''
+     */
+    public IRubyObject to_s() {
+<span class="fc" id="L2498">    	return anyToString();</span>
+    }
+
+    /** rb_any_to_a
+     *
+     *  call-seq:
+     *     obj.to_a -&gt; anArray
+     *
+     *  Returns an array representation of &lt;i&gt;obj&lt;/i&gt;. For objects of class
+     *  &lt;code&gt;Object&lt;/code&gt; and others that don't explicitly override the
+     *  method, the return value is an array containing &lt;code&gt;self&lt;/code&gt;.
+     *  However, this latter behavior will soon be obsolete.
+     *
+     *     self.to_a       #=&gt; -:1: warning: default `to_a' will be obsolete
+     *     &quot;hello&quot;.to_a    #=&gt; [&quot;hello&quot;]
+     *     Time.new.to_a   #=&gt; [39, 54, 8, 9, 4, 2003, 3, 99, true, &quot;CDT&quot;]
+     *
+     *  The default to_a method is deprecated.
+     */
+    public RubyArray to_a() {
+<span class="nc" id="L2518">        getRuntime().getWarnings().warn(ID.DEPRECATED_METHOD, &quot;default 'to_a' will be obsolete&quot;);</span>
+<span class="nc" id="L2519">        return getRuntime().newArray(this);</span>
+    }
+
+    /** rb_obj_instance_eval
+     *
+     *  call-seq:
+     *     obj.instance_eval(string [, filename [, lineno]] )   =&gt; obj
+     *     obj.instance_eval {| | block }                       =&gt; obj
+     *
+     *  Evaluates a string containing Ruby source code, or the given block,
+     *  within the context of the receiver (_obj_). In order to set the
+     *  context, the variable +self+ is set to _obj_ while
+     *  the code is executing, giving the code access to _obj_'s
+     *  instance variables. In the version of &lt;code&gt;instance_eval&lt;/code&gt;
+     *  that takes a +String+, the optional second and third
+     *  parameters supply a filename and starting line number that are used
+     *  when reporting compilation errors.
+     *
+     *     class Klass
+     *       def initialize
+     *         @secret = 99
+     *       end
+     *     end
+     *     k = Klass.new
+     *     k.instance_eval { @secret }   #=&gt; 99
+     */
+    public IRubyObject instance_eval(ThreadContext context, Block block) {
+<span class="nc" id="L2546">        return specificEval(context, getInstanceEvalClass(), block, EvalType.INSTANCE_EVAL);</span>
+    }
+    public IRubyObject instance_eval(ThreadContext context, IRubyObject arg0, Block block) {
+<span class="nc" id="L2549">        return specificEval(context, getInstanceEvalClass(), arg0, block, EvalType.INSTANCE_EVAL);</span>
+    }
+    public IRubyObject instance_eval(ThreadContext context, IRubyObject arg0, IRubyObject arg1, Block block) {
+<span class="nc" id="L2552">        return specificEval(context, getInstanceEvalClass(), arg0, arg1, block, EvalType.INSTANCE_EVAL);</span>
+    }
+    public IRubyObject instance_eval(ThreadContext context, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="nc" id="L2555">        return specificEval(context, getInstanceEvalClass(), arg0, arg1, arg2, block, EvalType.INSTANCE_EVAL);</span>
+    }
+
+    /** rb_obj_instance_exec
+     *
+     *  call-seq:
+     *     obj.instance_exec(arg...) {|var...| block }                       =&gt; obj
+     *
+     *  Executes the given block within the context of the receiver
+     *  (_obj_). In order to set the context, the variable +self+ is set
+     *  to _obj_ while the code is executing, giving the code access to
+     *  _obj_'s instance variables.  Arguments are passed as block parameters.
+     *
+     *     class Klass
+     *       def initialize
+     *         @secret = 99
+     *       end
+     *     end
+     *     k = Klass.new
+     *     k.instance_exec(5) {|x| @secret+x }   #=&gt; 104
+     */
+    public IRubyObject instance_exec(ThreadContext context, IRubyObject[] args, Block block) {
+<span class="nc bnc" id="L2577" title="All 2 branches missed.">        if (!block.isGiven()) {</span>
+<span class="nc" id="L2578">            throw context.runtime.newArgumentError(&quot;block not supplied&quot;);</span>
+        }
+
+        RubyModule klazz;
+<span class="nc bnc" id="L2582" title="All 2 branches missed.">        if (isImmediate()) {</span>
+            // Ruby uses Qnil here, we use &quot;dummy&quot; because we need a class
+<span class="nc" id="L2584">            klazz = context.runtime.getDummy();</span>
+        } else {
+<span class="nc" id="L2586">            klazz = getSingletonClass();</span>
+        }
+
+<span class="nc" id="L2589">        return yieldUnder(context, klazz, args, block, EvalType.INSTANCE_EVAL);</span>
+    }
+
+    /** rb_obj_extend
+     *
+     *  call-seq:
+     *     obj.extend(module, ...)    =&gt; obj
+     *
+     *  Adds to _obj_ the instance methods from each module given as a
+     *  parameter.
+     *
+     *     module Mod
+     *       def hello
+     *         &quot;Hello from Mod.\n&quot;
+     *       end
+     *     end
+     *
+     *     class Klass
+     *       def hello
+     *         &quot;Hello from Klass.\n&quot;
+     *       end
+     *     end
+     *
+     *     k = Klass.new
+     *     k.hello         #=&gt; &quot;Hello from Klass.\n&quot;
+     *     k.extend(Mod)   #=&gt; #&lt;Klass:0x401b3bc8&gt;
+     *     k.hello         #=&gt; &quot;Hello from Mod.\n&quot;
+     */
+    public IRubyObject extend(IRubyObject[] args) {
+<span class="fc" id="L2618">        Ruby runtime = getRuntime();</span>
+
+        // Make sure all arguments are modules before calling the callbacks
+<span class="fc bfc" id="L2621" title="All 2 branches covered.">        for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="pc bpc" id="L2622" title="1 of 2 branches missed.">            if (!args[i].isModule()) throw runtime.newTypeError(args[i], runtime.getModule());</span>
+        }
+
+<span class="fc" id="L2625">        ThreadContext context = runtime.getCurrentContext();</span>
+
+        // MRI extends in order from last to first
+<span class="fc bfc" id="L2628" title="All 2 branches covered.">        for (int i = args.length - 1; i &gt;= 0; i--) {</span>
+<span class="fc" id="L2629">            args[i].callMethod(context, &quot;extend_object&quot;, this);</span>
+<span class="fc" id="L2630">            args[i].callMethod(context, &quot;extended&quot;, this);</span>
+        }
+<span class="fc" id="L2632">        return this;</span>
+    }
+
+    /** rb_f_send
+     *
+     * send( aSymbol  [, args  ]*   ) -&gt; anObject
+     *
+     * Invokes the method identified by aSymbol, passing it any arguments
+     * specified. You can use __send__ if the name send clashes with an
+     * existing method in this object.
+     *
+     * &lt;pre&gt;
+     * class Klass
+     *   def hello(*args)
+     *     &quot;Hello &quot; + args.join(' ')
+     *   end
+     * end
+     *
+     * k = Klass.new
+     * k.send :hello, &quot;gentle&quot;, &quot;readers&quot;
+     * &lt;/pre&gt;
+     *
+     * @return the result of invoking the method identified by aSymbol.
+     */
+    public IRubyObject send(ThreadContext context, Block block) {
+<span class="nc" id="L2657">        throw context.runtime.newArgumentError(0, 1);</span>
+    }
+    public IRubyObject send(ThreadContext context, IRubyObject arg0, Block block) {
+<span class="nc" id="L2660">        String name = RubySymbol.objectToSymbolString(arg0);</span>
+
+<span class="nc" id="L2662">        return getMetaClass().finvoke(context, this, name, block);</span>
+    }
+    public IRubyObject send(ThreadContext context, IRubyObject arg0, IRubyObject arg1, Block block) {
+<span class="nc" id="L2665">        String name = RubySymbol.objectToSymbolString(arg0);</span>
+
+<span class="nc" id="L2667">        return getMetaClass().finvoke(context, this, name, arg1, block);</span>
+    }
+    public IRubyObject send(ThreadContext context, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="nc" id="L2670">        String name = RubySymbol.objectToSymbolString(arg0);</span>
+
+<span class="nc" id="L2672">        return getMetaClass().finvoke(context, this, name, arg1, arg2, block);</span>
+    }
+    public IRubyObject send(ThreadContext context, IRubyObject[] args, Block block) {
+<span class="nc bnc" id="L2675" title="All 2 branches missed.">        if (args.length == 0) return send(context, block);</span>
+        
+<span class="nc" id="L2677">        String name = RubySymbol.objectToSymbolString(args[0]);</span>
+<span class="nc" id="L2678">        int newArgsLength = args.length - 1;</span>
+
+        IRubyObject[] newArgs;
+<span class="nc bnc" id="L2681" title="All 2 branches missed.">        if (newArgsLength == 0) {</span>
+<span class="nc" id="L2682">            newArgs = IRubyObject.NULL_ARRAY;</span>
+        } else {
+<span class="nc" id="L2684">            newArgs = new IRubyObject[newArgsLength];</span>
+<span class="nc" id="L2685">            System.arraycopy(args, 1, newArgs, 0, newArgs.length);</span>
+        }
+
+<span class="nc" id="L2688">        return getMetaClass().finvoke(context, this, name, newArgs, block);</span>
+    }
+
+    /** rb_false
+     *
+     * call_seq:
+     *   nil.nil?               =&gt; true
+     *   &lt;anything_else&gt;.nil?   =&gt; false
+     *
+     * Only the object &lt;i&gt;nil&lt;/i&gt; responds &lt;code&gt;true&lt;/code&gt; to &lt;code&gt;nil?&lt;/code&gt;.
+     */
+    public IRubyObject nil_p(ThreadContext context) {
+<span class="fc" id="L2700">        return context.runtime.getFalse();</span>
+    }
+
+    /** rb_obj_pattern_match
+     *
+     *  call-seq:
+     *     obj =~ other  =&gt; false
+     *
+     *  Pattern Match---Overridden by descendents (notably
+     *  &lt;code&gt;Regexp&lt;/code&gt; and &lt;code&gt;String&lt;/code&gt;) to provide meaningful
+     *  pattern-match semantics.
+     */
+    public IRubyObject op_match(ThreadContext context, IRubyObject arg) {
+<span class="nc" id="L2713">        return context.runtime.getFalse();</span>
+    }
+
+    public IRubyObject op_match19(ThreadContext context, IRubyObject arg) {
+<span class="fc" id="L2717">        return context.runtime.getNil();</span>
+    }
+
+    public IRubyObject op_not_match(ThreadContext context, IRubyObject arg) {
+<span class="fc bfc" id="L2721" title="All 2 branches covered.">        return context.runtime.newBoolean(!callMethod(context, &quot;=~&quot;, arg).isTrue());</span>
+    }
+
+
+    //
+    // INSTANCE VARIABLE RUBY METHODS
+    //
+
+    /** rb_obj_ivar_defined
+     *
+     *  call-seq:
+     *     obj.instance_variable_defined?(symbol)    =&gt; true or false
+     *
+     *  Returns &lt;code&gt;true&lt;/code&gt; if the given instance variable is
+     *  defined in &lt;i&gt;obj&lt;/i&gt;.
+     *
+     *     class Fred
+     *       def initialize(p1, p2)
+     *         @a, @b = p1, p2
+     *       end
+     *     end
+     *     fred = Fred.new('cat', 99)
+     *     fred.instance_variable_defined?(:@a)    #=&gt; true
+     *     fred.instance_variable_defined?(&quot;@b&quot;)   #=&gt; true
+     *     fred.instance_variable_defined?(&quot;@c&quot;)   #=&gt; false
+     */
+    public IRubyObject instance_variable_defined_p(ThreadContext context, IRubyObject name) {
+<span class="fc bfc" id="L2748" title="All 2 branches covered.">        if (variableTableContains(validateInstanceVariable(name.asJavaString()))) {</span>
+<span class="fc" id="L2749">            return context.runtime.getTrue();</span>
+        }
+<span class="fc" id="L2751">        return context.runtime.getFalse();</span>
+    }
+
+    /** rb_obj_ivar_get
+     *
+     *  call-seq:
+     *     obj.instance_variable_get(symbol)    =&gt; obj
+     *
+     *  Returns the value of the given instance variable, or nil if the
+     *  instance variable is not set. The &lt;code&gt;@&lt;/code&gt; part of the
+     *  variable name should be included for regular instance
+     *  variables. Throws a &lt;code&gt;NameError&lt;/code&gt; exception if the
+     *  supplied symbol is not valid as an instance variable name.
+     *
+     *     class Fred
+     *       def initialize(p1, p2)
+     *         @a, @b = p1, p2
+     *       end
+     *     end
+     *     fred = Fred.new('cat', 99)
+     *     fred.instance_variable_get(:@a)    #=&gt; &quot;cat&quot;
+     *     fred.instance_variable_get(&quot;@b&quot;)   #=&gt; 99
+     */
+    public IRubyObject instance_variable_get(ThreadContext context, IRubyObject name) {
+        Object value;
+<span class="fc bfc" id="L2776" title="All 2 branches covered.">        if ((value = variableTableFetch(validateInstanceVariable(name.asJavaString()))) != null) {</span>
+<span class="fc" id="L2777">            return (IRubyObject)value;</span>
+        }
+<span class="fc" id="L2779">        return context.runtime.getNil();</span>
+    }
+
+    /** rb_obj_ivar_set
+     *
+     *  call-seq:
+     *     obj.instance_variable_set(symbol, obj)    =&gt; obj
+     *
+     *  Sets the instance variable names by &lt;i&gt;symbol&lt;/i&gt; to
+     *  &lt;i&gt;object&lt;/i&gt;, thereby frustrating the efforts of the class's
+     *  author to attempt to provide proper encapsulation. The variable
+     *  did not have to exist prior to this call.
+     *
+     *     class Fred
+     *       def initialize(p1, p2)
+     *         @a, @b = p1, p2
+     *       end
+     *     end
+     *     fred = Fred.new('cat', 99)
+     *     fred.instance_variable_set(:@a, 'dog')   #=&gt; &quot;dog&quot;
+     *     fred.instance_variable_set(:@c, 'cat')   #=&gt; &quot;cat&quot;
+     *     fred.inspect                             #=&gt; &quot;#&lt;Fred:0x401b3da8 @a=\&quot;dog\&quot;, @b=99, @c=\&quot;cat\&quot;&gt;&quot;
+     */
+    public IRubyObject instance_variable_set(IRubyObject name, IRubyObject value) {
+        // no need to check for ensureInstanceVariablesSettable() here, that'll happen downstream in setVariable
+<span class="fc" id="L2804">        return (IRubyObject)variableTableStore(validateInstanceVariable(name.asJavaString()), value);</span>
+    }
+
+    /** rb_obj_remove_instance_variable
+     *
+     *  call-seq:
+     *     obj.remove_instance_variable(symbol)    =&gt; obj
+     *
+     *  Removes the named instance variable from &lt;i&gt;obj&lt;/i&gt;, returning that
+     *  variable's value.
+     *
+     *     class Dummy
+     *       attr_reader :var
+     *       def initialize
+     *         @var = 99
+     *       end
+     *       def remove
+     *         remove_instance_variable(:@var)
+     *       end
+     *     end
+     *     d = Dummy.new
+     *     d.var      #=&gt; 99
+     *     d.remove   #=&gt; 99
+     *     d.var      #=&gt; nil
+     */
+    public IRubyObject remove_instance_variable(ThreadContext context, IRubyObject name, Block block) {
+<span class="fc" id="L2830">        ensureInstanceVariablesSettable();</span>
+        IRubyObject value;
+<span class="fc bfc" id="L2832" title="All 2 branches covered.">        if ((value = (IRubyObject)variableTableRemove(validateInstanceVariable(name.asJavaString()))) != null) {</span>
+<span class="fc" id="L2833">            return value;</span>
+        }
+<span class="fc" id="L2835">        throw context.runtime.newNameError(&quot;instance variable &quot; + name.asJavaString() + &quot; not defined&quot;, name.asJavaString());</span>
+    }
+
+    /** rb_obj_instance_variables
+     *
+     *  call-seq:
+     *     obj.instance_variables    =&gt; array
+     *
+     *  Returns an array of instance variable names for the receiver. Note
+     *  that simply defining an accessor does not create the corresponding
+     *  instance variable.
+     *
+     *     class Fred
+     *       attr_accessor :a1
+     *       def initialize
+     *         @iv = 3
+     *       end
+     *     end
+     *     Fred.new.instance_variables   #=&gt; [&quot;@iv&quot;]
+     */
+    public RubyArray instance_variables(ThreadContext context) {
+<span class="nc" id="L2856">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L2857">        List&lt;String&gt; nameList = getInstanceVariableNameList();</span>
+
+<span class="nc" id="L2859">        RubyArray array = runtime.newArray(nameList.size());</span>
+
+<span class="nc bnc" id="L2861" title="All 2 branches missed.">        for (String name : nameList) {</span>
+<span class="nc" id="L2862">            array.append(runtime.newString(name));</span>
+<span class="nc" id="L2863">        }</span>
+
+<span class="nc" id="L2865">        return array;</span>
+    }
+
+    // In 1.9, return symbols
+    public RubyArray instance_variables19(ThreadContext context) {
+<span class="fc" id="L2870">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L2871">        List&lt;String&gt; nameList = getInstanceVariableNameList();</span>
+
+<span class="fc" id="L2873">        RubyArray array = runtime.newArray(nameList.size());</span>
+
+<span class="fc bfc" id="L2875" title="All 2 branches covered.">        for (String name : nameList) {</span>
+<span class="fc" id="L2876">            array.append(runtime.newSymbol(name));</span>
+<span class="fc" id="L2877">        }</span>
+
+<span class="fc" id="L2879">        return array;</span>
+    }
+
+    /**
+     * Checks if the name parameter represents a legal instance variable name, and otherwise throws a Ruby NameError
+     */
+    protected String validateInstanceVariable(String name) {
+<span class="fc bfc" id="L2886" title="All 2 branches covered.">        if (IdUtil.isValidInstanceVariableName(name)) return name;</span>
+
+<span class="fc" id="L2888">        throw getRuntime().newNameError(&quot;`&quot; + name + &quot;' is not allowable as an instance variable name&quot;, name);</span>
+    }
+    
+    /**
+     * Serialization of a Ruby (basic) object involves three steps:
+     * 
+     * &lt;ol&gt;
+     * &lt;li&gt;Dump the object itself&lt;/li&gt;
+     * &lt;li&gt;Dump a String used to load the appropriate Ruby class&lt;/li&gt;
+     * &lt;li&gt;Dump each variable from varTable in turn&lt;/li&gt;
+     * &lt;/ol&gt;
+     * 
+     * The metaClass field is marked transient since Ruby classes generally will
+     * not be able to serialize (since they hold references to method tables,
+     * other classes, and potentially thread-, runtime-, or jvm-local state.
+     * 
+     * The varTable field is transient because the layout of the same class may
+     * differ across runtimes, since it is determined at runtime based on the
+     * order in which variables get assigned for a given class. We serialize
+     * entries by name to allow other layouts to work properly.
+     */
+    private void writeObject(ObjectOutputStream oos) throws IOException {
+<span class="nc bnc" id="L2910" title="All 2 branches missed.">        if (metaClass.isSingleton()) {</span>
+<span class="nc" id="L2911">            throw new IOException(&quot;can not serialize singleton object&quot;);</span>
+        }
+        
+<span class="nc" id="L2914">        oos.defaultWriteObject();</span>
+<span class="nc" id="L2915">        oos.writeUTF(metaClass.getName());</span>
+        
+<span class="nc" id="L2917">        metaClass.getVariableTableManager().serializeVariables(this, oos);</span>
+<span class="nc" id="L2918">    }</span>
+    
+    /**
+     * Deserialization proceeds as follows:
+     * 
+     * &lt;ol&gt;
+     * &lt;li&gt;Deserialize the object instance. It will have null metaClass and
+     * varTable fields.&lt;/li&gt;
+     * &lt;li&gt;Deserialize the name of the object's class, and retrieve class from a
+     * thread-local JRuby instance.&lt;/li&gt;
+     * &lt;li&gt;Retrieve each variable in turn, re-assigning them by name.&lt;/li&gt;
+     * &lt;/ol&gt;
+     * 
+     * @see RubyBasicObject#writeObject(java.io.ObjectOutputStream) 
+     */
+    private void readObject(ObjectInputStream ois) throws IOException, ClassNotFoundException {
+<span class="nc" id="L2934">        Ruby ruby = Ruby.getThreadLocalRuntime();</span>
+        
+<span class="nc bnc" id="L2936" title="All 2 branches missed.">        if (ruby == null) {</span>
+<span class="nc" id="L2937">            throw new IOException(&quot;No thread-local org.jruby.Ruby available; can't deserialize Ruby object. Set with Ruby#setThreadLocalRuntime.&quot;);</span>
+        }
+        
+<span class="nc" id="L2940">        ois.defaultReadObject();</span>
+<span class="nc" id="L2941">        metaClass = (RubyClass)ruby.getClassFromPath(ois.readUTF());</span>
+        
+<span class="nc" id="L2943">        metaClass.getVariableTableManager().deserializeVariables(this, ois);</span>
+<span class="nc" id="L2944">    }</span>
+
+    // Deprecated methods below this line
+
+    @Deprecated
+    public IRubyObject initialize() {
+<span class="nc" id="L2950">        return getRuntime().getNil();</span>
+    }
+
+    @Deprecated
+    protected RubyBasicObject(Ruby runtime, RubyClass metaClass, boolean useObjectSpace, boolean canBeTainted) {
+<span class="nc" id="L2955">        this(runtime, metaClass, useObjectSpace);</span>
+<span class="nc" id="L2956">    }</span>
+
+    @Deprecated
+    @Override
+    public IRubyObject callSuper(ThreadContext context, IRubyObject[] args, Block block) {
+<span class="nc" id="L2961">        return Helpers.invokeSuper(context, this, args, block);</span>
+    }
+
+    @Deprecated
+    @Override
+    public final IRubyObject callMethod(ThreadContext context, int methodIndex, String name) {
+<span class="nc" id="L2967">        return Helpers.invoke(context, this, name);</span>
+    }
+
+    @Deprecated
+    @Override
+    public final IRubyObject callMethod(ThreadContext context, int methodIndex, String name, IRubyObject arg) {
+<span class="nc" id="L2973">        return Helpers.invoke(context, this, name, arg, Block.NULL_BLOCK);</span>
+    }
+
+    @Deprecated
+    @Override
+    public RubyInteger convertToInteger(int methodIndex, String convertMethod) {
+<span class="nc" id="L2979">        return convertToInteger(convertMethod);</span>
+    }
+
+    @Deprecated
+    @Override
+    public int getVariableCount() {
+<span class="nc" id="L2985">        return getMetaClass().getVariableTableSize();</span>
+    }
+
+    @Deprecated
+    protected boolean variableTableFastContains(String internedName) {
+<span class="nc" id="L2990">        return variableTableContains(internedName);</span>
+    }
+
+    @Deprecated
+    protected Object variableTableFastFetch(String internedName) {
+<span class="nc" id="L2995">        return variableTableFetch(internedName);</span>
+    }
+
+    @Deprecated
+    protected Object variableTableFastStore(String internedName, Object value) {
+<span class="nc" id="L3000">        return variableTableStore(internedName, value);</span>
+    }
+
+    @Deprecated
+    @Override
+    public boolean fastHasInternalVariable(String internedName) {
+<span class="nc" id="L3006">        return hasInternalVariable(internedName);</span>
+    }
+
+    @Deprecated
+    @Override
+    public Object fastGetInternalVariable(String internedName) {
+<span class="nc" id="L3012">        return getInternalVariable(internedName);</span>
+    }
+
+    @Deprecated
+    @Override
+    public void fastSetInternalVariable(String internedName, Object value) {
+<span class="fc" id="L3018">        setInternalVariable(internedName, value);</span>
+<span class="fc" id="L3019">    }</span>
+
+    @Deprecated
+    @Override
+    public void syncVariables(List&lt;Variable&lt;Object&gt;&gt; variables) {
+<span class="nc" id="L3024">        variableTableSync(variables);</span>
+<span class="nc" id="L3025">    }</span>
+
+    @Deprecated
+    @Override
+    public boolean fastHasInstanceVariable(String internedName) {
+<span class="nc" id="L3030">        return hasInstanceVariable(internedName);</span>
+    }
+
+    @Deprecated
+    @Override
+    public IRubyObject fastGetInstanceVariable(String internedName) {
+<span class="nc" id="L3036">        return getInstanceVariable(internedName);</span>
+    }
+
+    @Deprecated
+    @Override
+    public IRubyObject fastSetInstanceVariable(String internedName, IRubyObject value) {
+<span class="nc" id="L3042">        return setInstanceVariable(internedName, value);</span>
+    }
+
+    @Deprecated
+    public static final int UNTRUST_F = 1 &lt;&lt; 3;
+
+    @Override
+    @Deprecated
+    public boolean isUntrusted() {
+<span class="nc" id="L3051">        return isTaint();</span>
+    }
+
+    @Override
+    @Deprecated
+    public void setUntrusted(boolean untrusted) {
+<span class="nc" id="L3057">        setTaint(untrusted);</span>
+<span class="nc" id="L3058">    }</span>
+
+    @Deprecated
+    public RubyBoolean untrusted_p(ThreadContext context) {
+<span class="nc" id="L3062">        return tainted_p(context);</span>
+    }
+
+    @Deprecated
+    public IRubyObject untrust(ThreadContext context) {
+<span class="nc" id="L3067">        return taint(context);</span>
+    }
+
+    @Deprecated
+    public IRubyObject trust(ThreadContext context) {
+<span class="nc" id="L3072">        return untaint(context);</span>
+    }
+
+    @Deprecated
+    public final Object getNativeHandle() {
+<span class="nc" id="L3077">        return null;</span>
+    }
+
+    @Deprecated
+    public final void setNativeHandle(Object value) {
+<span class="nc" id="L3082">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

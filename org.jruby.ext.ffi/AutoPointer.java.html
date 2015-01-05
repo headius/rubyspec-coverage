@@ -1,0 +1,282 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AutoPointer.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.ffi</a> &gt; <span class="el_source">AutoPointer.java</span></div><h1>AutoPointer.java</h1><pre class="source lang-java linenums">
+package org.jruby.ext.ffi;
+
+import java.lang.ref.Reference;
+import java.lang.ref.SoftReference;
+import java.lang.ref.WeakReference;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import org.jruby.Ruby;
+import org.jruby.RubyClass;
+import org.jruby.RubyInstanceConfig;
+import org.jruby.RubyModule;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.callsite.CachingCallSite;
+import org.jruby.runtime.callsite.FunctionalCachingCallSite;
+import org.jruby.util.PhantomReferenceReaper;
+
+import static org.jruby.runtime.Visibility.*;
+
+@JRubyClass(name = &quot;FFI::&quot; + AutoPointer.AUTOPTR_CLASS_NAME, parent = &quot;FFI::Pointer&quot;)
+public class AutoPointer extends Pointer {
+    static final String AUTOPTR_CLASS_NAME = &quot;AutoPointer&quot;;
+    
+    /** Keep strong references to the Reaper until cleanup */
+<span class="fc" id="L31">    private static final ConcurrentMap&lt;ReaperGroup, Boolean&gt; referenceSet = new ConcurrentHashMap&lt;ReaperGroup, Boolean&gt;();</span>
+<span class="fc" id="L32">    private static final ThreadLocal&lt;Reference&lt;ReaperGroup&gt;&gt; currentReaper = new ThreadLocal&lt;Reference&lt;ReaperGroup&gt;&gt;();</span>
+    
+    private Pointer pointer;
+    private Object referent;
+    private transient volatile Reaper reaper;
+    
+    public static RubyClass createAutoPointerClass(Ruby runtime, RubyModule module) {
+<span class="fc" id="L39">        RubyClass autoptrClass = module.defineClassUnder(AUTOPTR_CLASS_NAME,</span>
+<span class="pc bpc" id="L40" title="1 of 2 branches missed.">                module.getClass(&quot;Pointer&quot;),</span>
+                RubyInstanceConfig.REIFY_RUBY_CLASSES ? new ReifyingAllocator(AutoPointer.class) : AutoPointerAllocator.INSTANCE);
+<span class="fc" id="L42">        autoptrClass.defineAnnotatedMethods(AutoPointer.class);</span>
+<span class="fc" id="L43">        autoptrClass.defineAnnotatedConstants(AutoPointer.class);</span>
+<span class="fc" id="L44">        autoptrClass.setReifiedClass(AutoPointer.class);</span>
+<span class="fc" id="L45">        autoptrClass.kindOf = new RubyModule.KindOf() {</span>
+            @Override
+            public boolean isKindOf(IRubyObject obj, RubyModule type) {
+<span class="nc bnc" id="L48" title="All 4 branches missed.">                return obj instanceof AutoPointer &amp;&amp; super.isKindOf(obj, type);</span>
+            }
+        };
+
+<span class="fc" id="L52">        return autoptrClass;</span>
+    }
+
+<span class="fc" id="L55">    private static final class AutoPointerAllocator implements ObjectAllocator {</span>
+<span class="fc" id="L56">        static final ObjectAllocator INSTANCE = new AutoPointerAllocator();</span>
+
+        public IRubyObject allocate(Ruby runtime, RubyClass klazz) {
+<span class="nc" id="L59">            return new AutoPointer(runtime, klazz);</span>
+        }
+
+    }
+
+    public AutoPointer(Ruby runtime, RubyClass klazz) {
+<span class="nc" id="L65">        super(runtime, klazz, runtime.getFFI().getNullMemoryIO());</span>
+<span class="nc" id="L66">    }</span>
+    
+    private static final void checkPointer(Ruby runtime, IRubyObject ptr) {
+<span class="nc bnc" id="L69" title="All 2 branches missed.">        if (!(ptr instanceof Pointer)) {</span>
+<span class="nc" id="L70">            throw runtime.newTypeError(ptr, runtime.getFFI().pointerClass);</span>
+        }
+<span class="nc bnc" id="L72" title="All 4 branches missed.">        if (ptr instanceof MemoryPointer || ptr instanceof AutoPointer) {</span>
+<span class="nc" id="L73">            throw runtime.newTypeError(&quot;Cannot use AutoPointer with MemoryPointer or AutoPointer instances&quot;);</span>
+        }
+<span class="nc" id="L75">    }</span>
+
+    @JRubyMethod(name=&quot;from_native&quot;, meta = true)
+    public static IRubyObject from_native(ThreadContext context, IRubyObject recv, IRubyObject value, IRubyObject ctx) {
+<span class="nc" id="L79">        return ((RubyClass) recv).newInstance(context, value, Block.NULL_BLOCK);</span>
+    }
+
+    @Override
+    @JRubyMethod(name = &quot;initialize&quot;, visibility = PRIVATE)
+    public final IRubyObject initialize(ThreadContext context, IRubyObject pointerArg) {
+
+<span class="nc" id="L86">        Ruby runtime = context.runtime;</span>
+
+<span class="nc" id="L88">        checkPointer(runtime, pointerArg);</span>
+
+<span class="nc" id="L90">        Object ffiHandle = getMetaClass().getFFIHandle();</span>
+<span class="nc bnc" id="L91" title="All 2 branches missed.">        if (!(ffiHandle instanceof ClassData)) {</span>
+<span class="nc" id="L92">            getMetaClass().setFFIHandle(ffiHandle = new ClassData());</span>
+        }
+<span class="nc" id="L94">        ClassData classData = (ClassData) ffiHandle;</span>
+
+        // If no release method is defined, then memory leaks will result.
+<span class="nc" id="L97">        DynamicMethod releaseMethod = classData.releaseCallSite.retrieveCache(getMetaClass().getMetaClass(), classData.releaseCallSite.getMethodName()).method;</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        if (releaseMethod.isUndefined()) {</span>
+<span class="nc" id="L99">            throw runtime.newRuntimeError(&quot;release method undefined&quot;);</span>
+
+<span class="nc bnc" id="L101" title="All 6 branches missed.">        } else if ((releaseMethod.getArity().isFixed() &amp;&amp; releaseMethod.getArity().required() != 1) || releaseMethod.getArity().required() &gt; 1) {</span>
+<span class="nc" id="L102">            throw runtime.newRuntimeError(&quot;wrong number of arguments to release method (&quot;</span>
+<span class="nc" id="L103">                    + 1 + &quot; for &quot; + releaseMethod.getArity().required()  + &quot;)&quot;);</span>
+        }
+
+
+<span class="nc" id="L107">        setMemoryIO(((Pointer) pointerArg).getMemoryIO());</span>
+<span class="nc" id="L108">        this.pointer = (Pointer) pointerArg;</span>
+<span class="nc" id="L109">        this.size = pointer.size;</span>
+<span class="nc" id="L110">        this.typeSize = pointer.typeSize;</span>
+<span class="nc" id="L111">        setReaper(new Reaper(pointer, getMetaClass(), classData.releaseCallSite));</span>
+
+<span class="nc" id="L113">        return this;</span>
+    }
+
+    @Override
+    @JRubyMethod(name = &quot;initialize&quot;, visibility = PRIVATE)
+    public final IRubyObject initialize(ThreadContext context, IRubyObject pointerArg, IRubyObject releaser) {
+
+<span class="nc" id="L120">        checkPointer(context.runtime, pointerArg);</span>
+
+<span class="nc" id="L122">        setMemoryIO(((Pointer) pointerArg).getMemoryIO());</span>
+<span class="nc" id="L123">        this.pointer = (Pointer) pointerArg;</span>
+<span class="nc" id="L124">        this.size = pointer.size;</span>
+<span class="nc" id="L125">        this.typeSize = pointer.typeSize;</span>
+
+<span class="nc" id="L127">        Object ffiHandle = releaser.getMetaClass().getFFIHandleAccessorField().getVariableAccessorForRead().get(releaser);</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">        if (!(ffiHandle instanceof ReleaserData)) {</span>
+<span class="nc" id="L129">            getMetaClass().setFFIHandle(ffiHandle = new ReleaserData());</span>
+        }
+
+<span class="nc" id="L132">        ReleaserData releaserData = (ReleaserData) ffiHandle;</span>
+<span class="nc" id="L133">        DynamicMethod releaseMethod = releaserData.releaseCallSite.retrieveCache(releaser.getMetaClass(), releaserData.releaseCallSite.getMethodName()).method;</span>
+        // If no release method is defined, then memory leaks will result.
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        if (releaseMethod.isUndefined()) {</span>
+<span class="nc" id="L136">            throw context.runtime.newRuntimeError(&quot;call method undefined&quot;);</span>
+
+<span class="nc bnc" id="L138" title="All 6 branches missed.">        } else if ((releaseMethod.getArity().isFixed() &amp;&amp; releaseMethod.getArity().required() != 1) || releaseMethod.getArity().required() &gt; 1) {</span>
+<span class="nc" id="L139">            throw context.runtime.newRuntimeError(&quot;wrong number of arguments to call method (&quot;</span>
+<span class="nc" id="L140">                    + 1 + &quot; for &quot; + releaseMethod.getArity().required()  + &quot;)&quot;);</span>
+        }
+
+<span class="nc" id="L143">        setReaper(new Reaper(pointer, releaser, releaserData.releaseCallSite));</span>
+
+<span class="nc" id="L145">        return this;</span>
+    }
+
+    @JRubyMethod(name = &quot;free&quot;)
+    public final IRubyObject free(ThreadContext context) {
+<span class="nc" id="L150">        Reaper r = reaper;</span>
+
+<span class="nc bnc" id="L152" title="All 4 branches missed.">        if (r == null || r.released) {</span>
+<span class="nc" id="L153">            throw context.runtime.newRuntimeError(&quot;pointer already freed&quot;);</span>
+        }
+
+<span class="nc" id="L156">        r.release(context);</span>
+<span class="nc" id="L157">        reaper = null;</span>
+<span class="nc" id="L158">        referent = null;</span>
+
+<span class="nc" id="L160">        return context.runtime.getNil();</span>
+    }
+
+    @JRubyMethod(name = &quot;autorelease=&quot;)
+    public final IRubyObject autorelease(ThreadContext context, IRubyObject autorelease) {
+<span class="nc" id="L165">        Reaper r = reaper;</span>
+
+<span class="nc bnc" id="L167" title="All 4 branches missed.">        if (r == null || r.released) {</span>
+<span class="nc" id="L168">            throw context.runtime.newRuntimeError(&quot;pointer already freed&quot;);</span>
+        }
+
+<span class="nc" id="L171">        r.autorelease(autorelease.isTrue());</span>
+
+<span class="nc" id="L173">        return context.runtime.getNil();</span>
+    }
+
+    @JRubyMethod(name = &quot;autorelease?&quot;)
+    public final IRubyObject autorelease_p(ThreadContext context) {
+<span class="nc bnc" id="L178" title="All 4 branches missed.">        return context.runtime.newBoolean(reaper != null ? !reaper.unmanaged : false);</span>
+    }
+
+    private void setReaper(Reaper reaper) {
+<span class="nc" id="L182">        Reference&lt;ReaperGroup&gt; reaperGroupReference = currentReaper.get();</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">        ReaperGroup reaperGroup = reaperGroupReference != null ? reaperGroupReference.get() : null;</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        Object referent = reaperGroup != null ? reaperGroup.referent() : null;</span>
+<span class="nc bnc" id="L185" title="All 4 branches missed.">        if (referent == null || !reaperGroup.canAccept()) {</span>
+<span class="nc" id="L186">            reaperGroup = new ReaperGroup(referent = new Object());</span>
+<span class="nc" id="L187">            currentReaper.set(new SoftReference&lt;ReaperGroup&gt;(reaperGroup));</span>
+<span class="nc" id="L188">            referenceSet.put(reaperGroup, Boolean.TRUE);</span>
+        }
+<span class="nc" id="L190">        this.referent = referent;</span>
+<span class="nc" id="L191">        this.reaper = reaper;</span>
+<span class="nc" id="L192">        reaperGroup.add(reaper);</span>
+<span class="nc" id="L193">    }</span>
+
+    private static final class ReaperGroup extends PhantomReferenceReaper&lt;Object&gt; implements Runnable {
+<span class="nc" id="L196">        private static int MAX_REAPERS_PER_GROUP = 100;</span>
+        private final WeakReference&lt;Object&gt; weakref;
+        private int reaperCount;
+        private volatile Reaper head;
+        
+        ReaperGroup(Object referent) {
+<span class="nc" id="L202">            super(referent);</span>
+<span class="nc" id="L203">            this.weakref = new WeakReference&lt;Object&gt;(referent);</span>
+<span class="nc" id="L204">        }</span>
+        
+        Object referent() {
+<span class="nc" id="L207">            return weakref.get();</span>
+        }
+        
+        boolean canAccept() {
+<span class="nc bnc" id="L211" title="All 2 branches missed.">            return reaperCount &lt; MAX_REAPERS_PER_GROUP;</span>
+        }
+        
+        void add(Reaper r) {
+<span class="nc" id="L215">            ++reaperCount;</span>
+<span class="nc" id="L216">            r.next = head;</span>
+<span class="nc" id="L217">            head = r;</span>
+<span class="nc" id="L218">        }</span>
+        
+        public void run() {
+<span class="nc" id="L221">            referenceSet.remove(this);</span>
+<span class="nc" id="L222">            Ruby runtime = null;</span>
+<span class="nc" id="L223">            ThreadContext ctx = null;</span>
+<span class="nc" id="L224">            Reaper r = head;</span>
+            
+<span class="nc bnc" id="L226" title="All 2 branches missed.">            while (r != null) {</span>
+<span class="nc bnc" id="L227" title="All 4 branches missed.">                if (!r.released &amp;&amp; !r.unmanaged) {</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">                    if (r.getRuntime() != runtime) {</span>
+<span class="nc" id="L229">                        runtime = r.getRuntime();</span>
+<span class="nc" id="L230">                        ctx = runtime.getCurrentContext();</span>
+                    }
+<span class="nc" id="L232">                    r.dispose(ctx);</span>
+                }
+<span class="nc" id="L234">                r = r.next;</span>
+            }
+<span class="nc" id="L236">        } </span>
+    }
+
+    private static final class Reaper {
+        final Pointer pointer;
+        final IRubyObject proc;
+        final CachingCallSite callSite;
+        volatile Reaper next;
+        volatile boolean released;
+        volatile boolean unmanaged;
+
+
+<span class="nc" id="L248">        private Reaper(Pointer ptr, IRubyObject proc, CachingCallSite callSite) {</span>
+<span class="nc" id="L249">            this.pointer = ptr;</span>
+<span class="nc" id="L250">            this.proc = proc;</span>
+<span class="nc" id="L251">            this.callSite = callSite;</span>
+<span class="nc" id="L252">        }</span>
+        
+        final Ruby getRuntime() {
+<span class="nc" id="L255">            return proc.getRuntime();</span>
+        }
+        
+        void dispose(ThreadContext context) {
+<span class="nc" id="L259">            callSite.call(context, proc, proc, pointer);</span>
+<span class="nc" id="L260">        }</span>
+
+        public final void release(ThreadContext context) {
+<span class="nc bnc" id="L263" title="All 2 branches missed.">            if (!released) {</span>
+<span class="nc" id="L264">                released = true;</span>
+<span class="nc" id="L265">                dispose(context);</span>
+            }
+<span class="nc" id="L267">        }</span>
+
+        public final void autorelease(boolean autorelease) {
+<span class="nc bnc" id="L270" title="All 2 branches missed.">            this.unmanaged = !autorelease;</span>
+<span class="nc" id="L271">        }</span>
+    }
+
+<span class="nc" id="L274">    private static final class ClassData {</span>
+<span class="nc" id="L275">        private final CachingCallSite releaseCallSite = new FunctionalCachingCallSite(&quot;release&quot;);</span>
+    }
+
+<span class="nc" id="L278">    private static final class ReleaserData {</span>
+<span class="nc" id="L279">        private final CachingCallSite releaseCallSite = new FunctionalCachingCallSite(&quot;call&quot;);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

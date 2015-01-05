@@ -1,0 +1,492 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyDigest.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.digest</a> &gt; <span class="el_source">RubyDigest.java</span></div><h1>RubyDigest.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2006, 2007 Ola Bini &lt;ola@ologix.com&gt;
+ * Copyright (C) 2007 Nick Sieger &lt;nicksieger@gmail.com&gt;
+ * Copyright (C) 2008 Vladimir Sizikov &lt;vsizikov@gmail.com&gt;
+ * Copyright (C) 2009 Joseph LaFata &lt;joe@quibb.org&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.ext.digest;
+
+import java.security.AccessController;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.PrivilegedAction;
+import java.security.Provider;
+import java.util.HashMap;
+import java.util.Map;
+
+import org.jcodings.specific.USASCIIEncoding;
+import org.jruby.Ruby;
+import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyModule;
+import org.jruby.RubyObject;
+import org.jruby.RubyString;
+
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.anno.JRubyModule;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.Visibility;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
+
+/**
+ * @author &lt;a href=&quot;mailto:ola.bini@ki.se&quot;&gt;Ola Bini&lt;/a&gt;
+ */
+@JRubyModule(name=&quot;Digest&quot;)
+<span class="nc" id="L64">public class RubyDigest {</span>
+<span class="fc" id="L65">    private static Provider provider = null;</span>
+<span class="fc" id="L66">    private static final Map&lt;String, MessageDigest&gt; CLONEABLE_DIGESTS = new HashMap&lt;String, MessageDigest&gt;();</span>
+    static {
+        // standard digests from JCA specification; if we can retrieve and clone, save them
+<span class="fc bfc" id="L69" title="All 2 branches covered.">        for (String name : new String[] {&quot;MD2&quot;, &quot;MD5&quot;, &quot;SHA-1&quot;, &quot;SHA-256&quot;, &quot;SHA-384&quot;, &quot;SHA-512&quot;})</span>
+        try {
+<span class="fc" id="L71">            MessageDigest digest = MessageDigest.getInstance(name);</span>
+<span class="fc" id="L72">            digest.clone();</span>
+<span class="fc" id="L73">            CLONEABLE_DIGESTS.put(name, digest);</span>
+<span class="nc" id="L74">        } catch (Exception e) {</span>
+<span class="nc" id="L75">            e.printStackTrace();</span>
+            // ignore; go to next iteration
+<span class="fc" id="L77">        }</span>
+    }
+
+    public static void createDigest(Ruby runtime) {
+        // We're not setting the provider or anything, but it seems that BouncyCastle does some internal things in its
+        // provider's constructor which require it to be executed in a secure context.
+        // Ideally this hack should be removed. See JRUBY-3919 and this BC bug:
+        //   http://www.bouncycastle.org/jira/browse/BJA-227
+<span class="fc" id="L85">        provider = (Provider) AccessController.doPrivileged(new PrivilegedAction() {</span>
+            public Object run() {
+                try {
+<span class="nc" id="L88">                    return Class.forName(&quot;org.bouncycastle.jce.provider.BouncyCastleProvider&quot;).newInstance();</span>
+<span class="fc" id="L89">                } catch(Throwable t) {</span>
+                    // provider is not available
+<span class="fc" id="L91">                    return null;</span>
+                }
+            }
+        });
+
+<span class="fc" id="L96">        RubyModule mDigest = runtime.defineModule(&quot;Digest&quot;);</span>
+<span class="fc" id="L97">        mDigest.defineAnnotatedMethods(RubyDigest.class);</span>
+<span class="fc" id="L98">        RubyModule mDigestInstance = mDigest.defineModuleUnder(&quot;Instance&quot;);</span>
+<span class="fc" id="L99">        mDigestInstance.defineAnnotatedMethods(DigestInstance.class);</span>
+<span class="fc" id="L100">        RubyClass cDigestClass = mDigest.defineClassUnder(&quot;Class&quot;, runtime.getObject(), DigestClass.DIGEST_CLASS_ALLOCATOR);</span>
+<span class="fc" id="L101">        cDigestClass.defineAnnotatedMethods(DigestClass.class);</span>
+<span class="fc" id="L102">        cDigestClass.includeModule(mDigestInstance);</span>
+<span class="fc" id="L103">        RubyClass cDigestBase = mDigest.defineClassUnder(&quot;Base&quot;, cDigestClass, DigestBase.DIGEST_BASE_ALLOCATOR);</span>
+<span class="fc" id="L104">        cDigestBase.defineAnnotatedMethods(DigestBase.class);</span>
+<span class="fc" id="L105">    }</span>
+
+    private static MessageDigest createMessageDigest(Ruby runtime, String providerName) throws NoSuchAlgorithmException {
+<span class="nc" id="L108">        MessageDigest cloneable = CLONEABLE_DIGESTS.get(providerName);</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">        if (cloneable != null) {</span>
+            try {
+<span class="nc" id="L111">                return (MessageDigest)cloneable.clone();</span>
+<span class="nc" id="L112">            } catch (CloneNotSupportedException cnse) {</span>
+                // should never happen, since we tested it in static init
+            }
+        }
+
+        // fall back on JCA mechanisms for getting a digest
+<span class="nc bnc" id="L118" title="All 2 branches missed.">        if(provider != null) {</span>
+            try {
+<span class="nc" id="L120">                return MessageDigest.getInstance(providerName, provider);</span>
+<span class="nc" id="L121">            } catch(NoSuchAlgorithmException e) {</span>
+                // bouncy castle doesn't support algorithm
+            }
+        }
+
+        // fall back to default JCA providers
+<span class="nc" id="L127">        return MessageDigest.getInstance(providerName);</span>
+    }
+
+<span class="fc" id="L130">    private final static byte[] digits = {</span>
+        '0', '1', '2', '3', '4', '5',
+        '6', '7', '8', '9', 'a', 'b',
+        'c', 'd', 'e', 'f', 'g', 'h',
+        'i', 'j', 'k', 'l', 'm', 'n',
+        'o', 'p', 'q', 'r', 's', 't',
+        'u', 'v', 'w', 'x', 'y', 'z'
+    };
+
+    private static ByteList toHex(byte[] val) {
+<span class="nc" id="L140">        ByteList byteList = new ByteList(val.length * 2);</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">        for (int i = 0, j = val.length; i &lt; j; i++) {</span>
+<span class="nc" id="L142">            int b = val[i] &amp; 0xFF;</span>
+<span class="nc" id="L143">            byteList.append(digits[b &gt;&gt; 4]);</span>
+<span class="nc" id="L144">            byteList.append(digits[b &amp; 0xF]);</span>
+        }
+<span class="nc" id="L146">        return byteList;</span>
+    }
+
+    private static IRubyObject toHexString(Ruby runtime, byte[] val) {
+<span class="nc" id="L150">        return RubyString.newStringNoCopy(runtime, new ByteList(ByteList.plain(toHex(val)), USASCIIEncoding.INSTANCE));</span>
+    }
+
+    @JRubyMethod(name = &quot;hexencode&quot;, required = 1, meta = true)
+    public static IRubyObject s_hexencode(IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L155">        return toHexString(recv.getRuntime(), arg.convertToString().getBytes());</span>
+    }
+
+    @JRubyMethod(name = &quot;bubblebabble&quot;, required = 1, meta = true)
+    public static IRubyObject bubblebabble(IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L160">        return RubyString.newString(recv.getRuntime(), BubbleBabble.bubblebabble(arg.convertToString().getBytes()));</span>
+    }
+
+    private static class Metadata {
+
+        private final String name;
+        private final int blockLength;
+
+<span class="nc" id="L168">        Metadata(String name, int blockLength) {</span>
+<span class="nc" id="L169">            this.name = name;</span>
+<span class="nc" id="L170">            this.blockLength = blockLength;</span>
+<span class="nc" id="L171">        }</span>
+
+        String getName() {
+<span class="nc" id="L174">            return name;</span>
+        }
+
+        int getBlockLength() {
+<span class="nc" id="L178">            return blockLength;</span>
+        }
+    }
+
+
+    @JRubyClass(name=&quot;Digest::MD5&quot;, parent=&quot;Digest::Base&quot;)
+<span class="nc" id="L184">    public static class MD5 {}</span>
+    @JRubyClass(name=&quot;Digest::RMD160&quot;, parent=&quot;Digest::Base&quot;)
+<span class="nc" id="L186">    public static class RMD160 {}</span>
+    @JRubyClass(name=&quot;Digest::SHA1&quot;, parent=&quot;Digest::Base&quot;)
+<span class="nc" id="L188">    public static class SHA1 {}</span>
+    @JRubyClass(name=&quot;Digest::SHA256&quot;, parent=&quot;Digest::Base&quot;)
+<span class="nc" id="L190">    public static class SHA256 {}</span>
+    @JRubyClass(name=&quot;Digest::SHA384&quot;, parent=&quot;Digest::Base&quot;)
+<span class="nc" id="L192">    public static class SHA384 {}</span>
+    @JRubyClass(name=&quot;Digest::SHA512&quot;, parent=&quot;Digest::Base&quot;)
+<span class="nc" id="L194">    public static class SHA512 {}</span>
+
+    public static void createDigestMD5(Ruby runtime) {
+<span class="nc" id="L197">        runtime.getLoadService().require(&quot;digest&quot;);</span>
+<span class="nc" id="L198">        RubyModule mDigest = runtime.getModule(&quot;Digest&quot;);</span>
+<span class="nc" id="L199">        RubyClass cDigestBase = mDigest.getClass(&quot;Base&quot;);</span>
+<span class="nc" id="L200">        RubyClass cDigest_MD5 = mDigest.defineClassUnder(&quot;MD5&quot;,cDigestBase,cDigestBase.getAllocator());</span>
+<span class="nc" id="L201">        cDigest_MD5.setInternalVariable(&quot;metadata&quot;, new Metadata(&quot;MD5&quot;, 64));</span>
+<span class="nc" id="L202">    }</span>
+
+    public static void createDigestRMD160(Ruby runtime) {
+<span class="nc" id="L205">        runtime.getLoadService().require(&quot;digest&quot;);</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">        if(provider == null) {</span>
+<span class="nc" id="L207">            throw runtime.newLoadError(&quot;RMD160 not supported without BouncyCastle&quot;);</span>
+        }
+<span class="nc" id="L209">        RubyModule mDigest = runtime.getModule(&quot;Digest&quot;);</span>
+<span class="nc" id="L210">        RubyClass cDigestBase = mDigest.getClass(&quot;Base&quot;);</span>
+<span class="nc" id="L211">        RubyClass cDigest_RMD160 = mDigest.defineClassUnder(&quot;RMD160&quot;,cDigestBase,cDigestBase.getAllocator());</span>
+<span class="nc" id="L212">        cDigest_RMD160.setInternalVariable(&quot;metadata&quot;, new Metadata(&quot;RIPEMD160&quot;, 64));</span>
+<span class="nc" id="L213">    }</span>
+
+    public static void createDigestSHA1(Ruby runtime) {
+<span class="nc" id="L216">        runtime.getLoadService().require(&quot;digest&quot;);</span>
+<span class="nc" id="L217">        RubyModule mDigest = runtime.getModule(&quot;Digest&quot;);</span>
+<span class="nc" id="L218">        RubyClass cDigestBase = mDigest.getClass(&quot;Base&quot;);</span>
+<span class="nc" id="L219">        RubyClass cDigest_SHA1 = mDigest.defineClassUnder(&quot;SHA1&quot;,cDigestBase,cDigestBase.getAllocator());</span>
+<span class="nc" id="L220">        cDigest_SHA1.setInternalVariable(&quot;metadata&quot;, new Metadata(&quot;SHA1&quot;, 64));</span>
+<span class="nc" id="L221">    }</span>
+
+    public static void createDigestSHA2(Ruby runtime) {
+<span class="nc" id="L224">        runtime.getLoadService().require(&quot;digest&quot;);</span>
+        try {
+<span class="nc" id="L226">            createMessageDigest(runtime, &quot;SHA-256&quot;);</span>
+<span class="nc" id="L227">        } catch(NoSuchAlgorithmException e) {</span>
+<span class="nc" id="L228">            throw runtime.newLoadError(&quot;SHA2 not supported&quot;);</span>
+<span class="nc" id="L229">        }</span>
+<span class="nc" id="L230">        RubyModule mDigest = runtime.getModule(&quot;Digest&quot;);</span>
+<span class="nc" id="L231">        RubyClass cDigestBase = mDigest.getClass(&quot;Base&quot;);</span>
+<span class="nc" id="L232">        RubyClass cDigest_SHA2_256 = mDigest.defineClassUnder(&quot;SHA256&quot;,cDigestBase,cDigestBase.getAllocator());</span>
+<span class="nc" id="L233">        Metadata sha256Metadata = new Metadata(&quot;SHA-256&quot;, 64);</span>
+<span class="nc" id="L234">        cDigest_SHA2_256.setInternalVariable(&quot;metadata&quot;, sha256Metadata);</span>
+<span class="nc" id="L235">        RubyClass cDigest_SHA2_384 = mDigest.defineClassUnder(&quot;SHA384&quot;,cDigestBase,cDigestBase.getAllocator());</span>
+<span class="nc" id="L236">        cDigest_SHA2_384.setInternalVariable(&quot;metadata&quot;, new Metadata(&quot;SHA-384&quot;, 128));</span>
+<span class="nc" id="L237">        RubyClass cDigest_SHA2_512 = mDigest.defineClassUnder(&quot;SHA512&quot;,cDigestBase,cDigestBase.getAllocator());</span>
+<span class="nc" id="L238">        cDigest_SHA2_512.setInternalVariable(&quot;metadata&quot;, new Metadata(&quot;SHA-512&quot;, 128));</span>
+<span class="nc" id="L239">    }</span>
+
+    @JRubyModule(name = &quot;Digest::Instance&quot;)
+<span class="nc" id="L242">    public static class DigestInstance {</span>
+
+        private static IRubyObject throwUnimplError(IRubyObject self, String name) {
+<span class="nc" id="L245">            throw self.getRuntime().newRuntimeError(String.format(&quot;%s does not implement %s()&quot;, self.getMetaClass().getRealClass().getName(), name));</span>
+        }
+
+        /* instance methods that should be overridden */
+        @JRubyMethod(name = {&quot;update&quot;, &quot;&lt;&lt;&quot;}, required = 1)
+        public static IRubyObject update(ThreadContext context, IRubyObject self, IRubyObject arg) {
+<span class="nc" id="L251">            return throwUnimplError(self, &quot;update&quot;);</span>
+        }
+
+        @JRubyMethod()
+        public static IRubyObject finish(ThreadContext context, IRubyObject self) {
+<span class="nc" id="L256">            return throwUnimplError(self, &quot;finish&quot;);</span>
+        }
+
+        @JRubyMethod()
+        public static IRubyObject reset(ThreadContext context, IRubyObject self) {
+<span class="nc" id="L261">            return throwUnimplError(self, &quot;reset&quot;);</span>
+        }
+
+        @JRubyMethod()
+        public static IRubyObject digest_length(ThreadContext context, IRubyObject self) {
+<span class="nc" id="L266">            return digest(context, self, null).convertToString().bytesize();</span>
+        }
+
+        @JRubyMethod()
+        public static IRubyObject block_length(ThreadContext context, IRubyObject self) {
+<span class="nc" id="L271">            return throwUnimplError(self, &quot;block_length&quot;);</span>
+        }
+
+        /* instance methods that may be overridden */
+        @JRubyMethod(name = &quot;==&quot;, required = 1)
+        public static IRubyObject op_equal(ThreadContext context, IRubyObject self, IRubyObject oth) {
+<span class="nc bnc" id="L277" title="All 2 branches missed.">            if(oth.isNil()) return context.runtime.getFalse();</span>
+
+            RubyString str1, str2;
+<span class="nc" id="L280">            RubyModule instance = (RubyModule)context.runtime.getModule(&quot;Digest&quot;).getConstantAt(&quot;Instance&quot;);</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">            if (oth.getMetaClass().getRealClass().hasModuleInHierarchy(instance)) {</span>
+<span class="nc" id="L282">                str1 = digest(context, self, null).convertToString();</span>
+<span class="nc" id="L283">                str2 = digest(context, oth, null).convertToString();</span>
+            } else {
+<span class="nc" id="L285">                str1 = to_s(context, self).convertToString();</span>
+<span class="nc" id="L286">                str2 = oth.convertToString();</span>
+            }
+<span class="nc bnc" id="L288" title="All 4 branches missed.">            boolean ret = str1.bytesize().eql(str2.bytesize()) &amp;&amp; (str1.eql(str2));</span>
+<span class="nc bnc" id="L289" title="All 2 branches missed.">            return ret ? context.runtime.getTrue() : context.runtime.getFalse();</span>
+        }
+
+        @JRubyMethod()
+        public static IRubyObject inspect(ThreadContext context, IRubyObject self) {
+<span class="nc" id="L294">            return RubyString.newStringNoCopy(self.getRuntime(), ByteList.plain(&quot;#&lt;&quot; + self.getMetaClass().getRealClass().getName() + &quot;: &quot; + hexdigest(context, self, null) + &quot;&gt;&quot;));</span>
+        }
+
+        /* instance methods that need not usually be overridden */
+        @JRubyMethod(name = &quot;new&quot;)
+        public static IRubyObject newObject(ThreadContext context, IRubyObject self) {
+<span class="nc" id="L300">            return self.rbClone().callMethod(context, &quot;reset&quot;);</span>
+        }
+
+        @JRubyMethod(optional = 1)
+        public static IRubyObject digest(ThreadContext context, IRubyObject self, IRubyObject[] args) {
+<span class="nc" id="L305">            IRubyObject value = null;</span>
+<span class="nc bnc" id="L306" title="All 4 branches missed.">            if (args != null &amp;&amp; args.length &gt; 0) {</span>
+<span class="nc" id="L307">                self.callMethod(context, &quot;reset&quot;);</span>
+<span class="nc" id="L308">                self.callMethod(context, &quot;update&quot;, args[0]);</span>
+<span class="nc" id="L309">                value = self.callMethod(context, &quot;finish&quot;);</span>
+<span class="nc" id="L310">                self.callMethod(context, &quot;reset&quot;);</span>
+            } else {
+<span class="nc" id="L312">                IRubyObject clone = self.rbClone();</span>
+<span class="nc" id="L313">                value = clone.callMethod(context, &quot;finish&quot;);</span>
+<span class="nc" id="L314">                clone.callMethod(context, &quot;reset&quot;);</span>
+            }
+<span class="nc" id="L316">            return value;</span>
+        }
+
+        @JRubyMethod(name = &quot;digest!&quot;)
+        public static IRubyObject digest_bang(ThreadContext context, IRubyObject self) {
+<span class="nc" id="L321">            IRubyObject value = self.callMethod(context, &quot;finish&quot;);</span>
+<span class="nc" id="L322">            self.callMethod(context, &quot;reset&quot;);</span>
+<span class="nc" id="L323">            return value;</span>
+        }
+
+        @JRubyMethod(optional = 1)
+        public static IRubyObject hexdigest(ThreadContext context, IRubyObject self, IRubyObject[] args) {
+<span class="nc" id="L328">            return toHexString(context.runtime, digest(context, self, args).convertToString().getBytes());</span>
+        }
+
+        @JRubyMethod(name = &quot;hexdigest!&quot;)
+        public static IRubyObject hexdigest_bang(ThreadContext context, IRubyObject self) {
+<span class="nc" id="L333">            return toHexString(context.runtime, digest_bang(context, self).convertToString().getBytes());</span>
+        }
+
+        @JRubyMethod(name = &quot;bubblebabble&quot;, required = 1, optional = 1, meta = true)
+        public static IRubyObject bubblebabble(ThreadContext context, IRubyObject recv, IRubyObject[] args, Block unusedBlock) {
+<span class="nc" id="L338">            byte[] digest = recv.callMethod(context, &quot;digest&quot;, args, Block.NULL_BLOCK).convertToString().getBytes();</span>
+<span class="nc" id="L339">            return RubyString.newString(recv.getRuntime(), BubbleBabble.bubblebabble(digest));</span>
+        }
+
+        @JRubyMethod()
+        public static IRubyObject to_s(ThreadContext context, IRubyObject self) {
+<span class="nc" id="L344">            return self.callMethod(context, &quot;hexdigest&quot;);</span>
+        }
+
+        @JRubyMethod(name = {&quot;length&quot;, &quot;size&quot;})
+        public static IRubyObject length(ThreadContext context, IRubyObject self) {
+<span class="nc" id="L349">            return self.callMethod(context, &quot;digest_length&quot;);</span>
+        }
+    }
+
+
+    @JRubyClass(name=&quot;Digest::Class&quot;)
+    public static class DigestClass extends RubyObject {
+<span class="fc" id="L356">        protected static final ObjectAllocator DIGEST_CLASS_ALLOCATOR = new ObjectAllocator() {</span>
+            public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L358">                return new DigestClass(runtime, klass);</span>
+            }
+        };
+
+        public DigestClass(Ruby runtime, RubyClass type) {
+<span class="nc" id="L363">            super(runtime, type);</span>
+<span class="nc" id="L364">        }</span>
+        
+        @JRubyMethod(name = &quot;digest&quot;, required = 1, rest = true, meta = true)
+        public static IRubyObject s_digest(ThreadContext context, IRubyObject recv, IRubyObject[] args, Block unusedBlock) {
+<span class="nc" id="L368">            Ruby runtime = recv.getRuntime();</span>
+<span class="nc bnc" id="L369" title="All 2 branches missed.">            if (args.length &lt; 1) {</span>
+<span class="nc" id="L370">                throw runtime.newArgumentError(&quot;no data given&quot;);</span>
+            }
+<span class="nc" id="L372">            RubyString str = args[0].convertToString();</span>
+<span class="nc" id="L373">            IRubyObject[] newArgs = new IRubyObject[args.length - 1];</span>
+<span class="nc" id="L374">            System.arraycopy(args, 1, newArgs, 0, args.length - 1);</span>
+<span class="nc" id="L375">            IRubyObject obj = ((RubyClass)recv).newInstance(context, newArgs, Block.NULL_BLOCK);</span>
+<span class="nc" id="L376">            return obj.callMethod(context, &quot;digest&quot;, str);</span>
+        }
+
+        @JRubyMethod(name = &quot;hexdigest&quot;, required = 1, optional = 1, meta = true)
+        public static IRubyObject s_hexdigest(ThreadContext context, IRubyObject recv, IRubyObject[] args, Block unusedBlock) {
+<span class="nc" id="L381">            Ruby runtime = recv.getRuntime();</span>
+<span class="nc" id="L382">            byte[] digest = recv.callMethod(context, &quot;digest&quot;, args, Block.NULL_BLOCK).convertToString().getBytes();</span>
+<span class="nc" id="L383">            return RubyDigest.toHexString(runtime, digest);</span>
+        }
+    }
+
+
+<span class="nc" id="L388">    @JRubyClass(name=&quot;Digest::Base&quot;)</span>
+    public static class DigestBase extends RubyObject {
+<span class="fc" id="L390">        protected static final ObjectAllocator DIGEST_BASE_ALLOCATOR = new ObjectAllocator() {</span>
+            public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L392">                return new DigestBase(runtime, klass);</span>
+            }
+        };
+
+        private MessageDigest algo;
+<span class="nc" id="L397">        private int blockLength = 0;</span>
+
+        public DigestBase(Ruby runtime, RubyClass type) {
+<span class="nc" id="L400">            super(runtime,type);</span>
+
+<span class="nc bnc" id="L402" title="All 2 branches missed.">            if(type == runtime.getModule(&quot;Digest&quot;).getClass(&quot;Base&quot;)) {</span>
+<span class="nc" id="L403">                throw runtime.newNotImplementedError(&quot;Digest::Base is an abstract class&quot;);</span>
+            }
+
+<span class="nc" id="L406">            Metadata metadata = getMetadata(type);</span>
+<span class="nc bnc" id="L407" title="All 2 branches missed.">            if(metadata == null) {</span>
+<span class="nc" id="L408">                throw runtime.newNotImplementedError(&quot;the &quot; + type + &quot;() function is unimplemented on this machine&quot;);</span>
+            }
+            
+            try {
+<span class="nc" id="L412">                setAlgorithm(metadata);</span>
+<span class="nc" id="L413">            } catch(NoSuchAlgorithmException e) {</span>
+<span class="nc" id="L414">                throw runtime.newNotImplementedError(&quot;the &quot; + type + &quot;() function is unimplemented on this machine&quot;);</span>
+<span class="nc" id="L415">            }</span>
+
+<span class="nc" id="L417">        }</span>
+
+        // if subclass extends particular digest we need to walk to find it...we should rearchitect digest to avoid walking type systems
+        private Metadata getMetadata(RubyModule type) {
+<span class="nc bnc" id="L421" title="All 2 branches missed.">            for (RubyModule current = type; current != null; current = current.getSuperClass()) {</span>
+<span class="nc" id="L422">                Metadata metadata = (Metadata) current.getInternalVariable(&quot;metadata&quot;);</span>
+
+<span class="nc bnc" id="L424" title="All 2 branches missed.">                if (metadata != null) return metadata;</span>
+            }
+
+<span class="nc" id="L427">            return null;</span>
+        }
+
+        @JRubyMethod(required = 1, visibility = Visibility.PRIVATE)
+        @Override
+        public IRubyObject initialize_copy(IRubyObject obj) {
+<span class="nc bnc" id="L433" title="All 2 branches missed.">            if(this == obj) {</span>
+<span class="nc" id="L434">                return this;</span>
+            }
+<span class="nc" id="L436">            ((RubyObject)obj).checkFrozen();</span>
+
+<span class="nc" id="L438">            String name = ((DigestBase)obj).algo.getAlgorithm();</span>
+            try {
+<span class="nc" id="L440">                algo = (MessageDigest)((DigestBase)obj).algo.clone();</span>
+<span class="nc" id="L441">            } catch(CloneNotSupportedException e) {</span>
+<span class="nc" id="L442">                throw getRuntime().newTypeError(&quot;Could not initialize copy of digest (&quot; + name + &quot;)&quot;);</span>
+<span class="nc" id="L443">            }</span>
+<span class="nc" id="L444">            return this;</span>
+        }
+
+        @JRubyMethod(name = {&quot;update&quot;, &quot;&lt;&lt;&quot;}, required = 1)
+        public IRubyObject update(IRubyObject obj) {
+<span class="nc" id="L449">            ByteList bytes = obj.convertToString().getByteList();</span>
+<span class="nc" id="L450">            algo.update(bytes.getUnsafeBytes(), bytes.getBegin(), bytes.getRealSize());</span>
+<span class="nc" id="L451">            return this;</span>
+        }
+
+        @JRubyMethod()
+        public IRubyObject finish() {
+<span class="nc" id="L456">            IRubyObject digest = RubyString.newStringNoCopy(getRuntime(), algo.digest());</span>
+<span class="nc" id="L457">            algo.reset();</span>
+<span class="nc" id="L458">            return digest;</span>
+        }
+        
+        @JRubyMethod()
+        public IRubyObject digest_length() {
+<span class="nc" id="L463">            return RubyFixnum.newFixnum(getRuntime(), algo.getDigestLength());</span>
+        }
+
+        @JRubyMethod()
+        public IRubyObject block_length() {
+<span class="nc bnc" id="L468" title="All 2 branches missed.">            if (blockLength == 0) {</span>
+<span class="nc" id="L469">                throw getRuntime().newRuntimeError(</span>
+<span class="nc" id="L470">                        this.getMetaClass() + &quot; doesn't implement block_length()&quot;);</span>
+            }
+<span class="nc" id="L472">            return RubyFixnum.newFixnum(getRuntime(), blockLength);</span>
+        }
+
+        @JRubyMethod()
+        public IRubyObject reset() {
+<span class="nc" id="L477">            algo.reset();</span>
+<span class="nc" id="L478">            return this;</span>
+        }
+
+        @JRubyMethod()
+        public IRubyObject bubblebabble(ThreadContext context) {
+<span class="nc" id="L483">            return RubyString.newString(context.runtime, BubbleBabble.bubblebabble(algo.digest()));</span>
+        }
+
+        private void setAlgorithm(Metadata metadata) throws NoSuchAlgorithmException {
+<span class="nc" id="L487">           this.algo = createMessageDigest(getRuntime(), metadata.getName());</span>
+<span class="nc" id="L488">           this.blockLength = metadata.getBlockLength();</span>
+<span class="nc" id="L489">        }</span>
+    }
+}// RubyDigest
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

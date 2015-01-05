@@ -1,0 +1,572 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>StaticScope.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.parser</a> &gt; <span class="el_source">StaticScope.java</span></div><h1>StaticScope.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2006-2007 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.parser;
+
+import java.io.Serializable;
+import java.util.Arrays;
+
+import org.jruby.RubyModule;
+import org.jruby.RubyObject;
+import org.jruby.ast.AssignableNode;
+import org.jruby.ast.DAsgnNode;
+import org.jruby.ast.DVarNode;
+import org.jruby.ast.LocalAsgnNode;
+import org.jruby.ast.LocalVarNode;
+import org.jruby.ast.Node;
+import org.jruby.ast.VCallNode;
+import org.jruby.ir.IRScope;
+import org.jruby.ir.IRScopeType;
+import org.jruby.lexer.yacc.ISourcePosition;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.DynamicScope;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.scope.DummyDynamicScope;
+
+/**
+ * StaticScope represents lexical scoping of variables and module/class constants.
+ * 
+ * At a very high level every scopes enclosing scope contains variables in the next outer
+ * lexical layer.  The enclosing scopes variables may or may not be reachable depending
+ * on the scoping rules for variables (governed by BlockStaticScope and LocalStaticScope).
+ * 
+ * StaticScope also keeps track of current module/class that is in scope.  previousCRefScope
+ * will point to the previous scope of the enclosing module/class (cref).
+ * 
+ */
+<span class="pc bpc" id="L62" title="1 of 2 branches missed.">public class StaticScope implements Serializable {</span>
+    private static final long serialVersionUID = 3423852552352498148L;
+
+    // Next immediate scope.  Variable and constant scoping rules make use of this variable
+    // in different ways.
+    final protected StaticScope enclosingScope;
+
+    // Live reference to module
+<span class="fc" id="L70">    private transient RubyModule cref = null;</span>
+
+    // Next CRef down the lexical structure
+<span class="fc" id="L73">    private StaticScope previousCRefScope = null;</span>
+
+    // Our name holder (offsets are assigned as variables are added
+    private String[] variableNames;
+
+    // number of variables in this scope representing required arguments
+<span class="fc" id="L79">    private int requiredArgs = 0;</span>
+
+    // number of variables in this scope representing optional arguments
+<span class="fc" id="L82">    private int optionalArgs = 0;</span>
+
+    // index of variable that represents a &quot;rest&quot; arg
+<span class="fc" id="L85">    private int restArg = -1;</span>
+
+    private DynamicScope dummyScope;
+
+    protected IRScopeType scopeType;
+
+<span class="fc" id="L91">    private static final String[] NO_NAMES = new String[0];</span>
+
+    private Type type;
+    private boolean isBlockOrEval;
+    private boolean isArgumentScope; // Is this block and argument scope of a define_method (for the purposes of zsuper).
+
+    private int scopeId;
+    private IRScope irScope; // Method/Closure that this static scope corresponds to
+
+<span class="pc" id="L100">    public enum Type {</span>
+<span class="fc" id="L101">        LOCAL, BLOCK, EVAL;</span>
+
+        public static Type fromOrdinal(int value) {
+<span class="nc bnc" id="L104" title="All 4 branches missed.">            return value &lt; 0 || value &gt;= values().length ? null : values()[value];</span>
+        }
+    }
+
+    /**
+     * Construct a new static scope.
+     *
+     * @param type           the type of scope
+     * @param enclosingScope the lexically containing scope.
+     */
+    protected StaticScope(Type type, StaticScope enclosingScope) {
+<span class="fc" id="L115">        this(type, enclosingScope, NO_NAMES);</span>
+<span class="fc" id="L116">    }</span>
+
+    /**
+     * Construct a new static scope. The array of strings should all be the
+     * interned versions, since several other optimizations depend on being
+     * able to do object equality checks.
+     *
+     * @param type           the type of scope
+     * @param enclosingScope the lexically containing scope.
+     * @param names          The list of interned String variable names.
+     */
+<span class="fc" id="L127">    protected StaticScope(Type type, StaticScope enclosingScope, String[] names) {</span>
+<span class="pc bpc" id="L128" title="3 of 4 branches missed.">        assert names != null : &quot;names is not null&quot;;</span>
+<span class="pc bpc" id="L129" title="3 of 4 branches missed.">        assert namesAreInterned(names);</span>
+
+<span class="fc" id="L131">        this.enclosingScope = enclosingScope;</span>
+<span class="fc" id="L132">        this.variableNames = names;</span>
+<span class="fc" id="L133">        this.type = type;</span>
+<span class="fc" id="L134">        this.irScope = null;</span>
+<span class="fc bfc" id="L135" title="All 2 branches covered.">        this.isBlockOrEval = (type != Type.LOCAL);</span>
+<span class="fc bfc" id="L136" title="All 2 branches covered.">        this.isArgumentScope = !isBlockOrEval;</span>
+<span class="fc" id="L137">    }</span>
+
+    public IRScope getIRScope() {
+<span class="fc" id="L140">        return irScope;</span>
+    }
+
+    public int getScopeId() {
+<span class="nc" id="L144">        return scopeId;</span>
+    }
+
+    public IRScopeType getScopeType() {
+<span class="fc" id="L148">        return scopeType;</span>
+    }
+
+    public void setScopeType(IRScopeType scopeType) {
+<span class="fc" id="L152">        this.scopeType = scopeType;</span>
+<span class="fc" id="L153">    }</span>
+
+    public void setIRScope(IRScope irScope, boolean isForLoopBody) {
+<span class="pc bpc" id="L156" title="1 of 2 branches missed.">        if (!isForLoopBody) {</span>
+<span class="fc" id="L157">            this.irScope = irScope;</span>
+        }
+<span class="fc" id="L159">        this.scopeId = irScope.getScopeId();</span>
+<span class="fc" id="L160">        this.scopeType = irScope.getScopeType();</span>
+<span class="fc" id="L161">    }</span>
+
+    public void setIRScope(IRScope irScope) {
+<span class="fc" id="L164">        setIRScope(irScope, false);</span>
+<span class="fc" id="L165">    }</span>
+
+    /**
+     * Check that all strings in the given array are the interned versions.
+     *
+     * @param names The array of strings
+     * @return true if they are all interned, false otherwise
+     */
+    private static boolean namesAreInterned(String[] names) {
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        for (String name : names) {</span>
+            // Note that this object equality check is intentional, to ensure
+            // the string and its interned version are the same object.
+<span class="nc bnc" id="L177" title="All 2 branches missed.">            if (name != name.intern()) return false;</span>
+        }
+<span class="nc" id="L179">        return true;</span>
+    }
+
+    /**
+     * Add a new variable to this (current) scope unless it is already defined in the
+     * current scope.
+     *
+     * @param name of new variable
+     * @return index+depth merged location of scope
+     */
+    public int addVariableThisScope(String name) {
+        // Ignore duplicate &quot;_&quot; args in blocks
+        // (duplicate _ args are named &quot;_$0&quot;)
+        // Dont allocate slots for them.
+<span class="fc bfc" id="L193" title="All 2 branches covered.">        if (name.equals(&quot;_$0&quot;)) {</span>
+<span class="fc" id="L194">            return -1;</span>
+        }
+
+<span class="fc" id="L197">        int slot = exists(name);</span>
+
+<span class="fc bfc" id="L199" title="All 2 branches covered.">        if (slot &gt;= 0) return slot;</span>
+
+        // This is perhaps innefficient timewise?  Optimal spacewise
+<span class="fc" id="L202">        growVariableNames(name);</span>
+
+        // Returns slot of variable
+<span class="fc" id="L205">        return variableNames.length - 1;</span>
+    }
+
+    /**
+     * Add a new variable to this (current) scope unless it is already defined in any
+     * reachable scope.
+     *
+     * @param name of new variable
+     * @return index+depth merged location of scope
+     */
+    public int addVariable(String name) {
+<span class="fc" id="L216">        int slot = isDefined(name);</span>
+
+<span class="fc bfc" id="L218" title="All 2 branches covered.">        if (slot &gt;= 0) return slot;</span>
+
+        // This is perhaps innefficient timewise?  Optimal spacewise
+<span class="fc" id="L221">        growVariableNames(name);</span>
+
+        // Returns slot of variable
+<span class="fc" id="L224">        return variableNames.length - 1;</span>
+    }
+
+    public String[] getVariables() {
+<span class="fc" id="L228">        return variableNames;</span>
+    }
+
+    public int getNumberOfVariables() {
+<span class="fc bfc" id="L232" title="All 2 branches covered.">        return irScope == null ? variableNames.length : irScope.getUsedVariablesCount();</span>
+    }
+
+    public void setVariables(String[] names) {
+<span class="nc bnc" id="L236" title="All 4 branches missed.">        assert names != null : &quot;names is not null&quot;;</span>
+
+<span class="nc" id="L238">        variableNames = new String[names.length];</span>
+<span class="nc" id="L239">        System.arraycopy(names, 0, variableNames, 0, names.length);</span>
+<span class="nc" id="L240">    }</span>
+
+    /* Note: Only used by compiler until it can use getConstant again or use some other refactoring */
+    public IRubyObject getConstantWithConstMissing(String internedName) {
+<span class="nc" id="L244">        IRubyObject result = getConstantInner(internedName);</span>
+
+        // If we could not find the constant from cref..then try getting from inheritence hierarchy
+<span class="nc bnc" id="L247" title="All 2 branches missed.">        return result == null ? cref.getConstant(internedName) : result;</span>
+    }
+
+    public boolean isConstantDefined(String internedName) {
+<span class="nc bnc" id="L251" title="All 2 branches missed.">        return getConstant(internedName) != null;</span>
+    }
+
+    public IRubyObject getConstant(String internedName) {
+<span class="nc" id="L255">        IRubyObject result = getConstantInner(internedName);</span>
+
+        // If we could not find the constant from cref..then try getting from inheritence hierarchy
+<span class="nc bnc" id="L258" title="All 2 branches missed.">        return result == null ? cref.getConstantNoConstMissing(internedName) : result;</span>
+    }
+
+    public IRubyObject getConstantInner(String internedName) {
+<span class="fc" id="L262">        IRubyObject result = cref.fetchConstant(internedName);</span>
+
+<span class="fc bfc" id="L264" title="All 2 branches covered.">        if (result != null) {</span>
+<span class="fc bfc" id="L265" title="All 2 branches covered.">            return result == RubyObject.UNDEF ? cref.resolveUndefConstant(internedName) : result;</span>
+        }
+
+<span class="fc bfc" id="L268" title="All 2 branches covered.">        return previousCRefScope == null ? null : previousCRefScope.getConstantInnerNoObject(internedName);</span>
+    }
+
+    private IRubyObject getConstantInnerNoObject(String internedName) {
+<span class="fc bfc" id="L272" title="All 2 branches covered.">        if (previousCRefScope == null) return null;</span>
+
+<span class="fc" id="L274">        return getConstantInner(internedName);</span>
+    }
+
+    public IRubyObject setConstant(String internedName, IRubyObject result) {
+        RubyModule module;
+
+<span class="nc bnc" id="L280" title="All 2 branches missed.">        if ((module = getModule()) != null) {</span>
+<span class="nc" id="L281">            module.setConstant(internedName, result);</span>
+<span class="nc" id="L282">            return result;</span>
+        }
+
+        // TODO: wire into new exception handling mechanism
+<span class="nc" id="L286">        throw result.getRuntime().newTypeError(&quot;no class/module to define constant&quot;);</span>
+    }
+
+    /**
+     * Next outer most scope in list of scopes.  An enclosing scope may have no direct scoping
+     * relationship to its child.  If I am in a localScope and then I enter something which
+     * creates another localScope the enclosing scope will be the first scope, but there are
+     * no valid scoping relationships between the two.  Methods which walk the enclosing scopes
+     * are responsible for enforcing appropriate scoping relationships.
+     *
+     * @return the parent scope
+     */
+    public StaticScope getEnclosingScope() {
+<span class="fc" id="L299">        return enclosingScope;</span>
+    }
+
+    /**
+     * Does the variable exist?
+     *
+     * @param name of the variable to find
+     * @return index of variable or -1 if it does not exist
+     */
+    public int exists(String name) {
+<span class="fc" id="L309">        return findVariableName(name);</span>
+    }
+
+    private int findVariableName(String name) {
+<span class="fc bfc" id="L313" title="All 2 branches covered.">        for (int i = 0; i &lt; variableNames.length; i++) {</span>
+<span class="fc bfc" id="L314" title="All 2 branches covered.">            if (name == variableNames[i]) return i;</span>
+        }
+<span class="fc" id="L316">        return -1;</span>
+    }
+
+    /**
+     * Is this name in the visible to the current scope
+     *
+     * @param name to be looked for
+     * @return a location where the left-most 16 bits of number of scopes down it is and the
+     * right-most 16 bits represents its index in that scope
+     */
+    public int isDefined(String name) {
+<span class="fc" id="L327">        return isDefined(name, 0);</span>
+    }
+
+    /**
+     * Make a DASgn or LocalAsgn node based on scope logic
+     *
+     * @param position
+     * @param name
+     * @param value
+     * @return
+     */
+    public AssignableNode assign(ISourcePosition position, String name, Node value) {
+<span class="fc" id="L339">        return assign(position, name, value, this, 0);</span>
+    }
+
+    /**
+     * Get all visible variables that we can see from this scope that have been assigned
+     * (e.g. seen so far)
+     *
+     * @return a list of all names (sans $~ and $_ which are special names)
+     */
+    public String[] getAllNamesInScope() {
+<span class="fc" id="L349">        String[] names = getVariables();</span>
+<span class="fc bfc" id="L350" title="All 2 branches covered.">        if (isBlockOrEval) {</span>
+<span class="fc" id="L351">            String[] ourVariables = names;</span>
+<span class="fc" id="L352">            String[] variables = enclosingScope.getAllNamesInScope();</span>
+
+            // we know variables cannot be null since this IRStaticScope always returns a non-null array
+<span class="fc" id="L355">            names = new String[variables.length + ourVariables.length];</span>
+
+<span class="fc" id="L357">            System.arraycopy(variables, 0, names, 0, variables.length);</span>
+<span class="fc" id="L358">            System.arraycopy(ourVariables, 0, names, variables.length, ourVariables.length);</span>
+        }
+
+<span class="fc" id="L361">        return names;</span>
+    }
+
+    public int isDefined(String name, int depth) {
+<span class="fc bfc" id="L365" title="All 2 branches covered.">        if (isBlockOrEval) {</span>
+<span class="fc" id="L366">            int slot = exists(name);</span>
+<span class="fc bfc" id="L367" title="All 2 branches covered.">            if (slot &gt;= 0) return (depth &lt;&lt; 16) | slot;</span>
+
+<span class="fc" id="L369">            return enclosingScope.isDefined(name, depth + 1);</span>
+        } else {
+<span class="fc" id="L371">            return (depth &lt;&lt; 16) | exists(name);</span>
+        }
+    }
+
+    public AssignableNode addAssign(ISourcePosition position, String name, Node value) {
+<span class="fc" id="L376">        int slot = addVariable(name);</span>
+        // No bit math to store level since we know level is zero for this case
+<span class="fc" id="L378">        return new DAsgnNode(position, name, slot, value);</span>
+    }
+
+    public AssignableNode assign(ISourcePosition position, String name, Node value,
+                                 StaticScope topScope, int depth) {
+<span class="fc" id="L383">        int slot = exists(name);</span>
+
+        // We can assign if we already have variable of that name here or we are the only
+        // scope in the chain (which Local scopes always are).
+<span class="fc bfc" id="L387" title="All 2 branches covered.">        if (slot &gt;= 0) {</span>
+<span class="fc bfc" id="L388" title="All 2 branches covered.">            return isBlockOrEval ? new DAsgnNode(position, name, ((depth &lt;&lt; 16) | slot), value)</span>
+                    : new LocalAsgnNode(position, name, ((depth &lt;&lt; 16) | slot), value);
+<span class="fc bfc" id="L390" title="All 4 branches covered.">        } else if (!isBlockOrEval &amp;&amp; (topScope == this)) {</span>
+<span class="fc" id="L391">            slot = addVariable(name);</span>
+
+<span class="fc" id="L393">            return new LocalAsgnNode(position, name, slot, value);</span>
+        }
+
+        // If we are not a block-scope and we go there, we know that 'topScope' is a block scope
+        // because a local scope cannot be within a local scope
+        // If topScope was itself it would have created a LocalAsgnNode above.
+<span class="fc bfc" id="L399" title="All 2 branches covered.">        return isBlockOrEval ? enclosingScope.assign(position, name, value, topScope, depth + 1)</span>
+<span class="fc" id="L400">                : topScope.addAssign(position, name, value);</span>
+    }
+
+    public Node declare(ISourcePosition position, String name, int depth) {
+<span class="fc" id="L404">        int slot = exists(name);</span>
+
+<span class="fc bfc" id="L406" title="All 2 branches covered.">        if (slot &gt;= 0) {</span>
+<span class="fc bfc" id="L407" title="All 2 branches covered.">            return isBlockOrEval ? new DVarNode(position, ((depth &lt;&lt; 16) | slot), name) : new LocalVarNode(position, ((depth &lt;&lt; 16) | slot), name);</span>
+        }
+
+<span class="fc bfc" id="L410" title="All 2 branches covered.">        return isBlockOrEval ? enclosingScope.declare(position, name, depth + 1) : new VCallNode(position, name);</span>
+    }
+
+    /**
+     * Make a DVar or LocalVar node based on scoping logic
+     *
+     * @param position the location that in the source that the new node will come from
+     * @param name     of the variable to be created is named
+     * @return a DVarNode or LocalVarNode
+     */
+    public Node declare(ISourcePosition position, String name) {
+<span class="fc" id="L421">        return declare(position, name, 0);</span>
+    }
+
+    /**
+     * Gets the Local Scope relative to the current Scope.  For LocalScopes this will be itself.
+     * Blocks will contain the LocalScope it contains.
+     *
+     * @return localScope
+     */
+
+    public StaticScope getLocalScope() {
+<span class="fc bfc" id="L432" title="All 2 branches covered.">        return (type != Type.BLOCK) ? this : enclosingScope.getLocalScope();</span>
+    }
+
+    /**
+     * Get the live CRef module associated with this scope.
+     *
+     * @return the live module
+     */
+    public RubyModule getModule() {
+<span class="fc" id="L441">        return cref;</span>
+    }
+
+    public StaticScope getPreviousCRefScope() {
+<span class="fc" id="L445">        return previousCRefScope;</span>
+    }
+
+    public void setPreviousCRefScope(StaticScope crefScope) {
+<span class="fc" id="L449">        this.previousCRefScope = crefScope;</span>
+<span class="fc" id="L450">    }</span>
+
+    public void setModule(RubyModule module) {
+<span class="fc" id="L453">        this.cref = module;</span>
+
+<span class="pc bfc" id="L455" title="All 2 branches covered.">        for (StaticScope scope = getEnclosingScope(); scope != null; scope = scope.getEnclosingScope()) {</span>
+<span class="pc bpc" id="L456" title="1 of 2 branches missed.">            if (scope.cref != null) {</span>
+<span class="fc" id="L457">                previousCRefScope = scope;</span>
+<span class="fc" id="L458">                return;</span>
+            }
+        }
+<span class="fc" id="L461">    }</span>
+
+    /**
+     * Update current scoping structure to populate with proper cref scoping values.  This should
+     * be called at any point when you reference a scope for the first time.  For the interpreter
+     * this is done in a small number of places (defnNode, defsNode, and getBlock).  The compiler
+     * does this in the same places.
+     *
+     * @return the current cref, though this is largely an implementation detail
+     */
+    public RubyModule determineModule() {
+<span class="fc bfc" id="L472" title="All 2 branches covered.">        if (cref == null) {</span>
+<span class="fc" id="L473">            cref = getEnclosingScope().determineModule();</span>
+
+<span class="pc bpc" id="L475" title="3 of 4 branches missed.">            assert cref != null : &quot;CRef is always created before determine happens&quot;;</span>
+
+<span class="fc" id="L477">            previousCRefScope = getEnclosingScope().previousCRefScope;</span>
+        }
+
+<span class="fc" id="L480">        return cref;</span>
+    }
+
+    public int getOptionalArgs() {
+<span class="fc" id="L484">        return optionalArgs;</span>
+    }
+
+    public int getRequiredArgs() {
+<span class="fc" id="L488">        return requiredArgs;</span>
+    }
+
+    public void setRequiredArgs(int requiredArgs) {
+<span class="fc" id="L492">        this.requiredArgs = requiredArgs;</span>
+<span class="fc" id="L493">    }</span>
+
+    public int getRestArg() {
+<span class="fc" id="L496">        return restArg;</span>
+    }
+
+    public void setRestArg(int restArg) {
+<span class="fc" id="L500">        this.restArg = restArg;</span>
+<span class="fc" id="L501">    }</span>
+
+    public boolean isBlockScope() {
+<span class="fc" id="L504">        return isBlockOrEval;</span>
+    }
+
+    /**
+     * Argument scopes represent scopes which contain arguments for zsuper.  All LocalStaticScopes
+     * are argument scopes and BlockStaticScopes can be when they are used by define_method.
+     */
+    public boolean isArgumentScope() {
+<span class="fc" id="L512">        return isArgumentScope;</span>
+    }
+
+    public void makeArgumentScope() {
+<span class="fc" id="L516">        this.isArgumentScope = true;</span>
+<span class="fc" id="L517">    }</span>
+
+    public Arity getArity() {
+<span class="nc bnc" id="L520" title="All 2 branches missed.">        if (optionalArgs &gt; 0) {</span>
+<span class="nc bnc" id="L521" title="All 2 branches missed.">            if (restArg &gt;= 0) {</span>
+<span class="nc" id="L522">                return Arity.optional();</span>
+            }
+<span class="nc" id="L524">            return Arity.required(requiredArgs);</span>
+        } else {
+<span class="nc bnc" id="L526" title="All 2 branches missed.">            if (restArg &gt;= 0) {</span>
+<span class="nc" id="L527">                return Arity.optional();</span>
+            }
+<span class="nc" id="L529">            return Arity.fixed(requiredArgs);</span>
+        }
+    }
+
+    public void setArities(int required, int optional, int rest) {
+<span class="fc" id="L534">        this.requiredArgs = required;</span>
+<span class="fc" id="L535">        this.optionalArgs = optional;</span>
+<span class="fc" id="L536">        this.restArg = rest;</span>
+<span class="fc" id="L537">    }</span>
+
+    public DynamicScope getDummyScope() {
+<span class="nc bnc" id="L540" title="All 2 branches missed.">        return dummyScope == null ? dummyScope = new DummyDynamicScope(this) : dummyScope;</span>
+    }
+
+    private void growVariableNames(String name) {
+<span class="fc" id="L544">        String[] newVariableNames = new String[variableNames.length + 1];</span>
+<span class="fc" id="L545">        System.arraycopy(variableNames, 0, newVariableNames, 0, variableNames.length);</span>
+<span class="fc" id="L546">        variableNames = newVariableNames;</span>
+<span class="fc" id="L547">        variableNames[variableNames.length - 1] = name;</span>
+<span class="fc" id="L548">    }</span>
+
+    @Override
+    public String toString() {
+        // FIXME: Do we need to persist cref as well?
+<span class="nc" id="L553">        return &quot;StaticScope(&quot; + type + &quot;):&quot; + Arrays.toString(variableNames);</span>
+    }
+
+    public Type getType() {
+<span class="nc" id="L557">        return type;</span>
+    }
+
+    public StaticScope duplicate() {
+<span class="pc bpc" id="L561" title="1 of 2 branches missed.">        StaticScope dupe = new StaticScope(type, enclosingScope, variableNames == null ? NO_NAMES : variableNames);</span>
+        // irScope is not guaranteed to be set onto StaticScope until it is executed for the first time.
+        // We can call duplicate before its first execution.
+<span class="pc bpc" id="L564" title="1 of 2 branches missed.">        if (irScope != null) dupe.setIRScope(irScope);</span>
+<span class="fc" id="L565">        dupe.setScopeType(scopeType);</span>
+<span class="fc" id="L566">        dupe.setPreviousCRefScope(previousCRefScope);</span>
+<span class="fc" id="L567">        dupe.setModule(cref);</span>
+
+<span class="fc" id="L569">        return dupe;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

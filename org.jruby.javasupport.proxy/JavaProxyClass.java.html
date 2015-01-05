@@ -1,0 +1,740 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JavaProxyClass.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.javasupport.proxy</a> &gt; <span class="el_source">JavaProxyClass.java</span></div><h1>JavaProxyClass.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2006 Kresten Krab Thorup &lt;krab@gnu.org&gt;
+ * Copyright (C) 2007 William N Dortch &lt;bill.dortch@gmail.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+
+package org.jruby.javasupport.proxy;
+
+import java.lang.reflect.Array;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.security.AccessController;
+import java.security.PrivilegedActionException;
+import java.security.PrivilegedExceptionAction;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyModule;
+import org.jruby.RubyObject;
+import org.jruby.RubyNil;
+import org.jruby.RubyString;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.javasupport.JavaClass;
+import org.jruby.javasupport.JavaObject;
+import org.jruby.javasupport.JavaUtil;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.builtin.IRubyObject;
+
+/**
+ * Generalized proxy for classes and interfaces.
+ * 
+ * API looks a lot like java.lang.reflect.Proxy, except that you can specify a
+ * super class in addition to a set of interfaces.
+ * 
+ * The main implication for users of this class is to handle the case where a
+ * proxy method overrides an existing method, because in this case the
+ * invocation handler should &quot;default&quot; to calling the super implementation
+ * {JavaProxyMethod.invokeSuper}.
+ * 
+ * 
+ * @author krab@trifork.com
+ * @see java.lang.reflect.Proxy
+ * 
+ */
+public class JavaProxyClass extends JavaProxyReflectionObject {
+<span class="fc" id="L83">    static ThreadLocal&lt;Ruby&gt; runtimeTLS = new ThreadLocal&lt;Ruby&gt;();</span>
+    private final Class proxyClass;
+<span class="nc" id="L85">    private final ArrayList&lt;JavaProxyMethod&gt; methods = new ArrayList&lt;JavaProxyMethod&gt;();</span>
+<span class="nc" id="L86">    private final HashMap&lt;String, List&lt;JavaProxyMethod&gt;&gt; methodMap = new HashMap&lt;String, List&lt;JavaProxyMethod&gt;&gt;();</span>
+    private final RubyArray constructors;
+
+    /* package scope */
+    JavaProxyClass(Class proxyClass) {
+<span class="nc" id="L91">        super(getThreadLocalRuntime(), </span>
+<span class="nc" id="L92">                (RubyClass) getThreadLocalRuntime().getModule(&quot;Java&quot;).getClass(&quot;JavaProxyClass&quot;));</span>
+        
+<span class="nc" id="L94">        this.proxyClass = proxyClass;</span>
+<span class="nc" id="L95">        this.constructors = buildRubyArray(getConstructors());</span>
+<span class="nc" id="L96">    }</span>
+
+    public boolean equals(Object other) {
+<span class="nc bnc" id="L99" title="All 4 branches missed.">        return other instanceof JavaProxyClass &amp;&amp;</span>
+            this.proxyClass == ((JavaProxyClass)other).proxyClass;
+    }
+    
+    public int hashCode() {
+<span class="nc" id="L104">        return proxyClass.hashCode();</span>
+    }
+
+    public Object getValue() {
+<span class="nc" id="L108">        return this;</span>
+    }
+
+    private static Ruby getThreadLocalRuntime() {
+<span class="nc" id="L112">        return runtimeTLS.get();</span>
+    }
+
+    public static JavaProxyClass getProxyClass(Ruby runtime, Class superClass,
+            Class[] interfaces, Set names) throws InvocationTargetException {
+<span class="nc" id="L117">        Ruby save = runtimeTLS.get();</span>
+<span class="nc" id="L118">        runtimeTLS.set(runtime);</span>
+        try {
+<span class="nc" id="L120">            ClassLoader loader = runtime.getJRubyClassLoader();</span>
+            
+<span class="nc" id="L122">            return runtime.getJavaProxyClassFactory().newProxyClass(runtime, loader, null, superClass, interfaces, names);</span>
+        } finally {
+<span class="nc" id="L124">            runtimeTLS.set(save);</span>
+        }
+    }
+
+    public static JavaProxyClass getProxyClass(Ruby runtime, Class superClass,
+            Class[] interfaces) throws InvocationTargetException {
+<span class="nc" id="L130">        return getProxyClass(runtime,superClass,interfaces,null);</span>
+    }
+    
+    public static Object newProxyInstance(Ruby runtime, Class superClass, Class[] interfaces, 
+            Class[] constructorParameters, Object[] constructorArgs, 
+            JavaProxyInvocationHandler handler) throws IllegalArgumentException, 
+            InstantiationException, IllegalAccessException, InvocationTargetException,
+            SecurityException, NoSuchMethodException {
+<span class="nc" id="L138">        JavaProxyClass jpc = getProxyClass(runtime, superClass, interfaces);</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        JavaProxyConstructor cons = jpc.getConstructor(constructorParameters == null ? </span>
+                new Class[0] : constructorParameters);
+        
+<span class="nc" id="L142">        return cons.newInstance(constructorArgs, handler);</span>
+
+    }
+
+    public Class getSuperclass() {
+<span class="nc" id="L147">        return proxyClass.getSuperclass();</span>
+    }
+
+    public Class[] getInterfaces() {
+<span class="nc" id="L151">        Class[] ifaces = proxyClass.getInterfaces();</span>
+<span class="nc" id="L152">        Class[] result = new Class[ifaces.length - 1];</span>
+<span class="nc" id="L153">        int pos = 0;</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        for (int i = 0; i &lt; ifaces.length; i++) {</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">            if (ifaces[i] != InternalJavaProxy.class) {</span>
+<span class="nc" id="L156">                result[pos++] = ifaces[i];</span>
+            }
+        }
+<span class="nc" id="L159">        return result;</span>
+    }
+
+    public JavaProxyConstructor[] getConstructors() {
+<span class="nc" id="L163">        Constructor[] cons = proxyClass.getConstructors();</span>
+<span class="nc" id="L164">        JavaProxyConstructor[] result = new JavaProxyConstructor[cons.length];</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">        for (int i = 0; i &lt; cons.length; i++) {</span>
+<span class="nc" id="L166">            result[i] = new JavaProxyConstructor(getRuntime(), this, cons[i]);</span>
+        }
+<span class="nc" id="L168">        return result;</span>
+    }
+
+    public JavaProxyConstructor getConstructor(Class[] args)
+            throws SecurityException, NoSuchMethodException {
+
+<span class="nc" id="L174">        Class[] realArgs = new Class[args.length + 1];</span>
+<span class="nc" id="L175">        System.arraycopy(args, 0, realArgs, 0, args.length);</span>
+<span class="nc" id="L176">        realArgs[args.length] = JavaProxyInvocationHandler.class;</span>
+
+<span class="nc" id="L178">        Constructor constructor = proxyClass.getConstructor(realArgs);</span>
+<span class="nc" id="L179">        return new JavaProxyConstructor(getRuntime(), this, constructor);</span>
+    }
+
+    public JavaProxyMethod[] getMethods() {
+<span class="nc" id="L183">        return methods.toArray(new JavaProxyMethod[methods.size()]);</span>
+    }
+
+    public JavaProxyMethod getMethod(String name, Class[] parameterTypes) {
+<span class="nc" id="L187">        List&lt;JavaProxyMethod&gt; methods = methodMap.get(name);</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">        if (methods != null) {</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">            for (int i = methods.size(); --i &gt;= 0; ) {</span>
+<span class="nc" id="L190">                ProxyMethodImpl jpm = (ProxyMethodImpl) methods.get(i);</span>
+<span class="nc bnc" id="L191" title="All 2 branches missed.">                if (jpm.matches(name, parameterTypes)) return jpm;</span>
+<span class="nc" id="L192">            }</span>
+        }
+<span class="nc" id="L194">        return null;</span>
+    }
+
+    /** return the class of instances of this proxy class */
+    Class getProxyClass() {
+<span class="nc" id="L199">        return proxyClass;</span>
+    }
+    
+    @Override
+    public Class getJavaClass() {
+<span class="nc" id="L204">        return proxyClass;</span>
+    }
+
+    @JRubyClass(name=&quot;JavaProxy::JavaProxyMethod&quot;)
+    public static class ProxyMethodImpl extends JavaProxyReflectionObject
+            implements JavaProxyMethod {
+        private final Method m;
+
+        private Object state;
+
+        private final Method sm;
+        private final Class[] parameterTypes;
+
+        private final JavaProxyClass clazz;
+
+        public ProxyMethodImpl(Ruby runtime, JavaProxyClass clazz, Method m,
+                Method sm) {
+<span class="nc" id="L221">            super(runtime, runtime.getJavaSupport().getJavaModule()</span>
+<span class="nc" id="L222">                    .getClass(&quot;JavaProxyMethod&quot;));</span>
+<span class="nc" id="L223">            this.m = m;</span>
+<span class="nc" id="L224">            this.parameterTypes = m.getParameterTypes();</span>
+<span class="nc" id="L225">            this.sm = sm;</span>
+<span class="nc" id="L226">            this.clazz = clazz;</span>
+<span class="nc" id="L227">        }</span>
+
+        public boolean equals(Object other) {
+<span class="nc bnc" id="L230" title="All 4 branches missed.">            return other instanceof ProxyMethodImpl &amp;&amp;</span>
+                this.m == ((ProxyMethodImpl)other).m;
+        }
+        
+        public int hashCode() {
+<span class="nc" id="L235">            return m.hashCode();</span>
+        }
+
+        public Method getMethod() {
+<span class="nc" id="L239">            return m;</span>
+        }
+
+        public Method getSuperMethod() {
+<span class="nc" id="L243">            return sm;</span>
+        }
+
+        public int getModifiers() {
+<span class="nc" id="L247">            return m.getModifiers();</span>
+        }
+
+        public String getName() {
+<span class="nc" id="L251">            return m.getName();</span>
+        }
+
+        public Class&lt;?&gt;[] getExceptionTypes() {
+<span class="nc" id="L255">            return m.getExceptionTypes();</span>
+        }
+
+        public Class&lt;?&gt;[] getParameterTypes() {
+<span class="nc" id="L259">            return parameterTypes;</span>
+        }
+        
+        public boolean isVarArgs() {
+<span class="nc" id="L263">            return m.isVarArgs();</span>
+        }
+
+        public Object getState() {
+<span class="nc" id="L267">            return state;</span>
+        }
+
+        public boolean hasSuperImplementation() {
+<span class="nc bnc" id="L271" title="All 2 branches missed.">            return sm != null;</span>
+        }
+
+        public Object invoke(Object proxy, Object[] args) throws IllegalArgumentException, 
+            IllegalAccessException, InvocationTargetException, NoSuchMethodException {
+            
+<span class="nc bnc" id="L277" title="All 2 branches missed.">            if (!hasSuperImplementation()) throw new NoSuchMethodException();</span>
+
+<span class="nc" id="L279">            return sm.invoke(proxy, args);</span>
+        }
+
+        public void setState(Object state) {
+<span class="nc" id="L283">            this.state = state;</span>
+<span class="nc" id="L284">        }</span>
+
+        public String toString() {
+<span class="nc" id="L287">            return m.toString();</span>
+        }
+
+        public Object defaultResult() {
+<span class="nc" id="L291">            Class rt = m.getReturnType();</span>
+            
+<span class="nc bnc" id="L293" title="All 2 branches missed.">            if (rt == Void.TYPE) return null;</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">            if (rt == Boolean.TYPE) return Boolean.FALSE;</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">            if (rt == Byte.TYPE) return Byte.valueOf((byte) 0);</span>
+<span class="nc bnc" id="L296" title="All 2 branches missed.">            if (rt == Short.TYPE) return Short.valueOf((short) 0);</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">            if (rt == Integer.TYPE) return Integer.valueOf(0);</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">            if (rt == Long.TYPE) return Long.valueOf(0L);</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">            if (rt == Float.TYPE) return new Float(0.0f);</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">            if (rt == Double.TYPE) return new Double(0.0);</span>
+
+<span class="nc" id="L302">            return null;</span>
+        }
+
+        public boolean matches(String name, Class[] parameterTypes) {
+<span class="nc bnc" id="L306" title="All 4 branches missed.">            return m.getName().equals(name) &amp;&amp; Arrays.equals(this.parameterTypes, parameterTypes);</span>
+        }
+
+        public Class getReturnType() {
+<span class="nc" id="L310">            return m.getReturnType();</span>
+        }
+        
+        public static RubyClass createJavaProxyMethodClass(Ruby runtime, RubyModule javaProxyModule) {
+<span class="fc" id="L314">            RubyClass result = javaProxyModule.defineClassUnder(&quot;JavaProxyMethod&quot;, </span>
+<span class="fc" id="L315">                    runtime.getObject(), ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);</span>
+
+<span class="fc" id="L317">            JavaProxyReflectionObject.registerRubyMethods(runtime, result);</span>
+
+<span class="fc" id="L319">            result.defineAnnotatedMethods(ProxyMethodImpl.class);</span>
+
+<span class="fc" id="L321">            return result;</span>
+        }
+
+        public RubyObject name() {
+<span class="nc" id="L325">            return getRuntime().newString(getName());</span>
+        }
+
+        @JRubyMethod(name = &quot;declaring_class&quot;)
+        public JavaProxyClass getDeclaringClass() {
+<span class="nc" id="L330">            return clazz;</span>
+        }
+
+        @JRubyMethod
+        public RubyArray argument_types() {
+<span class="nc" id="L335">            return buildRubyArray(getParameterTypes());</span>
+        }
+
+        @JRubyMethod(name = &quot;super?&quot;)
+        public IRubyObject super_p() {
+<span class="nc bnc" id="L340" title="All 2 branches missed.">            return hasSuperImplementation() ? getRuntime().getTrue() : getRuntime().getFalse();</span>
+        }
+
+        @JRubyMethod
+        public RubyFixnum arity() {
+<span class="nc" id="L345">            return getRuntime().newFixnum(getArity());</span>
+        }
+
+        protected String nameOnInspection() {
+<span class="nc" id="L349">            return getDeclaringClass().nameOnInspection() + &quot;/&quot; + getName();</span>
+        }
+
+        @JRubyMethod
+        public IRubyObject inspect() {
+<span class="nc" id="L354">            StringBuilder result = new StringBuilder();</span>
+<span class="nc" id="L355">            result.append(nameOnInspection());</span>
+<span class="nc" id="L356">            result.append(&quot;(&quot;);</span>
+<span class="nc" id="L357">            Class[] parameterTypes = getParameterTypes();</span>
+<span class="nc bnc" id="L358" title="All 2 branches missed.">            for (int i = 0; i &lt; parameterTypes.length; i++) {</span>
+<span class="nc" id="L359">                result.append(parameterTypes[i].getName());</span>
+<span class="nc bnc" id="L360" title="All 2 branches missed.">                if (i &lt; parameterTypes.length - 1) {</span>
+<span class="nc" id="L361">                    result.append(',');</span>
+                }
+            }
+<span class="nc" id="L364">            result.append(&quot;)&gt;&quot;);</span>
+<span class="nc" id="L365">            return getRuntime().newString(result.toString());</span>
+        }
+
+        @JRubyMethod(name = &quot;invoke&quot;, rest = true)
+        public IRubyObject do_invoke(IRubyObject[] nargs) {
+<span class="nc bnc" id="L370" title="All 2 branches missed.">            if (nargs.length != 1 + getArity()) {</span>
+<span class="nc" id="L371">                throw getRuntime().newArgumentError(nargs.length, 1 + getArity());</span>
+            }
+
+<span class="nc" id="L374">            IRubyObject invokee = nargs[0];</span>
+<span class="nc bnc" id="L375" title="All 2 branches missed.">            if (!(invokee instanceof JavaObject)) {</span>
+<span class="nc" id="L376">                throw getRuntime().newTypeError(&quot;invokee not a java object&quot;);</span>
+            }
+<span class="nc" id="L378">            Object receiver_value = ((JavaObject) invokee).getValue();</span>
+<span class="nc" id="L379">            Object[] arguments = new Object[nargs.length - 1];</span>
+<span class="nc" id="L380">            System.arraycopy(nargs, 1, arguments, 0, arguments.length);</span>
+
+<span class="nc" id="L382">            Class[] parameterTypes = getParameterTypes();</span>
+<span class="nc bnc" id="L383" title="All 2 branches missed.">            for (int i = 0; i &lt; arguments.length; i++) {</span>
+<span class="nc" id="L384">                arguments[i] = </span>
+<span class="nc" id="L385">                    ((IRubyObject) arguments[i]).toJava(parameterTypes[i]);</span>
+            }
+
+            try {
+<span class="nc" id="L389">                Object javaResult = sm.invoke(receiver_value, arguments);</span>
+<span class="nc" id="L390">                return JavaUtil.convertJavaToRuby(getRuntime(), javaResult, getReturnType());</span>
+<span class="nc" id="L391">            } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L392">                throw getRuntime().newTypeError(&quot;expected &quot; + argument_types().inspect());</span>
+<span class="nc" id="L393">            } catch (IllegalAccessException iae) {</span>
+<span class="nc" id="L394">                throw getRuntime().newTypeError(&quot;illegal access on '&quot; + sm.getName() + &quot;': &quot; + </span>
+<span class="nc" id="L395">                        iae.getMessage());</span>
+<span class="nc" id="L396">            } catch (InvocationTargetException ite) {</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">                if (getRuntime().getDebug().isTrue()) ite.getTargetException().printStackTrace();</span>
+<span class="nc" id="L398">                getRuntime().getJavaSupport().handleNativeException(ite.getTargetException(), sm);</span>
+                // This point is only reached if there was an exception handler
+                // installed.
+<span class="nc" id="L401">                return getRuntime().getNil();</span>
+            }
+        }
+
+        private int getArity() {
+<span class="nc" id="L406">            return getParameterTypes().length;</span>
+        }
+
+    }
+
+    JavaProxyMethod initMethod(String name, String desc, boolean hasSuper) {
+<span class="nc" id="L412">        Class proxy = proxyClass;</span>
+        try {
+<span class="nc" id="L414">            Class[] parms = parse(proxy.getClassLoader(), desc);</span>
+<span class="nc" id="L415">            Method m = proxy.getDeclaredMethod(name, parms);</span>
+<span class="nc" id="L416">            Method sm = null;</span>
+<span class="nc bnc" id="L417" title="All 2 branches missed.">            if (hasSuper) {</span>
+<span class="nc" id="L418">                sm = proxy.getDeclaredMethod(&quot;__super$&quot; + name, parms);</span>
+            }
+
+<span class="nc" id="L421">            JavaProxyMethod jpm = new ProxyMethodImpl(getRuntime(), this, m, sm);</span>
+<span class="nc" id="L422">            methods.add(jpm);</span>
+<span class="nc" id="L423">            List&lt;JavaProxyMethod&gt; methodsWithName = methodMap.get(name);</span>
+<span class="nc bnc" id="L424" title="All 2 branches missed.">            if (methodsWithName == null) {</span>
+<span class="nc" id="L425">                methodsWithName = new ArrayList&lt;JavaProxyMethod&gt;(2);</span>
+<span class="nc" id="L426">                methodMap.put(name,methodsWithName);</span>
+            }
+<span class="nc" id="L428">            methodsWithName.add(jpm);</span>
+            
+<span class="nc" id="L430">            return jpm;</span>
+<span class="nc" id="L431">        } catch (ClassNotFoundException e) {</span>
+<span class="nc" id="L432">            throw new InternalError(e.getMessage());</span>
+<span class="nc" id="L433">        } catch (SecurityException e) {</span>
+<span class="nc" id="L434">            throw new InternalError(e.getMessage());</span>
+<span class="nc" id="L435">        } catch (NoSuchMethodException e) {</span>
+<span class="nc" id="L436">            throw new InternalError(e.getMessage());</span>
+        }
+    }
+
+    private static Class[] parse(final ClassLoader loader, String desc)
+            throws ClassNotFoundException {
+<span class="nc" id="L442">        List&lt;Class&gt; al = new ArrayList&lt;Class&gt;();</span>
+<span class="nc" id="L443">        int idx = 1;</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">        while (desc.charAt(idx) != ')') {</span>
+
+<span class="nc" id="L446">            int arr = 0;</span>
+<span class="nc bnc" id="L447" title="All 2 branches missed.">            while (desc.charAt(idx) == '[') {</span>
+<span class="nc" id="L448">                idx += 1;</span>
+<span class="nc" id="L449">                arr += 1;</span>
+            }
+
+            Class type;
+
+<span class="nc bnc" id="L454" title="All 10 branches missed.">            switch (desc.charAt(idx)) {</span>
+            case 'L':
+<span class="nc" id="L456">                int semi = desc.indexOf(';', idx);</span>
+<span class="nc" id="L457">                final String name = desc.substring(idx + 1, semi);</span>
+<span class="nc" id="L458">                idx = semi;</span>
+                try {
+<span class="nc" id="L460">                    type = AccessController.doPrivileged(new PrivilegedExceptionAction&lt;Class&gt;() {</span>
+                                public Class run() throws ClassNotFoundException {
+<span class="nc" id="L462">                                    return Class.forName(name.replace('/', '.'), false, loader);</span>
+                                }
+                            });
+<span class="nc" id="L465">                } catch (PrivilegedActionException e) {</span>
+<span class="nc" id="L466">                    throw (ClassNotFoundException) e.getException();</span>
+<span class="nc" id="L467">                }</span>
+                break;
+
+<span class="nc" id="L470">            case 'B': type = Byte.TYPE; break;</span>
+<span class="nc" id="L471">            case 'C': type = Character.TYPE; break;</span>
+<span class="nc" id="L472">            case 'Z': type = Boolean.TYPE; break;</span>
+<span class="nc" id="L473">            case 'S': type = Short.TYPE; break;</span>
+<span class="nc" id="L474">            case 'I': type = Integer.TYPE; break;</span>
+<span class="nc" id="L475">            case 'J': type = Long.TYPE; break;</span>
+<span class="nc" id="L476">            case 'F': type = Float.TYPE; break;</span>
+<span class="nc" id="L477">            case 'D': type = Double.TYPE; break;</span>
+            default:
+<span class="nc" id="L479">                throw new InternalError(&quot;cannot parse &quot; + desc + &quot;[&quot; + idx + &quot;]&quot;);</span>
+            }
+
+<span class="nc" id="L482">            idx += 1;</span>
+
+<span class="nc bnc" id="L484" title="All 2 branches missed.">            if (arr != 0) {</span>
+<span class="nc" id="L485">                type = Array.newInstance(type, new int[arr]).getClass();</span>
+            }
+
+<span class="nc" id="L488">            al.add(type);</span>
+<span class="nc" id="L489">        }</span>
+
+<span class="nc" id="L491">        return (Class[]) al.toArray(new Class[al.size()]);</span>
+    }
+
+    //
+    // Ruby-level methods
+    //
+        
+    public static RubyClass createJavaProxyClassClass(Ruby runtime, RubyModule javaModule) {
+<span class="fc" id="L499">        RubyClass result = javaModule.defineClassUnder(&quot;JavaProxyClass&quot;,</span>
+<span class="fc" id="L500">                runtime.getObject(),ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);</span>
+
+<span class="fc" id="L502">        JavaProxyReflectionObject.registerRubyMethods(runtime, result);</span>
+
+<span class="fc" id="L504">        result.defineAnnotatedMethods(JavaProxyClass.class);</span>
+
+<span class="fc" id="L506">        return result;</span>
+    }
+
+    @JRubyMethod(meta = true)
+    public static RubyObject get(IRubyObject recv, IRubyObject obj) {
+<span class="nc bnc" id="L511" title="All 2 branches missed.">        if (!(obj instanceof JavaClass)) {</span>
+<span class="nc" id="L512">            throw recv.getRuntime().newTypeError(obj, recv.getRuntime().getJavaSupport().getJavaClassClass());</span>
+        }
+<span class="nc" id="L514">        JavaClass type = (JavaClass)obj;</span>
+        
+        try {
+<span class="nc" id="L517">            return getProxyClass(recv.getRuntime(), (Class) type.getValue(), new Class[0]);</span>
+<span class="nc" id="L518">        } catch (Error e) {</span>
+<span class="nc" id="L519">            RaiseException ex = recv.getRuntime().newArgumentError(&quot;unable to create proxy class for &quot; + type.getValue());</span>
+<span class="nc" id="L520">            ex.initCause(e);</span>
+<span class="nc" id="L521">            throw ex;</span>
+<span class="nc" id="L522">        } catch (InvocationTargetException e) {</span>
+<span class="nc" id="L523">            RaiseException ex = recv.getRuntime().newArgumentError(&quot;unable to create proxy class for &quot; + type.getValue());</span>
+<span class="nc" id="L524">            ex.initCause(e);</span>
+<span class="nc" id="L525">            throw ex;</span>
+        }
+    }
+    
+<span class="fc" id="L529">    private static final HashSet&lt;String&gt; EXCLUDE_MODULES = new HashSet&lt;String&gt;();</span>
+    static {
+<span class="fc" id="L531">        EXCLUDE_MODULES.add(&quot;Kernel&quot;);</span>
+<span class="fc" id="L532">        EXCLUDE_MODULES.add(&quot;Java&quot;);</span>
+<span class="fc" id="L533">        EXCLUDE_MODULES.add(&quot;JavaProxyMethods&quot;);</span>
+<span class="fc" id="L534">        EXCLUDE_MODULES.add(&quot;Enumerable&quot;);</span>
+    }
+
+<span class="fc" id="L537">    private static final HashSet&lt;String&gt; EXCLUDE_METHODS = new HashSet&lt;String&gt;();</span>
+    static {
+<span class="fc" id="L539">        EXCLUDE_METHODS.add(&quot;class&quot;);</span>
+<span class="fc" id="L540">        EXCLUDE_METHODS.add(&quot;finalize&quot;);</span>
+<span class="fc" id="L541">        EXCLUDE_METHODS.add(&quot;initialize&quot;);</span>
+<span class="fc" id="L542">        EXCLUDE_METHODS.add(&quot;java_class&quot;);</span>
+<span class="fc" id="L543">        EXCLUDE_METHODS.add(&quot;java_object&quot;);</span>
+<span class="fc" id="L544">        EXCLUDE_METHODS.add(&quot;__jcreate!&quot;);</span>
+<span class="fc" id="L545">        EXCLUDE_METHODS.add(&quot;__jsend!&quot;);</span>
+<span class="fc" id="L546">    }</span>
+
+    @JRubyMethod(meta = true)
+    public static RubyObject get_with_class(IRubyObject recv, IRubyObject obj) {
+<span class="nc" id="L550">        Ruby runtime = recv.getRuntime();</span>
+        
+<span class="nc bnc" id="L552" title="All 2 branches missed.">        if (!(obj instanceof RubyClass)) {</span>
+<span class="nc" id="L553">            throw runtime.newTypeError(obj, runtime.getClassClass());</span>
+        }
+        
+<span class="nc" id="L556">        RubyClass clazz = (RubyClass)obj;</span>
+        
+        // Let's only generate methods for those the user may actually 
+        // intend to override.  That includes any defined in the current
+        // class, and any ancestors that are also JavaProxyClasses (but none
+        // from any other ancestor classes). Methods defined in mixins will
+        // be considered intentionally overridden, except those from Kernel,
+        // Java, and JavaProxyMethods, as well as Enumerable. 
+        // TODO: may want to exclude other common mixins?
+
+<span class="nc" id="L566">        JavaClass javaClass = null;</span>
+<span class="nc" id="L567">        Set&lt;String&gt; names = new HashSet&lt;String&gt;(); // need names ordered for key generation later</span>
+<span class="nc" id="L568">        List&lt;Class&lt;?&gt;&gt; interfaceList = new ArrayList&lt;Class&lt;?&gt;&gt;();</span>
+
+<span class="nc" id="L570">        List&lt;IRubyObject&gt; ancestors = clazz.getAncestorList();</span>
+<span class="nc" id="L571">        boolean skipRemainingClasses = false;</span>
+<span class="nc bnc" id="L572" title="All 2 branches missed.">        for (IRubyObject ancestorObject: ancestors) {</span>
+<span class="nc" id="L573">            RubyModule ancestor = (RubyModule) ancestorObject;</span>
+<span class="nc bnc" id="L574" title="All 2 branches missed.">            if (ancestor instanceof RubyClass) {</span>
+<span class="nc bnc" id="L575" title="All 2 branches missed.">                if (skipRemainingClasses) continue;</span>
+                // we only collect methods and interfaces for 
+                // user-defined proxy classes.
+<span class="nc bnc" id="L578" title="All 2 branches missed.">                if (!ancestor.getInstanceVariables().hasInstanceVariable(&quot;@java_proxy_class&quot;)) {</span>
+<span class="nc" id="L579">                    skipRemainingClasses = true;</span>
+<span class="nc" id="L580">                    continue;</span>
+                }
+
+                // get JavaClass if this is the new proxy class; verify it
+                // matches if this is a superclass proxy.
+<span class="nc" id="L585">                IRubyObject var = ancestor.getInstanceVariables().getInstanceVariable(&quot;@java_class&quot;);</span>
+<span class="nc bnc" id="L586" title="All 2 branches missed.">                if (var == null) {</span>
+<span class="nc" id="L587">                    throw runtime.newTypeError(</span>
+                            &quot;no java_class defined for proxy (or ancestor): &quot; + ancestor);
+<span class="nc bnc" id="L589" title="All 2 branches missed.">                } else if (!(var instanceof JavaClass)) {</span>
+<span class="nc" id="L590">                    throw runtime.newTypeError(</span>
+                            &quot;invalid java_class defined for proxy (or ancestor): &quot; +
+                            ancestor + &quot;: &quot; + var);
+                }
+<span class="nc bnc" id="L594" title="All 2 branches missed.">                if (javaClass == null) {</span>
+<span class="nc" id="L595">                    javaClass = (JavaClass)var;</span>
+<span class="nc bnc" id="L596" title="All 2 branches missed.">                } else if (javaClass != var) {</span>
+<span class="nc" id="L597">                    throw runtime.newTypeError(</span>
+                            &quot;java_class defined for &quot; + clazz + &quot; (&quot; + javaClass +
+                            &quot;) does not match java_class for ancestor &quot; + ancestor +
+                            &quot; (&quot; + var + &quot;)&quot;);
+                }
+                // get any included interfaces
+<span class="nc" id="L603">                var = ancestor.getInstanceVariables().getInstanceVariable(&quot;@java_interfaces&quot;);</span>
+<span class="nc bnc" id="L604" title="All 4 branches missed.">                if (var != null &amp;&amp; !(var instanceof RubyNil)) {</span>
+<span class="nc bnc" id="L605" title="All 2 branches missed.">                    if (!(var instanceof RubyArray)) {</span>
+<span class="nc" id="L606">                        throw runtime.newTypeError(</span>
+                                &quot;invalid java_interfaces defined for proxy (or ancestor): &quot; +
+                                ancestor + &quot;: &quot; + var);
+                    }
+<span class="nc" id="L610">                    RubyArray ifcArray = (RubyArray)var;</span>
+<span class="nc" id="L611">                    int size = ifcArray.size();</span>
+<span class="nc bnc" id="L612" title="All 2 branches missed.">                    for (int i = size; --i &gt;= 0; ) {</span>
+<span class="nc" id="L613">                        IRubyObject ifc = ifcArray.eltInternal(i);</span>
+<span class="nc bnc" id="L614" title="All 2 branches missed.">                        if (!(ifc instanceof JavaClass)) {</span>
+<span class="nc" id="L615">                            throw runtime.newTypeError(</span>
+                                &quot;invalid java interface defined for proxy (or ancestor): &quot; +
+                                ancestor + &quot;: &quot; + ifc);
+                        }
+<span class="nc" id="L619">                        Class interfaceClass = ((JavaClass)ifc).javaClass();</span>
+<span class="nc bnc" id="L620" title="All 2 branches missed.">                        if (!interfaceClass.isInterface()) {</span>
+<span class="nc" id="L621">                            throw runtime.newTypeError(</span>
+                                    &quot;invalid java interface defined for proxy (or ancestor): &quot; +
+                                    ancestor + &quot;: &quot; + ifc + &quot; (not an interface)&quot;);
+                        }
+<span class="nc bnc" id="L625" title="All 2 branches missed.">                        if (!interfaceList.contains(interfaceClass)) {</span>
+<span class="nc" id="L626">                            interfaceList.add(interfaceClass);</span>
+                        }
+<span class="nc" id="L628">                    }</span>
+                }
+                // set this class's method names in var @__java_ovrd_methods if this
+                // is the new class; otherwise, get method names from there if this is
+                // a proxy superclass.
+                
+                // FIXME: shouldn't need @__java_ovrd_methods, just query locally defined methods.
+                
+<span class="nc" id="L636">                var = ancestor.getInstanceVariables().getInstanceVariable(&quot;@__java_ovrd_methods&quot;);</span>
+<span class="nc bnc" id="L637" title="All 2 branches missed.">                if (var == null) {</span>
+                    // lock in the overridden methods for the new class, and any as-yet
+                    // uninstantiated ancestor class.
+                    Map&lt;String, DynamicMethod&gt; methods;
+                    RubyArray methodNames;
+<span class="nc" id="L642">                    synchronized(methods = ancestor.getMethods()) {</span>
+<span class="nc" id="L643">                        methodNames = RubyArray.newArrayLight(runtime,methods.size());</span>
+<span class="nc bnc" id="L644" title="All 2 branches missed.">                        for (String methodName: methods.keySet()) {</span>
+<span class="nc bnc" id="L645" title="All 2 branches missed.">                            if (!EXCLUDE_METHODS.contains(methodName)) {</span>
+<span class="nc" id="L646">                                names.add(methodName);</span>
+<span class="nc" id="L647">                                methodNames.append(runtime.newString(methodName));</span>
+                            }
+<span class="nc" id="L649">                        }</span>
+<span class="nc" id="L650">                    }</span>
+<span class="nc" id="L651">                    ancestor.setInstanceVariable(&quot;@__java_ovrd_methods&quot;,methodNames);</span>
+<span class="nc" id="L652">                } else {</span>
+<span class="nc bnc" id="L653" title="All 2 branches missed.">                    if (!(var instanceof RubyArray)) {</span>
+<span class="nc" id="L654">                        throw runtime.newTypeError(</span>
+                                &quot;invalid @__java_ovrd_methods defined for proxy: &quot; +
+                                ancestor + &quot;: &quot; + var);
+                    }
+<span class="nc" id="L658">                    RubyArray methodNames = (RubyArray)var;</span>
+<span class="nc" id="L659">                    int size = methodNames.size();</span>
+<span class="nc bnc" id="L660" title="All 2 branches missed.">                    for (int i = size; --i &gt;= 0; ) {</span>
+<span class="nc" id="L661">                        IRubyObject methodName = methodNames.eltInternal(i);</span>
+<span class="nc bnc" id="L662" title="All 2 branches missed.">                        if (!(methodName instanceof RubyString)) {</span>
+<span class="nc" id="L663">                            throw runtime.newTypeError(</span>
+                                    &quot;invalid method name defined for proxy (or ancestor): &quot; +
+                                    ancestor + &quot;: &quot; + methodName);
+                        }
+<span class="nc" id="L667">                        names.add(methodName.asJavaString());</span>
+<span class="nc" id="L668">                    }</span>
+                }
+<span class="nc bnc" id="L670" title="All 2 branches missed.">            } else if (!EXCLUDE_MODULES.contains(ancestor.getName())) {</span>
+                Map&lt;String, DynamicMethod&gt; methods;
+<span class="nc" id="L672">                synchronized(methods = ancestor.getMethods()) {</span>
+<span class="nc bnc" id="L673" title="All 2 branches missed.">                    for (String methodName: methods.keySet()) {</span>
+<span class="nc bnc" id="L674" title="All 2 branches missed.">                        if (!EXCLUDE_METHODS.contains(methodName)) {</span>
+<span class="nc" id="L675">                            names.add(methodName);</span>
+                        }
+<span class="nc" id="L677">                    }</span>
+<span class="nc" id="L678">                }</span>
+            }
+<span class="nc" id="L680">        }</span>
+
+<span class="nc bnc" id="L682" title="All 2 branches missed.">        if (javaClass == null) {</span>
+<span class="nc" id="L683">            throw runtime.newArgumentError(&quot;unable to create proxy class: no java_class defined for &quot; + clazz);</span>
+        }
+        
+<span class="nc" id="L686">        int interfaceCount = interfaceList.size();</span>
+<span class="nc" id="L687">        Class&lt;?&gt;[] interfaces = new Class&lt;?&gt;[interfaceCount];</span>
+<span class="nc bnc" id="L688" title="All 2 branches missed.">        for (int i = interfaceCount; --i &gt;= 0; ) {</span>
+<span class="nc" id="L689">            interfaces[i] = interfaceList.get(i);</span>
+        }
+       
+        try {
+<span class="nc" id="L693">            return getProxyClass(recv.getRuntime(), javaClass.javaClass(), interfaces, names);</span>
+<span class="nc" id="L694">        } catch (Error e) {</span>
+<span class="nc" id="L695">            RaiseException ex = recv.getRuntime().newArgumentError(&quot;unable to create proxy class for &quot; + javaClass.getValue() + &quot; : &quot; + e.getMessage());</span>
+            //e.printStackTrace();
+<span class="nc" id="L697">            ex.initCause(e);</span>
+<span class="nc" id="L698">            throw ex;</span>
+<span class="nc" id="L699">        } catch (InvocationTargetException e) {</span>
+<span class="nc" id="L700">            RaiseException ex = recv.getRuntime().newArgumentError(&quot;unable to create proxy class for &quot; + javaClass.getValue() + &quot; : &quot; + e.getMessage());</span>
+            //e.printStackTrace();
+<span class="nc" id="L702">            ex.initCause(e);</span>
+<span class="nc" id="L703">            throw ex;</span>
+        }
+    }
+
+    @JRubyMethod
+    public RubyObject superclass() {
+<span class="nc" id="L709">        return JavaClass.get(getRuntime(), getSuperclass());</span>
+    }
+
+    @JRubyMethod
+    public RubyArray methods() {
+<span class="nc" id="L714">        return buildRubyArray(getMethods());</span>
+    }
+
+    @JRubyMethod
+    public RubyArray interfaces() {
+<span class="nc" id="L719">        return buildRubyArray(getInterfaces());</span>
+    }
+
+    @JRubyMethod
+    public RubyArray constructors() {
+<span class="nc" id="L724">        return this.constructors;</span>
+    }
+
+    public static void createJavaProxyModule(Ruby runtime) {
+        // TODO Auto-generated method stub
+
+<span class="fc" id="L730">        RubyModule javaProxyModule = runtime.getJavaSupport().getJavaModule();</span>
+<span class="fc" id="L731">        JavaProxyClass.createJavaProxyClassClass(runtime, javaProxyModule);</span>
+<span class="fc" id="L732">        ProxyMethodImpl.createJavaProxyMethodClass(runtime, javaProxyModule);</span>
+<span class="fc" id="L733">        JavaProxyConstructor.createJavaProxyConstructorClass(runtime, javaProxyModule);</span>
+<span class="fc" id="L734">    }</span>
+
+    public String nameOnInspection() {
+<span class="nc" id="L737">        return &quot;[Proxy:&quot; + getSuperclass().getName() + &quot;]&quot;;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

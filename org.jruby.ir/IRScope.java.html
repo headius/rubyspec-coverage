@@ -1,0 +1,1199 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IRScope.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir</a> &gt; <span class="el_source">IRScope.java</span></div><h1>IRScope.java</h1><pre class="source lang-java linenums">package org.jruby.ir;
+
+import org.jruby.ParseResult;
+import org.jruby.RubyInstanceConfig;
+import org.jruby.RubyModule;
+import org.jruby.ir.dataflow.DataFlowProblem;
+import org.jruby.ir.instructions.*;
+import org.jruby.ir.interpreter.InterpreterContext;
+import org.jruby.ir.operands.*;
+import org.jruby.ir.operands.Float;
+import org.jruby.ir.passes.*;
+import org.jruby.ir.persistence.IRReaderDecoder;
+import org.jruby.ir.representations.BasicBlock;
+import org.jruby.ir.representations.CFG;
+import org.jruby.ir.representations.CFGLinearizer;
+import org.jruby.ir.transformations.inlining.CFGInliner;
+import org.jruby.ir.transformations.inlining.SimpleCloneInfo;
+import org.jruby.parser.StaticScope;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.jruby.ir.IRFlags.*;
+
+/**
+ * Right now, this class abstracts the following execution scopes:
+ * Method, Closure, Module, Class, MetaClass
+ * Top-level Script, and Eval Script
+ *
+ * In the compiler-land, IR versions of these scopes encapsulate only as much
+ * information as is required to convert Ruby code into equivalent Java code.
+ *
+ * But, in the non-compiler land, there will be a corresponding java object for
+ * some of these scopes which encapsulates the runtime semantics and data needed
+ * for implementing them.  In the case of Module, Class, MetaClass, and Method,
+ * they also happen to be instances of the corresponding Ruby classes -- so,
+ * in addition to providing code that help with this specific ruby implementation,
+ * they also have code that let them behave as ruby instances of their corresponding
+ * classes.
+ *
+ * Examples:
+ * - the runtime class object might have refs. to the runtime method objects.
+ * - the runtime method object might have a slot for a heap frame (for when it
+ *   has closures that need access to the method's local variables), it might
+ *   have version information, it might have references to other methods that
+ *   were optimized with the current version number, etc.
+ * - the runtime closure object will have a slot for a heap frame (for when it
+ *   has closures within) and might get reified as a method in the java land
+ *   (but inaccessible in ruby land).  So, passing closures in Java land might
+ *   be equivalent to passing around the method handles.
+ *
+ * and so on ...
+ */
+<span class="pc bpc" id="L56" title="1 of 2 branches missed.">public abstract class IRScope implements ParseResult {</span>
+<span class="fc" id="L57">    private static final Logger LOG = LoggerFactory.getLogger(&quot;IRScope&quot;);</span>
+
+<span class="fc" id="L59">    private static AtomicInteger globalScopeCount = new AtomicInteger();</span>
+
+    /** Unique global scope id */
+    private int scopeId;
+
+    /** Name */
+    private String name;
+
+    /** File within which this scope has been defined */
+    private final String fileName;
+
+    /** Starting line for this scope's definition */
+    private final int lineNumber;
+
+    /** Lexical parent scope */
+    private IRScope lexicalParent;
+
+    /** List of (nested) closures in this scope */
+    private List&lt;IRClosure&gt; nestedClosures;
+
+    // Index values to guarantee we don't assign same internal index twice
+    private int nextClosureIndex;
+
+    // List of all scopes this scope contains lexically.  This is not used
+    // for execution, but is used during dry-runs for debugging.
+    private List&lt;IRScope&gt; lexicalChildren;
+
+    /** Parser static-scope that this IR scope corresponds to */
+    private StaticScope staticScope;
+
+    /** List of IR instructions for this method */
+    private List&lt;Instr&gt; instrList;
+
+    /** Control flow graph representation of this method's instructions */
+    private CFG cfg;
+
+    /** Local variables defined in this scope */
+    private Set&lt;Variable&gt; definedLocalVars;
+
+    /** Local variables used in this scope */
+    private Set&lt;Variable&gt; usedLocalVars;
+
+    /** Map of name -&gt; dataflow problem */
+    private Map&lt;String, DataFlowProblem&gt; dfProbs;
+
+    /** What passes have been run on this scope? */
+    private List&lt;CompilerPass&gt; executedPasses;
+
+    /** What the interpreter depends on to interpret this IRScope */
+    protected InterpreterContext interpreterContext;
+    private List&lt;BasicBlock&gt; linearizedBBList;
+    protected int temporaryVariableIndex;
+    protected int floatVariableIndex;
+    protected int fixnumVariableIndex;
+    protected int booleanVariableIndex;
+
+    /** Keeps track of types of prefix indexes for variables and labels */
+    private Map&lt;String, Integer&gt; nextVarIndex;
+
+<span class="fc" id="L118">    private int instructionsOffsetInfoPersistenceBuffer = -1;</span>
+<span class="fc" id="L119">    private IRReaderDecoder persistenceStore = null;</span>
+    private TemporaryLocalVariable currentModuleVariable;
+    private TemporaryLocalVariable currentScopeVariable;
+
+    Map&lt;String, LocalVariable&gt; localVars;
+    Map&lt;String, LocalVariable&gt; evalScopeVars;
+
+<span class="fc" id="L126">    EnumSet&lt;IRFlags&gt; flags = EnumSet.noneOf(IRFlags.class);</span>
+
+    /** Have scope flags been computed? */
+    private boolean flagsComputed;
+
+    /** # of thread poll instrs added to this scope */
+    private int threadPollInstrsCount;
+
+    private IRManager manager;
+
+    // Used by cloning code
+<span class="fc" id="L137">    protected IRScope(IRScope s, IRScope lexicalParent) {</span>
+<span class="fc" id="L138">        this.lexicalParent = lexicalParent;</span>
+<span class="fc" id="L139">        this.manager = s.manager;</span>
+<span class="fc" id="L140">        this.fileName = s.fileName;</span>
+<span class="fc" id="L141">        this.lineNumber = s.lineNumber;</span>
+<span class="fc" id="L142">        this.staticScope = s.staticScope;</span>
+<span class="fc" id="L143">        this.threadPollInstrsCount = s.threadPollInstrsCount;</span>
+<span class="fc" id="L144">        this.nextClosureIndex = s.nextClosureIndex;</span>
+<span class="fc" id="L145">        this.temporaryVariableIndex = s.temporaryVariableIndex;</span>
+<span class="fc" id="L146">        this.floatVariableIndex = s.floatVariableIndex;</span>
+<span class="fc" id="L147">        this.instrList = new ArrayList&lt;Instr&gt;();</span>
+<span class="fc" id="L148">        this.nestedClosures = new ArrayList&lt;IRClosure&gt;();</span>
+<span class="fc" id="L149">        this.dfProbs = new HashMap&lt;String, DataFlowProblem&gt;();</span>
+<span class="fc" id="L150">        this.nextVarIndex = new HashMap&lt;String, Integer&gt;(); // SSS FIXME: clone!</span>
+<span class="fc" id="L151">        this.cfg = null;</span>
+<span class="fc" id="L152">        this.interpreterContext = null;</span>
+<span class="fc" id="L153">        this.linearizedBBList = null;</span>
+
+<span class="fc" id="L155">        this.flagsComputed = s.flagsComputed;</span>
+<span class="fc" id="L156">        this.flags = s.flags.clone();</span>
+
+<span class="fc" id="L158">        this.localVars = new HashMap&lt;String, LocalVariable&gt;(s.localVars);</span>
+<span class="fc" id="L159">        this.scopeId = globalScopeCount.getAndIncrement();</span>
+
+<span class="fc" id="L161">        this.executedPasses = new ArrayList&lt;CompilerPass&gt;();</span>
+
+<span class="fc" id="L163">        setupLexicalContainment();</span>
+<span class="fc" id="L164">    }</span>
+
+    public IRScope(IRManager manager, IRScope lexicalParent, String name,
+<span class="fc" id="L167">            String fileName, int lineNumber, StaticScope staticScope) {</span>
+<span class="fc" id="L168">        this.manager = manager;</span>
+<span class="fc" id="L169">        this.lexicalParent = lexicalParent;</span>
+<span class="fc" id="L170">        this.name = name;</span>
+<span class="fc" id="L171">        this.fileName = fileName;</span>
+<span class="fc" id="L172">        this.lineNumber = lineNumber;</span>
+<span class="fc" id="L173">        this.staticScope = staticScope;</span>
+<span class="fc" id="L174">        this.threadPollInstrsCount = 0;</span>
+<span class="fc" id="L175">        this.nextClosureIndex = 0;</span>
+<span class="fc" id="L176">        this.temporaryVariableIndex = -1;</span>
+<span class="fc" id="L177">        this.floatVariableIndex = -1;</span>
+<span class="fc" id="L178">        this.instrList = new ArrayList&lt;Instr&gt;();</span>
+<span class="fc" id="L179">        this.nestedClosures = new ArrayList&lt;IRClosure&gt;();</span>
+<span class="fc" id="L180">        this.dfProbs = new HashMap&lt;String, DataFlowProblem&gt;();</span>
+<span class="fc" id="L181">        this.nextVarIndex = new HashMap&lt;String, Integer&gt;();</span>
+<span class="fc" id="L182">        this.cfg = null;</span>
+<span class="fc" id="L183">        this.interpreterContext = null;</span>
+<span class="fc" id="L184">        this.linearizedBBList = null;</span>
+<span class="fc" id="L185">        this.flagsComputed = false;</span>
+<span class="fc" id="L186">        flags.remove(CAN_RECEIVE_BREAKS);</span>
+<span class="fc" id="L187">        flags.remove(CAN_RECEIVE_NONLOCAL_RETURNS);</span>
+<span class="fc" id="L188">        flags.remove(HAS_BREAK_INSTRS);</span>
+<span class="fc" id="L189">        flags.remove(HAS_END_BLOCKS);</span>
+<span class="fc" id="L190">        flags.remove(HAS_EXPLICIT_CALL_PROTOCOL);</span>
+<span class="fc" id="L191">        flags.remove(HAS_LOOPS);</span>
+<span class="fc" id="L192">        flags.remove(HAS_NONLOCAL_RETURNS);</span>
+<span class="fc" id="L193">        flags.remove(HAS_UNUSED_IMPLICIT_BLOCK_ARG);</span>
+<span class="fc" id="L194">        flags.remove(RECEIVES_KEYWORD_ARGS);</span>
+
+        // These flags are true by default!
+<span class="fc" id="L197">        flags.add(CAN_CAPTURE_CALLERS_BINDING);</span>
+<span class="fc" id="L198">        flags.add(BINDING_HAS_ESCAPED);</span>
+<span class="fc" id="L199">        flags.add(USES_EVAL);</span>
+<span class="fc" id="L200">        flags.add(USES_BACKREF_OR_LASTLINE);</span>
+<span class="fc" id="L201">        flags.add(REQUIRES_DYNSCOPE);</span>
+<span class="fc" id="L202">        flags.add(USES_ZSUPER);</span>
+
+<span class="fc" id="L204">        this.localVars = new HashMap&lt;String, LocalVariable&gt;();</span>
+<span class="fc" id="L205">        this.scopeId = globalScopeCount.getAndIncrement();</span>
+
+<span class="fc" id="L207">        this.executedPasses = new ArrayList&lt;CompilerPass&gt;();</span>
+
+<span class="fc" id="L209">        setupLexicalContainment();</span>
+<span class="fc" id="L210">    }</span>
+
+    private final void setupLexicalContainment() {
+<span class="pc bpc" id="L213" title="2 of 4 branches missed.">        if (manager.isDryRun() || RubyInstanceConfig.IR_WRITING) {</span>
+<span class="nc" id="L214">            lexicalChildren = new ArrayList&lt;IRScope&gt;();</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">            if (lexicalParent != null) lexicalParent.addChildScope(this);</span>
+        }
+<span class="fc" id="L217">    }</span>
+
+    private boolean hasListener() {
+<span class="pc bpc" id="L220" title="1 of 2 branches missed.">        return manager.getIRScopeListener() != null;</span>
+    }
+
+    public int getScopeId() {
+<span class="fc" id="L224">        return scopeId;</span>
+    }
+
+    @Override
+    public int hashCode() {
+<span class="nc" id="L229">        return scopeId;</span>
+    }
+
+    @Override
+    public boolean equals(Object other) {
+<span class="nc bnc" id="L234" title="All 6 branches missed.">        return (other != null) &amp;&amp; (getClass() == other.getClass()) &amp;&amp; (scopeId == ((IRScope) other).scopeId);</span>
+    }
+
+    protected void addChildScope(IRScope scope) {
+<span class="nc" id="L238">        lexicalChildren.add(scope);</span>
+<span class="nc" id="L239">    }</span>
+
+    public List&lt;IRScope&gt; getLexicalScopes() {
+<span class="nc" id="L242">        return lexicalChildren;</span>
+    }
+
+    public void initNestedClosures() {
+<span class="nc" id="L246">        this.nestedClosures = new ArrayList&lt;IRClosure&gt;();</span>
+<span class="nc" id="L247">    }</span>
+
+    public void addClosure(IRClosure closure) {
+<span class="fc" id="L250">        nestedClosures.add(closure);</span>
+<span class="fc" id="L251">    }</span>
+
+    public void removeClosure(IRClosure closure) {
+<span class="nc" id="L254">        nestedClosures.remove(closure);</span>
+<span class="nc" id="L255">    }</span>
+
+    public Instr getLastInstr() {
+<span class="nc" id="L258">        return instrList.get(instrList.size() - 1);</span>
+    }
+
+    public void addInstrAtBeginning(Instr instr) {
+<span class="fc" id="L262">        instr.computeScopeFlags(this);</span>
+
+<span class="pc bpc" id="L264" title="1 of 2 branches missed.">        if (hasListener()) manager.getIRScopeListener().addedInstr(this, instr, 0);</span>
+
+<span class="fc" id="L266">        instrList.add(0, instr);</span>
+<span class="fc" id="L267">    }</span>
+
+    public void addInstr(Instr instr) {
+<span class="fc bfc" id="L270" title="All 2 branches covered.">        if (instr instanceof ThreadPollInstr) threadPollInstrsCount++;</span>
+
+<span class="fc" id="L272">        instr.computeScopeFlags(this);</span>
+
+<span class="pc bpc" id="L274" title="1 of 2 branches missed.">        if (hasListener()) manager.getIRScopeListener().addedInstr(this, instr, instrList.size());</span>
+
+<span class="fc" id="L276">        instrList.add(instr);</span>
+<span class="fc" id="L277">    }</span>
+
+    public LocalVariable getNewFlipStateVariable() {
+<span class="fc" id="L280">        return getLocalVariable(&quot;%flip_&quot; + allocateNextPrefixedName(&quot;%flip&quot;), 0);</span>
+    }
+
+    public void initFlipStateVariable(Variable v, Operand initState) {
+        // Add it to the beginning
+<span class="fc" id="L285">        instrList.add(0, new CopyInstr(v, initState));</span>
+<span class="fc" id="L286">    }</span>
+
+    public Label getNewLabel(String prefix) {
+<span class="fc" id="L289">        return new Label(prefix, allocateNextPrefixedName(prefix));</span>
+    }
+
+    public Label getNewLabel() {
+<span class="fc" id="L293">        return getNewLabel(&quot;LBL&quot;);</span>
+    }
+
+    public List&lt;IRClosure&gt; getClosures() {
+<span class="fc" id="L297">        return nestedClosures;</span>
+    }
+
+    public IRManager getManager() {
+<span class="fc" id="L301">        return manager;</span>
+    }
+
+    /**
+     *  Returns the lexical scope that contains this scope definition
+     */
+    public IRScope getLexicalParent() {
+<span class="fc" id="L308">        return lexicalParent;</span>
+    }
+
+    public StaticScope getStaticScope() {
+<span class="fc" id="L312">        return staticScope;</span>
+    }
+
+    public IRMethod getNearestMethod() {
+<span class="fc" id="L316">        IRScope current = this;</span>
+
+<span class="fc bfc" id="L318" title="All 4 branches covered.">        while (current != null &amp;&amp; !(current instanceof IRMethod)) {</span>
+<span class="fc" id="L319">            current = current.getLexicalParent();</span>
+        }
+
+<span class="fc" id="L322">        return (IRMethod) current;</span>
+    }
+
+    public IRScope getNearestFlipVariableScope() {
+<span class="fc" id="L326">        IRScope current = this;</span>
+
+<span class="pc bpc" id="L328" title="1 of 4 branches missed.">        while (current != null &amp;&amp; !current.isFlipScope()) {</span>
+<span class="fc" id="L329">            current = current.getLexicalParent();</span>
+        }
+
+<span class="fc" id="L332">        return current;</span>
+    }
+
+    public IRScope getNearestTopLocalVariableScope() {
+<span class="fc" id="L336">        IRScope current = this;</span>
+
+<span class="pc bpc" id="L338" title="1 of 4 branches missed.">        while (current != null &amp;&amp; !current.isTopLocalVariableScope()) {</span>
+<span class="fc" id="L339">            current = current.getLexicalParent();</span>
+        }
+
+<span class="fc" id="L342">        return current;</span>
+    }
+
+    /**
+     * Returns the nearest scope which we can extract a live module from.  If
+     * this returns null (like for evals), then it means it cannot be statically
+     * determined.
+     */
+    public int getNearestModuleReferencingScopeDepth() {
+<span class="fc" id="L351">        int n = 0;</span>
+<span class="fc" id="L352">        IRScope current = this;</span>
+<span class="fc bfc" id="L353" title="All 2 branches covered.">        while (!(current instanceof IRModuleBody)) {</span>
+            // When eval'ing, we dont have a lexical view of what module we are nested in
+            // because binding_eval, class_eval, module_eval, instance_eval can switch
+            // around the lexical scope for evaluation to be something else.
+<span class="fc bfc" id="L357" title="All 4 branches covered.">            if (current == null || current instanceof IREvalScript) return -1;</span>
+
+<span class="fc" id="L359">            current = current.getLexicalParent();</span>
+<span class="fc" id="L360">            n++;</span>
+        }
+
+<span class="fc" id="L363">        return n;</span>
+    }
+
+    public String getName() {
+<span class="fc" id="L367">        return name;</span>
+    }
+
+    public void setName(String name) { // This is for IRClosure and IRMethod ;(
+<span class="fc" id="L371">        this.name = name;</span>
+<span class="fc" id="L372">    }</span>
+
+    public String getFileName() {
+<span class="fc" id="L375">        return fileName;</span>
+    }
+
+    public int getLineNumber() {
+<span class="fc" id="L379">        return lineNumber;</span>
+    }
+
+    /**
+     * Returns the top level scope
+     */
+    public IRScope getTopLevelScope() {
+<span class="fc" id="L386">        IRScope current = this;</span>
+
+<span class="pc bpc" id="L388" title="2 of 4 branches missed.">        for (; current != null &amp;&amp; !current.isScriptScope(); current = current.getLexicalParent()) {}</span>
+
+<span class="fc" id="L390">        return current;</span>
+    }
+
+    public boolean isNestedInClosure(IRClosure closure) {
+<span class="nc bnc" id="L394" title="All 4 branches missed.">        for (IRScope s = this; s != null &amp;&amp; !s.isTopLocalVariableScope(); s = s.getLexicalParent()) {</span>
+<span class="nc bnc" id="L395" title="All 2 branches missed.">            if (s == closure) return true;</span>
+        }
+
+<span class="nc" id="L398">        return false;</span>
+    }
+
+    public void setHasLoopsFlag() {
+<span class="fc" id="L402">        flags.add(HAS_LOOPS);</span>
+<span class="fc" id="L403">    }</span>
+
+    public boolean hasLoops() {
+<span class="fc" id="L406">        return flags.contains(HAS_LOOPS);</span>
+    }
+
+    public boolean hasExplicitCallProtocol() {
+<span class="fc" id="L410">        return flags.contains(HAS_EXPLICIT_CALL_PROTOCOL);</span>
+    }
+
+    public void setExplicitCallProtocolFlag() {
+<span class="fc" id="L414">        flags.add(HAS_EXPLICIT_CALL_PROTOCOL);</span>
+<span class="fc" id="L415">    }</span>
+
+    public boolean receivesKeywordArgs() {
+<span class="fc" id="L418">        return flags.contains(RECEIVES_KEYWORD_ARGS);</span>
+    }
+
+    public boolean bindingHasEscaped() {
+<span class="fc" id="L422">        return flags.contains(BINDING_HAS_ESCAPED);</span>
+    }
+
+    public boolean usesBackrefOrLastline() {
+<span class="nc" id="L426">        return flags.contains(USES_BACKREF_OR_LASTLINE);</span>
+    }
+
+    public boolean usesEval() {
+<span class="fc" id="L430">        return flags.contains(USES_EVAL);</span>
+    }
+
+    public boolean usesZSuper() {
+<span class="fc" id="L434">        return flags.contains(USES_ZSUPER);</span>
+    }
+
+    public boolean canReceiveNonlocalReturns() {
+<span class="fc" id="L438">        computeScopeFlags();</span>
+<span class="fc" id="L439">        return flags.contains(CAN_RECEIVE_NONLOCAL_RETURNS);</span>
+    }
+
+    public CFG buildCFG() {
+<span class="fc" id="L443">        CFG newCFG = new CFG(this);</span>
+<span class="fc" id="L444">        newCFG.build(getInstrs());</span>
+        // Clear out instruction list after CFG has been built.
+<span class="fc" id="L446">        this.instrList = null;</span>
+
+<span class="fc" id="L448">        setCFG(newCFG);</span>
+
+<span class="fc" id="L450">        return newCFG;</span>
+    }
+
+    protected void setCFG(CFG cfg) {
+<span class="fc" id="L454">        this.cfg = cfg;</span>
+<span class="fc" id="L455">    }</span>
+
+    public CFG getCFG() {
+<span class="fc" id="L458">        return cfg;</span>
+    }
+
+    @Interp
+    protected Instr[] prepareInstructions() {
+<span class="fc" id="L463">        setupLinearization();</span>
+
+<span class="fc" id="L465">        SimpleCloneInfo cloneInfo = new SimpleCloneInfo(this, false);</span>
+
+        // FIXME: If CFG (or linearizedBBList) knew number of instrs we could end up allocing better
+        // FIXME: Clone CFG in debug mode so interpreter can get matching info to instrs it is interp'ing
+
+        // Pass 1. Set up IPCs for labels and instructions and build linear instr list
+<span class="fc" id="L471">        List&lt;Instr&gt; newInstrs = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L472">        int ipc = 0;</span>
+<span class="fc bfc" id="L473" title="All 2 branches covered.">        for (BasicBlock b: linearizedBBList) {</span>
+            // All same-named labels must be same Java instance for this to work or we would need
+            // to examine all Label operands and update this as well which would be expensive.
+<span class="fc" id="L476">            b.getLabel().setTargetPC(ipc);</span>
+            // Set all renamed labels (simple clone makes a new copy) to their proper ipc
+<span class="fc" id="L478">            cloneInfo.getRenamedLabel(b.getLabel()).setTargetPC(ipc);</span>
+
+<span class="fc" id="L480">            List&lt;Instr&gt; bbInstrs = b.getInstrs();</span>
+<span class="fc" id="L481">            int bbInstrsLength = bbInstrs.size();</span>
+            // FIXME: Can be replaced with System.arrayCopy or clone() once we stop cloning individual instrs
+<span class="fc bfc" id="L483" title="All 2 branches covered.">            for (int i = 0; i &lt; bbInstrsLength; i++) {</span>
+<span class="fc" id="L484">                Instr instr = bbInstrs.get(i);</span>
+<span class="fc bfc" id="L485" title="All 2 branches covered.">                if (!(instr instanceof ReceiveSelfInstr)) {</span>
+                    // FIXME: Can be removed once ipc and rpc are stored in table(s) in IC
+<span class="fc" id="L487">                    Instr newInstr = instr.clone(cloneInfo);</span>
+
+                    // FIXME: Can be removed once noresult and attrassign properly specialize at IRBuild time.
+<span class="fc bfc" id="L490" title="All 2 branches covered.">                    if (newInstr instanceof Specializeable) {</span>
+<span class="fc" id="L491">                        newInstr = ((Specializeable) newInstr).specializeForInterpretation();</span>
+                    }
+
+<span class="fc" id="L494">                    newInstr.setIPC(ipc);</span>
+<span class="fc" id="L495">                    newInstrs.add(newInstr);</span>
+<span class="fc" id="L496">                    ipc++;</span>
+                }
+            }
+<span class="fc" id="L499">        }</span>
+
+<span class="fc" id="L501">        cfg().getExitBB().getLabel().setTargetPC(ipc + 1);  // Exit BB ipc</span>
+
+        // System.out.println(&quot;SCOPE: &quot; + getName());
+        // System.out.println(&quot;INSTRS: &quot; + cfg().toStringInstrs());
+
+<span class="fc" id="L506">        Instr[] linearizedInstrArray = newInstrs.toArray(new Instr[newInstrs.size()]);</span>
+
+        // Pass 2: Use ipc info from previous to mark all linearized instrs rpc
+<span class="fc" id="L509">        ipc = 0;</span>
+<span class="fc bfc" id="L510" title="All 2 branches covered.">        for (BasicBlock b : linearizedBBList) {</span>
+<span class="fc" id="L511">            BasicBlock rescuerBB = cfg().getRescuerBBFor(b);</span>
+<span class="fc bfc" id="L512" title="All 2 branches covered.">            int rescuerPC = rescuerBB == null ? -1 : rescuerBB.getLabel().getTargetPC();</span>
+<span class="fc bfc" id="L513" title="All 2 branches covered.">            for (Instr instr : b.getInstrs()) {</span>
+                // FIXME: If we did not omit instrs from previous pass, we could end up just doing
+                // a size and for loop this n times instead of walking an examining each instr
+<span class="fc bfc" id="L516" title="All 2 branches covered.">                if (!(instr instanceof ReceiveSelfInstr)) {</span>
+<span class="fc" id="L517">                    linearizedInstrArray[ipc].setRPC(rescuerPC);</span>
+<span class="fc" id="L518">                    ipc++;</span>
+                }
+<span class="fc" id="L520">            }</span>
+<span class="fc" id="L521">        }</span>
+
+<span class="fc" id="L523">        return linearizedInstrArray;</span>
+    }
+
+    private boolean isUnsafeScope() {
+<span class="fc bfc" id="L527" title="All 2 branches covered.">        if (this.isBeginEndBlock()) return true;                        // this is a BEGIN block</span>
+
+<span class="fc" id="L529">        List beginBlocks = getBeginBlocks();</span>
+<span class="pc bpc" id="L530" title="1 of 4 branches missed.">        if (beginBlocks != null &amp;&amp; !beginBlocks.isEmpty()) return true; // this contains a BEGIN block</span>
+
+        // Does topmost variable scope contain any BEGIN blocks (IRScriptBody or IREval)?
+        // Ex1: eval(&quot;BEGIN {a = 1}; p a&quot;)    Ex2: BEGIN {a = 1}; p a
+<span class="fc" id="L534">        beginBlocks = getNearestTopLocalVariableScope().getBeginBlocks();</span>
+<span class="pc bpc" id="L535" title="3 of 4 branches missed.">        return beginBlocks != null &amp;&amp; !beginBlocks.isEmpty();</span>
+    }
+
+    public List&lt;CompilerPass&gt; getExecutedPasses() {
+<span class="fc" id="L539">        return executedPasses;</span>
+    }
+
+    // SSS FIXME: We should configure different optimization levels
+    // and run different kinds of analysis depending on time budget.
+    // Accordingly, we need to set IR levels/states (basic, optimized, etc.)
+    // ENEBO: If we use a MT optimization mechanism we cannot mutate CFG
+    // while another thread is using it.  This may need to happen on a clone()
+    // and we may need to update the method to return the new method.  Also,
+    // if this scope is held in multiple locations how do we update all references?
+    private void runCompilerPasses(List&lt;CompilerPass&gt; passes) {
+        // All passes are disabled in scopes where BEGIN and END scopes might
+        // screw around with escaped variables. Optimizing for them is not
+        // worth the effort. It is simpler to just go fully safe in scopes
+        // influenced by their presence.
+<span class="fc bfc" id="L554" title="All 2 branches covered.">        if (isUnsafeScope()) {</span>
+<span class="fc" id="L555">            passes = getManager().getSafePasses(this);</span>
+        }
+
+<span class="fc" id="L558">        CompilerPassScheduler scheduler = getManager().schedulePasses(passes);</span>
+<span class="fc bfc" id="L559" title="All 2 branches covered.">        for (CompilerPass pass: scheduler) {</span>
+<span class="fc" id="L560">            pass.run(this);</span>
+<span class="fc" id="L561">        }</span>
+
+<span class="pc bpc" id="L563" title="1 of 2 branches missed.">        if (RubyInstanceConfig.IR_UNBOXING) {</span>
+<span class="nc" id="L564">            (new UnboxingPass()).run(this);</span>
+        }
+<span class="fc" id="L566">    }</span>
+
+    private void optimizeSimpleScopes() {
+        // For safe scopes that don't require a dynamic scope,
+        // run DCE since the analysis is less likely to be
+        // stymied by escaped bindings. We can also eliminate
+        // dynscopes for these scopes.
+<span class="fc bfc" id="L573" title="All 4 branches covered.">        if (!isUnsafeScope() &amp;&amp; !flags.contains(REQUIRES_DYNSCOPE)) {</span>
+<span class="fc" id="L574">            (new DeadCodeElimination()).run(this);</span>
+<span class="fc" id="L575">            (new OptimizeDynScopesPass()).run(this);</span>
+        }
+<span class="fc" id="L577">    }</span>
+
+    protected void initScope(boolean jitMode) {
+<span class="fc" id="L580">        runCompilerPasses(getManager().getCompilerPasses(this));</span>
+
+<span class="pc bpc" id="L582" title="1 of 4 branches missed.">        if (!jitMode &amp;&amp; RubyInstanceConfig.IR_COMPILER_PASSES == null) {</span>
+            // Skip this if:
+            // * we are in JIT mode since they are being run as part
+            //   of JIT passes in a way that minimizes LVA invalidations.
+            // * we have been passed in a list of passes to run on the
+            //   commandline (so as to honor the commandline request).
+<span class="fc" id="L588">            optimizeSimpleScopes();</span>
+        }
+
+        // If at the end, the cfg is still not build, build it.
+        // (ex: unsafe scopes for which passes don't run).
+<span class="fc bfc" id="L593" title="All 2 branches covered.">        if (getCFG() == null) {</span>
+<span class="fc" id="L594">            buildCFG();</span>
+        }
+<span class="fc" id="L596">    }</span>
+
+    /** Make version specific to scope which needs it (e.g. Closure vs non-closure). */
+    public InterpreterContext allocateInterpreterContext(Instr[] instructionList) {
+<span class="fc" id="L600">        return new InterpreterContext(this, instructionList);</span>
+    }
+
+    /** Run any necessary passes to get the IR ready for interpretation */
+    public synchronized InterpreterContext prepareForInterpretation() {
+<span class="fc bfc" id="L605" title="All 2 branches covered.">        if (interpreterContext != null) return interpreterContext; // Already prepared</span>
+
+<span class="fc" id="L607">        initScope(false);</span>
+
+        // System.out.println(&quot;-- passes run for: &quot; + this + &quot; = &quot; + java.util.Arrays.toString(executedPasses.toArray()));
+
+        // Always add call protocol instructions now for both interpreter and JIT
+        // since we are removing support for implicit stuff in the interpreter.
+        // When JIT later runs this same pass, it will be a NOP there.
+<span class="fc bfc" id="L614" title="All 2 branches covered.">        if (!isUnsafeScope()) {</span>
+<span class="fc" id="L615">            (new AddCallProtocolInstructions()).run(this);</span>
+        }
+
+<span class="fc" id="L618">        interpreterContext = allocateInterpreterContext(prepareInstructions());</span>
+
+<span class="fc" id="L620">        return interpreterContext;</span>
+    }
+
+    /** Run any necessary passes to get the IR ready for compilation */
+    public synchronized List&lt;BasicBlock&gt; prepareForCompilation() {
+        // Reset linearization, if any exists
+<span class="fc" id="L626">        resetLinearizationData();</span>
+
+<span class="fc" id="L628">        initScope(true);</span>
+
+<span class="fc" id="L630">        runCompilerPasses(getManager().getJITPasses(this));</span>
+
+<span class="fc" id="L632">        return buildLinearization();</span>
+    }
+
+    private void setupLinearization() {
+        try {
+<span class="fc" id="L637">            buildLinearization(); // FIXME: compiler passes should have done this</span>
+<span class="fc" id="L638">            depends(linearization());</span>
+<span class="nc" id="L639">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L640">            LOG.error(&quot;Error linearizing cfg: &quot;, e);</span>
+<span class="nc" id="L641">            CFG c = cfg();</span>
+<span class="nc" id="L642">            LOG.error(&quot;\nGraph:\n&quot; + c.toStringGraph());</span>
+<span class="nc" id="L643">            LOG.error(&quot;\nInstructions:\n&quot; + c.toStringInstrs());</span>
+<span class="nc" id="L644">            throw e;</span>
+<span class="fc" id="L645">        }</span>
+<span class="fc" id="L646">    }</span>
+
+    public Map&lt;BasicBlock, Label&gt; buildJVMExceptionTable() {
+<span class="fc" id="L649">        Map&lt;BasicBlock, Label&gt; map = new HashMap&lt;BasicBlock, Label&gt;();</span>
+
+<span class="fc bfc" id="L651" title="All 2 branches covered.">        for (BasicBlock bb: buildLinearization()) {</span>
+<span class="fc" id="L652">            BasicBlock rescueBB = cfg().getRescuerBBFor(bb);</span>
+<span class="fc bfc" id="L653" title="All 2 branches covered.">            if (rescueBB != null) {</span>
+<span class="fc" id="L654">                map.put(bb, rescueBB.getLabel());</span>
+            }
+<span class="fc" id="L656">        }</span>
+
+        // SSS FIXME: This could be optimized by compressing entries for adjacent BBs that have identical handlers
+        // This could be optimized either during generation or as another pass over the table.  But, if the JVM
+        // does that already, do we need to bother with it?
+<span class="fc" id="L661">        return map;</span>
+    }
+
+    private static Label[] catLabels(Label[] labels, Label cat) {
+<span class="nc bnc" id="L665" title="All 2 branches missed.">        if (labels == null) return new Label[] {cat};</span>
+<span class="nc" id="L666">        Label[] newLabels = new Label[labels.length + 1];</span>
+<span class="nc" id="L667">        System.arraycopy(labels, 0, newLabels, 0, labels.length);</span>
+<span class="nc" id="L668">        newLabels[labels.length] = cat;</span>
+<span class="nc" id="L669">        return newLabels;</span>
+    }
+
+    public EnumSet&lt;IRFlags&gt; getFlags() {
+<span class="fc" id="L673">        return flags;</span>
+    }
+
+    // This can help use eliminate writes to %block that are not used since this is
+    // a special local-variable, not programmer-defined local-variable
+    public void computeScopeFlags() {
+<span class="fc bfc" id="L679" title="All 2 branches covered.">        if (flagsComputed) return;</span>
+
+        // init
+<span class="fc" id="L682">        flags.remove(CAN_CAPTURE_CALLERS_BINDING);</span>
+<span class="fc" id="L683">        flags.remove(CAN_RECEIVE_BREAKS);</span>
+<span class="fc" id="L684">        flags.remove(CAN_RECEIVE_NONLOCAL_RETURNS);</span>
+<span class="fc" id="L685">        flags.remove(HAS_BREAK_INSTRS);</span>
+<span class="fc" id="L686">        flags.remove(HAS_NONLOCAL_RETURNS);</span>
+<span class="fc" id="L687">        flags.remove(USES_ZSUPER);</span>
+<span class="fc" id="L688">        flags.remove(USES_EVAL);</span>
+<span class="fc" id="L689">        flags.remove(USES_BACKREF_OR_LASTLINE);</span>
+<span class="fc" id="L690">        flags.remove(REQUIRES_DYNSCOPE);</span>
+        // NOTE: bindingHasEscaped is the crucial flag and it effectively is
+        // unconditionally true whenever it has a call that receives a closure.
+        // See CallBase.computeRequiresCallersBindingFlag
+<span class="fc bfc" id="L694" title="All 4 branches covered.">        if (this instanceof IREvalScript || this instanceof IRScriptBody) {</span>
+            // For eval scopes, bindings are considered escaped.
+            // For top-level script scopes, bindings are considered escaped as well
+            // because TOPLEVEL_BINDING can be used in places besides the file
+            // that is being parsed?
+<span class="fc" id="L699">            flags.add(BINDING_HAS_ESCAPED);</span>
+        } else {
+<span class="fc" id="L701">            flags.remove(BINDING_HAS_ESCAPED);</span>
+        }
+
+        // Recompute flags -- we could be calling this method different times.
+        // * once after IR generation and local optimizations propagates constants locally
+        // * also potentially at later times after other opt passes
+<span class="fc bfc" id="L707" title="All 2 branches covered.">        if (cfg == null) {</span>
+<span class="fc bfc" id="L708" title="All 2 branches covered.">            for (Instr i: getInstrs()) {</span>
+<span class="fc" id="L709">                i.computeScopeFlags(this);</span>
+<span class="fc" id="L710">            }</span>
+        } else {
+<span class="fc bfc" id="L712" title="All 2 branches covered.">            for (BasicBlock b: cfg.getBasicBlocks()) {</span>
+<span class="fc bfc" id="L713" title="All 2 branches covered.">                for (Instr i: b.getInstrs()) {</span>
+<span class="fc" id="L714">                    i.computeScopeFlags(this);</span>
+<span class="fc" id="L715">                }</span>
+<span class="fc" id="L716">            }</span>
+        }
+
+        // Compute flags for nested closures (recursively) and set derived flags.
+<span class="fc bfc" id="L720" title="All 2 branches covered.">        for (IRClosure cl: getClosures()) {</span>
+<span class="fc" id="L721">            cl.computeScopeFlags();</span>
+<span class="fc bfc" id="L722" title="All 2 branches covered.">            if (cl.usesEval()) {</span>
+<span class="fc" id="L723">                flags.add(CAN_RECEIVE_BREAKS);</span>
+<span class="fc" id="L724">                flags.add(CAN_RECEIVE_NONLOCAL_RETURNS);</span>
+<span class="fc" id="L725">                flags.add(USES_ZSUPER);</span>
+            } else {
+<span class="fc bfc" id="L727" title="All 4 branches covered.">                if (cl.flags.contains(HAS_BREAK_INSTRS) || cl.flags.contains(CAN_RECEIVE_BREAKS)) {</span>
+<span class="fc" id="L728">                    flags.add(CAN_RECEIVE_BREAKS);</span>
+                }
+<span class="fc bfc" id="L730" title="All 4 branches covered.">                if (cl.flags.contains(HAS_NONLOCAL_RETURNS) || cl.flags.contains(CAN_RECEIVE_NONLOCAL_RETURNS)) {</span>
+<span class="fc" id="L731">                    flags.add(CAN_RECEIVE_NONLOCAL_RETURNS);</span>
+                }
+<span class="fc bfc" id="L733" title="All 2 branches covered.">                if (cl.usesZSuper()) {</span>
+<span class="fc" id="L734">                    flags.add(USES_ZSUPER);</span>
+                }
+            }
+<span class="fc" id="L737">        }</span>
+
+<span class="fc bfc" id="L739" title="All 2 branches covered.">        if (flags.contains(CAN_RECEIVE_BREAKS)</span>
+<span class="fc bfc" id="L740" title="All 2 branches covered.">            || flags.contains(HAS_NONLOCAL_RETURNS)</span>
+<span class="fc bfc" id="L741" title="All 2 branches covered.">            || flags.contains(CAN_RECEIVE_NONLOCAL_RETURNS)</span>
+<span class="fc bfc" id="L742" title="All 2 branches covered.">            || flags.contains(BINDING_HAS_ESCAPED)</span>
+<span class="fc bfc" id="L743" title="All 2 branches covered.">            || flags.contains(USES_ZSUPER)</span>
+               // SSS FIXME: checkArity for keyword args
+               // looks up a keyword arg in the static scope
+               // which currently requires a dynamic scope to
+               // be recovered. If there is another way to do this,
+               // we can get rid of this.
+<span class="fc bfc" id="L749" title="All 2 branches covered.">            || flags.contains(RECEIVES_KEYWORD_ARGS))</span>
+        {
+<span class="fc" id="L751">            flags.add(REQUIRES_DYNSCOPE);</span>
+        }
+
+<span class="fc" id="L754">        flagsComputed = true;</span>
+<span class="fc" id="L755">    }</span>
+
+    public abstract IRScopeType getScopeType();
+
+    @Override
+    public String toString() {
+<span class="nc" id="L761">        return getScopeType() + &quot; &quot; + getName() + &quot;[&quot; + getFileName() + &quot;:&quot; + getLineNumber() + &quot;]&quot;;</span>
+    }
+
+    public String toStringInstrs() {
+<span class="nc" id="L765">        StringBuilder b = new StringBuilder();</span>
+
+<span class="nc" id="L767">        int i = 0;</span>
+<span class="nc bnc" id="L768" title="All 2 branches missed.">        for (Instr instr : instrList) {</span>
+<span class="nc bnc" id="L769" title="All 2 branches missed.">            if (i &gt; 0) b.append(&quot;\n&quot;);</span>
+
+<span class="nc" id="L771">            b.append(&quot;  &quot;).append(i).append('\t').append(instr);</span>
+
+<span class="nc" id="L773">            i++;</span>
+<span class="nc" id="L774">        }</span>
+
+<span class="nc bnc" id="L776" title="All 2 branches missed.">        if (!nestedClosures.isEmpty()) {</span>
+<span class="nc" id="L777">            b.append(&quot;\n\n------ Closures encountered in this scope ------\n&quot;);</span>
+<span class="nc bnc" id="L778" title="All 2 branches missed.">            for (IRClosure c: nestedClosures)</span>
+<span class="nc" id="L779">                b.append(c.toStringBody());</span>
+<span class="nc" id="L780">            b.append(&quot;------------------------------------------------\n&quot;);</span>
+        }
+
+<span class="nc" id="L783">        return b.toString();</span>
+    }
+
+    public LocalVariable getSelf() {
+<span class="fc" id="L787">        return Self.SELF;</span>
+    }
+
+    public Variable getCurrentModuleVariable() {
+        // SSS: Used in only 3 cases in generated IR:
+        // -&gt; searching a constant in the inheritance hierarchy
+        // -&gt; searching a super-method in the inheritance hierarchy
+        // -&gt; looking up 'StandardError' (which can be eliminated by creating a special operand type for this)
+<span class="fc bfc" id="L795" title="All 2 branches covered.">        if (currentModuleVariable == null) {</span>
+<span class="fc" id="L796">            temporaryVariableIndex++;</span>
+<span class="fc" id="L797">            currentModuleVariable = TemporaryCurrentModuleVariable.ModuleVariableFor(temporaryVariableIndex);</span>
+        }
+<span class="fc" id="L799">        return currentModuleVariable;</span>
+    }
+
+    public Variable getCurrentScopeVariable() {
+        // SSS: Used in only 1 case in generated IR:
+        // -&gt; searching a constant in the lexical scope hierarchy
+<span class="fc bfc" id="L805" title="All 2 branches covered.">        if (currentScopeVariable == null) {</span>
+<span class="fc" id="L806">            temporaryVariableIndex++;</span>
+<span class="fc" id="L807">            currentScopeVariable = TemporaryCurrentScopeVariable.ScopeVariableFor(temporaryVariableIndex);</span>
+        }
+<span class="fc" id="L809">        return currentScopeVariable;</span>
+    }
+
+    /**
+     * Get the local variables for this scope.
+     * This should only be used by persistence layer.
+     */
+    public Map&lt;String, LocalVariable&gt; getLocalVariables() {
+<span class="nc" id="L817">        return localVars;</span>
+    }
+
+    /**
+     * Set the local variables for this scope. This should only be used by persistence layer.
+     */
+    // FIXME: Consider making constructor for persistence to pass in all of this stuff
+    public void setLocalVariables(Map&lt;String, LocalVariable&gt; variables) {
+<span class="nc" id="L825">        this.localVars = variables;</span>
+<span class="nc" id="L826">    }</span>
+
+    public void setLabelIndices(Map&lt;String, Integer&gt; indices) {
+<span class="nc" id="L829">        nextVarIndex = indices;</span>
+<span class="nc" id="L830">    }</span>
+
+    public LocalVariable lookupExistingLVar(String name) {
+<span class="fc" id="L833">        return localVars.get(name);</span>
+    }
+
+    protected LocalVariable findExistingLocalVariable(String name, int depth) {
+<span class="fc" id="L837">        return localVars.get(name);</span>
+    }
+
+    /**
+     * Find or create a local variable.  By default, scopes are assumed to
+     * only check current depth.  Blocks/Closures override this because they
+     * have special nesting rules.
+     */
+    public LocalVariable getLocalVariable(String name, int scopeDepth) {
+<span class="fc" id="L846">        LocalVariable lvar = findExistingLocalVariable(name, scopeDepth);</span>
+<span class="fc bfc" id="L847" title="All 2 branches covered.">        if (lvar == null) {</span>
+<span class="fc" id="L848">            lvar = getNewLocalVariable(name, scopeDepth);</span>
+<span class="pc bpc" id="L849" title="1 of 2 branches missed.">        } else if (lvar.getScopeDepth() != scopeDepth) {</span>
+<span class="nc" id="L850">            lvar = lvar.cloneForDepth(scopeDepth);</span>
+        }
+
+<span class="fc" id="L853">        return lvar;</span>
+    }
+
+    public LocalVariable getNewLocalVariable(String name, int scopeDepth) {
+<span class="pc bpc" id="L857" title="3 of 4 branches missed.">        assert scopeDepth == 0: &quot;Scope depth is non-zero for new-var request &quot; + name + &quot; in &quot; + this;</span>
+<span class="fc" id="L858">        LocalVariable lvar = new LocalVariable(name, scopeDepth, getStaticScope().addVariable(name));</span>
+<span class="fc" id="L859">        localVars.put(name, lvar);</span>
+<span class="fc" id="L860">        return lvar;</span>
+    }
+
+    protected void initEvalScopeVariableAllocator(boolean reset) {
+<span class="pc bpc" id="L864" title="1 of 4 branches missed.">        if (reset || evalScopeVars == null) evalScopeVars = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L865">    }</span>
+
+    public TemporaryLocalVariable createTemporaryVariable() {
+<span class="fc" id="L868">        return getNewTemporaryVariable(TemporaryVariableType.LOCAL);</span>
+    }
+
+    public TemporaryLocalVariable getNewTemporaryVariableFor(LocalVariable var) {
+<span class="fc" id="L872">        temporaryVariableIndex++;</span>
+<span class="fc" id="L873">        return new TemporaryLocalReplacementVariable(var.getName(), temporaryVariableIndex);</span>
+    }
+
+    public TemporaryLocalVariable getNewTemporaryVariable(TemporaryVariableType type) {
+<span class="pc bpc" id="L877" title="4 of 5 branches missed.">        switch (type) {</span>
+            case FLOAT: {
+<span class="nc" id="L879">                floatVariableIndex++;</span>
+<span class="nc" id="L880">                return new TemporaryFloatVariable(floatVariableIndex);</span>
+            }
+            case FIXNUM: {
+<span class="nc" id="L883">                fixnumVariableIndex++;</span>
+<span class="nc" id="L884">                return new TemporaryFixnumVariable(fixnumVariableIndex);</span>
+            }
+            case BOOLEAN: {
+                // Shares var index with locals
+<span class="nc" id="L888">                temporaryVariableIndex++;</span>
+<span class="nc" id="L889">                return new TemporaryBooleanVariable(temporaryVariableIndex);</span>
+            }
+            case LOCAL: {
+<span class="fc" id="L892">                temporaryVariableIndex++;</span>
+<span class="fc" id="L893">                return manager.newTemporaryLocalVariable(temporaryVariableIndex);</span>
+            }
+        }
+
+<span class="nc" id="L897">        throw new RuntimeException(&quot;Invalid temporary variable being alloced in this scope: &quot; + type);</span>
+    }
+
+    public void setTemporaryVariableCount(int count) {
+<span class="nc" id="L901">        temporaryVariableIndex = count + 1;</span>
+<span class="nc" id="L902">    }</span>
+
+    public TemporaryLocalVariable getNewUnboxedVariable(Class type) {
+        TemporaryVariableType varType;
+<span class="nc bnc" id="L906" title="All 2 branches missed.">        if (type == Float.class) {</span>
+<span class="nc" id="L907">            varType = TemporaryVariableType.FLOAT;</span>
+<span class="nc bnc" id="L908" title="All 2 branches missed.">        } else if (type == Fixnum.class) {</span>
+<span class="nc" id="L909">            varType = TemporaryVariableType.FIXNUM;</span>
+<span class="nc bnc" id="L910" title="All 2 branches missed.">        } else if (type == UnboxedBoolean.class) {</span>
+<span class="nc" id="L911">            varType = TemporaryVariableType.BOOLEAN;</span>
+        } else {
+<span class="nc" id="L913">            varType = TemporaryVariableType.LOCAL;</span>
+        }
+<span class="nc" id="L915">        return getNewTemporaryVariable(varType);</span>
+    }
+
+    public void resetTemporaryVariables() {
+<span class="fc" id="L919">        temporaryVariableIndex = -1;</span>
+<span class="fc" id="L920">        floatVariableIndex = -1;</span>
+<span class="fc" id="L921">        fixnumVariableIndex = -1;</span>
+<span class="fc" id="L922">        booleanVariableIndex = -1;</span>
+<span class="fc" id="L923">    }</span>
+
+    public int getTemporaryVariablesCount() {
+<span class="fc" id="L926">        return temporaryVariableIndex + 1;</span>
+    }
+
+    public int getFloatVariablesCount() {
+<span class="fc" id="L930">        return floatVariableIndex + 1;</span>
+    }
+
+    public int getFixnumVariablesCount() {
+<span class="fc" id="L934">        return fixnumVariableIndex + 1;</span>
+    }
+
+    public int getBooleanVariablesCount() {
+<span class="fc" id="L938">        return booleanVariableIndex + 1;</span>
+    }
+
+    // Generate a new variable for inlined code
+    public Variable getNewInlineVariable(String inlinePrefix, Variable v) {
+<span class="nc bnc" id="L943" title="All 2 branches missed.">        if (v instanceof LocalVariable) {</span>
+<span class="nc" id="L944">            LocalVariable lv = (LocalVariable)v;</span>
+<span class="nc" id="L945">            return getLocalVariable(inlinePrefix + lv.getName(), lv.getScopeDepth());</span>
+        } else {
+<span class="nc" id="L947">            return createTemporaryVariable();</span>
+        }
+    }
+
+    public int getThreadPollInstrsCount() {
+<span class="nc" id="L952">        return threadPollInstrsCount;</span>
+    }
+
+    public int getLocalVariablesCount() {
+<span class="fc" id="L956">        return localVars.size();</span>
+    }
+
+    public int getUsedVariablesCount() {
+        // System.out.println(&quot;For &quot; + this + &quot;, # lvs: &quot; + getLocalVariablesCount());
+        // # local vars, # flip vars
+        //
+        // SSS FIXME: When we are opting local var access,
+        // no need to allocate local var space except when we have been asked to!
+<span class="fc" id="L965">        return getLocalVariablesCount() + getPrefixCountSize(&quot;%flip&quot;);</span>
+    }
+
+    public void setUpUseDefLocalVarMaps() {
+<span class="fc" id="L969">        definedLocalVars = new java.util.HashSet&lt;Variable&gt;();</span>
+<span class="fc" id="L970">        usedLocalVars = new java.util.HashSet&lt;Variable&gt;();</span>
+<span class="fc bfc" id="L971" title="All 2 branches covered.">        for (BasicBlock bb : cfg().getBasicBlocks()) {</span>
+<span class="fc bfc" id="L972" title="All 2 branches covered.">            for (Instr i : bb.getInstrs()) {</span>
+<span class="fc bfc" id="L973" title="All 2 branches covered.">                for (Variable v : i.getUsedVariables()) {</span>
+<span class="fc bfc" id="L974" title="All 2 branches covered.">                    if (v instanceof LocalVariable) usedLocalVars.add(v);</span>
+<span class="fc" id="L975">                }</span>
+
+<span class="fc bfc" id="L977" title="All 2 branches covered.">                if (i instanceof ResultInstr) {</span>
+<span class="fc" id="L978">                    Variable v = ((ResultInstr) i).getResult();</span>
+
+<span class="fc bfc" id="L980" title="All 2 branches covered.">                    if (v instanceof LocalVariable) definedLocalVars.add(v);</span>
+                }
+<span class="fc" id="L982">            }</span>
+<span class="fc" id="L983">        }</span>
+
+<span class="fc bfc" id="L985" title="All 2 branches covered.">        for (IRClosure cl : getClosures()) {</span>
+<span class="fc" id="L986">            cl.setUpUseDefLocalVarMaps();</span>
+<span class="fc" id="L987">        }</span>
+<span class="fc" id="L988">    }</span>
+
+    public boolean usesLocalVariable(Variable v) {
+<span class="fc bfc" id="L991" title="All 2 branches covered.">        if (usedLocalVars == null) setUpUseDefLocalVarMaps();</span>
+<span class="pc bpc" id="L992" title="1 of 2 branches missed.">        if (usedLocalVars.contains(v)) return true;</span>
+
+<span class="nc bnc" id="L994" title="All 2 branches missed.">        for (IRClosure cl : getClosures()) {</span>
+<span class="nc bnc" id="L995" title="All 2 branches missed.">            if (cl.usesLocalVariable(v)) return true;</span>
+<span class="nc" id="L996">        }</span>
+
+<span class="nc" id="L998">        return false;</span>
+    }
+
+    public boolean definesLocalVariable(Variable v) {
+<span class="fc bfc" id="L1002" title="All 2 branches covered.">        if (definedLocalVars == null) setUpUseDefLocalVarMaps();</span>
+<span class="fc bfc" id="L1003" title="All 2 branches covered.">        if (definedLocalVars.contains(v)) return true;</span>
+
+<span class="fc bfc" id="L1005" title="All 2 branches covered.">        for (IRClosure cl : getClosures()) {</span>
+<span class="pc bpc" id="L1006" title="1 of 2 branches missed.">            if (cl.definesLocalVariable(v)) return true;</span>
+<span class="fc" id="L1007">        }</span>
+
+<span class="fc" id="L1009">        return false;</span>
+    }
+
+    public void setDataFlowSolution(String name, DataFlowProblem p) {
+<span class="fc" id="L1013">        dfProbs.put(name, p);</span>
+<span class="fc" id="L1014">    }</span>
+
+    public DataFlowProblem getDataFlowSolution(String name) {
+<span class="fc" id="L1017">        return dfProbs.get(name);</span>
+    }
+
+    // This should only be used to do pre-cfg opts and to build the CFG.
+    // Everyone else should use the CFG.
+    public List&lt;Instr&gt; getInstrs() {
+<span class="pc bpc" id="L1023" title="1 of 2 branches missed.">        if (persistenceStore != null) {</span>
+<span class="nc" id="L1024">            instrList = persistenceStore.decodeInstructionsAt(this, instructionsOffsetInfoPersistenceBuffer);</span>
+        }
+<span class="pc bpc" id="L1026" title="1 of 2 branches missed.">        if (cfg != null) throw new RuntimeException(&quot;Please use the CFG to access this scope's instructions: &quot; + this);</span>
+<span class="fc" id="L1027">        return instrList;</span>
+    }
+
+    public InterpreterContext getInterpreterContext() {
+<span class="fc" id="L1031">        return interpreterContext;</span>
+    }
+
+    public void resetLinearizationData() {
+<span class="fc" id="L1035">        linearizedBBList = null;</span>
+<span class="fc" id="L1036">    }</span>
+
+    public List&lt;BasicBlock&gt; buildLinearization() {
+<span class="fc bfc" id="L1039" title="All 2 branches covered.">        if (linearizedBBList != null) return linearizedBBList; // Already linearized</span>
+
+<span class="fc" id="L1041">        linearizedBBList = CFGLinearizer.linearize(cfg);</span>
+
+<span class="fc" id="L1043">        return linearizedBBList;</span>
+    }
+
+    public List&lt;BasicBlock&gt; linearization() {
+<span class="fc" id="L1047">        depends(cfg());</span>
+
+<span class="pc bpc" id="L1049" title="3 of 4 branches missed.">        assert linearizedBBList != null: &quot;You have not run linearization&quot;;</span>
+
+<span class="fc" id="L1051">        return linearizedBBList;</span>
+    }
+
+    protected void depends(Object obj) {
+<span class="pc bpc" id="L1055" title="3 of 4 branches missed.">        assert obj != null: &quot;Unsatisfied dependency and this depends() was set &quot; +</span>
+                &quot;up wrong.  Use depends(build()) not depends(build).&quot;;
+<span class="fc" id="L1057">    }</span>
+
+    // SSS FIXME: Why do we have cfg() with this assertion and a getCFG() without an assertion??
+    public CFG cfg() {
+<span class="pc bpc" id="L1061" title="3 of 4 branches missed.">        assert cfg != null: &quot;Trying to access build before build started&quot;;</span>
+<span class="fc" id="L1062">        return cfg;</span>
+    }
+
+    public void resetState() {
+<span class="nc" id="L1066">        interpreterContext = null;</span>
+<span class="nc" id="L1067">        resetLinearizationData();</span>
+<span class="nc" id="L1068">        cfg.resetState();</span>
+
+        // reset flags
+<span class="nc" id="L1071">        flagsComputed = false;</span>
+<span class="nc" id="L1072">        flags.add(CAN_CAPTURE_CALLERS_BINDING);</span>
+<span class="nc" id="L1073">        flags.add(BINDING_HAS_ESCAPED);</span>
+<span class="nc" id="L1074">        flags.add(USES_EVAL);</span>
+<span class="nc" id="L1075">        flags.add(USES_ZSUPER);</span>
+
+<span class="nc" id="L1077">        flags.remove(HAS_BREAK_INSTRS);</span>
+<span class="nc" id="L1078">        flags.remove(HAS_NONLOCAL_RETURNS);</span>
+<span class="nc" id="L1079">        flags.remove(CAN_RECEIVE_BREAKS);</span>
+<span class="nc" id="L1080">        flags.remove(CAN_RECEIVE_NONLOCAL_RETURNS);</span>
+
+        // Invalidate compiler pass state.
+        //
+        // SSS FIXME: This is to get around concurrent-modification issues
+        // since CompilerPass.invalidate modifies this, but some passes
+        // cannot be invalidated.
+<span class="nc" id="L1087">        int i = 0;</span>
+<span class="nc bnc" id="L1088" title="All 2 branches missed.">        while (i &lt; executedPasses.size()) {</span>
+<span class="nc bnc" id="L1089" title="All 2 branches missed.">            if (!executedPasses.get(i).invalidate(this)) {</span>
+<span class="nc" id="L1090">                i++;</span>
+            }
+        }
+<span class="nc" id="L1093">    }</span>
+
+    public void inlineMethod(IRScope method, RubyModule implClass, int classToken, BasicBlock basicBlock, CallBase call, boolean cloneHost) {
+        // Inline
+<span class="nc" id="L1097">        depends(cfg());</span>
+<span class="nc" id="L1098">        new CFGInliner(cfg).inlineMethod(method, implClass, classToken, basicBlock, call, cloneHost);</span>
+
+        // Reset state
+<span class="nc" id="L1101">        resetState();</span>
+
+        // Re-run opts
+<span class="nc bnc" id="L1104" title="All 2 branches missed.">        for (CompilerPass pass: getManager().getInliningCompilerPasses(this)) {</span>
+<span class="nc" id="L1105">            pass.run(this);</span>
+<span class="nc" id="L1106">        }</span>
+<span class="nc" id="L1107">    }</span>
+
+    /** Record a begin block.  Only eval and script body scopes support this */
+    public void recordBeginBlock(IRClosure beginBlockClosure) {
+<span class="nc" id="L1111">        throw new RuntimeException(&quot;BEGIN blocks cannot be added to: &quot; + this.getClass().getName());</span>
+    }
+
+    public List&lt;IRClosure&gt; getBeginBlocks() {
+<span class="fc" id="L1115">        return null;</span>
+    }
+
+    public List&lt;IRClosure&gt; getEndBlocks() {
+<span class="nc" id="L1119">        return null;</span>
+    }
+
+    // Enebo: We should just make n primitive int and not take the hash hit
+    protected int allocateNextPrefixedName(String prefix) {
+<span class="fc" id="L1124">        int index = getPrefixCountSize(prefix);</span>
+
+<span class="fc" id="L1126">        nextVarIndex.put(prefix, index + 1);</span>
+
+<span class="fc" id="L1128">        return index;</span>
+    }
+
+    // This is how IR Persistence can re-read existing saved labels and reset
+    // scope back to proper index.
+    public void setPrefixedNameIndexTo(String prefix, int newIndex) {
+<span class="nc" id="L1134">        int index = getPrefixCountSize(prefix);</span>
+
+<span class="nc" id="L1136">        nextVarIndex.put(prefix, index);</span>
+<span class="nc" id="L1137">    }</span>
+
+    protected void resetVariableCounter(String prefix) {
+<span class="nc" id="L1140">        nextVarIndex.remove(prefix);</span>
+<span class="nc" id="L1141">    }</span>
+
+    public Map&lt;String, Integer&gt; getVarIndices() {
+<span class="nc" id="L1144">        return nextVarIndex;</span>
+    }
+
+    protected int getPrefixCountSize(String prefix) {
+<span class="fc" id="L1148">        Integer index = nextVarIndex.get(prefix);</span>
+
+<span class="fc bfc" id="L1150" title="All 2 branches covered.">        if (index == null) return 0;</span>
+
+<span class="fc" id="L1152">        return index.intValue();</span>
+    }
+
+    public int getNextClosureId() {
+<span class="fc" id="L1156">        nextClosureIndex++;</span>
+
+<span class="fc" id="L1158">        return nextClosureIndex;</span>
+    }
+
+    public boolean isBeginEndBlock() {
+<span class="fc" id="L1162">        return false;</span>
+    }
+
+    /**
+     * Does this scope represent a module body?
+     */
+    public boolean isModuleBody() {
+<span class="fc" id="L1169">        return false;</span>
+    }
+
+    /**
+     * Is this IRClassBody but not IRMetaClassBody?
+     */
+    public boolean isNonSingletonClassBody() {
+<span class="fc" id="L1176">        return false;</span>
+    }
+
+    public boolean isFlipScope() {
+<span class="fc" id="L1180">        return true;</span>
+    }
+
+    public boolean isTopLocalVariableScope() {
+<span class="fc" id="L1184">        return true;</span>
+    }
+
+    /**
+     * Is this an eval script or a regular file script?
+     */
+    public boolean isScriptScope() {
+<span class="nc" id="L1191">        return false;</span>
+    }
+
+    public void savePersistenceInfo(int offset, IRReaderDecoder file) {
+<span class="nc" id="L1195">        instructionsOffsetInfoPersistenceBuffer = offset;</span>
+<span class="nc" id="L1196">        persistenceStore = file;</span>
+<span class="nc" id="L1197">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

@@ -1,0 +1,996 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubySymbol.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubySymbol.java</span></div><h1>RubySymbol.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2001 Alan Moore &lt;alan_moore@gmx.net&gt;
+ * Copyright (C) 2001-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Joey Gibson &lt;joey@joeygibson.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2006 Derek Berner &lt;derek.berner@state.nm.us&gt;
+ * Copyright (C) 2006 Miguel Covarrubias &lt;mlcovarrubias@gmail.com&gt;
+ * Copyright (C) 2007 William N Dortch &lt;bill.dortch@gmail.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import org.jcodings.Encoding;
+import org.jcodings.specific.USASCIIEncoding;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.ast.util.ArgsUtil;
+import org.jruby.compiler.Constantizable;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.Binding;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.Block.Type;
+import org.jruby.runtime.BlockBody;
+import org.jruby.runtime.CallSite;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.ContextAwareBlockBody;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.callsite.FunctionalCachingCallSite;
+import org.jruby.runtime.encoding.MarshalEncoding;
+import org.jruby.runtime.marshal.UnmarshalStream;
+import org.jruby.runtime.opto.OptoFactory;
+import org.jruby.util.ByteList;
+import org.jruby.util.PerlHash;
+import org.jruby.util.SipHashInline;
+
+import java.lang.ref.WeakReference;
+import java.util.concurrent.locks.ReentrantLock;
+
+import static org.jruby.util.StringSupport.codeLength;
+import static org.jruby.util.StringSupport.codePoint;
+
+/**
+ * Represents a Ruby symbol (e.g. :bar)
+ */
+@JRubyClass(name=&quot;Symbol&quot;)
+public class RubySymbol extends RubyObject implements MarshalEncoding, Constantizable {
+    public static final long symbolHashSeedK0 = 5238926673095087190l;
+
+    private final String symbol;
+    private final int id;
+    private final ByteList symbolBytes;
+    private final int hashCode;
+    private Object constant;
+    
+    /**
+     * 
+     * @param runtime
+     * @param internedSymbol the String value of the new Symbol. This &lt;em&gt;must&lt;/em&gt;
+     *                       have been previously interned
+     */
+    private RubySymbol(Ruby runtime, String internedSymbol, ByteList symbolBytes) {
+<span class="fc" id="L91">        super(runtime, runtime.getSymbol(), false);</span>
+        // symbol string *must* be interned
+
+        //        assert internedSymbol == internedSymbol.intern() : internedSymbol + &quot; is not interned&quot;;
+
+<span class="fc" id="L96">        this.symbol = internedSymbol;</span>
+<span class="fc" id="L97">        this.symbolBytes = symbolBytes;</span>
+<span class="fc" id="L98">        this.id = runtime.allocSymbolId();</span>
+
+<span class="pc bpc" id="L100" title="1 of 2 branches missed.">        long hash = runtime.isSiphashEnabled() ? SipHashInline.hash24(</span>
+<span class="nc" id="L101">                symbolHashSeedK0, 0, symbolBytes.getUnsafeBytes(),</span>
+<span class="nc" id="L102">                symbolBytes.getBegin(), symbolBytes.getRealSize()) :</span>
+<span class="fc" id="L103">                PerlHash.hash(symbolHashSeedK0, symbolBytes.getUnsafeBytes(),</span>
+<span class="fc" id="L104">                symbolBytes.getBegin(), symbolBytes.getRealSize());</span>
+<span class="fc" id="L105">        this.hashCode = (int) hash;</span>
+<span class="fc" id="L106">        setFrozen(true);</span>
+<span class="fc" id="L107">    }</span>
+
+    private RubySymbol(Ruby runtime, String internedSymbol) {
+<span class="fc" id="L110">        this(runtime, internedSymbol, symbolBytesFromString(runtime, internedSymbol));</span>
+<span class="fc" id="L111">    }</span>
+
+    public static RubyClass createSymbolClass(Ruby runtime) {
+<span class="fc" id="L114">        RubyClass symbolClass = runtime.defineClass(&quot;Symbol&quot;, runtime.getObject(), ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);</span>
+<span class="fc" id="L115">        runtime.setSymbol(symbolClass);</span>
+<span class="fc" id="L116">        RubyClass symbolMetaClass = symbolClass.getMetaClass();</span>
+<span class="fc" id="L117">        symbolClass.setClassIndex(ClassIndex.SYMBOL);</span>
+<span class="fc" id="L118">        symbolClass.setReifiedClass(RubySymbol.class);</span>
+<span class="fc" id="L119">        symbolClass.kindOf = new RubyModule.JavaClassKindOf(RubySymbol.class);</span>
+
+<span class="fc" id="L121">        symbolClass.defineAnnotatedMethods(RubySymbol.class);</span>
+<span class="fc" id="L122">        symbolMetaClass.undefineMethod(&quot;new&quot;);</span>
+
+<span class="fc" id="L124">        symbolClass.includeModule(runtime.getComparable());</span>
+        
+<span class="fc" id="L126">        return symbolClass;</span>
+    }
+    
+    @Override
+    public ClassIndex getNativeClassIndex() {
+<span class="fc" id="L131">        return ClassIndex.SYMBOL;</span>
+    }
+
+    /** rb_to_id
+     * 
+     * @return a String representation of the symbol 
+     */
+    @Override
+    public String asJavaString() {
+<span class="fc" id="L140">        return symbol;</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="fc" id="L145">        return symbol;</span>
+    }
+
+    final ByteList getBytes() {
+<span class="fc" id="L149">        return symbolBytes;</span>
+    }
+
+    /**
+     * RubySymbol is created by passing in a String and bytes are extracted from that.  We will
+     * pass in encoding of that string after construction but before use so it does not forget
+     * what it is.
+     */
+    public void associateEncoding(Encoding encoding) {
+<span class="fc" id="L158">        symbolBytes.setEncoding(encoding);</span>
+<span class="fc" id="L159">    }</span>
+
+    /** short circuit for Symbol key comparison
+     * 
+     */
+    @Override
+    public final boolean eql(IRubyObject other) {
+<span class="nc bnc" id="L166" title="All 2 branches missed.">        return other == this;</span>
+    }
+
+    @Override
+    public boolean isImmediate() {
+<span class="fc" id="L171">    	return true;</span>
+    }
+
+    @Override
+    public RubyClass getSingletonClass() {
+<span class="fc" id="L176">        throw getRuntime().newTypeError(&quot;can't define singleton&quot;);</span>
+    }
+
+    public static RubySymbol getSymbolLong(Ruby runtime, long id) {
+<span class="nc" id="L180">        return runtime.getSymbolTable().lookup(id);</span>
+    }
+    
+    /* Symbol class methods.
+     * 
+     */
+    
+    public static RubySymbol newSymbol(Ruby runtime, IRubyObject name) {
+<span class="fc bfc" id="L188" title="All 2 branches covered.">        if (!(name instanceof RubyString)) return newSymbol(runtime, name.asJavaString());</span>
+        
+<span class="fc" id="L190">        return runtime.getSymbolTable().getSymbol(((RubyString) name).getByteList());</span>
+    }
+
+    public static RubySymbol newSymbol(Ruby runtime, String name) {
+<span class="fc" id="L194">        return runtime.getSymbolTable().getSymbol(name);</span>
+    }
+
+    // FIXME: same bytesequences will fight over encoding of the symbol once cached.  I think largely
+    // this will only happen in some ISO_8859_?? encodings making symbols at the same time so it should
+    // be pretty rare.
+    public static RubySymbol newSymbol(Ruby runtime, String name, Encoding encoding) {
+<span class="fc" id="L201">        RubySymbol newSymbol = newSymbol(runtime, name);</span>
+
+<span class="fc" id="L203">        newSymbol.associateEncoding(encoding);</span>
+
+<span class="fc" id="L205">        return newSymbol;</span>
+    }
+
+    /**
+     * @see org.jruby.compiler.Constantizable
+     */
+    @Override
+    public Object constant() {
+<span class="nc bnc" id="L213" title="All 2 branches missed.">        return constant == null ?</span>
+<span class="nc" id="L214">                constant = OptoFactory.newConstantWrapper(IRubyObject.class, this) :</span>
+                constant;
+    }
+
+    @Deprecated
+    @Override
+    public IRubyObject inspect() {
+<span class="fc" id="L221">        return inspect19(getRuntime().getCurrentContext());</span>
+    }
+
+    public IRubyObject inspect(ThreadContext context) {
+<span class="nc" id="L225">        return inspect19(context.runtime);</span>
+    }
+
+    @JRubyMethod(name = &quot;inspect&quot;)
+    public IRubyObject inspect19(ThreadContext context) {
+<span class="fc" id="L230">        return inspect19(context.runtime);</span>
+    }
+
+    private final IRubyObject inspect19(Ruby runtime) {
+<span class="fc" id="L234">        ByteList result = new ByteList(symbolBytes.getRealSize() + 1);</span>
+<span class="fc" id="L235">        result.setEncoding(symbolBytes.getEncoding());</span>
+<span class="fc" id="L236">        result.append((byte)':');</span>
+<span class="fc" id="L237">        result.append(symbolBytes);</span>
+
+<span class="fc" id="L239">        RubyString str = RubyString.newString(runtime, result); </span>
+        // TODO: 1.9 rb_enc_symname_p
+<span class="fc bfc" id="L241" title="All 4 branches covered.">        if (isPrintable() &amp;&amp; isSymbolName19(symbol)) return str;</span>
+            
+<span class="fc" id="L243">        str = (RubyString)str.inspect19();</span>
+<span class="fc" id="L244">        ByteList bytes = str.getByteList();</span>
+<span class="fc" id="L245">        bytes.set(0, ':');</span>
+<span class="fc" id="L246">        bytes.set(1, '&quot;');</span>
+        
+<span class="fc" id="L248">        return str;</span>
+    }
+
+    @Override
+    public IRubyObject to_s() {
+<span class="fc" id="L253">        return to_s(getRuntime());</span>
+    }
+    
+    @JRubyMethod
+    public IRubyObject to_s(ThreadContext context) {
+<span class="fc" id="L258">        return to_s(context.runtime);</span>
+    }
+    
+    private final IRubyObject to_s(Ruby runtime) {
+<span class="fc" id="L262">        return RubyString.newStringShared(runtime, symbolBytes);</span>
+    }
+
+    public IRubyObject id2name() {
+<span class="fc" id="L266">        return to_s(getRuntime());</span>
+    }
+    
+    @JRubyMethod
+    public IRubyObject id2name(ThreadContext context) {
+<span class="fc" id="L271">        return to_s(context);</span>
+    }
+
+    @JRubyMethod(name = &quot;===&quot;, required = 1)
+    @Override
+    public IRubyObject op_eqq(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L277">        return super.op_equal(context, other);</span>
+    }
+
+    @Deprecated
+    @Override
+    public RubyFixnum hash() {
+<span class="nc" id="L283">        return getRuntime().newFixnum(hashCode());</span>
+    }
+
+    @JRubyMethod
+    public RubyFixnum hash(ThreadContext context) {
+<span class="fc" id="L288">        return context.runtime.newFixnum(hashCode());</span>
+    }
+    
+    @Override
+    public int hashCode() {
+<span class="fc" id="L293">        return hashCode;</span>
+    }
+
+    public int getId() {
+<span class="nc" id="L297">        return id;</span>
+    }
+    
+    @Override
+    public boolean equals(Object other) {
+<span class="nc bnc" id="L302" title="All 2 branches missed.">        return other == this;</span>
+    }
+    
+    @JRubyMethod(name = &quot;to_sym&quot;)
+    public IRubyObject to_sym() {
+<span class="fc" id="L307">        return this;</span>
+    }
+
+    @JRubyMethod(name = &quot;intern&quot;)
+    public IRubyObject to_sym19() {
+<span class="fc" id="L312">        return this;</span>
+    }
+
+    @Override
+    public IRubyObject taint(ThreadContext context) {
+<span class="nc" id="L317">        return this;</span>
+    }
+
+    private RubyString newShared(Ruby runtime) {
+<span class="fc" id="L321">        return RubyString.newStringShared(runtime, symbolBytes);</span>
+    }
+
+    private RubyString rubyStringFromString(Ruby runtime) {
+<span class="fc" id="L325">        return RubyString.newString(runtime, symbol);</span>
+    }
+
+    @JRubyMethod(name = {&quot;succ&quot;, &quot;next&quot;})
+    public IRubyObject succ(ThreadContext context) {
+<span class="fc" id="L330">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L331">        return newSymbol(runtime, newShared(runtime).succ19(context).toString());</span>
+    }
+
+    @JRubyMethod(name = &quot;&lt;=&gt;&quot;)
+    @Override
+    public IRubyObject op_cmp(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L337">        Ruby runtime = context.runtime;</span>
+        
+<span class="fc bfc" id="L339" title="All 2 branches covered.">        return !(other instanceof RubySymbol) ? runtime.getNil() :</span>
+<span class="fc" id="L340">                newShared(runtime).op_cmp(context, ((RubySymbol)other).newShared(runtime));</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject casecmp(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L345">        Ruby runtime = context.runtime;</span>
+        
+<span class="fc bfc" id="L347" title="All 2 branches covered.">        return !(other instanceof RubySymbol) ? runtime.getNil() :</span>
+<span class="fc" id="L348">                newShared(runtime).casecmp19(context, ((RubySymbol) other).newShared(runtime));</span>
+    }
+
+    @JRubyMethod(name = {&quot;=~&quot;, &quot;match&quot;})
+    @Override
+    public IRubyObject op_match19(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L354">        return newShared(context.runtime).op_match19(context, other);</span>
+    }
+
+    @JRubyMethod(name = {&quot;[]&quot;, &quot;slice&quot;})
+    public IRubyObject op_aref(ThreadContext context, IRubyObject arg) {
+<span class="fc" id="L359">        return newShared(context.runtime).op_aref19(context, arg);</span>
+    }
+
+    @JRubyMethod(name = {&quot;[]&quot;, &quot;slice&quot;})
+    public IRubyObject op_aref(ThreadContext context, IRubyObject arg1, IRubyObject arg2) {
+<span class="fc" id="L364">        return newShared(context.runtime).op_aref19(context, arg1, arg2);</span>
+    }
+
+    @JRubyMethod(name = {&quot;length&quot;, &quot;size&quot;})
+    public IRubyObject length() {
+<span class="fc" id="L369">        return newShared(getRuntime()).length19();</span>
+    }
+
+    @JRubyMethod(name = &quot;empty?&quot;)
+    public IRubyObject empty_p(ThreadContext context) {
+<span class="fc" id="L374">        return newShared(context.runtime).empty_p(context);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject upcase(ThreadContext context) {
+<span class="fc" id="L379">        Ruby runtime = context.runtime;</span>
+        
+<span class="fc" id="L381">        return newSymbol(runtime, rubyStringFromString(runtime).upcase19(context).toString());</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject downcase(ThreadContext context) {
+<span class="fc" id="L386">        Ruby runtime = context.runtime;</span>
+        
+<span class="fc" id="L388">        return newSymbol(runtime, rubyStringFromString(runtime).downcase19(context).toString());</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject capitalize(ThreadContext context) {
+<span class="fc" id="L393">        Ruby runtime = context.runtime;</span>
+        
+<span class="fc" id="L395">        return newSymbol(runtime, rubyStringFromString(runtime).capitalize19(context).toString());</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject swapcase(ThreadContext context) {
+<span class="fc" id="L400">        Ruby runtime = context.runtime;</span>
+        
+<span class="fc" id="L402">        return newSymbol(runtime, rubyStringFromString(runtime).swapcase19(context).toString());</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject encoding(ThreadContext context) {
+<span class="fc" id="L407">        return context.runtime.getEncodingService().getEncoding(symbolBytes.getEncoding());</span>
+    }
+    
+    @JRubyMethod
+    public IRubyObject to_proc(ThreadContext context) {
+<span class="fc" id="L412">        StaticScope scope = context.runtime.getStaticScopeFactory().getDummyScope();</span>
+<span class="fc" id="L413">        final CallSite site = new FunctionalCachingCallSite(symbol);</span>
+<span class="fc" id="L414">        BlockBody body = new ContextAwareBlockBody(scope, Arity.OPTIONAL, BlockBody.SINGLE_RESTARG) {</span>
+            private IRubyObject yieldInner(ThreadContext context, RubyArray array, Block block) {
+<span class="fc bfc" id="L416" title="All 2 branches covered.">                if (array.isEmpty()) {</span>
+<span class="fc" id="L417">                    throw context.runtime.newArgumentError(&quot;no receiver given&quot;);</span>
+                }
+
+<span class="fc" id="L420">                IRubyObject self = array.shift(context);</span>
+
+<span class="fc" id="L422">                return site.call(context, self, self, array.toJavaArray(), block);</span>
+            }
+
+            @Override
+            public IRubyObject yield(ThreadContext context, IRubyObject[] args, IRubyObject self,
+                                     Binding binding, Type type, Block block) {
+<span class="fc" id="L428">                RubyProc.prepareArgs(context, type, block.arity(), args);</span>
+<span class="fc" id="L429">                return yieldInner(context, context.runtime.newArrayNoCopyLight(args), block);</span>
+            }
+
+            @Override
+            public IRubyObject yield(ThreadContext context, IRubyObject value,
+                    Binding binding, Block.Type type, Block block) {
+<span class="nc" id="L435">                return yieldInner(context, ArgsUtil.convertToRubyArray(context.runtime, value, false), block);</span>
+            }
+            
+            @Override
+            protected IRubyObject doYield(ThreadContext context, IRubyObject value, Binding binding, Type type) {
+<span class="fc" id="L440">                return yieldInner(context, ArgsUtil.convertToRubyArray(context.runtime, value, false), Block.NULL_BLOCK);</span>
+            }
+
+            @Override
+            protected IRubyObject doYield(ThreadContext context, IRubyObject[] args, IRubyObject self, Binding binding, Type type) {
+<span class="fc" id="L445">                return yieldInner(context, context.runtime.newArrayNoCopyLight(args), Block.NULL_BLOCK);</span>
+            }
+
+            @Override
+            public IRubyObject yieldSpecific(ThreadContext context, IRubyObject arg0, Binding binding, Block.Type type) {
+<span class="nc" id="L450">                return site.call(context, arg0, arg0);</span>
+            }
+
+            @Override
+            public IRubyObject yieldSpecific(ThreadContext context, IRubyObject arg0, IRubyObject arg1, Binding binding, Block.Type type) {
+<span class="nc" id="L455">                return site.call(context, arg0, arg0, arg1);</span>
+            }
+
+            @Override
+            public IRubyObject yieldSpecific(ThreadContext context, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Binding binding, Block.Type type) {
+<span class="nc" id="L460">                return site.call(context, arg0, arg0, arg1, arg2);</span>
+            }
+
+            @Override
+            public String getFile() {
+<span class="fc" id="L465">                return symbol;</span>
+            }
+
+            @Override
+            public int getLine() {
+<span class="fc" id="L470">                return -1;</span>
+            }
+        };
+
+<span class="fc" id="L474">        return RubyProc.newProc(context.runtime,</span>
+<span class="fc" id="L475">                                new Block(body, context.currentBinding()),</span>
+                                Block.Type.PROC);
+    }
+    
+    private static boolean isIdentStart(char c) {
+<span class="fc bfc" id="L480" title="All 10 branches covered.">        return ((c &gt;= 'a' &amp;&amp; c &lt;= 'z')|| (c &gt;= 'A' &amp;&amp; c &lt;= 'Z') || c == '_');</span>
+    }
+    
+    private static boolean isIdentChar(char c) {
+<span class="pc bpc" id="L484" title="2 of 14 branches missed.">        return ((c &gt;= 'a' &amp;&amp; c &lt;= 'z') || (c &gt;= '0' &amp;&amp; c &lt;= '9') || (c &gt;= 'A' &amp;&amp; c &lt;= 'Z') || c == '_');</span>
+    }
+    
+    private static boolean isIdentifier(String s) {
+<span class="pc bpc" id="L488" title="1 of 6 branches missed.">        if (s == null || s.length() &lt;= 0 || !isIdentStart(s.charAt(0))) return false;</span>
+
+<span class="fc bfc" id="L490" title="All 2 branches covered.">        for (int i = 1; i &lt; s.length(); i++) {</span>
+<span class="fc bfc" id="L491" title="All 2 branches covered.">            if (!isIdentChar(s.charAt(i))) return false;</span>
+        }
+        
+<span class="fc" id="L494">        return true;</span>
+    }
+    
+    /**
+     * is_special_global_name from parse.c.  
+     * @param s
+     * @return
+     */
+    private static boolean isSpecialGlobalName(String s) {
+<span class="pc bpc" id="L503" title="2 of 4 branches missed.">        if (s == null || s.length() &lt;= 0) return false;</span>
+
+<span class="fc" id="L505">        int length = s.length();</span>
+           
+<span class="fc bfc" id="L507" title="All 3 branches covered.">        switch (s.charAt(0)) {        </span>
+        case '~': case '*': case '$': case '?': case '!': case '@': case '/': case '\\':        
+        case ';': case ',': case '.': case '=': case ':': case '&lt;': case '&gt;': case '\&quot;':        
+        case '&amp;': case '`': case '\'': case '+': case '0':
+<span class="pc bpc" id="L511" title="1 of 2 branches missed.">            return length == 1;            </span>
+        case '-':
+<span class="pc bpc" id="L513" title="2 of 6 branches missed.">            return (length == 1 || (length == 2 &amp;&amp; isIdentChar(s.charAt(1))));</span>
+            
+        default:
+<span class="fc bfc" id="L516" title="All 2 branches covered.">            for (int i = 0; i &lt; length; i++) {</span>
+<span class="fc bfc" id="L517" title="All 2 branches covered.">                if (!Character.isDigit(s.charAt(i))) return false;</span>
+            }
+        }
+        
+<span class="fc" id="L521">        return true;</span>
+    }
+
+    private boolean isPrintable() {
+<span class="fc" id="L525">        Ruby runtime = getRuntime();</span>
+<span class="fc" id="L526">        int p = symbolBytes.getBegin();</span>
+<span class="fc" id="L527">        int end = p + symbolBytes.getRealSize();</span>
+<span class="fc" id="L528">        byte[]bytes = symbolBytes.getUnsafeBytes();</span>
+<span class="fc" id="L529">        Encoding enc = symbolBytes.getEncoding();</span>
+
+<span class="fc bfc" id="L531" title="All 2 branches covered.">        while (p &lt; end) {</span>
+<span class="fc" id="L532">            int c = codePoint(runtime, enc, bytes, p, end);</span>
+            
+<span class="fc bfc" id="L534" title="All 2 branches covered.">            if (!enc.isPrint(c)) return false;</span>
+            
+<span class="fc" id="L536">            p += codeLength(runtime, enc, c);</span>
+<span class="fc" id="L537">        }</span>
+        
+<span class="fc" id="L539">        return true;</span>
+    }
+
+    private static boolean isSymbolName19(String s) {
+<span class="pc bpc" id="L543" title="1 of 4 branches missed.">        if (s == null || s.length() &lt; 1) return false;</span>
+
+<span class="fc" id="L545">        int length = s.length();</span>
+<span class="fc" id="L546">        char c = s.charAt(0);</span>
+        
+<span class="pc bpc" id="L548" title="1 of 8 branches missed.">        return isSymbolNameCommon(s, c, length) || </span>
+                (c == '!' &amp;&amp; (length == 1 ||
+<span class="pc bpc" id="L550" title="1 of 4 branches missed.">                             (length == 2 &amp;&amp; (s.charAt(1) == '~' || s.charAt(1) == '=')))) ||</span>
+<span class="fc bfc" id="L551" title="All 2 branches covered.">                isSymbolLocal(s, c, length);</span>
+    }
+
+    private static boolean isSymbolNameCommon(String s, char c, int length) {        
+<span class="fc bfc" id="L555" title="All 11 branches covered.">        switch (c) {</span>
+        case '$':
+<span class="fc bfc" id="L557" title="All 4 branches covered.">            if (length &gt; 1 &amp;&amp; isSpecialGlobalName(s.substring(1))) return true;</span>
+
+<span class="fc" id="L559">            return isIdentifier(s.substring(1));</span>
+        case '@':
+<span class="fc" id="L561">            int offset = 1;</span>
+<span class="fc bfc" id="L562" title="All 4 branches covered.">            if (length &gt;= 2 &amp;&amp; s.charAt(1) == '@') offset++;</span>
+
+<span class="fc" id="L564">            return isIdentifier(s.substring(offset));</span>
+        case '&lt;':
+<span class="pc bpc" id="L566" title="2 of 10 branches missed.">            return (length == 1 || (length == 2 &amp;&amp; (s.equals(&quot;&lt;&lt;&quot;) || s.equals(&quot;&lt;=&quot;))) ||</span>
+<span class="pc bpc" id="L567" title="1 of 2 branches missed.">                    (length == 3 &amp;&amp; s.equals(&quot;&lt;=&gt;&quot;)));</span>
+        case '&gt;':
+<span class="pc bpc" id="L569" title="2 of 8 branches missed.">            return (length == 1) || (length == 2 &amp;&amp; (s.equals(&quot;&gt;&gt;&quot;) || s.equals(&quot;&gt;=&quot;)));</span>
+        case '=':
+<span class="fc bfc" id="L571" title="All 8 branches covered.">            return ((length == 2 &amp;&amp; (s.equals(&quot;==&quot;) || s.equals(&quot;=~&quot;))) ||</span>
+<span class="pc bpc" id="L572" title="1 of 2 branches missed.">                    (length == 3 &amp;&amp; s.equals(&quot;===&quot;)));</span>
+        case '*':
+<span class="pc bpc" id="L574" title="1 of 6 branches missed.">            return (length == 1 || (length == 2 &amp;&amp; s.equals(&quot;**&quot;)));</span>
+        case '+':
+<span class="pc bpc" id="L576" title="1 of 6 branches missed.">            return (length == 1 || (length == 2 &amp;&amp; s.equals(&quot;+@&quot;)));</span>
+        case '-':
+<span class="pc bpc" id="L578" title="3 of 6 branches missed.">            return (length == 1 || (length == 2 &amp;&amp; s.equals(&quot;-@&quot;)));</span>
+        case '|': case '^': case '&amp;': case '/': case '%': case '~': case '`':
+<span class="fc bfc" id="L580" title="All 2 branches covered.">            return length == 1;</span>
+        case '[':
+<span class="pc bpc" id="L582" title="1 of 4 branches missed.">            return s.equals(&quot;[]&quot;) || s.equals(&quot;[]=&quot;);</span>
+        }
+<span class="fc" id="L584">        return false;</span>
+    }
+
+    private static boolean isSymbolLocal(String s, char c, int length) {
+<span class="fc bfc" id="L588" title="All 2 branches covered.">        if (!isIdentStart(c)) return false;</span>
+
+<span class="pc bpc" id="L590" title="1 of 4 branches missed.">        boolean localID = (c &gt;= 'a' &amp;&amp; c &lt;= 'z');</span>
+<span class="fc" id="L591">        int last = 1;</span>
+
+<span class="fc bfc" id="L593" title="All 2 branches covered.">        for (; last &lt; length; last++) {</span>
+<span class="fc" id="L594">            char d = s.charAt(last);</span>
+
+<span class="fc bfc" id="L596" title="All 2 branches covered.">            if (!isIdentChar(d)) break;</span>
+        }
+
+<span class="fc bfc" id="L599" title="All 2 branches covered.">        if (last == length) return true;</span>
+<span class="pc bpc" id="L600" title="1 of 4 branches missed.">        if (localID &amp;&amp; last == length - 1) {</span>
+<span class="fc" id="L601">            char d = s.charAt(last);</span>
+
+<span class="pc bpc" id="L603" title="1 of 6 branches missed.">            return d == '!' || d == '?' || d == '=';</span>
+        }
+
+<span class="fc" id="L606">        return false;</span>
+    }
+    
+    @JRubyMethod(meta = true)
+    public static IRubyObject all_symbols(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L611">        return context.runtime.getSymbolTable().all_symbols();</span>
+    }
+    @Deprecated
+    public static IRubyObject all_symbols(IRubyObject recv) {
+<span class="nc" id="L615">        return recv.getRuntime().getSymbolTable().all_symbols();</span>
+    }
+
+    public static RubySymbol unmarshalFrom(UnmarshalStream input) throws java.io.IOException {
+<span class="fc" id="L619">        RubySymbol result = newSymbol(input.getRuntime(), RubyString.byteListToString(input.unmarshalString()));</span>
+        
+<span class="fc" id="L621">        input.registerLinkTarget(result);</span>
+        
+<span class="fc" id="L623">        return result;</span>
+    }
+
+    @Override
+    public Object toJava(Class target) {
+<span class="nc bnc" id="L628" title="All 4 branches missed.">        if (target == String.class || target == CharSequence.class) return symbol;</span>
+
+<span class="nc" id="L630">        return super.toJava(target);</span>
+    }
+
+    public static ByteList symbolBytesFromString(Ruby runtime, String internedSymbol) {
+<span class="fc" id="L634">        return new ByteList(ByteList.plain(internedSymbol), USASCIIEncoding.INSTANCE, false);</span>
+    }
+
+    public static final class SymbolTable {
+        static final int DEFAULT_INITIAL_CAPACITY = 1 &lt;&lt; 10; // *must* be power of 2!
+        static final int MAXIMUM_CAPACITY = 1 &lt;&lt; 16; // enough for a 64k buckets; if you need more than this, something's wrong
+        static final float DEFAULT_LOAD_FACTOR = 0.75f;
+        
+<span class="fc" id="L642">        private final ReentrantLock tableLock = new ReentrantLock();</span>
+        private volatile SymbolEntry[] symbolTable;
+        private int size;
+        private int threshold;
+        private final float loadFactor;
+        private final Ruby runtime;
+        
+<span class="fc" id="L649">        public SymbolTable(Ruby runtime) {</span>
+<span class="fc" id="L650">            this.runtime = runtime;</span>
+<span class="fc" id="L651">            this.loadFactor = DEFAULT_LOAD_FACTOR;</span>
+<span class="fc" id="L652">            this.threshold = (int)(DEFAULT_INITIAL_CAPACITY * DEFAULT_LOAD_FACTOR);</span>
+<span class="fc" id="L653">            this.symbolTable = new SymbolEntry[DEFAULT_INITIAL_CAPACITY];</span>
+<span class="fc" id="L654">        }</span>
+        
+        // note all fields are final -- rehash creates new entries when necessary.
+        // as documented in java.util.concurrent.ConcurrentHashMap.java, that will
+        // statistically affect only a small percentage (&lt; 20%) of entries for a given rehash.
+        static class SymbolEntry {
+            final int hash;
+            final String name;
+            final ByteList bytes;
+            final WeakReference&lt;RubySymbol&gt; symbol;
+            SymbolEntry next;
+            
+<span class="fc" id="L666">            SymbolEntry(int hash, String name, ByteList bytes, WeakReference&lt;RubySymbol&gt; symbol, SymbolEntry next) {</span>
+<span class="fc" id="L667">                this.hash = hash;</span>
+<span class="fc" id="L668">                this.name = name;</span>
+<span class="fc" id="L669">                this.bytes = bytes;</span>
+<span class="fc" id="L670">                this.symbol = symbol;</span>
+<span class="fc" id="L671">                this.next = next;</span>
+<span class="fc" id="L672">            }</span>
+        }
+
+        public RubySymbol getSymbol(String name) {
+<span class="fc" id="L676">            int hash = javaStringHashCode(name);</span>
+<span class="fc" id="L677">            RubySymbol symbol = null;</span>
+            
+<span class="fc bfc" id="L679" title="All 2 branches covered.">            for (SymbolEntry e = getEntryFromTable(symbolTable, hash); e != null; e = e.next) {</span>
+<span class="fc bfc" id="L680" title="All 2 branches covered.">                if (isSymbolMatch(name, hash, e)) {</span>
+<span class="fc" id="L681">                    symbol = e.symbol.get();</span>
+<span class="fc" id="L682">                    break;</span>
+                }
+            }
+            
+<span class="fc bfc" id="L686" title="All 2 branches covered.">            if (symbol == null) symbol = createSymbol(name, symbolBytesFromString(runtime, name), hash);</span>
+
+<span class="fc" id="L688">            return symbol;</span>
+        }
+
+        public RubySymbol getSymbol(ByteList bytes) {
+<span class="fc" id="L692">            RubySymbol symbol = null;</span>
+<span class="fc" id="L693">            int hash = javaStringHashCode(bytes);</span>
+
+<span class="fc bfc" id="L695" title="All 2 branches covered.">            for (SymbolEntry e = getEntryFromTable(symbolTable, hash); e != null; e = e.next) {</span>
+<span class="fc bfc" id="L696" title="All 2 branches covered.">                if (isSymbolMatch(bytes, hash, e)) {</span>
+<span class="fc" id="L697">                    symbol = e.symbol.get();</span>
+<span class="fc" id="L698">                    break;</span>
+                }
+            }
+
+<span class="fc bfc" id="L702" title="All 2 branches covered.">            if (symbol == null) {</span>
+<span class="fc" id="L703">                bytes = bytes.dup();</span>
+<span class="fc" id="L704">                symbol = createSymbol(bytes.toString(), bytes, hash);</span>
+            }
+
+<span class="fc" id="L707">            return symbol;</span>
+        }
+
+        public RubySymbol fastGetSymbol(String internedName) {
+<span class="fc" id="L711">            RubySymbol symbol = null;</span>
+
+<span class="fc bfc" id="L713" title="All 2 branches covered.">            for (SymbolEntry e = getEntryFromTable(symbolTable, internedName.hashCode()); e != null; e = e.next) {</span>
+<span class="fc bfc" id="L714" title="All 2 branches covered.">                if (isSymbolMatch(internedName, e)) {</span>
+<span class="fc" id="L715">                    symbol = e.symbol.get();</span>
+<span class="fc" id="L716">                    break;</span>
+                }
+            }
+            
+<span class="fc bfc" id="L720" title="All 2 branches covered.">            if (symbol == null) {</span>
+<span class="fc" id="L721">                symbol = fastCreateSymbol(internedName);</span>
+            }
+
+<span class="fc" id="L724">            return symbol;</span>
+        }
+
+        private static SymbolEntry getEntryFromTable(SymbolEntry[] table, int hash) {
+<span class="fc" id="L728">            return table[hash &amp; (table.length - 1)];</span>
+        }
+
+        private static boolean isSymbolMatch(String name, int hash, SymbolEntry entry) {
+<span class="fc bfc" id="L732" title="All 4 branches covered.">            return hash == entry.hash &amp;&amp; name.equals(entry.name);</span>
+        }
+
+        private static boolean isSymbolMatch(ByteList bytes, int hash, SymbolEntry entry) {
+<span class="fc bfc" id="L736" title="All 4 branches covered.">            return hash == entry.hash &amp;&amp; bytes.equals(entry.bytes);</span>
+        }
+
+        private static boolean isSymbolMatch(String internedName, SymbolEntry entry) {
+<span class="fc bfc" id="L740" title="All 2 branches covered.">            return internedName == entry.name;</span>
+        }
+
+        private RubySymbol createSymbol(final String name, final ByteList value, final int hash) {
+            ReentrantLock lock;
+<span class="fc" id="L745">            (lock = tableLock).lock();</span>
+            try {
+<span class="fc bfc" id="L747" title="All 2 branches covered.">                final SymbolEntry[] table = size &gt; threshold ? rehash() : symbolTable;</span>
+<span class="fc" id="L748">                final int index = hash &amp; (table.length - 1);</span>
+<span class="fc" id="L749">                RubySymbol symbol = null;</span>
+
+                // try lookup again under lock
+<span class="fc bfc" id="L752" title="All 2 branches covered.">                for (SymbolEntry last = null, curr = table[index]; curr != null; curr = curr.next) {</span>
+<span class="fc" id="L753">                    RubySymbol localSymbol = curr.symbol.get();</span>
+
+<span class="fc bfc" id="L755" title="All 2 branches covered.">                    if (localSymbol == null) {</span>
+<span class="fc" id="L756">                        removeDeadEntry(table, index, last, curr);</span>
+
+                        // if it's not our entry, proceed to next
+<span class="fc bfc" id="L759" title="All 4 branches covered.">                        if (hash != curr.hash || !name.equals(curr.name)) continue;</span>
+                    }
+
+                    // update last entry that was either not dead or not the one we want
+<span class="fc" id="L763">                    last = curr;</span>
+
+                    // if have a matching entry -- even if symbol has gone away -- exit the loop
+<span class="fc bfc" id="L766" title="All 4 branches covered.">                    if (hash == curr.hash &amp;&amp; name.equals(curr.name)) {</span>
+<span class="fc" id="L767">                        symbol = localSymbol;</span>
+<span class="fc" id="L768">                        break;</span>
+                    }
+                }
+
+<span class="fc bfc" id="L772" title="All 2 branches covered.">                if (symbol == null) {</span>
+<span class="fc" id="L773">                    String internedName = name.intern();</span>
+<span class="fc" id="L774">                    symbol = new RubySymbol(runtime, internedName, value);</span>
+<span class="fc" id="L775">                    table[index] = new SymbolEntry(hash, internedName, value, new WeakReference(symbol), table[index]);</span>
+<span class="fc" id="L776">                    size++;</span>
+                    // write-volatile
+<span class="fc" id="L778">                    symbolTable = table;</span>
+                }
+<span class="fc" id="L780">                return symbol;</span>
+            } finally {
+<span class="pc" id="L782">                lock.unlock();</span>
+            }
+        }
+
+        private void removeDeadEntry(SymbolEntry[] table, int index, SymbolEntry last, SymbolEntry e) {
+<span class="fc bfc" id="L787" title="All 2 branches covered.">            if (last == null) {</span>
+<span class="fc" id="L788">                table[index] = e.next; // shift head of bucket</span>
+            } else {
+<span class="fc" id="L790">                last.next = e.next; // remove collected bucket entry</span>
+            }
+
+<span class="fc" id="L793">            size--; // reduce current size because we lost one somewhere</span>
+<span class="fc" id="L794">        }</span>
+
+        private RubySymbol fastCreateSymbol(final String internedName) {
+            ReentrantLock lock;
+<span class="fc" id="L798">            (lock = tableLock).lock();</span>
+            try {
+<span class="fc bfc" id="L800" title="All 2 branches covered.">                final SymbolEntry[] table = size + 1 &gt; threshold ? rehash() : symbolTable;</span>
+<span class="fc" id="L801">                final int hash = internedName.hashCode();</span>
+<span class="fc" id="L802">                final int index = hash &amp; (table.length - 1);</span>
+<span class="fc" id="L803">                RubySymbol symbol = null;</span>
+
+                // try lookup again under lock
+<span class="fc bfc" id="L806" title="All 2 branches covered.">                for (SymbolEntry last = null, curr = table[index]; curr != null; curr = curr.next) {</span>
+<span class="fc" id="L807">                    RubySymbol localSymbol = curr.symbol.get();</span>
+
+<span class="fc bfc" id="L809" title="All 2 branches covered.">                    if (localSymbol == null) {</span>
+<span class="fc" id="L810">                        removeDeadEntry(table, index, last, curr);</span>
+
+                        // if it's not our entry, proceed to next
+<span class="fc bfc" id="L813" title="All 2 branches covered.">                        if (internedName != curr.name) continue;</span>
+                    }
+
+                    // update last entry that was either not dead or not the one we want
+<span class="fc" id="L817">                    last = curr;</span>
+
+                    // if have a matching entry -- even if symbol has gone away -- exit the loop
+<span class="fc bfc" id="L820" title="All 2 branches covered.">                    if (internedName == curr.name) {</span>
+<span class="fc" id="L821">                        symbol = localSymbol;</span>
+<span class="fc" id="L822">                        break;</span>
+                    }
+                }
+
+<span class="pc bpc" id="L826" title="1 of 2 branches missed.">                if (symbol == null) {</span>
+<span class="fc" id="L827">                    symbol = new RubySymbol(runtime, internedName);</span>
+<span class="fc" id="L828">                    table[index] = new SymbolEntry(hash, internedName, symbol.getBytes(), new WeakReference(symbol), table[index]);</span>
+<span class="fc" id="L829">                    size++;</span>
+                    // write-volatile
+<span class="fc" id="L831">                    symbolTable = table;</span>
+                }
+<span class="fc" id="L833">                return symbol;</span>
+            } finally {
+<span class="pc" id="L835">                lock.unlock();</span>
+            }
+        }
+        
+        public RubySymbol lookup(long id) {
+<span class="nc" id="L840">            SymbolEntry[] table = symbolTable;</span>
+<span class="nc" id="L841">            RubySymbol symbol = null;</span>
+            
+<span class="nc bnc" id="L843" title="All 2 branches missed.">            for (int i = table.length; --i &gt;= 0; ) {</span>
+<span class="nc bnc" id="L844" title="All 2 branches missed.">                for (SymbolEntry e = table[i]; e != null; e = e.next) {</span>
+<span class="nc" id="L845">                    symbol = e.symbol.get();</span>
+<span class="nc bnc" id="L846" title="All 4 branches missed.">                    if (symbol != null &amp;&amp; id == symbol.id) return symbol;</span>
+                }
+            }
+
+<span class="nc" id="L850">            return null;</span>
+        }
+        
+        public RubyArray all_symbols() {
+<span class="fc" id="L854">            SymbolEntry[] table = this.symbolTable;</span>
+<span class="fc" id="L855">            RubyArray array = runtime.newArray(this.size);</span>
+            RubySymbol symbol;
+
+<span class="fc bfc" id="L858" title="All 2 branches covered.">            for (int i = table.length; --i &gt;= 0; ) {</span>
+<span class="fc bfc" id="L859" title="All 2 branches covered.">                for (SymbolEntry e = table[i]; e != null; e = e.next) {</span>
+<span class="fc" id="L860">                    symbol = e.symbol.get();</span>
+<span class="fc bfc" id="L861" title="All 2 branches covered.">                    if (symbol != null) array.append(symbol);</span>
+                }
+            }
+<span class="fc" id="L864">            return array;</span>
+        }
+        
+        private SymbolEntry[] rehash() {
+<span class="fc" id="L868">            SymbolEntry[] oldTable = symbolTable;</span>
+<span class="fc" id="L869">            int oldCapacity = oldTable.length;</span>
+            
+<span class="pc bpc" id="L871" title="1 of 2 branches missed.">            if (oldCapacity &gt;= MAXIMUM_CAPACITY) return oldTable;</span>
+            
+<span class="fc" id="L873">            int newCapacity = oldCapacity &lt;&lt; 1;</span>
+<span class="fc" id="L874">            SymbolEntry[] newTable = new SymbolEntry[newCapacity];</span>
+<span class="fc" id="L875">            threshold = (int)(newCapacity * loadFactor);</span>
+<span class="fc" id="L876">            int sizeMask = newCapacity - 1;</span>
+            SymbolEntry e;
+<span class="fc bfc" id="L878" title="All 2 branches covered.">            for (int i = oldCapacity; --i &gt;= 0; ) {</span>
+                // We need to guarantee that any existing reads of old Map can
+                //  proceed. So we cannot yet null out each bin.
+<span class="fc" id="L881">                e = oldTable[i];</span>
+<span class="fc bfc" id="L882" title="All 2 branches covered.">                if (e == null) continue;</span>
+
+<span class="fc" id="L884">                SymbolEntry next = e.next;</span>
+<span class="fc" id="L885">                int idx = e.hash &amp; sizeMask;</span>
+
+                //  Single node on list, reuse it
+<span class="fc bfc" id="L888" title="All 2 branches covered.">                if (next == null) {</span>
+<span class="fc" id="L889">                    newTable[idx] = e;</span>
+                } else {
+                    // Reuse trailing consecutive sequence at same slot
+<span class="fc" id="L892">                    SymbolEntry lastRun = e;</span>
+<span class="fc" id="L893">                    int lastIdx = idx;</span>
+<span class="fc" id="L894">                    for (SymbolEntry last = next;</span>
+<span class="fc bfc" id="L895" title="All 2 branches covered.">                         last != null;</span>
+<span class="fc" id="L896">                         last = last.next) {</span>
+<span class="fc" id="L897">                        int k = last.hash &amp; sizeMask;</span>
+<span class="fc bfc" id="L898" title="All 2 branches covered.">                        if (k != lastIdx) {</span>
+<span class="fc" id="L899">                            lastIdx = k;</span>
+<span class="fc" id="L900">                            lastRun = last;</span>
+                        }
+                    }
+<span class="fc" id="L903">                    newTable[lastIdx] = lastRun;</span>
+
+                    // Clone all remaining nodes
+<span class="fc bfc" id="L906" title="All 2 branches covered.">                    for (SymbolEntry p = e; p != lastRun; p = p.next) {</span>
+<span class="fc" id="L907">                        int k = p.hash &amp; sizeMask;</span>
+<span class="fc" id="L908">                        SymbolEntry n = newTable[k];</span>
+<span class="fc" id="L909">                        newTable[k] = new SymbolEntry(p.hash, p.name, p.bytes, p.symbol, n);</span>
+                    }
+                }
+<span class="fc" id="L912">            }</span>
+<span class="fc" id="L913">            symbolTable = newTable;</span>
+<span class="fc" id="L914">            return newTable;</span>
+        }
+
+        // backwards-compatibility, but threadsafe now
+        @Deprecated
+        public RubySymbol lookup(String name) {
+<span class="nc" id="L920">            int hash = name.hashCode();</span>
+<span class="nc" id="L921">            SymbolEntry[] table = symbolTable;</span>
+<span class="nc" id="L922">            RubySymbol symbol = null;</span>
+
+<span class="nc" id="L924">            SymbolEntry e = table[hash &amp; (table.length - 1)];</span>
+<span class="nc bnc" id="L925" title="All 2 branches missed.">            while (e != null) {</span>
+<span class="nc bnc" id="L926" title="All 4 branches missed.">                if (hash == e.hash &amp;&amp; name.equals(e.name)) {</span>
+<span class="nc" id="L927">                    symbol = e.symbol.get();</span>
+<span class="nc bnc" id="L928" title="All 2 branches missed.">                    if (symbol != null) break;</span>
+                }
+<span class="nc" id="L930">                e = e.next;</span>
+            }
+
+<span class="nc" id="L933">            return symbol;</span>
+        }
+
+        // not so backwards-compatible here, but no one should have been
+        // calling this anyway.
+        @Deprecated
+        public void store(RubySymbol symbol) {
+<span class="nc" id="L940">            throw new UnsupportedOperationException();</span>
+        }
+    }
+
+    private static int javaStringHashCode(String str) {
+<span class="fc" id="L945">        return str.hashCode();</span>
+    }
+
+    private static int javaStringHashCode(ByteList iso8859) {
+<span class="fc" id="L949">        int h = 0;</span>
+<span class="fc" id="L950">        int length = iso8859.length();</span>
+<span class="pc bpc" id="L951" title="1 of 4 branches missed.">        if (h == 0 &amp;&amp; length &gt; 0) {</span>
+<span class="fc" id="L952">            byte val[] = iso8859.getUnsafeBytes();</span>
+<span class="fc" id="L953">            int begin = iso8859.begin();</span>
+
+<span class="fc bfc" id="L955" title="All 2 branches covered.">            for (int i = 0; i &lt; length; i++) {</span>
+<span class="fc" id="L956">                h = 31 * h + val[begin + i];</span>
+            }
+        }
+<span class="fc" id="L959">        return h;</span>
+    }
+
+    @Override
+    public boolean shouldMarshalEncoding() {
+<span class="fc bfc" id="L964" title="All 2 branches covered.">        return getMarshalEncoding() != USASCIIEncoding.INSTANCE;</span>
+    }
+
+    @Override
+    public Encoding getMarshalEncoding() {
+<span class="fc" id="L969">        return symbolBytes.getEncoding();</span>
+    }
+    
+    /**
+     * Properly stringify an object for the current &quot;raw bytes&quot; representation
+     * of a symbol.
+     * 
+     * Symbols are represented internally as a Java string, but decoded using
+     * raw bytes in ISO-8859-1 representation. This means they do not in their
+     * normal String form represent a readable Java string, but it does allow
+     * differently-encoded strings to map to different symbol objects.
+     * 
+     * See #736
+     * 
+     * @param object the object to symbolify
+     * @return the symbol string associated with the object's string representation
+     */
+    public static String objectToSymbolString(IRubyObject object) {
+<span class="fc bfc" id="L987" title="All 2 branches covered.">        if (object instanceof RubySymbol) {</span>
+<span class="fc" id="L988">            return ((RubySymbol)object).toString();</span>
+<span class="pc bpc" id="L989" title="1 of 2 branches missed.">        } else if (object instanceof RubyString) {</span>
+<span class="fc" id="L990">            return ((RubyString)object).getByteList().toString();</span>
+        } else {
+<span class="nc" id="L992">            return object.convertToString().getByteList().toString();</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

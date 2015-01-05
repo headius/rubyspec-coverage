@@ -1,0 +1,308 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LexerSource.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.lexer.yacc</a> &gt; <span class="el_source">LexerSource.java</span></div><h1>LexerSource.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2004-2006 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2005 Zach Dennis &lt;zdennis@mktec.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.lexer.yacc;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.List;
+import org.jcodings.Encoding;
+
+import org.jruby.parser.ParserConfiguration;
+import org.jruby.util.ByteList;
+import org.jruby.util.cli.Options;
+
+/**
+ * This class is what feeds the lexer.  It is primarily a wrapper around a
+ * Reader that can unread() data back onto the source.  Originally, I thought
+ * about using the PushBackReader to handle read/unread, but I realized that
+ * some extremely pathological case could overflow the pushback buffer.  Better
+ * safe than sorry.  I could have combined this implementation with a 
+ * PushbackBuffer, but the added complexity did not seem worth it.
+ * 
+ */
+public abstract class LexerSource {
+	
+    // The name of this source (e.g. a filename: foo.rb)
+    private final String sourceName;
+    
+    // Number of newlines read from the reader
+<span class="fc" id="L58">    protected int line = 0;</span>
+    
+    // Virtual line as specified by eval, etc...
+<span class="fc" id="L61">    protected int lineOffset = 0;</span>
+    
+    // How many bytes into the source are we?
+<span class="fc" id="L64">    protected int offset = 0;</span>
+    
+    // Store each line into this list if not null.
+    private List&lt;String&gt; list;
+    
+    // For 'list' and only populated if list is not null.
+    private StringBuilder lineBuffer;
+
+    // Last full line read.
+    private StringBuilder sourceLine;
+
+    protected ISourcePosition lastPosition;
+    private int startOfTokenOffset;
+
+<span class="fc" id="L78">    private boolean detailedSourcePositions = Options.PARSER_DETAILED_SOURCE_POSITIONS.load();</span>
+
+    /**
+     * Create our food-source for the lexer
+     * 
+     * @param sourceName is the file we are reading
+     */
+<span class="fc" id="L85">    protected LexerSource(String sourceName, List&lt;String&gt; list, int lineOffset) {</span>
+<span class="fc" id="L86">        this.sourceName = sourceName;</span>
+<span class="fc" id="L87">        this.lineOffset = lineOffset;</span>
+<span class="fc" id="L88">        this.list = list;</span>
+<span class="fc" id="L89">        lineBuffer = new StringBuilder(160);</span>
+<span class="fc" id="L90">        sourceLine = new StringBuilder(160);</span>
+
+<span class="pc bpc" id="L92" title="1 of 2 branches missed.">        if (detailedSourcePositions) {</span>
+<span class="nc" id="L93">            lastPosition = new DetailedSourcePosition(sourceName, line, 0, 0);</span>
+        } else {
+<span class="fc" id="L95">            lastPosition = new SimpleSourcePosition(sourceName, line);</span>
+        }
+<span class="fc" id="L97">    }</span>
+
+    /**
+     * What file are we lexing?
+     * @return the files name
+     */
+    public String getFilename() {
+<span class="fc" id="L104">    	return sourceName;</span>
+    }
+    
+    /**
+     * What line are we at?
+     * @return the line number 0...line_size-1
+     */
+    public int getLine() {
+<span class="fc" id="L112">        return line;</span>
+    }
+    
+    public int getVirtualLine() {
+<span class="fc" id="L116">        return line + lineOffset;</span>
+    }
+    
+    /**
+     * The location of the last byte we read from the source.
+     * 
+     * @return current location of source
+     */
+    public int getOffset() {
+<span class="pc bpc" id="L125" title="1 of 2 branches missed.">        return (offset &lt;= 0 ? 0 : offset);</span>
+    }
+
+    public void startOfToken() {
+<span class="pc bpc" id="L129" title="1 of 2 branches missed.">        if (detailedSourcePositions) {</span>
+<span class="nc" id="L130">            startOfTokenOffset = offset;</span>
+        }
+<span class="fc" id="L132">    }</span>
+
+    /**
+     * Where is the reader within the source {filename,row}
+     *
+     * Node that this method updates some internal state - it's not just a constructor
+     * 
+     * @return the current position
+     */
+    public ISourcePosition getPosition(ISourcePosition startPosition) {
+<span class="pc bpc" id="L142" title="1 of 2 branches missed.">        if (detailedSourcePositions) {</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">            if (startPosition == null) {</span>
+<span class="nc" id="L144">                lastPosition = new DetailedSourcePosition(getFilename(), getVirtualLine(), startOfTokenOffset, offset - startOfTokenOffset);</span>
+            } else {
+<span class="nc" id="L146">                DetailedSourcePosition detailedStartPosition = (DetailedSourcePosition) startPosition;</span>
+<span class="nc" id="L147">                lastPosition = new DetailedSourcePosition(getFilename(), getVirtualLine(), detailedStartPosition.getOffset(), 0); // offset - detailedStartPosition.getOffset()</span>
+<span class="nc" id="L148">                return lastPosition;</span>
+            }
+        } else {
+<span class="fc bfc" id="L151" title="All 2 branches covered.">            if (startPosition == null) {</span>
+                // Only give new position if we are at least one char past \n of previous line so that last tokens
+                // of previous line will not get associated with the next line.
+<span class="fc bfc" id="L154" title="All 4 branches covered.">                if (lastPosition.getLine() == getVirtualLine() || lastWasBeginOfLine()) {</span>
+<span class="fc" id="L155">                    return lastPosition;</span>
+                }
+
+<span class="fc" id="L158">                lastPosition = new SimpleSourcePosition(getFilename(), getVirtualLine());</span>
+            } else {
+<span class="fc" id="L160">                lastPosition = startPosition;</span>
+<span class="fc" id="L161">                return lastPosition;</span>
+            }
+        }
+
+<span class="fc" id="L165">        return lastPosition;</span>
+    }
+    
+    /**
+     * Where is the reader within the source {filename,row}
+     *
+     * Node that this method updates some internal state - it's not just a constructor
+     * 
+     * @return the current position
+     */
+    public ISourcePosition getPosition() {
+<span class="fc" id="L176">    	return getPosition(null);</span>
+    }
+
+    /**
+     * Create a source.
+     * 
+     * @param name the name of the source (e.g a filename: foo.rb)
+     * @param content the data of the source
+     * @return the new source
+     */
+    public static LexerSource getSource(String name, InputStream content, List&lt;String&gt; list,
+            ParserConfiguration configuration) {
+<span class="fc" id="L188">        return new InputStreamLexerSource(name, content, list, configuration.getLineNumber());</span>
+    }
+
+    public static LexerSource getSource(String name, byte[] content, List&lt;String&gt; list,
+            ParserConfiguration configuration) {
+<span class="fc" id="L193">        return new ByteArrayLexerSource(name, content, list, configuration.getLineNumber());</span>
+    }
+
+    private void captureFeatureNewline() {
+<span class="nc" id="L197">        StringBuilder temp = sourceLine;</span>
+        // Save sourceLine for error reporting to display line where error occurred
+<span class="nc" id="L199">        sourceLine = lineBuffer;</span>
+
+
+        // Ruby's OMG capture all source in a Hash feature
+        // Add each line to buffer when encountering newline or EOF for first time.
+<span class="nc bnc" id="L204" title="All 4 branches missed.">        if (list != null &amp;&amp; lineBuffer.length() &gt; 0) list.add(sourceLine.toString());</span>
+
+<span class="nc" id="L206">        temp.setLength(0);</span>
+<span class="nc" id="L207">        lineBuffer = temp;</span>
+<span class="nc" id="L208">    }</span>
+
+    protected void captureFeature(int c) {
+<span class="nc bnc" id="L211" title="All 3 branches missed.">        switch(c) {</span>
+            case '\n':
+<span class="nc" id="L213">                lineBuffer.append((char) c);</span>
+            case -1:
+<span class="nc" id="L215">                captureFeatureNewline();</span>
+<span class="nc" id="L216">                break;</span>
+            default:
+<span class="nc" id="L218">                lineBuffer.append((char) c);</span>
+                break;
+        }
+<span class="nc" id="L221">    }</span>
+
+    protected void uncaptureFeature(int c) {
+<span class="nc" id="L224">        int end = lineBuffer.length() - 1;</span>
+<span class="nc bnc" id="L225" title="All 4 branches missed.">        if (end &gt;= 0 &amp;&amp; lineBuffer.charAt(end) == c) {</span>
+<span class="nc" id="L226">            lineBuffer.deleteCharAt(end);</span>
+<span class="nc bnc" id="L227" title="All 6 branches missed.">        } else if (c == '\n' &amp;&amp; list != null &amp;&amp; !list.isEmpty()) {</span>
+<span class="nc" id="L228">            lineBuffer = new StringBuilder(list.remove(list.size() - 1));</span>
+<span class="nc" id="L229">            end = lineBuffer.length() - 1;</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">            if (lineBuffer.charAt(end) == '\n') {</span>
+<span class="nc" id="L231">                lineBuffer.deleteCharAt(end);</span>
+            }
+        }
+<span class="nc" id="L234">    }</span>
+
+    public String getCurrentLine() {
+<span class="fc" id="L237">        int errorLocation = lineBuffer.length() - 1;</span>
+
+        // Get rest of line. lineBuffer filled as side-effect...
+<span class="pc" id="L240">        try { readLineBytes(); } catch (IOException e) {}</span>
+
+
+<span class="fc" id="L243">        return sourceLine.toString() + makePointer(errorLocation);</span>
+    }
+
+    protected String makePointer(int length) {
+<span class="fc" id="L247">        StringBuilder buf = new StringBuilder();</span>
+
+<span class="fc bfc" id="L249" title="All 2 branches covered.">        for (int i = 0; i &lt; length; i++) {</span>
+<span class="fc" id="L250">            buf.append(' ');</span>
+        }
+<span class="fc" id="L252">        buf.append('^');</span>
+
+<span class="fc" id="L254">        return buf.toString();</span>
+    }
+
+    // Super slow codepoint reader when we detect non-asci chars
+    public int readCodepoint(int first, Encoding encoding) throws IOException {
+<span class="fc" id="L259">        int count = 0;</span>
+<span class="fc" id="L260">        byte[] value = new byte[6];</span>
+
+        // We know this will never be EOF
+<span class="fc" id="L263">        value[0] = (byte) first;</span>
+
+<span class="fc bfc" id="L265" title="All 2 branches covered.">        for (count = 1; count &lt; 6; count++) {</span>
+<span class="fc" id="L266">            int c = read();</span>
+<span class="pc bpc" id="L267" title="1 of 2 branches missed.">            if (c == RubyLexer.EOF) break; // Maybe we have enough bytes read to mbc at EOF.</span>
+<span class="fc" id="L268">            value[count] = (byte) c;</span>
+        }
+
+<span class="fc" id="L271">        int length = encoding.length(value, 0, count);</span>
+<span class="pc bpc" id="L272" title="1 of 2 branches missed.">        if (length &lt; 0) {</span>
+<span class="nc" id="L273">            return -2; // TODO: Hack</span>
+        }
+
+<span class="fc" id="L276">        int codepoint = encoding.mbcToCode(value, 0, length);</span>
+<span class="fc bfc" id="L277" title="All 2 branches covered.">        for (int i = count - 1; i &gt;= length; i--) {</span>
+<span class="fc" id="L278">            unread(value[i]);</span>
+        }
+
+<span class="fc" id="L281">        return codepoint;</span>
+    }
+
+    /**
+     * Match marker against input consumering lexer source as it goes...Unless it does not match
+     * then it reverts lexer source back to point when this method was invoked.
+     * 
+     * @param marker to match against
+     * @param indent eat any leading whitespace
+     * @param withNewline includes a check that marker is followed by newline or EOF
+     * @return true if marker matches...false otherwise
+     * @throws IOException if an error occurred reading from underlying IO source
+     */
+    public abstract boolean matchMarker(ByteList marker, boolean indent, boolean withNewline) throws IOException;
+
+    public abstract int read() throws IOException;
+    public abstract ByteList readUntil(char c) throws IOException;
+    public abstract ByteList readLineBytes() throws IOException;
+    public abstract int skipUntil(int c) throws IOException;
+    public abstract void unread(int c);
+    public abstract void unreadMany(CharSequence line);
+    public abstract boolean peek(int c) throws IOException;
+    public abstract boolean lastWasBeginOfLine();
+    public abstract boolean wasBeginOfLine();
+    public abstract InputStream getRemainingAsStream() throws IOException;
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

@@ -1,0 +1,469 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AbstractNumericMethodGenerator.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.ffi.jffi</a> &gt; <span class="el_source">AbstractNumericMethodGenerator.java</span></div><h1>AbstractNumericMethodGenerator.java</h1><pre class="source lang-java linenums">package org.jruby.ext.ffi.jffi;
+
+import com.kenai.jffi.*;
+import org.jruby.RubyClass;
+import org.jruby.RubyModule;
+import org.jruby.compiler.impl.SkinnyMethodAdapter;
+import org.jruby.ext.ffi.MemoryObject;
+import org.jruby.ext.ffi.NativeType;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.CallSite;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.callsite.CachingCallSite;
+import org.objectweb.asm.Label;
+
+import java.util.Arrays;
+
+import static org.jruby.util.CodegenUtils.*;
+import static org.objectweb.asm.Opcodes.ACC_FINAL;
+import static org.objectweb.asm.Opcodes.ACC_PUBLIC;
+
+/**
+ *
+ */
+<span class="nc" id="L26">abstract class AbstractNumericMethodGenerator implements JITMethodGenerator {</span>
+
+    public void generate(AsmClassBuilder builder, String functionName, JITSignature signature) {
+<span class="nc" id="L29">        Class[] params = new Class[4 + signature.getParameterCount()];</span>
+<span class="nc" id="L30">        params[0] = ThreadContext.class;</span>
+<span class="nc" id="L31">        params[1] = IRubyObject.class;</span>
+<span class="nc" id="L32">        params[2] = RubyModule.class;</span>
+<span class="nc" id="L33">        params[3] = String.class;</span>
+<span class="nc" id="L34">        Arrays.fill(params, 4, params.length, IRubyObject.class);</span>
+<span class="nc" id="L35">        SkinnyMethodAdapter mv = new SkinnyMethodAdapter(builder.getClassVisitor(),</span>
+                ACC_PUBLIC | ACC_FINAL, functionName,
+<span class="nc" id="L37">                sig(IRubyObject.class, params),</span>
+                null, null);
+
+<span class="nc" id="L40">        mv.start();</span>
+<span class="nc" id="L41">        generate(builder, mv, signature, 5);</span>
+<span class="nc" id="L42">        mv.visitMaxs(30, 30);</span>
+<span class="nc" id="L43">        mv.visitEnd();</span>
+<span class="nc" id="L44">    }</span>
+
+    public void generate(AsmClassBuilder builder, SkinnyMethodAdapter mv, JITSignature signature, int firstParam) {
+<span class="nc" id="L47">        final Class nativeIntType = getInvokerIntType();</span>
+<span class="nc" id="L48">        int pointerCount = 0;</span>
+
+<span class="nc" id="L50">        mv.aload(1); // load ThreadContext arg for result boxing</span>
+<span class="nc" id="L51">        mv.getstatic(p(JITNativeInvoker.class), &quot;invoker&quot;, ci(com.kenai.jffi.Invoker.class));</span>
+<span class="nc" id="L52">        mv.aload(0);</span>
+<span class="nc" id="L53">        mv.getfield(p(JITNativeInvoker.class), &quot;callContext&quot;, ci(CallContext.class));</span>
+<span class="nc" id="L54">        mv.aload(0);</span>
+<span class="nc" id="L55">        mv.getfield(p(JITNativeInvoker.class), &quot;functionAddress&quot;, ci(long.class));</span>
+
+        // [ stack now contains: Invoker, CalLContext, function address ]
+
+<span class="nc" id="L59">        int nextLocalVar = firstParam + signature.getParameterCount();</span>
+<span class="nc" id="L60">        final int heapPointerCountVar = nextLocalVar++;</span>
+<span class="nc" id="L61">        int firstMemoryVar = nextLocalVar; nextLocalVar += signature.getParameterCount();</span>
+<span class="nc" id="L62">        int nextMemoryVar = firstMemoryVar;</span>
+        
+        // Perform any generic data conversions on the parameters
+<span class="nc bnc" id="L65" title="All 2 branches missed.">        for (int i = 0; i &lt; signature.getParameterCount(); i++) {</span>
+<span class="nc bnc" id="L66" title="All 2 branches missed.">            if (signature.hasParameterConverter(i)) {</span>
+<span class="nc" id="L67">                mv.aload(0);</span>
+<span class="nc" id="L68">                mv.getfield(builder.getClassName(), builder.getParameterConverterFieldName(i), ci(NativeDataConverter.class));</span>
+<span class="nc" id="L69">                mv.aload(1);              // ThreadContext</span>
+<span class="nc" id="L70">                mv.aload(firstParam + i); // IRubyObject</span>
+<span class="nc" id="L71">                mv.invokevirtual(p(NativeDataConverter.class), &quot;toNative&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject.class));</span>
+<span class="nc" id="L72">                mv.astore(firstParam + i);</span>
+            }
+        }
+
+        // Load and un-box parameters
+<span class="nc bnc" id="L77" title="All 2 branches missed.">        for (int i = 0; i &lt; signature.getParameterCount(); i++) {</span>
+<span class="nc" id="L78">            final NativeType parameterType = signature.getParameterType(i);</span>
+<span class="nc" id="L79">            final int paramVar = i + firstParam;</span>
+<span class="nc" id="L80">            mv.aload(paramVar);</span>
+<span class="nc bnc" id="L81" title="All 15 branches missed.">            switch (parameterType) {</span>
+                case BOOL:
+<span class="nc" id="L83">                    unbox(mv, &quot;boolValue&quot;);</span>
+<span class="nc" id="L84">                    break;</span>
+
+                case CHAR:
+<span class="nc" id="L87">                    unbox(mv, &quot;s8Value&quot;);</span>
+<span class="nc" id="L88">                    break;</span>
+                
+                case UCHAR:
+<span class="nc" id="L91">                    unbox(mv, &quot;u8Value&quot;);</span>
+<span class="nc" id="L92">                    break;</span>
+                
+                case SHORT:
+<span class="nc" id="L95">                    unbox(mv, &quot;s16Value&quot;);</span>
+<span class="nc" id="L96">                    break;</span>
+                
+                case USHORT:
+<span class="nc" id="L99">                    unbox(mv, &quot;u16Value&quot;);</span>
+<span class="nc" id="L100">                    break;</span>
+                
+                case INT:
+<span class="nc" id="L103">                    unbox(mv, &quot;s32Value&quot;);</span>
+<span class="nc" id="L104">                    break;</span>
+                
+                case UINT:
+<span class="nc" id="L107">                    unbox(mv, &quot;u32Value&quot;);</span>
+<span class="nc" id="L108">                    break;</span>
+                    
+                case LONG:
+<span class="nc bnc" id="L111" title="All 2 branches missed.">                    if (Platform.getPlatform().longSize() == 32) {</span>
+<span class="nc" id="L112">                        unbox(mv, &quot;s32Value&quot;);</span>
+                    } else {
+<span class="nc" id="L114">                        unbox(mv, &quot;s64Value&quot;);</span>
+                    }
+<span class="nc" id="L116">                    break;</span>
+                
+                case ULONG:
+<span class="nc bnc" id="L119" title="All 2 branches missed.">                    if (Platform.getPlatform().longSize() == 32) {</span>
+<span class="nc" id="L120">                        unbox(mv, &quot;u32Value&quot;);</span>
+                    } else {
+<span class="nc" id="L122">                        unbox(mv, &quot;u64Value&quot;);</span>
+                    }
+<span class="nc" id="L124">                    break;</span>
+                
+                case LONG_LONG:
+<span class="nc" id="L127">                    unbox(mv, &quot;s64Value&quot;);</span>
+<span class="nc" id="L128">                    break;</span>
+                
+                case ULONG_LONG:
+<span class="nc" id="L131">                    unbox(mv, &quot;u64Value&quot;);</span>
+<span class="nc" id="L132">                    break;</span>
+                
+                case POINTER:
+                case BUFFER_IN:
+                case BUFFER_OUT:
+                case BUFFER_INOUT:
+                case STRING:
+                case TRANSIENT_STRING:
+<span class="nc" id="L140">                    Label direct = new Label();</span>
+<span class="nc" id="L141">                    Label next = new Label();</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">                    if (pointerCount++ &lt; 1) {</span>
+<span class="nc" id="L143">                        mv.pushInt(0);</span>
+<span class="nc" id="L144">                        mv.istore(heapPointerCountVar);</span>
+                    }
+
+<span class="nc" id="L147">                    Label haveMemoryIO = new Label();</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">                    switch (parameterType) {</span>
+                        case STRING:
+                        case TRANSIENT_STRING:
+<span class="nc" id="L151">                            mv.aload(1); // ThreadContext</span>
+<span class="nc" id="L152">                            mv.aload(0);</span>
+<span class="nc" id="L153">                            mv.getfield(p(JITNativeInvoker.class), builder.getParameterCallSiteName(i), ci(CachingCallSite.class));</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">                            mv.invokestatic(p(JITRuntime.class), </span>
+                                    parameterType == NativeType.STRING ? &quot;convertToStringMemoryIO&quot; : &quot;convertToTransientStringMemoryIO&quot;, 
+<span class="nc" id="L156">                                    sig(org.jruby.ext.ffi.MemoryIO.class, IRubyObject.class, ThreadContext.class, CachingCallSite.class));</span>
+<span class="nc" id="L157">                            break;</span>
+
+
+                        default:
+                            // First try fast lookup based solely on what java type the parameter is
+<span class="nc" id="L162">                            mv.invokestatic(p(JITRuntime.class), &quot;lookupPointerMemoryIO&quot;, sig(org.jruby.ext.ffi.MemoryIO.class, IRubyObject.class));</span>
+<span class="nc" id="L163">                            mv.astore(nextMemoryVar);</span>
+<span class="nc" id="L164">                            mv.aload(nextMemoryVar);</span>
+<span class="nc" id="L165">                            mv.ifnonnull(haveMemoryIO);</span>
+
+                            // Now coerce the parameter to a pointer, and get the MemoryIO from it
+<span class="nc" id="L168">                            mv.aload(1); // ThreadContext</span>
+<span class="nc" id="L169">                            mv.aload(paramVar);</span>
+<span class="nc" id="L170">                            mv.aload(0);</span>
+<span class="nc" id="L171">                            mv.getfield(p(JITNativeInvoker.class), builder.getParameterCallSiteName(i), ci(CachingCallSite.class));</span>
+<span class="nc" id="L172">                            mv.invokestatic(p(JITRuntime.class), &quot;convertToPointerMemoryIO&quot;, sig(org.jruby.ext.ffi.MemoryIO.class, ThreadContext.class, IRubyObject.class, CachingCallSite.class));</span>
+<span class="nc" id="L173">                            break;</span>
+                    }
+                   
+<span class="nc" id="L176">                    mv.astore(nextMemoryVar);</span>
+<span class="nc" id="L177">                    mv.label(haveMemoryIO);</span>
+                    
+<span class="nc" id="L179">                    mv.aload(nextMemoryVar);</span>
+<span class="nc" id="L180">                    mv.invokevirtual(p(org.jruby.ext.ffi.MemoryIO.class), &quot;isDirect&quot;, sig(boolean.class));</span>
+
+<span class="nc" id="L182">                    mv.iftrue(direct);</span>
+<span class="nc" id="L183">                    mv.iinc(heapPointerCountVar, 1);</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">                    if (int.class == nativeIntType) mv.iconst_0(); else mv.lconst_0();</span>
+<span class="nc" id="L185">                    mv.go_to(next);</span>
+
+<span class="nc" id="L187">                    mv.label(direct);</span>
+<span class="nc" id="L188">                    mv.aload(nextMemoryVar);</span>
+<span class="nc" id="L189">                    mv.invokevirtual(p(org.jruby.ext.ffi.MemoryIO.class), &quot;address&quot;, sig(long.class));</span>
+<span class="nc" id="L190">                    narrow(mv, long.class, nativeIntType);</span>
+<span class="nc" id="L191">                    nextMemoryVar++;</span>
+<span class="nc" id="L192">                    mv.label(next);</span>
+<span class="nc" id="L193">                    break;</span>
+
+                case FLOAT:
+<span class="nc" id="L196">                    unbox(mv, &quot;f32Value&quot;);</span>
+<span class="nc" id="L197">                    break;</span>
+
+                case DOUBLE:
+<span class="nc" id="L200">                    unbox(mv, &quot;f64Value&quot;);</span>
+<span class="nc" id="L201">                    break;</span>
+
+                default:
+<span class="nc" id="L204">                    throw new UnsupportedOperationException(&quot;unsupported parameter type &quot; + parameterType);</span>
+            }
+        }
+
+<span class="nc" id="L208">        Label indirect = new Label();</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">        if (pointerCount &gt; 0) {</span>
+<span class="nc" id="L210">            mv.iload(heapPointerCountVar);</span>
+<span class="nc" id="L211">            mv.ifne(indirect);</span>
+        }
+
+        // stack now contains [ Invoker, Function, int/long args ]
+<span class="nc" id="L215">        mv.invokevirtual(p(com.kenai.jffi.Invoker.class),</span>
+<span class="nc" id="L216">                getInvokerMethodName(signature),</span>
+<span class="nc" id="L217">                getInvokerSignature(signature.getParameterCount()));</span>
+
+
+<span class="nc" id="L220">        Label boxResult = new Label();</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">        if (pointerCount &gt; 0) mv.label(boxResult);</span>
+
+        // box up the raw int/long result
+<span class="nc" id="L224">        boxResult(mv, signature.getResultType());</span>
+<span class="nc" id="L225">        Label resultConversion = new Label();</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">        if (pointerCount &gt; 0) mv.label(resultConversion);</span>
+<span class="nc" id="L227">        emitResultConversion(mv, builder, signature);</span>
+<span class="nc" id="L228">        mv.areturn();</span>
+
+        // Handle non-direct pointer parameters
+<span class="nc bnc" id="L231" title="All 2 branches missed.">        if (pointerCount &gt; 0) {</span>
+<span class="nc" id="L232">            mv.label(indirect);</span>
+
+<span class="nc bnc" id="L234" title="All 2 branches missed.">            if (int.class == nativeIntType) {</span>
+<span class="nc" id="L235">                final int firstIntParam = nextLocalVar;</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">                for (int i = 0; i &lt; signature.getParameterCount() - 1; i++) {</span>
+<span class="nc" id="L237">                    mv.istore(firstIntParam + i);</span>
+                }
+
+<span class="nc" id="L240">                mv.i2l();</span>
+                // reload the rest and convert to long
+<span class="nc bnc" id="L242" title="All 2 branches missed.">                for (int i = signature.getParameterCount() - 2; i &gt;= 0; i--) {</span>
+<span class="nc" id="L243">                    mv.iload(firstIntParam + i);</span>
+<span class="nc" id="L244">                    mv.i2l();</span>
+                }
+            }
+
+<span class="nc" id="L248">            mv.iload(heapPointerCountVar);</span>
+
+            // Just load all the pointer parameters, conversion strategies and parameter info onto
+            // the operand stack, so the helper functions can sort them out.
+<span class="nc bnc" id="L252" title="All 2 branches missed.">            for (int i = 0, ptrIdx = 0; i &lt; signature.getParameterCount(); i++) {</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">                switch (signature.getParameterType(i)) {</span>
+                    case POINTER:
+                    case BUFFER_IN:
+                    case BUFFER_OUT:
+                    case BUFFER_INOUT:
+                    case STRING:
+                    case TRANSIENT_STRING:
+<span class="nc" id="L260">                        mv.aload(firstMemoryVar + ptrIdx);</span>
+<span class="nc" id="L261">                        mv.dup();</span>
+<span class="nc" id="L262">                        mv.invokestatic(p(JITRuntime.class), &quot;getMemoryIOStrategy&quot;, sig(PointerParameterStrategy.class, org.jruby.ext.ffi.MemoryIO.class));</span>
+<span class="nc" id="L263">                        mv.aload(0);</span>
+<span class="nc" id="L264">                        mv.getfield(p(JITNativeInvoker.class), &quot;parameterInfo&quot; + i, ci(ObjectParameterInfo.class));</span>
+<span class="nc" id="L265">                        ptrIdx++;</span>
+                        break;
+                }
+            }
+
+                
+<span class="nc" id="L271">            mv.invokevirtual(p(Invoker.class), &quot;invokeN&quot; + signature.getParameterCount(),</span>
+<span class="nc" id="L272">                    sig(long.class, makeObjectParamSignature(signature, pointerCount)));</span>
+<span class="nc" id="L273">            narrow(mv, long.class, nativeIntType);</span>
+<span class="nc" id="L274">            mv.go_to(boxResult);</span>
+        }
+<span class="nc" id="L276">    }</span>
+
+    private void emitResultConversion(SkinnyMethodAdapter mv, AsmClassBuilder builder, JITSignature signature) {
+<span class="nc bnc" id="L279" title="All 2 branches missed.">        if (signature.hasResultConverter()) {</span>
+<span class="nc" id="L280">            mv.aload(0); // [ result, this ]</span>
+<span class="nc" id="L281">            mv.getfield(builder.getClassName(), builder.getResultConverterFieldName(), ci(NativeDataConverter.class));</span>
+<span class="nc" id="L282">            mv.swap();   // [ converter, result ]</span>
+<span class="nc" id="L283">            mv.aload(1);</span>
+<span class="nc" id="L284">            mv.swap();   // [ converter, thread context, result ]</span>
+<span class="nc" id="L285">            mv.invokevirtual(p(NativeDataConverter.class), &quot;fromNative&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject.class));</span>
+        }
+<span class="nc" id="L287">    }</span>
+    
+    private static Class[] makeObjectParamSignature(JITSignature signature, int pointerCount) {
+<span class="nc" id="L290">        Class[] paramTypes = new Class[3 + signature.getParameterCount() + (pointerCount * 3)];</span>
+<span class="nc" id="L291">        int idx = 0;</span>
+
+<span class="nc" id="L293">        paramTypes[idx++] = CallContext.class;</span>
+<span class="nc" id="L294">        paramTypes[idx++] = long.class;</span>
+
+<span class="nc bnc" id="L296" title="All 2 branches missed.">        for (int i = 0; i &lt; signature.getParameterCount(); i++) {</span>
+<span class="nc" id="L297">            paramTypes[idx++] = long.class;</span>
+        }
+        
+<span class="nc" id="L300">        paramTypes[idx++] = int.class;</span>
+
+<span class="nc bnc" id="L302" title="All 2 branches missed.">        for (int i = 0; i &lt; pointerCount; i++) {</span>
+<span class="nc" id="L303">            paramTypes[idx++] = Object.class;</span>
+<span class="nc" id="L304">            paramTypes[idx++] = ObjectParameterStrategy.class;</span>
+<span class="nc" id="L305">            paramTypes[idx++] = ObjectParameterInfo.class;</span>
+        }
+
+<span class="nc" id="L308">        return paramTypes;</span>
+    }
+
+
+    private void unbox(SkinnyMethodAdapter mv, String method) {
+<span class="nc" id="L313">        mv.invokestatic(p(JITRuntime.class), getRuntimeMethod(method), sig(getInvokerIntType(), IRubyObject.class));</span>
+<span class="nc" id="L314">    }</span>
+
+    private String getRuntimeMethod(String method) {
+<span class="nc bnc" id="L317" title="All 2 branches missed.">        return method + (int.class == getInvokerIntType() ? &quot;32&quot; : &quot;64&quot;);</span>
+    }
+
+    private void boxResult(SkinnyMethodAdapter mv,
+                           String boxMethodName) {
+<span class="nc" id="L322">        mv.invokestatic(p(JITRuntime.class), boxMethodName,</span>
+<span class="nc" id="L323">                sig(IRubyObject.class, ThreadContext.class, getInvokerIntType()));</span>
+<span class="nc" id="L324">    }</span>
+
+    private void boxResult(SkinnyMethodAdapter mv, NativeType type) {
+<span class="nc bnc" id="L327" title="All 17 branches missed.">        switch (type) {</span>
+            case BOOL:
+<span class="nc" id="L329">                boxResult(mv, &quot;newBoolean&quot;);</span>
+<span class="nc" id="L330">                break;</span>
+
+            case CHAR:
+<span class="nc" id="L333">                boxResult(mv, &quot;newSigned8&quot;);</span>
+<span class="nc" id="L334">                break;</span>
+
+            case UCHAR:
+<span class="nc" id="L337">                boxResult(mv, &quot;newUnsigned8&quot;);</span>
+<span class="nc" id="L338">                break;</span>
+
+            case SHORT:
+<span class="nc" id="L341">                boxResult(mv, &quot;newSigned16&quot;);</span>
+<span class="nc" id="L342">                break;</span>
+
+            case USHORT:
+<span class="nc" id="L345">                boxResult(mv, &quot;newUnsigned16&quot;);</span>
+<span class="nc" id="L346">                break;</span>
+
+            case INT:
+<span class="nc" id="L349">                boxResult(mv, &quot;newSigned32&quot;);</span>
+<span class="nc" id="L350">                break;</span>
+
+            case UINT:
+<span class="nc" id="L353">                boxResult(mv, &quot;newUnsigned32&quot;);</span>
+<span class="nc" id="L354">                break;</span>
+
+            case LONG:
+<span class="nc bnc" id="L357" title="All 2 branches missed.">                if (Platform.getPlatform().longSize() == 32) {</span>
+<span class="nc" id="L358">                    boxResult(mv, &quot;newSigned32&quot;);</span>
+                } else {
+<span class="nc" id="L360">                    boxResult(mv, &quot;newSigned64&quot;);</span>
+                }
+<span class="nc" id="L362">                break;</span>
+
+            case ULONG:
+<span class="nc bnc" id="L365" title="All 2 branches missed.">                if (Platform.getPlatform().longSize() == 32) {</span>
+<span class="nc" id="L366">                    boxResult(mv, &quot;newUnsigned32&quot;);</span>
+                } else {
+<span class="nc" id="L368">                    boxResult(mv, &quot;newUnsigned64&quot;);</span>
+                }
+<span class="nc" id="L370">                break;</span>
+
+            case LONG_LONG:
+<span class="nc" id="L373">                boxResult(mv, &quot;newSigned64&quot;);</span>
+<span class="nc" id="L374">                break;</span>
+
+            case ULONG_LONG:
+<span class="nc" id="L377">                boxResult(mv, &quot;newUnsigned64&quot;);</span>
+<span class="nc" id="L378">                break;</span>
+                
+            case FLOAT:
+<span class="nc" id="L381">                boxResult(mv, &quot;newFloat32&quot;);</span>
+<span class="nc" id="L382">                break;</span>
+                
+            case DOUBLE:
+<span class="nc" id="L385">                boxResult(mv, &quot;newFloat64&quot;);</span>
+<span class="nc" id="L386">                break;</span>
+
+            case VOID:
+<span class="nc bnc" id="L389" title="All 2 branches missed.">                if (int.class == getInvokerIntType()) mv.pop(); else mv.pop2();</span>
+<span class="nc" id="L390">                mv.getfield(p(ThreadContext.class), &quot;nil&quot;, ci(IRubyObject.class));</span>
+<span class="nc" id="L391">                break;</span>
+
+            case POINTER:
+<span class="nc" id="L394">                boxResult(mv, &quot;newPointer&quot; + Platform.getPlatform().addressSize());</span>
+<span class="nc" id="L395">                break;</span>
+
+            case STRING:
+            case TRANSIENT_STRING:
+<span class="nc" id="L399">                boxResult(mv, &quot;newString&quot;);</span>
+<span class="nc" id="L400">                break;</span>
+
+
+            default:
+<span class="nc" id="L404">                throw new UnsupportedOperationException(&quot;native return type not supported: &quot; + type);</span>
+
+        }
+<span class="nc" id="L407">    }</span>
+
+    abstract String getInvokerMethodName(JITSignature signature);
+
+    abstract String getInvokerSignature(int parameterCount);
+
+    abstract Class getInvokerIntType();
+
+
+    public static boolean isPrimitiveInt(Class c) {
+<span class="nc bnc" id="L417" title="All 10 branches missed.">        return byte.class == c || char.class == c || short.class == c || int.class == c || boolean.class == c;</span>
+    }
+
+    public static final void widen(SkinnyMethodAdapter mv, Class from, Class to) {
+<span class="nc bnc" id="L421" title="All 6 branches missed.">        if (long.class == to &amp;&amp; long.class != from &amp;&amp; isPrimitiveInt(from)) {</span>
+<span class="nc" id="L422">            mv.i2l();</span>
+        }
+<span class="nc" id="L424">    }</span>
+
+    public static final void narrow(SkinnyMethodAdapter mv, Class from, Class to) {
+<span class="nc bnc" id="L427" title="All 4 branches missed.">        if (!from.equals(to) &amp;&amp; isPrimitiveInt(to)) {</span>
+<span class="nc bnc" id="L428" title="All 2 branches missed.">            if (long.class == from) {</span>
+<span class="nc" id="L429">                mv.l2i();</span>
+            }
+
+<span class="nc bnc" id="L432" title="All 2 branches missed.">            if (byte.class == to) {</span>
+<span class="nc" id="L433">                mv.i2b();</span>
+
+<span class="nc bnc" id="L435" title="All 2 branches missed.">            } else if (short.class == to) {</span>
+<span class="nc" id="L436">                mv.i2s();</span>
+
+<span class="nc bnc" id="L438" title="All 2 branches missed.">            } else if (char.class == to) {</span>
+<span class="nc" id="L439">                mv.i2c();</span>
+
+<span class="nc bnc" id="L441" title="All 2 branches missed.">            } else if (boolean.class == to) {</span>
+                // Ensure only 0x0 and 0x1 values are used for boolean
+<span class="nc" id="L443">                mv.iconst_1();</span>
+<span class="nc" id="L444">                mv.iand();</span>
+            }
+        }
+<span class="nc" id="L447">    }</span>
+    
+    protected static String[] buildSignatures(Class nativeIntClass, int maxParameters) {
+<span class="nc bnc" id="L450" title="All 2 branches missed.">        char sigChar = int.class == nativeIntClass ? 'I' : 'J';</span>
+        
+<span class="nc" id="L452">        String[] signatures = new String[maxParameters + 1];</span>
+<span class="nc bnc" id="L453" title="All 2 branches missed.">        for (int i = 0; i &lt; signatures.length; i++) {</span>
+            
+<span class="nc" id="L455">            StringBuilder sb = new StringBuilder();</span>
+            
+<span class="nc" id="L457">            sb.append('(').append(ci(CallContext.class)).append(ci(long.class));</span>
+            
+<span class="nc bnc" id="L459" title="All 2 branches missed.">            for (int n = 0; n &lt; i; n++) {</span>
+<span class="nc" id="L460">                sb.append(sigChar);</span>
+            }
+            
+<span class="nc" id="L463">            signatures[i] = sb.append(&quot;)&quot;).append(sigChar).toString();</span>
+        }
+        
+<span class="nc" id="L466">        return signatures;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

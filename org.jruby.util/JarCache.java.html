@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JarCache.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util</a> &gt; <span class="el_source">JarCache.java</span></div><h1>JarCache.java</h1><pre class="source lang-java linenums">package org.jruby.util;
+
+import static org.jruby.RubyFile.canonicalize;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.WeakHashMap;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
+
+
+/**
+  * Instances of JarCache provides jar index information.
+  *
+  * &lt;p&gt;
+  *     Implementation is threadsafe.
+  *
+  *     Since loading index information is O(jar-entries) we cache the snapshot in a WeakHashMap.
+  *     The implementation pays attention to lastModified timestamp of the jar and will invalidate
+  *     the cache entry if jar has been updated since the snapshot calculation.
+  * &lt;/p&gt;
+  */
+<span class="fc" id="L29">class JarCache {</span>
+    static class JarIndex {
+        private static final String ROOT_KEY = &quot;&quot;;
+
+        private final Map&lt;String, String[]&gt; cachedDirEntries;
+        private final JarFile jar;
+        private final long snapshotCalculated;
+
+<span class="nc" id="L37">        JarIndex(String jarPath) throws IOException {</span>
+<span class="nc" id="L38">            this.jar = new JarFile(jarPath);</span>
+<span class="nc" id="L39">            this.snapshotCalculated = new File(jarPath).lastModified();</span>
+
+<span class="nc" id="L41">            Map&lt;String, Set&lt;String&gt;&gt; mutableCache = new HashMap&lt;String, Set&lt;String&gt;&gt;();</span>
+
+            // Always have a root directory
+<span class="nc" id="L44">            mutableCache.put(ROOT_KEY, new HashSet&lt;String&gt;());</span>
+
+<span class="nc" id="L46">            Enumeration&lt;JarEntry&gt; entries = jar.entries();</span>
+<span class="nc bnc" id="L47" title="All 2 branches missed.">            while (entries.hasMoreElements()) {</span>
+<span class="nc" id="L48">                JarEntry entry = entries.nextElement();</span>
+<span class="nc" id="L49">                String path = entry.getName();</span>
+
+                int lastPathSep;
+<span class="nc bnc" id="L52" title="All 2 branches missed.">                while ((lastPathSep = path.lastIndexOf('/')) != -1) {</span>
+<span class="nc" id="L53">                    String dirPath = path.substring(0, lastPathSep); </span>
+
+<span class="nc bnc" id="L55" title="All 2 branches missed.">                    if (!mutableCache.containsKey(dirPath)) {</span>
+<span class="nc" id="L56">                        mutableCache.put(dirPath, new HashSet&lt;String&gt;());</span>
+                    }
+
+<span class="nc" id="L59">                    String entryPath = path.substring(lastPathSep + 1);</span>
+
+                    // &quot;&quot; is not really a child path, even if we see foo/ entry
+<span class="nc bnc" id="L62" title="All 2 branches missed.">                    if (entryPath.length() &gt; 0) {</span>
+<span class="nc" id="L63">                        mutableCache.get(dirPath).add(entryPath);</span>
+                    }
+
+<span class="nc" id="L66">                    path = dirPath;</span>
+<span class="nc" id="L67">                }</span>
+
+<span class="nc" id="L69">                mutableCache.get(ROOT_KEY).add(path);</span>
+<span class="nc" id="L70">            }</span>
+
+<span class="nc" id="L72">            Map&lt;String, String[]&gt; cachedDirEntries = new HashMap&lt;String, String[]&gt;();</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">            for (Map.Entry&lt;String, Set&lt;String&gt;&gt; entry : mutableCache.entrySet()) {</span>
+<span class="nc" id="L74">                cachedDirEntries.put(entry.getKey(), entry.getValue().toArray(new String[0]));</span>
+<span class="nc" id="L75">            }</span>
+
+<span class="nc" id="L77">            this.cachedDirEntries = Collections.unmodifiableMap(cachedDirEntries);</span>
+<span class="nc" id="L78">        }</span>
+
+        public JarEntry getJarEntry(String entryPath) {
+<span class="nc" id="L81">            return jar.getJarEntry(canonicalJarPath(entryPath));</span>
+        }
+
+        public String[] getDirEntries(String entryPath) {
+<span class="nc" id="L85">          return cachedDirEntries.get(canonicalJarPath(entryPath));</span>
+        }
+
+        public InputStream getInputStream(JarEntry entry) {
+          try {
+<span class="nc" id="L90">              return jar.getInputStream(entry);</span>
+<span class="nc" id="L91">          } catch (IOException ioError) {</span>
+<span class="nc" id="L92">              return null;</span>
+          }
+        }
+
+        public void release() {
+            try {
+<span class="nc" id="L98">                jar.close();</span>
+<span class="nc" id="L99">            } catch (IOException ioe) { }</span>
+<span class="nc" id="L100">        }</span>
+
+        public boolean isValid() {
+<span class="nc bnc" id="L103" title="All 2 branches missed.">            return new File(jar.getName()).lastModified() &lt;= snapshotCalculated;</span>
+        }
+
+        private static String canonicalJarPath(String path) {
+<span class="nc" id="L107">            String canonical = canonicalize(path);</span>
+
+            // When hitting root, canonicalize tends to add a slash (so &quot;foo/../bar&quot; becomes &quot;/bar&quot;),
+            // which doesn't quite work with jar entry paths, since most jar paths tends to be
+            // relative (e.g. foo.jar!foo/bar). So we fix it.
+<span class="nc bnc" id="L112" title="All 4 branches missed.">            if (canonical.startsWith(&quot;/&quot;) &amp;&amp; !path.startsWith(&quot;/&quot;)) {</span>
+<span class="nc" id="L113">                canonical = canonical.substring(1);</span>
+            }
+
+<span class="nc" id="L116">            return canonical;</span>
+        }
+    }
+
+<span class="fc" id="L120">    private final Map&lt;String, JarIndex&gt; indexCache = new WeakHashMap&lt;String, JarIndex&gt;();</span>
+
+    public JarIndex getIndex(String jarPath) {
+<span class="nc" id="L123">        String cacheKey = jarPath;</span>
+
+<span class="nc" id="L125">        synchronized (indexCache) {</span>
+<span class="nc" id="L126">            JarIndex index = indexCache.get(cacheKey);</span>
+
+            // If the index is invalid (jar has changed since snapshot was loaded)
+            // we can just treat it as a &quot;new&quot; index and cache the updated results.
+<span class="nc bnc" id="L130" title="All 4 branches missed.">            if (index != null &amp;&amp; !index.isValid()) {</span>
+<span class="nc" id="L131">                index.release();</span>
+<span class="nc" id="L132">                index = null;</span>
+            }
+
+<span class="nc bnc" id="L135" title="All 2 branches missed.">            if (index == null) {</span>
+                try { 
+<span class="nc" id="L137">                    index = new JarIndex(jarPath);</span>
+<span class="nc" id="L138">                    indexCache.put(cacheKey, index);</span>
+<span class="nc" id="L139">                } catch (IOException ioe) {</span>
+<span class="nc" id="L140">                    return null;</span>
+<span class="nc" id="L141">                }</span>
+            }
+
+<span class="nc" id="L144">            return index;</span>
+<span class="nc" id="L145">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

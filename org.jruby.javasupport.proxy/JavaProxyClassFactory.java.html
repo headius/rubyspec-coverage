@@ -1,0 +1,803 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JavaProxyClassFactory.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.javasupport.proxy</a> &gt; <span class="el_source">JavaProxyClassFactory.java</span></div><h1>JavaProxyClassFactory.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2006 Kresten Krab Thorup &lt;krab@gnu.org&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+
+package org.jruby.javasupport.proxy;
+
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.UndeclaredThrowableException;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
+import java.security.ProtectionDomain;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
+
+import org.jruby.Ruby;
+import org.jruby.util.cli.Options;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.FieldVisitor;
+import org.objectweb.asm.Label;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
+import org.objectweb.asm.commons.GeneratorAdapter;
+
+<span class="fc" id="L59">public class JavaProxyClassFactory {</span>
+<span class="fc" id="L60">    private static final Logger LOG = LoggerFactory.getLogger(&quot;JavaProxyClassFactory&quot;);</span>
+
+<span class="fc" id="L62">    private static final Type JAVA_LANG_CLASS_TYPE = Type.getType(Class.class);</span>
+
+<span class="fc" id="L64">    private static final Type[] EMPTY_TYPE_ARR = new Type[0];</span>
+
+<span class="fc" id="L66">    private static final org.objectweb.asm.commons.Method HELPER_GET_PROXY_CLASS_METHOD = org.objectweb.asm.commons.Method</span>
+<span class="fc" id="L67">            .getMethod(JavaProxyClass.class.getName()</span>
+                    + &quot; initProxyClass(java.lang.Class)&quot;);
+
+<span class="fc" id="L70">    private static final org.objectweb.asm.commons.Method CLASS_FORNAME_METHOD = org.objectweb.asm.commons.Method</span>
+<span class="fc" id="L71">            .getMethod(&quot;java.lang.Class forName(java.lang.String)&quot;);</span>
+
+    private static final String INVOCATION_HANDLER_FIELD_NAME = &quot;__handler&quot;;
+
+    private static final String PROXY_CLASS_FIELD_NAME = &quot;__proxy_class&quot;;
+
+<span class="fc" id="L77">    private static final Class[] EMPTY_CLASS_ARR = new Class[0];</span>
+
+<span class="fc" id="L79">    private static final Type INVOCATION_HANDLER_TYPE = Type</span>
+<span class="fc" id="L80">            .getType(JavaProxyInvocationHandler.class);</span>
+
+<span class="fc" id="L82">    private static final Type PROXY_METHOD_TYPE = Type</span>
+<span class="fc" id="L83">            .getType(JavaProxyMethod.class);</span>
+
+<span class="fc" id="L85">    private static final Type PROXY_CLASS_TYPE = Type</span>
+<span class="fc" id="L86">            .getType(JavaProxyClass.class);</span>
+
+<span class="fc" id="L88">    private static final org.objectweb.asm.commons.Method INVOCATION_HANDLER_INVOKE_METHOD = org.objectweb.asm.commons.Method</span>
+<span class="fc" id="L89">            .getMethod(&quot;java.lang.Object invoke(java.lang.Object, &quot;</span>
+<span class="fc" id="L90">                    + PROXY_METHOD_TYPE.getClassName()</span>
+                    + &quot;, java.lang.Object[])&quot;);
+
+<span class="fc" id="L93">    private static final Type PROXY_HELPER_TYPE = Type</span>
+<span class="fc" id="L94">            .getType(InternalJavaProxyHelper.class);</span>
+
+<span class="fc" id="L96">    private static final org.objectweb.asm.commons.Method PROXY_HELPER_GET_METHOD = org.objectweb.asm.commons.Method</span>
+<span class="fc" id="L97">            .getMethod(PROXY_METHOD_TYPE.getClassName() + &quot; initProxyMethod(&quot;</span>
+<span class="fc" id="L98">                    + JavaProxyClass.class.getName()</span>
+                    + &quot;,java.lang.String,java.lang.String,boolean)&quot;);
+
+<span class="fc" id="L101">    private static final Type JAVA_PROXY_TYPE = Type</span>
+<span class="fc" id="L102">            .getType(InternalJavaProxy.class);</span>
+
+    private static int counter;
+
+    private static Method defineClass_method; // statically initialized below
+    
+<span class="fc" id="L108">    public static final String PROXY_CLASS_FACTORY = Options.JI_PROXYCLASSFACTORY.load();    </span>
+
+    private static synchronized int nextId() {
+<span class="nc" id="L111">        return counter++;</span>
+    }
+    
+    public static JavaProxyClassFactory createFactory() {
+<span class="fc" id="L115">        JavaProxyClassFactory factory = null;</span>
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">        if (PROXY_CLASS_FACTORY != null) {</span>
+            try {
+<span class="nc" id="L118">                Class clazz = Class.forName(PROXY_CLASS_FACTORY);</span>
+<span class="nc" id="L119">                Object instance = clazz.newInstance();</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">                if (instance instanceof JavaProxyClassFactory) {</span>
+<span class="nc" id="L121">                    factory = (JavaProxyClassFactory) instance;</span>
+<span class="nc" id="L122">                    LOG.info(&quot;Created proxy class factory: &quot; + factory);</span>
+                } else {
+<span class="nc" id="L124">                    LOG.error(&quot;Invalid proxy class factory: &quot; + instance);</span>
+                }
+<span class="nc" id="L126">            } catch (ClassNotFoundException e) {</span>
+<span class="nc" id="L127">                LOG.error(&quot;ClassNotFoundException creating proxy class factory: &quot; + e);</span>
+<span class="nc" id="L128">            } catch (InstantiationException e) {</span>
+<span class="nc" id="L129">                LOG.error(&quot;InstantiationException creating proxy class factory: &quot; + e);</span>
+<span class="nc" id="L130">            } catch (IllegalAccessException e) {</span>
+<span class="nc" id="L131">                LOG.error(&quot;IllegalAccessException creating proxy class factory: &quot; + e);</span>
+<span class="nc" id="L132">            }</span>
+        }
+        
+<span class="pc bpc" id="L135" title="1 of 2 branches missed.">        if (factory == null) factory = new JavaProxyClassFactory();</span>
+        
+<span class="fc" id="L137">        return factory;</span>
+    }
+    
+    public JavaProxyClass newProxyClass(Ruby runtime, ClassLoader loader,
+            String targetClassName, Class superClass, Class[] interfaces, Set names)
+            throws InvocationTargetException {
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        if (loader == null) loader = JavaProxyClassFactory.class.getClassLoader();</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">        if (superClass == null) superClass = Object.class;</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (interfaces == null) interfaces = EMPTY_CLASS_ARR;</span>
+
+<span class="nc" id="L147">        Set key = new HashSet();</span>
+<span class="nc" id="L148">        key.add(superClass);</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">        for (int i = 0; i &lt; interfaces.length; i++) {</span>
+<span class="nc" id="L150">            key.add(interfaces[i]);</span>
+        }
+
+        // add (potentially) overridden names to the key.
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        if (names != null) key.addAll(names);</span>
+
+<span class="nc" id="L156">        Map&lt;Set&lt;?&gt;, JavaProxyClass&gt; proxyCache =</span>
+<span class="nc" id="L157">                runtime.getJavaSupport().getJavaProxyClassCache();</span>
+<span class="nc" id="L158">        JavaProxyClass proxyClass = proxyCache.get(key);</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">        if (proxyClass == null) {</span>
+
+<span class="nc bnc" id="L161" title="All 2 branches missed.">            if (targetClassName == null) {</span>
+                // We always prepend an org.jruby.proxy package to the beginning
+                // because java and javax packages are protected and signed
+                // jars prevent us generating new classes with those package
+                // names. See JRUBY-2439.
+<span class="nc" id="L166">                String pkg = proxyPackageName(superClass);</span>
+<span class="nc" id="L167">                String fullName = superClass.getName();</span>
+<span class="nc" id="L168">                int ix = fullName.lastIndexOf('.');</span>
+<span class="nc" id="L169">                String cName = fullName;</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">                if(ix != -1) {</span>
+<span class="nc" id="L171">                    cName = fullName.substring(ix+1);</span>
+                }
+<span class="nc" id="L173">                targetClassName = pkg + &quot;.&quot; + cName + &quot;$Proxy&quot; + nextId();</span>
+            }
+
+<span class="nc" id="L176">            validateArgs(runtime, targetClassName, superClass);</span>
+
+<span class="nc" id="L178">            Type selfType = Type.getType(&quot;L&quot; + toInternalClassName(targetClassName) + &quot;;&quot;);</span>
+<span class="nc" id="L179">            proxyClass = generate(loader, targetClassName, superClass,</span>
+<span class="nc" id="L180">                    interfaces, collectMethods(superClass, interfaces, names), selfType);</span>
+
+<span class="nc" id="L182">            proxyCache.put(key, proxyClass);</span>
+        }
+
+<span class="nc" id="L185">        return proxyClass;</span>
+    }
+
+    private JavaProxyClass generate(ClassLoader loader, String targetClassName,
+            Class superClass, Class[] interfaces, 
+            Map&lt;MethodKey, MethodData&gt; methods, Type selfType) {
+<span class="nc" id="L191">        ClassWriter cw = beginProxyClass(targetClassName, superClass, interfaces);</span>
+
+<span class="nc" id="L193">        GeneratorAdapter clazzInit = createClassInitializer(selfType, cw);</span>
+
+<span class="nc" id="L195">        generateConstructors(superClass, selfType, cw);</span>
+<span class="nc" id="L196">        generateGetProxyClass(selfType, cw);</span>
+<span class="nc" id="L197">        generateGetInvocationHandler(selfType, cw);</span>
+<span class="nc" id="L198">        generateProxyMethods(superClass, methods, selfType, cw, clazzInit);</span>
+
+        // finish class initializer
+<span class="nc" id="L201">        clazzInit.returnValue();</span>
+<span class="nc" id="L202">        clazzInit.endMethod();</span>
+
+        // end class
+<span class="nc" id="L205">        cw.visitEnd();</span>
+
+<span class="nc" id="L207">        Class clazz = invokeDefineClass(loader, selfType.getClassName(), cw.toByteArray());</span>
+
+        // trigger class initialization for the class
+        try {
+<span class="nc" id="L211">            Field proxy_class = clazz.getDeclaredField(PROXY_CLASS_FIELD_NAME);</span>
+<span class="nc" id="L212">            proxy_class.setAccessible(true);</span>
+<span class="nc" id="L213">            return (JavaProxyClass) proxy_class.get(clazz);</span>
+<span class="nc" id="L214">        } catch (Exception ex) {</span>
+<span class="nc" id="L215">            InternalError ie = new InternalError();</span>
+<span class="nc" id="L216">            ie.initCause(ex);</span>
+<span class="nc" id="L217">            throw ie;</span>
+        }
+    }
+
+    static {
+<span class="fc" id="L222">        AccessController.doPrivileged(new PrivilegedAction() {</span>
+            public Object run() {
+                try {
+<span class="fc" id="L225">                    defineClass_method = ClassLoader.class.getDeclaredMethod(</span>
+                            &quot;defineClass&quot;, new Class[] { String.class,
+                                    byte[].class, int.class, int.class, ProtectionDomain.class });
+<span class="nc" id="L228">                } catch (Exception e) {</span>
+                    // should not happen!
+<span class="nc" id="L230">                    e.printStackTrace();</span>
+<span class="nc" id="L231">                    return null;</span>
+<span class="fc" id="L232">                }</span>
+<span class="fc" id="L233">                defineClass_method.setAccessible(true);</span>
+<span class="fc" id="L234">                return null;</span>
+            }
+        });
+<span class="fc" id="L237">    }</span>
+
+    protected Class invokeDefineClass(ClassLoader loader, String className, byte[] data) {
+        try {
+            /* DEBUGGING
+             * try { FileOutputStream o = new
+             * FileOutputStream(targetClassName.replace( '/', '.') + &quot;.class&quot;);
+             * o.write(data); o.close(); } catch (IOException ex) {
+             * ex.printStackTrace(); }
+             */            
+<span class="nc" id="L247">            return (Class) defineClass_method.invoke(loader, new Object[] { className, data,</span>
+<span class="nc" id="L248">                            Integer.valueOf(0), Integer.valueOf(data.length), JavaProxyClassFactory.class.getProtectionDomain() });</span>
+<span class="nc" id="L249">        } catch (IllegalArgumentException e) {</span>
+            // TODO Auto-generated catch block
+<span class="nc" id="L251">            e.printStackTrace();</span>
+<span class="nc" id="L252">            return null;</span>
+<span class="nc" id="L253">        } catch (IllegalAccessException e) {</span>
+            // TODO Auto-generated catch block
+<span class="nc" id="L255">            e.printStackTrace();</span>
+<span class="nc" id="L256">            return null;</span>
+<span class="nc" id="L257">        } catch (InvocationTargetException e) {</span>
+            // TODO Auto-generated catch block
+<span class="nc" id="L259">            e.printStackTrace();</span>
+<span class="nc" id="L260">            return null;</span>
+        }
+    }
+
+    private ClassWriter beginProxyClass(final String className,
+            final Class superClass, final Class[] interfaces) {
+<span class="nc" id="L266">        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);</span>
+
+        // start class
+<span class="nc" id="L269">        cw.visit(Opcodes.V1_3, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SUPER, </span>
+<span class="nc" id="L270">                toInternalClassName(className), /*signature*/ null, </span>
+<span class="nc" id="L271">                toInternalClassName(superClass), </span>
+<span class="nc" id="L272">                interfaceNamesForProxyClass(interfaces));</span>
+
+<span class="nc" id="L274">        cw.visitField(Opcodes.ACC_PRIVATE, INVOCATION_HANDLER_FIELD_NAME,</span>
+<span class="nc" id="L275">                INVOCATION_HANDLER_TYPE.getDescriptor(), null, null).visitEnd();</span>
+
+<span class="nc" id="L277">        cw.visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC,</span>
+<span class="nc" id="L278">                PROXY_CLASS_FIELD_NAME, PROXY_CLASS_TYPE.getDescriptor(), null,</span>
+<span class="nc" id="L279">                null).visitEnd();</span>
+
+<span class="nc" id="L281">        return cw;</span>
+    }
+    
+    private String[] interfaceNamesForProxyClass(final Class[] interfaces) {
+<span class="nc" id="L285">        String[] interfaceNames = new String[interfaces.length + 1];</span>
+        
+<span class="nc bnc" id="L287" title="All 2 branches missed.">        for (int i = 0; i &lt; interfaces.length; i++) {</span>
+<span class="nc" id="L288">            interfaceNames[i] = toInternalClassName(interfaces[i]);</span>
+        }
+<span class="nc" id="L290">        interfaceNames[interfaces.length] = toInternalClassName(InternalJavaProxy.class);</span>
+        
+<span class="nc" id="L292">        return interfaceNames;</span>
+    }
+
+    private void generateProxyMethods(Class superClass, 
+            Map&lt;MethodKey, MethodData&gt; methods, Type selfType, ClassVisitor cw,
+            GeneratorAdapter clazzInit) {
+<span class="nc bnc" id="L298" title="All 2 branches missed.">        for (MethodData md: methods.values()) {</span>
+<span class="nc" id="L299">            Type superClassType = Type.getType(superClass);</span>
+<span class="nc" id="L300">            generateProxyMethod(selfType, superClassType, cw, clazzInit, md);</span>
+<span class="nc" id="L301">        }</span>
+<span class="nc" id="L302">    }</span>
+
+    private void generateGetInvocationHandler(Type selfType, ClassVisitor cw) {
+        // make getter for handler
+<span class="nc" id="L306">        GeneratorAdapter gh = new GeneratorAdapter(Opcodes.ACC_PUBLIC,</span>
+                new org.objectweb.asm.commons.Method(&quot;___getInvocationHandler&quot;,
+                        INVOCATION_HANDLER_TYPE, EMPTY_TYPE_ARR), null,
+                EMPTY_TYPE_ARR, cw);
+
+<span class="nc" id="L311">        gh.loadThis();</span>
+<span class="nc" id="L312">        gh.getField(selfType, INVOCATION_HANDLER_FIELD_NAME, INVOCATION_HANDLER_TYPE);</span>
+<span class="nc" id="L313">        gh.returnValue();</span>
+<span class="nc" id="L314">        gh.endMethod();</span>
+<span class="nc" id="L315">    }</span>
+
+    private void generateGetProxyClass(Type selfType, ClassVisitor cw) {
+        // make getter for proxy class
+<span class="nc" id="L319">        GeneratorAdapter gpc = new GeneratorAdapter(Opcodes.ACC_PUBLIC,</span>
+                new org.objectweb.asm.commons.Method(&quot;___getProxyClass&quot;,
+                        PROXY_CLASS_TYPE, EMPTY_TYPE_ARR), null,
+                EMPTY_TYPE_ARR, cw);
+<span class="nc" id="L323">        gpc.getStatic(selfType, PROXY_CLASS_FIELD_NAME, PROXY_CLASS_TYPE);</span>
+<span class="nc" id="L324">        gpc.returnValue();</span>
+<span class="nc" id="L325">        gpc.endMethod();</span>
+<span class="nc" id="L326">    }</span>
+
+    private void generateConstructors(Class superClass, Type selfType, ClassVisitor cw) {
+<span class="nc" id="L329">        Constructor[] cons = superClass.getDeclaredConstructors();</span>
+        
+<span class="nc bnc" id="L331" title="All 2 branches missed.">        for (int i = 0; i &lt; cons.length; i++) {</span>
+            // if the constructor is private, pretend it doesn't exist
+<span class="nc bnc" id="L333" title="All 2 branches missed.">            if (Modifier.isPrivate(cons[i].getModifiers())) continue;</span>
+
+            // otherwise, define everything and let some of them fail at invocation
+<span class="nc" id="L336">            generateConstructor(selfType, cons[i], cw);</span>
+        }
+<span class="nc" id="L338">    }</span>
+
+    private GeneratorAdapter createClassInitializer(Type selfType, ClassVisitor cw) {
+<span class="nc" id="L341">        GeneratorAdapter clazzInit = new GeneratorAdapter(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC,</span>
+                new org.objectweb.asm.commons.Method(&quot;&lt;clinit&gt;&quot;, Type.VOID_TYPE, EMPTY_TYPE_ARR), 
+                null, EMPTY_TYPE_ARR, cw);
+
+<span class="nc" id="L345">        clazzInit.visitLdcInsn(selfType.getClassName());</span>
+<span class="nc" id="L346">        clazzInit.invokeStatic(JAVA_LANG_CLASS_TYPE, CLASS_FORNAME_METHOD);</span>
+<span class="nc" id="L347">        clazzInit.invokeStatic(PROXY_HELPER_TYPE, HELPER_GET_PROXY_CLASS_METHOD);</span>
+<span class="nc" id="L348">        clazzInit.dup();</span>
+<span class="nc" id="L349">        clazzInit.putStatic(selfType, PROXY_CLASS_FIELD_NAME, PROXY_CLASS_TYPE);</span>
+        
+<span class="nc" id="L351">        return clazzInit;</span>
+    }
+
+    private void generateProxyMethod(Type selfType, Type superType,
+            ClassVisitor cw, GeneratorAdapter clazzInit, MethodData md) {
+<span class="nc bnc" id="L356" title="All 2 branches missed.">        if (!md.generateProxyMethod()) return;</span>
+
+<span class="nc" id="L358">        org.objectweb.asm.commons.Method m = md.getMethod();</span>
+<span class="nc" id="L359">        Type[] ex = toType(md.getExceptions());</span>
+
+<span class="nc" id="L361">        String field_name = &quot;__mth$&quot; + md.getName() + md.scrambledSignature();</span>
+
+        // create static private method field
+<span class="nc" id="L364">        FieldVisitor fv = cw.visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC, </span>
+<span class="nc" id="L365">                field_name, PROXY_METHOD_TYPE.getDescriptor(), null, null);</span>
+<span class="nc" id="L366">        fv.visitEnd();</span>
+
+<span class="nc" id="L368">        clazzInit.dup();</span>
+<span class="nc" id="L369">        clazzInit.push(m.getName());</span>
+<span class="nc" id="L370">        clazzInit.push(m.getDescriptor());</span>
+<span class="nc" id="L371">        clazzInit.push(md.isImplemented());</span>
+<span class="nc" id="L372">        clazzInit.invokeStatic(PROXY_HELPER_TYPE, PROXY_HELPER_GET_METHOD);</span>
+<span class="nc" id="L373">        clazzInit.putStatic(selfType, field_name, PROXY_METHOD_TYPE);</span>
+
+<span class="nc" id="L375">        org.objectweb.asm.commons.Method sm = new org.objectweb.asm.commons.Method(</span>
+<span class="nc" id="L376">                &quot;__super$&quot; + m.getName(), m.getReturnType(), m</span>
+<span class="nc" id="L377">                        .getArgumentTypes());</span>
+
+        //
+        // construct the proxy method
+        //
+<span class="nc" id="L382">        GeneratorAdapter ga = new GeneratorAdapter(Opcodes.ACC_PUBLIC, m, null,</span>
+                ex, cw);
+
+<span class="nc" id="L385">        ga.loadThis();</span>
+<span class="nc" id="L386">        ga.getField(selfType, INVOCATION_HANDLER_FIELD_NAME,</span>
+                INVOCATION_HANDLER_TYPE);
+
+        // if the method is extending something, then we have
+        // to test if the handler is initialized...
+
+<span class="nc bnc" id="L392" title="All 2 branches missed.">        if (md.isImplemented()) {</span>
+<span class="nc" id="L393">            ga.dup();</span>
+<span class="nc" id="L394">            Label ok = ga.newLabel();</span>
+<span class="nc" id="L395">            ga.ifNonNull(ok);</span>
+
+<span class="nc" id="L397">            ga.loadThis();</span>
+<span class="nc" id="L398">            ga.loadArgs();</span>
+<span class="nc" id="L399">            ga.invokeConstructor(superType, m);</span>
+<span class="nc" id="L400">            ga.returnValue();</span>
+<span class="nc" id="L401">            ga.mark(ok);</span>
+        }
+
+<span class="nc" id="L404">        ga.loadThis();</span>
+<span class="nc" id="L405">        ga.getStatic(selfType, field_name, PROXY_METHOD_TYPE);</span>
+
+<span class="nc bnc" id="L407" title="All 2 branches missed.">        if (m.getArgumentTypes().length == 0) {</span>
+            // load static empty array
+<span class="nc" id="L409">            ga.getStatic(JAVA_PROXY_TYPE, &quot;NO_ARGS&quot;, Type</span>
+<span class="nc" id="L410">                    .getType(Object[].class));</span>
+        } else {
+            // box arguments
+<span class="nc" id="L413">            ga.loadArgArray();</span>
+        }
+
+<span class="nc" id="L416">        Label before = ga.mark();</span>
+
+<span class="nc" id="L418">        ga.invokeInterface(INVOCATION_HANDLER_TYPE,</span>
+                INVOCATION_HANDLER_INVOKE_METHOD);
+
+<span class="nc" id="L421">        Label after = ga.mark();</span>
+
+<span class="nc" id="L423">        ga.unbox(m.getReturnType());</span>
+<span class="nc" id="L424">        ga.returnValue();</span>
+
+        // this is a simple rethrow handler
+<span class="nc" id="L427">        Label rethrow = ga.mark();</span>
+<span class="nc" id="L428">        ga.visitInsn(Opcodes.ATHROW);</span>
+
+<span class="nc bnc" id="L430" title="All 2 branches missed.">        for (int i = 0; i &lt; ex.length; i++) {</span>
+<span class="nc" id="L431">            ga.visitTryCatchBlock(before, after, rethrow, ex[i].getInternalName());</span>
+        }
+
+<span class="nc" id="L434">        ga.visitTryCatchBlock(before, after, rethrow, &quot;java/lang/Error&quot;);</span>
+<span class="nc" id="L435">        ga.visitTryCatchBlock(before, after, rethrow, &quot;java/lang/RuntimeException&quot;);</span>
+
+<span class="nc" id="L437">        Type thr = Type.getType(Throwable.class);</span>
+<span class="nc" id="L438">        Label handler = ga.mark();</span>
+<span class="nc" id="L439">        Type udt = Type.getType(UndeclaredThrowableException.class);</span>
+<span class="nc" id="L440">        int loc = ga.newLocal(thr);</span>
+<span class="nc" id="L441">        ga.storeLocal(loc, thr);</span>
+<span class="nc" id="L442">        ga.newInstance(udt);</span>
+<span class="nc" id="L443">        ga.dup();</span>
+<span class="nc" id="L444">        ga.loadLocal(loc, thr);</span>
+<span class="nc" id="L445">        ga.invokeConstructor(udt, org.objectweb.asm.commons.Method</span>
+<span class="nc" id="L446">                .getMethod(&quot;void &lt;init&gt;(java.lang.Throwable)&quot;));</span>
+<span class="nc" id="L447">        ga.throwException();</span>
+
+<span class="nc" id="L449">        ga.visitTryCatchBlock(before, after, handler, &quot;java/lang/Throwable&quot;);</span>
+
+<span class="nc" id="L451">        ga.endMethod();</span>
+
+        //
+        // construct the super-proxy method
+        //
+<span class="nc bnc" id="L456" title="All 2 branches missed.">        if (md.isImplemented()) {</span>
+<span class="nc" id="L457">            GeneratorAdapter ga2 = new GeneratorAdapter(Opcodes.ACC_PUBLIC, sm,</span>
+                    null, ex, cw);
+
+<span class="nc" id="L460">            ga2.loadThis();</span>
+<span class="nc" id="L461">            ga2.loadArgs();</span>
+<span class="nc" id="L462">            ga2.invokeConstructor(superType, m);</span>
+<span class="nc" id="L463">            ga2.returnValue();</span>
+<span class="nc" id="L464">            ga2.endMethod();</span>
+        }
+<span class="nc" id="L466">    }</span>
+
+    private Class[] generateConstructor(Type selfType, Constructor constructor, ClassVisitor cw) {
+<span class="nc" id="L469">        Class[] superConstructorParameterTypes = constructor.getParameterTypes();</span>
+<span class="nc" id="L470">        Class[] newConstructorParameterTypes = new Class[superConstructorParameterTypes.length + 1];</span>
+<span class="nc" id="L471">        System.arraycopy(superConstructorParameterTypes, 0,</span>
+                newConstructorParameterTypes, 0,
+                superConstructorParameterTypes.length);
+<span class="nc" id="L474">        newConstructorParameterTypes[superConstructorParameterTypes.length] = JavaProxyInvocationHandler.class;</span>
+
+<span class="nc" id="L476">        int access = Opcodes.ACC_PUBLIC;</span>
+<span class="nc" id="L477">        String name1 = &quot;&lt;init&gt;&quot;;</span>
+<span class="nc" id="L478">        String signature = null;</span>
+<span class="nc" id="L479">        Class[] superConstructorExceptions = constructor.getExceptionTypes();</span>
+
+<span class="nc" id="L481">        org.objectweb.asm.commons.Method super_m = new org.objectweb.asm.commons.Method(</span>
+<span class="nc" id="L482">                name1, Type.VOID_TYPE, toType(superConstructorParameterTypes));</span>
+<span class="nc" id="L483">        org.objectweb.asm.commons.Method m = new org.objectweb.asm.commons.Method(</span>
+<span class="nc" id="L484">                name1, Type.VOID_TYPE, toType(newConstructorParameterTypes));</span>
+
+<span class="nc" id="L486">        GeneratorAdapter ga = new GeneratorAdapter(access, m, signature,</span>
+<span class="nc" id="L487">                toType(superConstructorExceptions), cw);</span>
+
+<span class="nc" id="L489">        ga.loadThis();</span>
+<span class="nc" id="L490">        ga.loadArgs(0, superConstructorParameterTypes.length);</span>
+<span class="nc" id="L491">        ga.invokeConstructor(Type.getType(constructor.getDeclaringClass()),</span>
+                super_m);
+
+<span class="nc" id="L494">        ga.loadThis();</span>
+<span class="nc" id="L495">        ga.loadArg(superConstructorParameterTypes.length);</span>
+<span class="nc" id="L496">        ga.putField(selfType, INVOCATION_HANDLER_FIELD_NAME,</span>
+                INVOCATION_HANDLER_TYPE);
+
+        // do a void return
+<span class="nc" id="L500">        ga.returnValue();</span>
+<span class="nc" id="L501">        ga.endMethod();</span>
+        
+<span class="nc" id="L503">        return newConstructorParameterTypes;</span>
+    }
+
+    private static String toInternalClassName(Class clazz) {
+<span class="nc" id="L507">        return toInternalClassName(clazz.getName());</span>
+    }
+
+    private static String toInternalClassName(String name) {
+<span class="nc" id="L511">        return name.replace('.', '/');</span>
+    }
+
+    private static Type[] toType(Class[] parameterTypes) {
+<span class="nc" id="L515">        Type[] result = new Type[parameterTypes.length];</span>
+<span class="nc bnc" id="L516" title="All 2 branches missed.">        for (int i = 0; i &lt; result.length; i++) {</span>
+<span class="nc" id="L517">            result[i] = Type.getType(parameterTypes[i]);</span>
+        }
+<span class="nc" id="L519">        return result;</span>
+    }
+
+    private static Map&lt;MethodKey, MethodData&gt; collectMethods(Class superClass, Class[] interfaces, Set names) {
+<span class="nc" id="L523">        Map&lt;MethodKey, MethodData&gt; methods = new HashMap&lt;MethodKey, MethodData&gt;();</span>
+        
+<span class="nc" id="L525">        HashSet allClasses = new HashSet();</span>
+<span class="nc" id="L526">        addClass(allClasses, methods, superClass, names);</span>
+<span class="nc" id="L527">        addInterfaces(allClasses, methods, interfaces, names);</span>
+        
+<span class="nc" id="L529">        return methods;</span>
+    }
+
+    static class MethodData {
+<span class="nc" id="L533">        Set methods = new HashSet();</span>
+
+        final Method mostSpecificMethod;
+        final Class[] mostSpecificParameterTypes;
+
+<span class="nc" id="L538">        boolean hasPublicDecl = false;</span>
+
+<span class="nc" id="L540">        MethodData(Method method) {</span>
+<span class="nc" id="L541">            this.mostSpecificMethod = method;</span>
+<span class="nc" id="L542">            this.mostSpecificParameterTypes = mostSpecificMethod.getParameterTypes();</span>
+<span class="nc bnc" id="L543" title="All 2 branches missed.">            hasPublicDecl = method.getDeclaringClass().isInterface()</span>
+<span class="nc bnc" id="L544" title="All 2 branches missed.">                    || Modifier.isPublic(method.getModifiers());</span>
+<span class="nc" id="L545">        }</span>
+
+        public String scrambledSignature() {
+<span class="nc" id="L548">            StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L549">            Class[] parms = getParameterTypes();</span>
+<span class="nc bnc" id="L550" title="All 2 branches missed.">            for (int i = 0; i &lt; parms.length; i++) {</span>
+<span class="nc" id="L551">                sb.append('$');</span>
+<span class="nc" id="L552">                String name = parms[i].getName();</span>
+<span class="nc" id="L553">                name = name.replace('[', '1');</span>
+<span class="nc" id="L554">                name = name.replace('.', '_');</span>
+<span class="nc" id="L555">                name = name.replace(';', '2');</span>
+<span class="nc" id="L556">                sb.append(name);</span>
+            }
+<span class="nc" id="L558">            return sb.toString();</span>
+        }
+
+        public Class getDeclaringClass() {
+<span class="nc" id="L562">            return mostSpecificMethod.getDeclaringClass();</span>
+        }
+
+        public org.objectweb.asm.commons.Method getMethod() {
+<span class="nc" id="L566">            return new org.objectweb.asm.commons.Method(getName(), Type</span>
+<span class="nc" id="L567">                    .getType(getReturnType()), getType(getParameterTypes()));</span>
+        }
+
+        private Type[] getType(Class[] parameterTypes) {
+<span class="nc" id="L571">            Type[] result = new Type[parameterTypes.length];</span>
+<span class="nc bnc" id="L572" title="All 2 branches missed.">            for (int i = 0; i &lt; parameterTypes.length; i++) {</span>
+<span class="nc" id="L573">                result[i] = Type.getType(parameterTypes[i]);</span>
+            }
+<span class="nc" id="L575">            return result;</span>
+        }
+
+        private String getName() {
+<span class="nc" id="L579">            return mostSpecificMethod.getName();</span>
+        }
+
+        private Class[] getParameterTypes() {
+<span class="nc" id="L583">            return mostSpecificParameterTypes;</span>
+        }
+
+        public Class[] getExceptions() {
+
+<span class="nc" id="L588">            Set all = new HashSet();</span>
+
+<span class="nc" id="L590">            Iterator it = methods.iterator();</span>
+<span class="nc bnc" id="L591" title="All 2 branches missed.">            while (it.hasNext()) {</span>
+<span class="nc" id="L592">                Method m = (Method) it.next();</span>
+<span class="nc" id="L593">                Class[] ex = m.getExceptionTypes();</span>
+<span class="nc bnc" id="L594" title="All 2 branches missed.">                for (int i = 0; i &lt; ex.length; i++) {</span>
+<span class="nc" id="L595">                    Class exx = ex[i];</span>
+
+<span class="nc bnc" id="L597" title="All 2 branches missed.">                    if (all.contains(exx)) {</span>
+<span class="nc" id="L598">                        continue;</span>
+                    }
+
+<span class="nc" id="L601">                    boolean add = true;</span>
+<span class="nc" id="L602">                    Iterator it2 = all.iterator();</span>
+<span class="nc bnc" id="L603" title="All 2 branches missed.">                    while (it2.hasNext()) {</span>
+<span class="nc" id="L604">                        Class de = (Class) it2.next();</span>
+
+<span class="nc bnc" id="L606" title="All 2 branches missed.">                        if (de.isAssignableFrom(exx)) {</span>
+<span class="nc" id="L607">                            add = false;</span>
+<span class="nc" id="L608">                            break;</span>
+<span class="nc bnc" id="L609" title="All 2 branches missed.">                        } else if (exx.isAssignableFrom(de)) {</span>
+<span class="nc" id="L610">                            it2.remove();</span>
+<span class="nc" id="L611">                            add = true;</span>
+                        }
+
+<span class="nc" id="L614">                    }</span>
+
+<span class="nc bnc" id="L616" title="All 2 branches missed.">                    if (add) {</span>
+<span class="nc" id="L617">                        all.add(exx);</span>
+                    }
+                }
+<span class="nc" id="L620">            }</span>
+
+<span class="nc" id="L622">            return (Class[]) all.toArray(new Class[all.size()]);</span>
+        }
+
+        public boolean generateProxyMethod() {
+<span class="nc bnc" id="L626" title="All 4 branches missed.">            return !isFinal() &amp;&amp; !isPrivate();</span>
+        }
+
+        public void add(Method method) {
+<span class="nc" id="L630">            methods.add(method);</span>
+<span class="nc" id="L631">            hasPublicDecl |= Modifier.isPublic(method.getModifiers());</span>
+<span class="nc" id="L632">        }</span>
+
+        Class getReturnType() {
+<span class="nc" id="L635">            return mostSpecificMethod.getReturnType();</span>
+        }
+
+        boolean isFinal() {
+<span class="nc bnc" id="L639" title="All 2 branches missed.">            if (mostSpecificMethod.getDeclaringClass().isInterface()) {</span>
+<span class="nc" id="L640">                return false;</span>
+            }
+
+<span class="nc" id="L643">            int mod = mostSpecificMethod.getModifiers();</span>
+<span class="nc" id="L644">            return Modifier.isFinal(mod);</span>
+        }
+
+        boolean isPrivate() {
+<span class="nc bnc" id="L648" title="All 2 branches missed.">            if (mostSpecificMethod.getDeclaringClass().isInterface()) {</span>
+<span class="nc" id="L649">                return false;</span>
+            }
+
+<span class="nc" id="L652">            int mod = mostSpecificMethod.getModifiers();</span>
+<span class="nc" id="L653">            return Modifier.isPrivate(mod);</span>
+        }
+
+        boolean isImplemented() {
+<span class="nc bnc" id="L657" title="All 2 branches missed.">            if (mostSpecificMethod.getDeclaringClass().isInterface()) {</span>
+<span class="nc" id="L658">                return false;</span>
+            }
+
+<span class="nc" id="L661">            int mod = mostSpecificMethod.getModifiers();</span>
+<span class="nc bnc" id="L662" title="All 2 branches missed.">            return !Modifier.isAbstract(mod);</span>
+        }
+    }
+
+<span class="fc" id="L666">    static class MethodKey {</span>
+        private String name;
+
+        private Class[] arguments;
+
+<span class="nc" id="L671">        MethodKey(Method m) {</span>
+<span class="nc" id="L672">            this.name = m.getName();</span>
+<span class="nc" id="L673">            this.arguments = m.getParameterTypes();</span>
+<span class="nc" id="L674">        }</span>
+
+        @Override
+        public boolean equals(Object obj) {
+<span class="nc bnc" id="L678" title="All 2 branches missed.">            if (obj instanceof MethodKey) {</span>
+<span class="nc" id="L679">                MethodKey key = (MethodKey) obj;</span>
+
+<span class="nc bnc" id="L681" title="All 2 branches missed.">                return name.equals(key.name)</span>
+<span class="nc bnc" id="L682" title="All 2 branches missed.">                        &amp;&amp; Arrays.equals(arguments, key.arguments);</span>
+            }
+
+<span class="nc" id="L685">            return false;</span>
+        }
+
+        @Override
+        public int hashCode() {
+<span class="nc" id="L690">            return name.hashCode();</span>
+        }
+    }
+
+    private static void addInterfaces(Set allClasses, Map methods,
+            Class[] interfaces, Set names) {
+<span class="nc bnc" id="L696" title="All 2 branches missed.">        for (int i = 0; i &lt; interfaces.length; i++) {</span>
+<span class="nc" id="L697">            addInterface(allClasses, methods, interfaces[i], names);</span>
+        }
+<span class="nc" id="L699">    }</span>
+
+    private static void addInterface(Set allClasses, Map methods,
+            Class interfaze, Set names) {
+<span class="nc bnc" id="L703" title="All 2 branches missed.">        if (allClasses.add(interfaze)) {</span>
+<span class="nc" id="L704">            addMethods(methods, interfaze, names);</span>
+<span class="nc" id="L705">            addInterfaces(allClasses, methods, interfaze.getInterfaces(), names);</span>
+        }
+<span class="nc" id="L707">    }</span>
+
+    private static void addMethods(Map methods, Class classOrInterface, Set names) {
+<span class="nc" id="L710">        Method[] mths = classOrInterface.getDeclaredMethods();</span>
+<span class="nc bnc" id="L711" title="All 2 branches missed.">        for (int i = 0; i &lt; mths.length; i++) {</span>
+<span class="nc bnc" id="L712" title="All 4 branches missed.">            if (names == null || names.contains(mths[i].getName())) {</span>
+<span class="nc" id="L713">                addMethod(methods, mths[i]);</span>
+            }
+        }
+<span class="nc" id="L716">    }</span>
+
+    private static void addMethod(Map methods, Method method) {
+<span class="nc" id="L719">        int acc = method.getModifiers();</span>
+        
+<span class="nc bnc" id="L721" title="All 4 branches missed.">        if (Modifier.isStatic(acc) || Modifier.isPrivate(acc)) {</span>
+<span class="nc" id="L722">            return;</span>
+        }
+
+<span class="nc" id="L725">        MethodKey mk = new MethodKey(method);</span>
+<span class="nc" id="L726">        MethodData md = (MethodData) methods.get(mk);</span>
+<span class="nc bnc" id="L727" title="All 2 branches missed.">        if (md == null) {</span>
+<span class="nc" id="L728">            md = new MethodData(method);</span>
+<span class="nc" id="L729">            methods.put(mk, md);</span>
+        }
+<span class="nc" id="L731">        md.add(method);</span>
+<span class="nc" id="L732">    }</span>
+
+    private static void addClass(Set allClasses, Map methods, Class clazz, Set names) {
+<span class="nc bnc" id="L735" title="All 2 branches missed.">        if (allClasses.add(clazz)) {</span>
+<span class="nc" id="L736">            addMethods(methods, clazz, names);</span>
+<span class="nc" id="L737">            Class superClass = clazz.getSuperclass();</span>
+<span class="nc bnc" id="L738" title="All 2 branches missed.">            if (superClass != null) {</span>
+<span class="nc" id="L739">                addClass(allClasses, methods, superClass, names);</span>
+            }
+
+<span class="nc" id="L742">            addInterfaces(allClasses, methods, clazz.getInterfaces(), names);</span>
+        }
+<span class="nc" id="L744">    }</span>
+
+    private static void validateArgs(Ruby runtime, String targetClassName, Class superClass) {
+
+<span class="nc bnc" id="L748" title="All 2 branches missed.">        if (Modifier.isFinal(superClass.getModifiers())) {</span>
+<span class="nc" id="L749">            throw runtime.newTypeError(&quot;cannot extend final class &quot; + superClass.getName());</span>
+        }
+
+<span class="nc bnc" id="L752" title="All 2 branches missed.">        if(!hasPublicOrProtectedConstructors(superClass)) {</span>
+<span class="nc" id="L753">            throw runtime.newTypeError(&quot;class &quot; + superClass.getName() + &quot; doesn't have any public or private constructors&quot;);</span>
+        }
+
+<span class="nc" id="L756">        String targetPackage = packageName(targetClassName);</span>
+
+<span class="nc" id="L758">        String pkg = targetPackage.replace('.', '/');</span>
+<span class="nc bnc" id="L759" title="All 2 branches missed.">        if (pkg.startsWith(&quot;java&quot;)) {</span>
+<span class="nc" id="L760">            throw runtime.newTypeError(&quot;cannot add classes to package &quot; + pkg);</span>
+        }
+
+<span class="nc" id="L763">        Package p = Package.getPackage(pkg);</span>
+<span class="nc bnc" id="L764" title="All 2 branches missed.">        if (p != null) {</span>
+<span class="nc bnc" id="L765" title="All 2 branches missed.">            if (p.isSealed()) {</span>
+<span class="nc" id="L766">                throw runtime.newTypeError(&quot;package &quot; + p + &quot; is sealed&quot;);</span>
+            }
+        }
+<span class="nc" id="L769">    }</span>
+
+    private static boolean hasPublicOrProtectedConstructors(Class superClass) {
+<span class="nc" id="L772">        Constructor[] constructors = superClass.getDeclaredConstructors();</span>
+<span class="nc" id="L773">        boolean hasPublicOrProtectedConstructors = false;</span>
+<span class="nc bnc" id="L774" title="All 2 branches missed.">        for (Constructor constructor : constructors) {</span>
+<span class="nc bnc" id="L775" title="All 2 branches missed.">            if (Modifier.isPublic(constructor.getModifiers())</span>
+<span class="nc bnc" id="L776" title="All 2 branches missed.">                    || Modifier.isProtected(constructor.getModifiers())) {</span>
+<span class="nc" id="L777">                hasPublicOrProtectedConstructors = true;</span>
+            }
+        }
+<span class="nc" id="L780">        return hasPublicOrProtectedConstructors;</span>
+    }
+
+    private static String packageName(String clazzName) {
+<span class="nc" id="L784">        int idx = clazzName.lastIndexOf('.');</span>
+<span class="nc bnc" id="L785" title="All 2 branches missed.">        if (idx == -1) {</span>
+<span class="nc" id="L786">            return &quot;&quot;;</span>
+        } else {
+<span class="nc" id="L788">            return clazzName.substring(0, idx);</span>
+        }
+    }
+
+    private static String proxyPackageName(Class clazz) {
+<span class="nc" id="L793">        String clazzName = clazz.getName();</span>
+<span class="nc" id="L794">        int idx = clazzName.lastIndexOf('.');</span>
+<span class="nc bnc" id="L795" title="All 2 branches missed.">        if (idx == -1) {</span>
+<span class="nc" id="L796">            return &quot;org.jruby.proxy&quot;;</span>
+        } else {
+<span class="nc" id="L798">            return &quot;org.jruby.proxy.&quot; + clazzName.substring(0, idx);</span>
+        }
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

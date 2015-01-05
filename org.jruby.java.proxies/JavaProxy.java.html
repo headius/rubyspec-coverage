@@ -1,0 +1,522 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JavaProxy.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.java.proxies</a> &gt; <span class="el_source">JavaProxy.java</span></div><h1>JavaProxy.java</h1><pre class="source lang-java linenums">package org.jruby.java.proxies;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
+import java.lang.reflect.Array;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.text.MessageFormat;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyClass;
+import org.jruby.RubyHash;
+import org.jruby.RubyHash.Visitor;
+import org.jruby.RubyInteger;
+import org.jruby.RubyMethod;
+import org.jruby.RubyModule;
+import org.jruby.RubyObject;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.common.IRubyWarnings;
+import org.jruby.java.invokers.InstanceFieldGetter;
+import org.jruby.java.invokers.InstanceFieldSetter;
+import org.jruby.java.invokers.InstanceMethodInvoker;
+import org.jruby.java.invokers.MethodInvoker;
+import org.jruby.java.invokers.StaticFieldGetter;
+import org.jruby.java.invokers.StaticFieldSetter;
+import org.jruby.java.invokers.StaticMethodInvoker;
+import org.jruby.javasupport.Java;
+import org.jruby.javasupport.JavaClass;
+import org.jruby.javasupport.JavaMethod;
+import org.jruby.javasupport.JavaObject;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
+import org.jruby.util.CodegenUtils;
+import org.jruby.util.JRubyObjectInputStream;
+
+public class JavaProxy extends RubyObject {
+    private static final boolean DEBUG = false;
+    private JavaObject javaObject;
+    protected Object object;
+    
+    public JavaProxy(Ruby runtime, RubyClass klazz) {
+<span class="fc" id="L55">        super(runtime, klazz);</span>
+<span class="fc" id="L56">    }</span>
+
+    public JavaProxy(Ruby runtime, RubyClass klazz, Object object) {
+<span class="fc" id="L59">        super(runtime, klazz);</span>
+<span class="fc" id="L60">        this.object = object;</span>
+<span class="fc" id="L61">    }</span>
+
+    @Override
+    public Object dataGetStruct() {
+        // for investigating and eliminating code that causes JavaObject to live
+        if (DEBUG) Thread.dumpStack();
+<span class="nc" id="L67">        lazyJavaObject();</span>
+<span class="nc" id="L68">        return javaObject;</span>
+    }
+
+    @Override
+    public void dataWrapStruct(Object object) {
+<span class="nc" id="L73">        this.javaObject = (JavaObject)object;</span>
+<span class="nc" id="L74">        this.object = javaObject.getValue();</span>
+<span class="nc" id="L75">    }</span>
+
+    public Object getObject() {
+        // FIXME: Added this because marshal_spec seemed to reconstitute objects without calling dataWrapStruct
+        // this resulted in object being null after unmarshalling...
+<span class="pc bpc" id="L80" title="1 of 2 branches missed.">        if (object == null) {</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">            if (javaObject == null) {</span>
+<span class="nc" id="L82">                throw getRuntime().newRuntimeError(&quot;Java wrapper with no contents: &quot; + this.getMetaClass().getName());</span>
+            } else {
+<span class="nc" id="L84">                object = javaObject.getValue();</span>
+            }
+        }
+<span class="fc" id="L87">        return object;</span>
+    }
+
+    public void setObject(Object object) {
+<span class="fc" id="L91">        this.object = object;</span>
+<span class="fc" id="L92">    }</span>
+
+    private void lazyJavaObject() {
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        if (javaObject == null) {</span>
+<span class="nc" id="L96">            javaObject = JavaObject.wrap(getRuntime(), object);</span>
+        }
+<span class="nc" id="L98">    }</span>
+
+    @Override
+    public Class getJavaClass() {
+<span class="nc" id="L102">        return object.getClass();</span>
+    }
+    
+    public static RubyClass createJavaProxy(ThreadContext context) {
+<span class="fc" id="L106">        Ruby runtime = context.runtime;</span>
+        
+<span class="fc" id="L108">        RubyClass javaProxy = runtime.defineClass(&quot;JavaProxy&quot;, runtime.getObject(), new ObjectAllocator() {</span>
+            public IRubyObject allocate(Ruby runtime, RubyClass klazz) {
+<span class="nc" id="L110">                return new JavaProxy(runtime, klazz);</span>
+            }
+        });
+        
+<span class="fc" id="L114">        RubyClass singleton = javaProxy.getSingletonClass();</span>
+        
+<span class="fc" id="L116">        singleton.addReadWriteAttribute(context, &quot;java_class&quot;);</span>
+        
+<span class="fc" id="L118">        javaProxy.defineAnnotatedMethods(JavaProxy.class);</span>
+<span class="fc" id="L119">        javaProxy.includeModule(runtime.getModule(&quot;JavaProxyMethods&quot;));</span>
+        
+<span class="fc" id="L121">        return javaProxy;</span>
+    }
+
+    // framed for invokeSuper
+    @JRubyMethod(frame = true, meta = true)
+    public static IRubyObject inherited(ThreadContext context, IRubyObject recv, IRubyObject subclass) {
+<span class="fc" id="L127">        IRubyObject subJavaClass = Helpers.invoke(context, subclass, &quot;java_class&quot;);</span>
+<span class="pc bpc" id="L128" title="1 of 2 branches missed.">        if (subJavaClass.isNil()) {</span>
+<span class="fc" id="L129">            subJavaClass = Helpers.invoke(context, recv, &quot;java_class&quot;);</span>
+<span class="fc" id="L130">            Helpers.invoke(context, subclass, &quot;java_class=&quot;, subJavaClass);</span>
+        }
+<span class="fc" id="L132">        return Helpers.invokeSuper(context, recv, subclass, Block.NULL_BLOCK);</span>
+    }
+    
+    @JRubyMethod(meta = true)
+    public static IRubyObject singleton_class(IRubyObject recv) {
+<span class="nc" id="L137">        return ((RubyClass)recv).getSingletonClass();</span>
+    }
+    
+    @JRubyMethod(name = &quot;[]&quot;, meta = true, rest = true)
+    public static IRubyObject op_aref(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L142">        IRubyObject javaClass = Helpers.invoke(context, recv, &quot;java_class&quot;);</span>
+<span class="pc bpc" id="L143" title="1 of 2 branches missed.">        if (args.length &gt; 0) {</span>
+            // construct new array proxy (ArrayJavaProxy)
+<span class="nc" id="L145">            ArrayJavaProxyCreator ajpc = new ArrayJavaProxyCreator(context.runtime);</span>
+<span class="nc" id="L146">            ajpc.setup(context, javaClass, args);</span>
+<span class="nc" id="L147">            return ajpc;</span>
+        } else {
+<span class="fc" id="L149">            return Java.get_proxy_class(javaClass, Helpers.invoke(context, javaClass, &quot;array_class&quot;));</span>
+        }
+    }
+    
+    @JRubyMethod(meta = true)
+    public static IRubyObject new_array(ThreadContext context, IRubyObject recv, IRubyObject arg0) {
+<span class="nc" id="L155">        JavaClass javaClass = (JavaClass) Helpers.invoke(context, recv, &quot;java_class&quot;);</span>
+<span class="nc" id="L156">        RubyClass proxyClass = (RubyClass)recv;</span>
+<span class="nc" id="L157">        Class componentType = javaClass.javaClass();</span>
+        
+        // construct new array proxy (ArrayJavaProxy)
+<span class="nc" id="L160">        return new ArrayJavaProxy(context.runtime, proxyClass, Array.newInstance(componentType, (int)((RubyInteger)arg0.convertToInteger()).getLongValue()));</span>
+    }
+
+    @JRubyMethod(name = &quot;__persistent__=&quot;, meta = true)
+    public static IRubyObject persistent(IRubyObject cls, IRubyObject value) {
+<span class="nc" id="L165">        ((RubyClass)cls).getRealClass().setCacheProxy(value.isTrue());</span>
+<span class="nc" id="L166">        return value;</span>
+    }
+
+    @JRubyMethod(name = &quot;__persistent__&quot;, meta = true)
+    public static IRubyObject persistent(ThreadContext context, IRubyObject cls) {
+<span class="nc" id="L171">        return context.runtime.newBoolean(((RubyClass)cls).getRealClass().getCacheProxy());</span>
+    }
+
+    @Override
+    public IRubyObject initialize_copy(IRubyObject original) {
+<span class="nc" id="L176">        super.initialize_copy(original);</span>
+        // because we lazily init JavaObject in the data-wrapped slot, explicitly copy over the object
+<span class="nc" id="L178">        setObject(((JavaProxy)original).object);</span>
+<span class="nc" id="L179">        return this;</span>
+    }
+
+    private static Class&lt;?&gt; getJavaClass(ThreadContext context, RubyModule module) {
+        try {
+<span class="nc" id="L184">            IRubyObject jClass = Helpers.invoke(context, module, &quot;java_class&quot;);</span>
+
+<span class="nc bnc" id="L186" title="All 2 branches missed.">            return !(jClass instanceof JavaClass) ? null : ((JavaClass) jClass).javaClass();</span>
+<span class="nc" id="L187">        } catch (Exception e) {</span>
+            // clear $! since our &quot;java_class&quot; invoke above may have failed and set it
+<span class="nc" id="L189">            context.setErrorInfo(context.nil);</span>
+<span class="nc" id="L190">            return null;</span>
+        }
+    }
+    
+    /**
+     * Create a name/newname map of fields to be exposed as methods.
+     */
+    private static Map&lt;String, String&gt; getFieldListFromArgs(IRubyObject[] args) {
+<span class="nc" id="L198">        final Map&lt;String, String&gt; map = new HashMap&lt;String, String&gt;();</span>
+        
+        // Get map of all fields we want to define.  
+<span class="nc bnc" id="L201" title="All 2 branches missed.">        for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">            if (args[i] instanceof RubyHash) {</span>
+<span class="nc" id="L203">                ((RubyHash) args[i]).visitAll(new Visitor() {</span>
+                    @Override
+                    public void visit(IRubyObject key, IRubyObject value) {
+<span class="nc" id="L206">                        map.put(key.asString().toString(), value.asString().toString());</span>
+<span class="nc" id="L207">                    }</span>
+                });
+            } else {
+<span class="nc" id="L210">                String value = args[i].asString().toString();</span>
+<span class="nc" id="L211">                map.put(value, value);</span>
+            }
+        }
+        
+<span class="nc" id="L215">        return map;</span>
+    }
+
+    // Look through all mappings to find a match entry for this field
+    private static void installField(ThreadContext context, Map&lt;String, String&gt; fieldMap,
+            Field field, RubyModule module, boolean asReader, boolean asWriter) {
+<span class="nc" id="L221">        boolean isFinal = Modifier.isFinal(field.getModifiers());</span>
+
+<span class="nc bnc" id="L223" title="All 2 branches missed.">        for (Iterator&lt;Map.Entry&lt;String,String&gt;&gt; iter = fieldMap.entrySet().iterator(); iter.hasNext();) {</span>
+<span class="nc" id="L224">            Map.Entry&lt;String,String&gt; entry = iter.next();</span>
+<span class="nc" id="L225">            String key = entry.getKey();</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">            if (key.equals(field.getName())) {</span>
+<span class="nc bnc" id="L227" title="All 4 branches missed.">                if (Ruby.isSecurityRestricted() &amp;&amp; !Modifier.isPublic(field.getModifiers())) {</span>
+<span class="nc" id="L228">                    throw context.runtime.newSecurityError(&quot;Cannot change accessibility on fields in a restricted mode: field '&quot; + field.getName() + &quot;'&quot;);</span>
+                }
+                
+<span class="nc" id="L231">                String asName = entry.getValue();</span>
+
+<span class="nc bnc" id="L233" title="All 2 branches missed.">                if (Modifier.isStatic(field.getModifiers())) {</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">                    if (asReader) module.getSingletonClass().addMethod(asName, new StaticFieldGetter(key, module, field));</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">                    if (asWriter) {</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">                        if (isFinal) {</span>
+<span class="nc" id="L237">                            throw context.runtime.newSecurityError(&quot;Cannot change final field '&quot; + field.getName() + &quot;'&quot;);</span>
+                        }
+<span class="nc" id="L239">                        module.getSingletonClass().addMethod(asName + &quot;=&quot;, new StaticFieldSetter(key, module, field));</span>
+                    }
+                } else {
+<span class="nc bnc" id="L242" title="All 2 branches missed.">                    if (asReader) module.addMethod(asName, new InstanceFieldGetter(key, module, field));</span>
+<span class="nc bnc" id="L243" title="All 2 branches missed.">                    if (asWriter) {</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">                        if (isFinal) {</span>
+<span class="nc" id="L245">                            throw context.runtime.newSecurityError(&quot;Cannot change final field '&quot; + field.getName() + &quot;'&quot;);</span>
+                        }
+<span class="nc" id="L247">                        module.addMethod(asName + &quot;=&quot;, new InstanceFieldSetter(key, module, field));</span>
+                    }
+                }
+                
+<span class="nc" id="L251">                iter.remove();</span>
+<span class="nc" id="L252">                break;</span>
+            }
+<span class="nc" id="L254">        }</span>
+<span class="nc" id="L255">    }    </span>
+
+    private static void findFields(ThreadContext context, RubyModule topModule,
+            IRubyObject args[], boolean asReader, boolean asWriter) {
+<span class="nc" id="L259">        Map&lt;String, String&gt; fieldMap = getFieldListFromArgs(args);</span>
+        
+<span class="nc bnc" id="L261" title="All 2 branches missed.">        for (RubyModule module = topModule; module != null; module = module.getSuperClass()) {</span>
+<span class="nc" id="L262">            Class&lt;?&gt; javaClass = getJavaClass(context, module);</span>
+            
+            // Hit a non-java proxy class (included Modules can be a cause of this...skip)
+<span class="nc bnc" id="L265" title="All 2 branches missed.">            if (javaClass == null) continue;</span>
+
+<span class="nc" id="L267">            Field[] fields = JavaClass.getDeclaredFields(javaClass);</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">            for (int j = 0; j &lt; fields.length; j++) {</span>
+<span class="nc" id="L269">                installField(context, fieldMap, fields[j], module, asReader, asWriter);</span>
+            }
+        }
+        
+        // We could not find all of them print out first one (we could print them all?)
+<span class="nc bnc" id="L274" title="All 2 branches missed.">        if (!fieldMap.isEmpty()) {</span>
+<span class="nc" id="L275">            throw JavaClass.undefinedFieldError(context.runtime,</span>
+<span class="nc" id="L276">                    topModule.getName(), fieldMap.keySet().iterator().next());</span>
+        }
+
+<span class="nc" id="L279">    }</span>
+    
+    @JRubyMethod(meta = true, rest = true)
+    public static IRubyObject field_accessor(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L283">        findFields(context, (RubyModule) recv, args, true, true);</span>
+
+<span class="nc" id="L285">        return context.runtime.getNil();</span>
+    }
+
+    @JRubyMethod(meta = true, rest = true)
+    public static IRubyObject field_reader(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L290">        findFields(context, (RubyModule) recv, args, true, false);</span>
+
+<span class="nc" id="L292">        return context.runtime.getNil();</span>
+    }
+    
+    @JRubyMethod(meta = true, rest = true)
+    public static IRubyObject field_writer(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L297">        findFields(context, (RubyModule) recv, args, false, true);</span>
+
+<span class="nc" id="L299">        return context.runtime.getNil();</span>
+    }
+
+    @JRubyMethod(name = &quot;equal?&quot;)
+    public IRubyObject equal_p(ThreadContext context, IRubyObject other) {
+<span class="nc" id="L304">        Ruby runtime = context.runtime;</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">        if (other instanceof JavaProxy) {</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">            boolean equal = getObject() == ((JavaProxy)other).getObject();</span>
+<span class="nc" id="L307">            return runtime.newBoolean(equal);</span>
+        }
+<span class="nc" id="L309">        return runtime.getFalse();</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject java_send(ThreadContext context, IRubyObject rubyName) {
+<span class="nc" id="L314">        String name = rubyName.asJavaString();</span>
+<span class="nc" id="L315">        Ruby runtime = context.runtime;</span>
+        
+<span class="nc" id="L317">        JavaMethod method = new JavaMethod(runtime, getMethod(context, name));</span>
+<span class="nc" id="L318">        return method.invokeDirect(context, getObject());</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject java_send(ThreadContext context, IRubyObject rubyName, IRubyObject argTypes) {
+<span class="nc" id="L323">        String name = rubyName.asJavaString();</span>
+<span class="nc" id="L324">        RubyArray argTypesAry = argTypes.convertToArray();</span>
+<span class="nc" id="L325">        Ruby runtime = context.runtime;</span>
+
+<span class="nc bnc" id="L327" title="All 2 branches missed.">        if (argTypesAry.size() != 0) {</span>
+<span class="nc" id="L328">            Class[] argTypesClasses = (Class[])argTypesAry.toArray(new Class[argTypesAry.size()]);</span>
+<span class="nc" id="L329">            throw JavaMethod.newArgSizeMismatchError(runtime, argTypesClasses);</span>
+        }
+
+<span class="nc" id="L332">        JavaMethod method = new JavaMethod(runtime, getMethod(context, name));</span>
+<span class="nc" id="L333">        return method.invokeDirect(context, getObject());</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject java_send(ThreadContext context, IRubyObject rubyName, IRubyObject argTypes, IRubyObject arg0) {
+<span class="nc" id="L338">        String name = rubyName.asJavaString();</span>
+<span class="nc" id="L339">        RubyArray argTypesAry = argTypes.convertToArray();</span>
+<span class="nc" id="L340">        Ruby runtime = context.runtime;</span>
+
+<span class="nc bnc" id="L342" title="All 2 branches missed.">        if (argTypesAry.size() != 1) {</span>
+<span class="nc" id="L343">            Class[] argTypesClasses = (Class[])argTypesAry.toArray(new Class[argTypesAry.size()]);</span>
+<span class="nc" id="L344">            throw JavaMethod.newArgSizeMismatchError(runtime, argTypesClasses);</span>
+        }
+
+<span class="nc" id="L347">        Class argTypeClass = (Class)argTypesAry.eltInternal(0).toJava(Class.class);</span>
+
+<span class="nc" id="L349">        JavaMethod method = new JavaMethod(runtime, getMethod(context, name, argTypeClass));</span>
+<span class="nc" id="L350">        return method.invokeDirect(context, getObject(), arg0.toJava(argTypeClass));</span>
+    }
+
+    @JRubyMethod(required = 1, rest = true)
+    public IRubyObject java_send(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L355">        Ruby runtime = context.runtime;</span>
+        
+<span class="nc" id="L357">        String name = args[0].asJavaString();</span>
+<span class="nc" id="L358">        RubyArray argTypesAry = args[1].convertToArray();</span>
+<span class="nc" id="L359">        int argsLen = args.length - 2;</span>
+
+<span class="nc bnc" id="L361" title="All 2 branches missed.">        if (argTypesAry.size() != argsLen) {</span>
+<span class="nc" id="L362">            Class[] argTypesClasses = (Class[])argTypesAry.toArray(new Class[argTypesAry.size()]);</span>
+<span class="nc" id="L363">            throw JavaMethod.newArgSizeMismatchError(runtime, argTypesClasses);</span>
+        }
+
+<span class="nc" id="L366">        Class[] argTypesClasses = (Class[])argTypesAry.toArray(new Class[argsLen]);</span>
+
+<span class="nc" id="L368">        Object[] argsAry = new Object[argsLen];</span>
+<span class="nc bnc" id="L369" title="All 2 branches missed.">        for (int i = 0; i &lt; argsLen; i++) {</span>
+<span class="nc" id="L370">            argsAry[i] = args[i + 2].toJava(argTypesClasses[i]);</span>
+        }
+
+<span class="nc" id="L373">        JavaMethod method = new JavaMethod(runtime, getMethod(context, name, argTypesClasses));</span>
+<span class="nc" id="L374">        return method.invokeDirect(context, getObject(), argsAry);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject java_method(ThreadContext context, IRubyObject rubyName) {
+<span class="nc" id="L379">        String name = rubyName.asJavaString();</span>
+
+<span class="nc" id="L381">        return getRubyMethod(context, name);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject java_method(ThreadContext context, IRubyObject rubyName, IRubyObject argTypes) {
+<span class="nc" id="L386">        String name = rubyName.asJavaString();</span>
+<span class="nc" id="L387">        RubyArray argTypesAry = argTypes.convertToArray();</span>
+<span class="nc" id="L388">        Class[] argTypesClasses = (Class[])argTypesAry.toArray(new Class[argTypesAry.size()]);</span>
+
+<span class="nc" id="L390">        return getRubyMethod(context, name, argTypesClasses);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject marshal_dump() {
+<span class="nc bnc" id="L395" title="All 2 branches missed.">        if (Serializable.class.isAssignableFrom(object.getClass())) {</span>
+            try {
+<span class="nc" id="L397">                ByteArrayOutputStream baos = new ByteArrayOutputStream();</span>
+<span class="nc" id="L398">                ObjectOutputStream oos = new ObjectOutputStream(baos);</span>
+
+<span class="nc" id="L400">                oos.writeObject(object);</span>
+
+<span class="nc" id="L402">                return getRuntime().newString(new ByteList(baos.toByteArray()));</span>
+<span class="nc" id="L403">            } catch (IOException ioe) {</span>
+<span class="nc" id="L404">                throw getRuntime().newTypeError(&quot;Java type is not serializable: &quot; + ioe.getMessage());</span>
+            }
+        } else {
+<span class="nc" id="L407">            throw getRuntime().newTypeError(&quot;Java type is not serializable, cannot be marshaled &quot; + getJavaClass());</span>
+        }
+    }
+
+    @JRubyMethod
+    public IRubyObject marshal_load(ThreadContext context, IRubyObject str) {
+        try {
+<span class="nc" id="L414">            ByteList byteList = str.convertToString().getByteList();</span>
+<span class="nc" id="L415">            ByteArrayInputStream bais = new ByteArrayInputStream(byteList.getUnsafeBytes(), byteList.getBegin(), byteList.getRealSize());</span>
+<span class="nc" id="L416">            ObjectInputStream ois = new JRubyObjectInputStream(context.runtime, bais);</span>
+
+<span class="nc" id="L418">            object = ois.readObject();</span>
+
+<span class="nc" id="L420">            return this;</span>
+<span class="nc" id="L421">        } catch (IOException ioe) {</span>
+<span class="nc" id="L422">            throw context.runtime.newIOErrorFromException(ioe);</span>
+<span class="nc" id="L423">        } catch (ClassNotFoundException cnfe) {</span>
+<span class="nc" id="L424">            throw context.runtime.newTypeError(&quot;Class not found unmarshaling Java type: &quot; + cnfe.getLocalizedMessage());</span>
+        }
+    }
+
+    /**
+     * We override RubyBasicObject.inspectHashCode to be the identity hash of
+     * the contained object, so it remains consistent across wrappers.
+     *
+     * @return The identity hashcode of the wrapped object
+     */
+    @Override
+    protected int inspectHashCode() {
+<span class="nc" id="L436">        return System.identityHashCode(object);</span>
+    }
+
+    private Method getMethod(ThreadContext context, String name, Class... argTypes) {
+        try {
+<span class="nc" id="L441">            return getObject().getClass().getMethod(name, argTypes);</span>
+<span class="nc" id="L442">        } catch (NoSuchMethodException nsme) {</span>
+<span class="nc" id="L443">            throw JavaMethod.newMethodNotFoundError(context.runtime, getObject().getClass(), name + CodegenUtils.prettyParams(argTypes), name);</span>
+        }
+    }
+
+    private MethodInvoker getMethodInvoker(Method method) {
+<span class="nc bnc" id="L448" title="All 2 branches missed.">        if (Modifier.isStatic(method.getModifiers())) {</span>
+<span class="nc" id="L449">            return new StaticMethodInvoker(metaClass.getMetaClass(), method);</span>
+        } else {
+<span class="nc" id="L451">            return new InstanceMethodInvoker(metaClass, method);</span>
+        }
+    }
+
+    private RubyMethod getRubyMethod(ThreadContext context, String name, Class... argTypes) {
+<span class="nc" id="L456">        Method jmethod = getMethod(context, name, argTypes);</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">        if (Modifier.isStatic(jmethod.getModifiers())) {</span>
+<span class="nc" id="L458">            return RubyMethod.newMethod(metaClass.getSingletonClass(), CodegenUtils.prettyParams(argTypes), metaClass.getSingletonClass(), name, getMethodInvoker(jmethod), getMetaClass());</span>
+        } else {
+<span class="nc" id="L460">            return RubyMethod.newMethod(metaClass, CodegenUtils.prettyParams(argTypes), metaClass, name, getMethodInvoker(jmethod), this);</span>
+        }
+    }
+
+    @Override
+    public Object toJava(Class type) {
+<span class="nc" id="L466">        Object obj = getObject();</span>
+<span class="nc" id="L467">        Class cls = obj.getClass();</span>
+        
+<span class="nc bnc" id="L469" title="All 2 branches missed.">        if (type.isAssignableFrom(cls)) {</span>
+<span class="nc" id="L470">            return obj;</span>
+        }
+        
+<span class="nc" id="L473">        throw getRuntime().newTypeError(&quot;failed to coerce &quot; + cls.getName() + &quot; to &quot; + type.getName());</span>
+    }
+
+    @Override
+    public Object getVariable(int index) {
+<span class="nc" id="L478">        confirmCachedProxy(NONPERSISTENT_IVAR_MESSAGE);</span>
+<span class="nc" id="L479">        return super.getVariable(index);</span>
+    }
+
+    @Override
+    public void setVariable(int index, Object value) {
+<span class="nc" id="L484">        confirmCachedProxy(NONPERSISTENT_IVAR_MESSAGE);</span>
+<span class="nc" id="L485">        super.setVariable(index, value);</span>
+<span class="nc" id="L486">    }</span>
+
+    /** rb_singleton_class
+     *
+     * Note: this method is specialized for RubyFixnum, RubySymbol,
+     * RubyNil and RubyBoolean
+     *
+     * Will either return the existing singleton class for this
+     * object, or create a new one and return that.
+     */
+    @Override
+    public RubyClass getSingletonClass() {
+<span class="nc" id="L498">        confirmCachedProxy(NONPERSISTENT_SINGLETON_MESSAGE);</span>
+<span class="nc" id="L499">        return super.getSingletonClass();</span>
+    }
+
+    private void confirmCachedProxy(String message) {
+<span class="nc" id="L503">        RubyClass realClass = metaClass.getRealClass();</span>
+<span class="nc bnc" id="L504" title="All 2 branches missed.">        if (!realClass.getCacheProxy()) {</span>
+<span class="nc bnc" id="L505" title="All 2 branches missed.">            if (Java.OBJECT_PROXY_CACHE) {</span>
+<span class="nc" id="L506">                getRuntime().getWarnings().warnOnce(IRubyWarnings.ID.NON_PERSISTENT_JAVA_PROXY, MessageFormat.format(message, realClass));</span>
+            } else {
+<span class="nc" id="L508">                getRuntime().getWarnings().warn(MessageFormat.format(message, realClass));</span>
+<span class="nc" id="L509">                realClass.setCacheProxy(true);</span>
+<span class="nc" id="L510">                getRuntime().getJavaSupport().getObjectProxyCache().put(getObject(), this);</span>
+            }
+        }
+<span class="nc" id="L513">    }</span>
+    
+    public Object unwrap() {
+<span class="nc" id="L516">        return getObject();</span>
+    }
+
+    private static final String NONPERSISTENT_IVAR_MESSAGE = &quot;instance vars on non-persistent Java type {0} (http://wiki.jruby.org/Persistence)&quot;;
+    private static final String NONPERSISTENT_SINGLETON_MESSAGE = &quot;singleton on non-persistent Java type {0} (http://wiki.jruby.org/Persistence)&quot;;
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

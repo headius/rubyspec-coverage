@@ -1,0 +1,793 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyStruct.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyStruct.java</span></div><h1>RubyStruct.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002 Benoit Cerrina &lt;b.cerrina@wanadoo.fr&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2002-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2005 Charles O Nutter &lt;headius@headius.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.common.IRubyWarnings.ID;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.internal.runtime.methods.CallConfiguration;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.Visibility;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.marshal.MarshalStream;
+import org.jruby.runtime.marshal.UnmarshalStream;
+import org.jruby.util.ByteList;
+import org.jruby.util.IdUtil;
+
+import static org.jruby.RubyEnumerator.enumeratorizeWithSize;
+import static org.jruby.runtime.Helpers.invokedynamic;
+import static org.jruby.runtime.Visibility.PRIVATE;
+import static org.jruby.runtime.invokedynamic.MethodNames.HASH;
+import static org.jruby.RubyEnumerator.SizeFn;
+
+/**
+ * @author  jpetersen
+ */
+<span class="pc bpc" id="L63" title="1 of 2 branches missed.">@JRubyClass(name=&quot;Struct&quot;)</span>
+public class RubyStruct extends RubyObject {
+    private final IRubyObject[] values;
+
+    /**
+     * Constructor for RubyStruct.
+     * @param runtime
+     * @param rubyClass
+     */
+    private RubyStruct(Ruby runtime, RubyClass rubyClass) {
+<span class="fc" id="L73">        super(runtime, rubyClass);</span>
+        
+<span class="fc" id="L75">        int size = RubyNumeric.fix2int(getInternalVariable((RubyClass)rubyClass, &quot;__size__&quot;));</span>
+
+<span class="fc" id="L77">        values = new IRubyObject[size];</span>
+
+<span class="fc" id="L79">        Helpers.fillNil(values, runtime);</span>
+<span class="fc" id="L80">    }</span>
+
+    public static RubyClass createStructClass(Ruby runtime) {
+<span class="fc" id="L83">        RubyClass structClass = runtime.defineClass(&quot;Struct&quot;, runtime.getObject(), ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);</span>
+<span class="fc" id="L84">        runtime.setStructClass(structClass);</span>
+<span class="fc" id="L85">        structClass.setClassIndex(ClassIndex.STRUCT);</span>
+<span class="fc" id="L86">        structClass.includeModule(runtime.getEnumerable());</span>
+<span class="fc" id="L87">        structClass.defineAnnotatedMethods(RubyStruct.class);</span>
+
+<span class="fc" id="L89">        return structClass;</span>
+    }
+    
+    @Override
+    public ClassIndex getNativeClassIndex() {
+<span class="fc" id="L94">        return ClassIndex.STRUCT;</span>
+    }
+    
+    private static IRubyObject getInternalVariable(RubyClass type, String internedName) {
+<span class="fc" id="L98">        RubyClass structClass = type.getRuntime().getStructClass();</span>
+        IRubyObject variable;
+
+<span class="pc bpc" id="L101" title="2 of 4 branches missed.">        while (type != null &amp;&amp; type != structClass) {</span>
+<span class="fc bfc" id="L102" title="All 2 branches covered.">            if ((variable = (IRubyObject)type.getInternalVariable(internedName)) != null) {</span>
+<span class="fc" id="L103">                return variable;</span>
+            }
+
+<span class="fc" id="L106">            type = type.getSuperClass();</span>
+        }
+
+<span class="nc" id="L109">        return type.getRuntime().getNil();</span>
+    }
+
+    private RubyClass classOf() {
+<span class="fc bfc" id="L113" title="All 2 branches covered.">        return getMetaClass() instanceof MetaClass ? getMetaClass().getSuperClass() : getMetaClass();</span>
+    }
+
+    private void modify() {
+<span class="fc" id="L117">        testFrozen();</span>
+<span class="fc" id="L118">    }</span>
+    
+    @JRubyMethod
+    public RubyFixnum hash(ThreadContext context) {
+<span class="fc" id="L122">        int h = getMetaClass().getRealClass().hashCode();</span>
+
+<span class="fc bfc" id="L124" title="All 2 branches covered.">        for (int i = 0; i &lt; values.length; i++) {</span>
+<span class="fc bfc" id="L125" title="All 2 branches covered.">            h = (h &lt;&lt; 1) | (h &lt; 0 ? 1 : 0);</span>
+<span class="fc" id="L126">            h ^= RubyNumeric.num2long(invokedynamic(context, values[i], HASH));</span>
+        }
+        
+<span class="fc" id="L129">        return context.runtime.newFixnum(h);</span>
+    }
+
+    private IRubyObject setByName(String name, IRubyObject value) {
+<span class="fc" id="L133">        RubyArray member = __member__();</span>
+
+<span class="fc" id="L135">        modify();</span>
+
+<span class="fc bfc" id="L137" title="All 2 branches covered.">        for (int i = 0,k=member.getLength(); i &lt; k; i++) {</span>
+<span class="fc bfc" id="L138" title="All 2 branches covered.">            if (member.eltInternal(i).asJavaString().equals(name)) return values[i] = value;</span>
+        }
+
+<span class="fc" id="L141">        throw notStructMemberError(name);</span>
+    }
+
+    private IRubyObject getByName(String name) {
+<span class="fc" id="L145">        RubyArray member = __member__();</span>
+
+<span class="fc bfc" id="L147" title="All 2 branches covered.">        for (int i = 0,k=member.getLength(); i &lt; k; i++) {</span>
+<span class="fc bfc" id="L148" title="All 2 branches covered.">            if (member.eltInternal(i).asJavaString().equals(name)) return values[i];</span>
+        }
+
+<span class="fc" id="L151">        throw notStructMemberError(name);</span>
+    }
+
+    // Struct methods
+
+    /** Create new Struct class.
+     *
+     * MRI: rb_struct_s_def / make_struct
+     *
+     */
+    @JRubyMethod(name = &quot;new&quot;, required = 1, rest = true, meta = true)
+    public static RubyClass newInstance(IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="fc" id="L163">        String name = null;</span>
+<span class="fc" id="L164">        boolean nilName = false;</span>
+<span class="fc" id="L165">        Ruby runtime = recv.getRuntime();</span>
+
+<span class="pc bpc" id="L167" title="1 of 2 branches missed.">        if (args.length &gt; 0) {</span>
+<span class="fc" id="L168">            IRubyObject firstArgAsString = args[0].checkStringType();</span>
+<span class="fc bfc" id="L169" title="All 2 branches covered.">            if (!firstArgAsString.isNil()) {</span>
+<span class="fc" id="L170">                name = ((RubyString)firstArgAsString).getByteList().toString();</span>
+<span class="fc bfc" id="L171" title="All 2 branches covered.">            } else if (args[0].isNil()) {</span>
+<span class="fc" id="L172">                nilName = true;</span>
+            }
+        }
+
+<span class="fc" id="L176">        RubyArray member = runtime.newArray();</span>
+
+<span class="fc bfc" id="L178" title="All 6 branches covered.">        for (int i = (name == null &amp;&amp; !nilName) ? 0 : 1; i &lt; args.length; i++) {</span>
+<span class="fc" id="L179">            member.append(runtime.newSymbol(args[i].asJavaString()));</span>
+        }
+
+        RubyClass newStruct;
+<span class="fc" id="L183">        RubyClass superClass = (RubyClass)recv;</span>
+
+<span class="pc bpc" id="L185" title="1 of 4 branches missed.">        if (name == null || nilName) {</span>
+<span class="fc" id="L186">            newStruct = RubyClass.newClass(runtime, superClass);</span>
+<span class="fc" id="L187">            newStruct.setAllocator(STRUCT_INSTANCE_ALLOCATOR);</span>
+<span class="fc" id="L188">            newStruct.makeMetaClass(superClass.getMetaClass());</span>
+<span class="fc" id="L189">            newStruct.inherit(superClass);</span>
+        } else {
+<span class="fc bfc" id="L191" title="All 2 branches covered.">            if (!IdUtil.isConstant(name)) {</span>
+<span class="fc" id="L192">                throw runtime.newNameError(&quot;identifier &quot; + name + &quot; needs to be constant&quot;, name);</span>
+            }
+
+<span class="fc" id="L195">            IRubyObject type = superClass.getConstantAt(name);</span>
+<span class="fc bfc" id="L196" title="All 2 branches covered.">            if (type != null) {</span>
+<span class="fc" id="L197">                ThreadContext context = runtime.getCurrentContext();</span>
+<span class="fc" id="L198">                runtime.getWarnings().warn(ID.STRUCT_CONSTANT_REDEFINED, context.getFile(), context.getLine(), &quot;redefining constant Struct::&quot; + name);</span>
+<span class="fc" id="L199">                superClass.remove_const(context, runtime.newString(name));</span>
+            }
+<span class="fc" id="L201">            newStruct = superClass.defineClassUnder(name, superClass, STRUCT_INSTANCE_ALLOCATOR);</span>
+        }
+
+        // set reified class to RubyStruct, for Java subclasses to use
+<span class="fc" id="L205">        newStruct.setReifiedClass(RubyStruct.class);</span>
+<span class="fc" id="L206">        newStruct.setClassIndex(ClassIndex.STRUCT);</span>
+        
+<span class="fc" id="L208">        newStruct.setInternalVariable(&quot;__size__&quot;, member.length());</span>
+<span class="fc" id="L209">        newStruct.setInternalVariable(&quot;__member__&quot;, member);</span>
+
+<span class="fc" id="L211">        newStruct.getSingletonClass().defineAnnotatedMethods(StructMethods.class);</span>
+
+        // define access methods.
+<span class="fc bfc" id="L214" title="All 6 branches covered.">        for (int i = (name == null &amp;&amp; !nilName) ? 0 : 1; i &lt; args.length; i++) {</span>
+<span class="fc" id="L215">            final String memberName = args[i].asJavaString();</span>
+            // if we are storing a name as well, index is one too high for values
+<span class="fc bfc" id="L217" title="All 4 branches covered.">            final int index = (name == null &amp;&amp; !nilName) ? i : i - 1;</span>
+<span class="fc" id="L218">            newStruct.addMethod(memberName, new DynamicMethod(newStruct, Visibility.PUBLIC, CallConfiguration.FrameNoneScopeNone) {</span>
+                @Override
+                public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule clazz, String name, IRubyObject[] args, Block block) {
+<span class="fc" id="L221">                    Arity.checkArgumentCount(context.runtime, name, args, 0, 0);</span>
+<span class="fc" id="L222">                    return ((RubyStruct)self).get(index);</span>
+                }
+
+                @Override
+                public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule clazz, String name) {
+<span class="fc" id="L227">                    return ((RubyStruct)self).get(index);</span>
+                }
+
+                @Override
+                public DynamicMethod dup() {
+<span class="nc" id="L232">                    return this;</span>
+                }
+            });
+<span class="fc" id="L235">            newStruct.addMethod(memberName + &quot;=&quot;, new DynamicMethod(newStruct, Visibility.PUBLIC, CallConfiguration.FrameNoneScopeNone) {</span>
+                @Override
+                public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule clazz, String name, IRubyObject[] args, Block block) {
+<span class="fc" id="L238">                    Arity.checkArgumentCount(context.runtime, name, args, 1, 1);</span>
+<span class="fc" id="L239">                    return ((RubyStruct)self).set(args[0], index);</span>
+                }
+
+                @Override
+                public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule clazz, String name, IRubyObject arg) {
+<span class="nc" id="L244">                    return ((RubyStruct)self).set(arg, index);</span>
+                }
+
+                @Override
+                public DynamicMethod dup() {
+<span class="nc" id="L249">                    return this;</span>
+                }
+            });
+        }
+        
+<span class="fc bfc" id="L254" title="All 2 branches covered.">        if (block.isGiven()) {</span>
+            // Since this defines a new class, run the block as a module-eval.
+<span class="fc" id="L256">            block.setEvalType(EvalType.MODULE_EVAL);</span>
+            // Struct bodies should be public by default, so set block visibility to public. JRUBY-1185.
+<span class="fc" id="L258">            block.getBinding().setVisibility(Visibility.PUBLIC);</span>
+<span class="fc" id="L259">            block.yieldNonArray(runtime.getCurrentContext(), null, newStruct);</span>
+        }
+
+<span class="fc" id="L262">        return newStruct;</span>
+    }
+    
+    // For binding purposes on the newly created struct types
+<span class="nc" id="L266">    public static class StructMethods {</span>
+        @JRubyMethod(name = {&quot;new&quot;, &quot;[]&quot;}, rest = true)
+        public static IRubyObject newStruct(IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="fc" id="L269">            return RubyStruct.newStruct(recv, args, block);</span>
+        }
+
+        @JRubyMethod(name = {&quot;new&quot;, &quot;[]&quot;})
+        public static IRubyObject newStruct(IRubyObject recv, Block block) {
+<span class="fc" id="L274">            return RubyStruct.newStruct(recv, block);</span>
+        }
+
+        @JRubyMethod(name = {&quot;new&quot;, &quot;[]&quot;})
+        public static IRubyObject newStruct(IRubyObject recv, IRubyObject arg0, Block block) {
+<span class="fc" id="L279">            return RubyStruct.newStruct(recv, arg0, block);</span>
+        }
+
+        @JRubyMethod(name = {&quot;new&quot;, &quot;[]&quot;})
+        public static IRubyObject newStruct(IRubyObject recv, IRubyObject arg0, IRubyObject arg1, Block block) {
+<span class="nc" id="L284">            return RubyStruct.newStruct(recv, arg0, arg1, block);</span>
+        }
+
+        @JRubyMethod(name = {&quot;new&quot;, &quot;[]&quot;})
+        public static IRubyObject newStruct(IRubyObject recv, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="fc" id="L289">            return RubyStruct.newStruct(recv, arg0, arg1, arg2, block);</span>
+        }
+
+        @JRubyMethod
+        public static IRubyObject members(IRubyObject recv, Block block) {
+<span class="fc" id="L294">            return RubyStruct.members19(recv, block);</span>
+        }
+    }
+
+    /** Create new Structure.
+     *
+     * MRI: struct_alloc
+     *
+     */
+    public static RubyStruct newStruct(IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="fc" id="L304">        RubyStruct struct = new RubyStruct(recv.getRuntime(), (RubyClass) recv);</span>
+
+<span class="fc" id="L306">        struct.callInit(args, block);</span>
+
+<span class="fc" id="L308">        return struct;</span>
+    }
+
+    public static RubyStruct newStruct(IRubyObject recv, Block block) {
+<span class="fc" id="L312">        RubyStruct struct = new RubyStruct(recv.getRuntime(), (RubyClass) recv);</span>
+
+<span class="fc" id="L314">        struct.callInit(block);</span>
+
+<span class="fc" id="L316">        return struct;</span>
+    }
+
+    public static RubyStruct newStruct(IRubyObject recv, IRubyObject arg0, Block block) {
+<span class="fc" id="L320">        RubyStruct struct = new RubyStruct(recv.getRuntime(), (RubyClass) recv);</span>
+
+<span class="fc" id="L322">        struct.callInit(arg0, block);</span>
+
+<span class="fc" id="L324">        return struct;</span>
+    }
+
+    public static RubyStruct newStruct(IRubyObject recv, IRubyObject arg0, IRubyObject arg1, Block block) {
+<span class="nc" id="L328">        RubyStruct struct = new RubyStruct(recv.getRuntime(), (RubyClass) recv);</span>
+
+<span class="nc" id="L330">        struct.callInit(arg0, arg1, block);</span>
+
+<span class="nc" id="L332">        return struct;</span>
+    }
+
+    public static RubyStruct newStruct(IRubyObject recv, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="fc" id="L336">        RubyStruct struct = new RubyStruct(recv.getRuntime(), (RubyClass) recv);</span>
+
+<span class="fc" id="L338">        struct.callInit(arg0, arg1, arg2, block);</span>
+
+<span class="fc" id="L340">        return struct;</span>
+    }
+
+    private void checkSize(int length) {
+<span class="fc bfc" id="L344" title="All 2 branches covered.">        if (length &gt; values.length) {</span>
+<span class="fc" id="L345">            throw getRuntime().newArgumentError(&quot;struct size differs (&quot; + length +&quot; for &quot; + values.length + &quot;)&quot;);</span>
+        }
+<span class="fc" id="L347">    }</span>
+
+    @JRubyMethod(rest = true, visibility = PRIVATE)
+    public IRubyObject initialize(ThreadContext context, IRubyObject[] args) {
+<span class="fc" id="L351">        modify();</span>
+<span class="fc" id="L352">        checkSize(args.length);</span>
+
+<span class="fc" id="L354">        System.arraycopy(args, 0, values, 0, args.length);</span>
+<span class="fc" id="L355">        Helpers.fillNil(values, args.length, values.length, context.runtime);</span>
+
+<span class="fc" id="L357">        return context.nil;</span>
+    }
+
+    @JRubyMethod(visibility = PRIVATE)
+    @Override
+    public IRubyObject initialize(ThreadContext context) {
+<span class="fc" id="L363">        IRubyObject nil = context.nil;</span>
+<span class="fc" id="L364">        return initializeInternal(context, 0, nil, nil, nil);</span>
+    }
+
+    @JRubyMethod(visibility = PRIVATE)
+    public IRubyObject initialize(ThreadContext context, IRubyObject arg0) {
+<span class="fc" id="L369">        IRubyObject nil = context.nil;</span>
+<span class="fc" id="L370">        return initializeInternal(context, 1, arg0, nil, nil);</span>
+    }
+
+    @JRubyMethod(visibility = PRIVATE)
+    public IRubyObject initialize(ThreadContext context, IRubyObject arg0, IRubyObject arg1) {
+<span class="nc" id="L375">        return initializeInternal(context, 2, arg0, arg1, context.nil);</span>
+    }
+
+    @JRubyMethod(visibility = PRIVATE)
+    public IRubyObject initialize(ThreadContext context, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2) {
+<span class="fc" id="L380">        return initializeInternal(context, 3, arg0, arg1, arg2);</span>
+    }
+    
+    public IRubyObject initializeInternal(ThreadContext context, int provided, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2) {
+<span class="fc" id="L384">        modify();</span>
+<span class="fc" id="L385">        checkSize(provided);</span>
+
+<span class="pc bpc" id="L387" title="1 of 4 branches missed.">        switch (provided) {</span>
+        case 3:
+<span class="fc" id="L389">            values[2] = arg2;</span>
+        case 2:
+<span class="fc" id="L391">            values[1] = arg1;</span>
+        case 1:
+<span class="fc" id="L393">            values[0] = arg0;</span>
+        }
+<span class="fc bfc" id="L395" title="All 2 branches covered.">        if (provided &lt; values.length) {</span>
+<span class="fc" id="L396">            Helpers.fillNil(values, provided, values.length, context.runtime);</span>
+        }
+
+<span class="fc" id="L399">        return getRuntime().getNil();</span>
+    }
+    
+    public static RubyArray members(IRubyObject recv, Block block) {
+<span class="fc" id="L403">        RubyArray member = __member__((RubyClass) recv);</span>
+<span class="fc" id="L404">        RubyArray result = recv.getRuntime().newArray(member.getLength());</span>
+        
+<span class="fc bfc" id="L406" title="All 2 branches covered.">        for (int i = 0,k=member.getLength(); i &lt; k; i++) {</span>
+            // this looks weird, but it's because they're RubySymbol and that's java.lang.String internally
+<span class="fc" id="L408">            result.append(recv.getRuntime().newString(member.eltInternal(i).asJavaString()));</span>
+        }
+
+<span class="fc" id="L411">        return result;</span>
+    }
+
+    public static RubyArray members19(IRubyObject recv, Block block) {
+<span class="fc" id="L415">        RubyArray member = __member__((RubyClass) recv);</span>
+<span class="fc" id="L416">        RubyArray result = recv.getRuntime().newArray(member.getLength());</span>
+        
+<span class="fc bfc" id="L418" title="All 2 branches covered.">        for (int i = 0,k=member.getLength(); i &lt; k; i++) {</span>
+<span class="fc" id="L419">            result.append(member.eltInternal(i));</span>
+        }
+
+<span class="fc" id="L422">        return result;</span>
+    }
+    
+    private static RubyArray __member__(RubyClass clazz) {
+<span class="fc" id="L426">        RubyArray member = (RubyArray) getInternalVariable(clazz, &quot;__member__&quot;);</span>
+
+<span class="pc bpc" id="L428" title="3 of 4 branches missed.">        assert !member.isNil() : &quot;uninitialized struct&quot;;</span>
+        
+<span class="fc" id="L430">        return member;</span>
+    }
+    
+    private RubyArray __member__() {
+<span class="fc" id="L434">        return __member__(classOf());</span>
+    }
+
+    public RubyArray members() {
+<span class="nc" id="L438">        return members19();</span>
+    }
+
+    @JRubyMethod(name = &quot;members&quot;)
+    public RubyArray members19() {
+<span class="fc" id="L443">        return members19(classOf(), Block.NULL_BLOCK);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject select(ThreadContext context, Block block) {
+<span class="fc bfc" id="L448" title="All 2 branches covered.">        if (!block.isGiven()) {</span>
+<span class="fc" id="L449">            return enumeratorizeWithSize(context, this, &quot;select&quot;, enumSizeFn());</span>
+        }
+
+<span class="fc" id="L452">        RubyArray array = RubyArray.newArray(context.runtime);</span>
+        
+<span class="fc bfc" id="L454" title="All 2 branches covered.">        for (int i = 0; i &lt; values.length; i++) {</span>
+<span class="fc bfc" id="L455" title="All 2 branches covered.">            if (block.yield(context, values[i]).isTrue()) {</span>
+<span class="fc" id="L456">                array.append(values[i]);</span>
+            }
+        }
+        
+<span class="fc" id="L460">        return array;</span>
+    }
+
+    private SizeFn enumSizeFn() {
+<span class="fc" id="L464">        final RubyStruct self = this;</span>
+<span class="fc" id="L465">        return new SizeFn() {</span>
+            @Override
+            public IRubyObject size(IRubyObject[] args) {
+<span class="nc" id="L468">                return self.size();</span>
+            }
+        };
+    }
+
+    public IRubyObject set(IRubyObject value, int index) {
+<span class="fc" id="L474">        modify();</span>
+
+<span class="fc" id="L476">        return values[index] = value;</span>
+    }
+
+    private RaiseException notStructMemberError(String name) {
+<span class="fc" id="L480">        return getRuntime().newNameError(&quot;no member '&quot; + name + &quot;' in struct&quot;, name);</span>
+    }
+
+    public IRubyObject get(int index) {
+<span class="fc" id="L484">        return values[index];</span>
+    }
+
+    @Override
+    public void copySpecialInstanceVariables(IRubyObject clone) {
+<span class="fc" id="L489">        RubyStruct struct = (RubyStruct)clone;</span>
+<span class="fc" id="L490">        System.arraycopy(values, 0, struct.values, 0, values.length);</span>
+<span class="fc" id="L491">    }</span>
+
+    @JRubyMethod(name = &quot;==&quot;, required = 1)
+    @Override
+    public IRubyObject op_equal(final ThreadContext context, IRubyObject other) {
+<span class="fc bfc" id="L496" title="All 2 branches covered.">        if (this == other) return getRuntime().getTrue();</span>
+<span class="pc bpc" id="L497" title="1 of 2 branches missed.">        if (!(other instanceof RubyStruct)) return getRuntime().getFalse();</span>
+<span class="pc bpc" id="L498" title="1 of 2 branches missed.">        if (getMetaClass().getRealClass() != other.getMetaClass().getRealClass()) return getRuntime().getFalse();</span>
+
+<span class="pc bpc" id="L500" title="1 of 2 branches missed.">        if (other == this) return context.runtime.getTrue();</span>
+        
+<span class="fc" id="L502">        final Ruby runtime = context.runtime;</span>
+<span class="fc" id="L503">        final RubyStruct otherStruct = (RubyStruct)other;        </span>
+
+        // recursion guard
+<span class="fc" id="L506">        return runtime.execRecursiveOuter(new Ruby.RecursiveFunction() {</span>
+            @Override
+            public IRubyObject call(IRubyObject obj, boolean recur) {
+<span class="pc bpc" id="L509" title="1 of 2 branches missed.">                if (recur) return runtime.getTrue();</span>
+
+<span class="fc bfc" id="L511" title="All 2 branches covered.">                for (int i = 0; i &lt; values.length; i++) {</span>
+<span class="fc bfc" id="L512" title="All 2 branches covered.">                    if (!equalInternal(context, values[i], otherStruct.values[i])) return runtime.getFalse();</span>
+                }
+<span class="fc" id="L514">                return runtime.getTrue();</span>
+            }
+        }, this);
+    }
+    
+    @JRubyMethod(name = &quot;eql?&quot;, required = 1)
+    public IRubyObject eql_p(final ThreadContext context, IRubyObject other) {
+<span class="fc bfc" id="L521" title="All 2 branches covered.">        if (this == other) return getRuntime().getTrue();</span>
+<span class="pc bpc" id="L522" title="1 of 2 branches missed.">        if (!(other instanceof RubyStruct)) return getRuntime().getFalse();</span>
+<span class="pc bpc" id="L523" title="1 of 2 branches missed.">        if (getMetaClass() != other.getMetaClass()) return getRuntime().getFalse();</span>
+
+<span class="pc bpc" id="L525" title="1 of 2 branches missed.">        if (other == this) return context.runtime.getTrue();</span>
+        
+<span class="fc" id="L527">        final Ruby runtime = context.runtime;</span>
+<span class="fc" id="L528">        final RubyStruct otherStruct = (RubyStruct)other;</span>
+
+        // recursion guard
+<span class="fc" id="L531">        return runtime.execRecursiveOuter(new Ruby.RecursiveFunction() {</span>
+            @Override
+            public IRubyObject call(IRubyObject obj, boolean recur) {
+<span class="pc bpc" id="L534" title="1 of 2 branches missed.">                if (recur) return runtime.getTrue();</span>
+
+<span class="fc bfc" id="L536" title="All 2 branches covered.">                for (int i = 0; i &lt; values.length; i++) {</span>
+<span class="fc bfc" id="L537" title="All 2 branches covered.">                    if (!eqlInternal(context, values[i], otherStruct.values[i])) return runtime.getFalse();</span>
+                }
+<span class="fc" id="L539">                return runtime.getTrue();</span>
+            }
+        }, this);
+    }
+
+    /** inspect_struct
+    *
+    */
+    private IRubyObject inspectStruct(final ThreadContext context, boolean recur) {
+<span class="fc" id="L548">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L549">        RubyArray member = __member__();</span>
+<span class="fc" id="L550">        ByteList buffer = new ByteList(&quot;#&lt;struct &quot;.getBytes());</span>
+<span class="fc" id="L551">        String cpath = getMetaClass().getRealClass().getName();</span>
+<span class="fc" id="L552">        char first = cpath.charAt(0);</span>
+
+<span class="pc bpc" id="L554" title="2 of 4 branches missed.">        if (recur || first != '#') {</span>
+<span class="fc" id="L555">            buffer.append(cpath.getBytes());</span>
+<span class="fc" id="L556">            buffer.append(' ');</span>
+        }
+
+<span class="pc bpc" id="L559" title="1 of 2 branches missed.">        if (recur) {</span>
+<span class="nc" id="L560">            buffer.append(&quot;:...&gt;&quot;.getBytes());</span>
+<span class="nc" id="L561">            return runtime.newString(buffer);</span>
+        }
+
+<span class="fc bfc" id="L564" title="All 2 branches covered.">        for (int i = 0,k=member.getLength(); i &lt; k; i++) {</span>
+<span class="fc bfc" id="L565" title="All 2 branches covered.">            if (i &gt; 0) {</span>
+<span class="fc" id="L566">                buffer.append(',').append(' ');</span>
+            }
+<span class="fc" id="L568">            RubySymbol slot = (RubySymbol)member.eltInternal(i);</span>
+<span class="fc" id="L569">            String name = slot.toString();</span>
+<span class="pc bpc" id="L570" title="3 of 4 branches missed.">            if (IdUtil.isLocal(name) || IdUtil.isConstant(name)) {</span>
+<span class="fc" id="L571">                buffer.append(RubyString.objAsString(context, slot).getByteList());</span>
+            } else {
+<span class="nc" id="L573">                buffer.append(((RubyString) slot.inspect(context)).getByteList());</span>
+            }
+<span class="fc" id="L575">            buffer.append('=');</span>
+<span class="fc" id="L576">            buffer.append(inspect(context, values[i]).getByteList());</span>
+        }
+
+<span class="fc" id="L579">        buffer.append('&gt;');</span>
+<span class="fc" id="L580">        return getRuntime().newString(buffer); // OBJ_INFECT</span>
+    }
+
+    @JRubyMethod(name = {&quot;inspect&quot;, &quot;to_s&quot;})
+    public IRubyObject inspect(final ThreadContext context) {
+<span class="fc" id="L585">        final Ruby runtime = context.runtime;</span>
+
+        // recursion guard
+<span class="fc" id="L588">        return runtime.execRecursiveOuter(new Ruby.RecursiveFunction() {</span>
+            @Override
+            public IRubyObject call(IRubyObject obj, boolean recur) {
+<span class="fc" id="L591">                return inspectStruct(context, recur);</span>
+            }
+        }, this);
+    }
+
+    @JRubyMethod(name = {&quot;to_a&quot;, &quot;values&quot;})
+    @Override
+    public RubyArray to_a() {
+<span class="fc" id="L599">        return getRuntime().newArray(values);</span>
+    }
+    
+    @JRubyMethod
+    public RubyHash to_h(ThreadContext context) {
+<span class="fc" id="L604">        RubyHash hash = RubyHash.newHash(context.runtime);</span>
+<span class="fc" id="L605">        RubyArray members = __member__();</span>
+        
+<span class="fc bfc" id="L607" title="All 2 branches covered.">        for (int i = 0; i &lt; values.length; i++) {</span>
+<span class="fc" id="L608">            hash.op_aset(context, members.eltOk(i), values[i]);</span>
+        }
+        
+<span class="fc" id="L611">        return hash;</span>
+    }
+
+    @JRubyMethod(name = {&quot;size&quot;, &quot;length&quot;} )
+    public RubyFixnum size() {
+<span class="fc" id="L616">        return getRuntime().newFixnum(values.length);</span>
+    }
+
+    public IRubyObject eachInternal(ThreadContext context, Block block) {
+<span class="fc bfc" id="L620" title="All 2 branches covered.">        for (int i = 0; i &lt; values.length; i++) {</span>
+<span class="fc" id="L621">            block.yield(context, values[i]);</span>
+        }
+
+<span class="fc" id="L624">        return this;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject each(final ThreadContext context, final Block block) {
+<span class="fc bfc" id="L629" title="All 2 branches covered.">        return block.isGiven() ? eachInternal(context, block) : enumeratorizeWithSize(context, this, &quot;each&quot;, enumSizeFn());</span>
+    }
+
+    public IRubyObject each_pairInternal(ThreadContext context, Block block) {
+<span class="fc" id="L633">        RubyArray member = __member__();</span>
+
+<span class="fc bfc" id="L635" title="All 2 branches covered.">        for (int i = 0; i &lt; values.length; i++) {</span>
+<span class="fc" id="L636">            block.yield(context, getRuntime().newArrayNoCopy(new IRubyObject[]{member.eltInternal(i), values[i]}));</span>
+        }
+
+<span class="fc" id="L639">        return this;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject each_pair(final ThreadContext context, final Block block) {
+<span class="fc bfc" id="L644" title="All 2 branches covered.">        return block.isGiven() ? each_pairInternal(context, block) : enumeratorizeWithSize(context, this, &quot;each_pair&quot;, enumSizeFn());</span>
+    }
+
+    @JRubyMethod(name = &quot;[]&quot;, required = 1)
+    public IRubyObject aref(IRubyObject key) {
+<span class="fc bfc" id="L649" title="All 4 branches covered.">        if (key instanceof RubyString || key instanceof RubySymbol) {</span>
+<span class="fc" id="L650">            return getByName(key.asJavaString());</span>
+        }
+
+<span class="fc" id="L653">        int idx = RubyNumeric.fix2int(key);</span>
+
+<span class="fc bfc" id="L655" title="All 2 branches covered.">        idx = idx &lt; 0 ? values.length + idx : idx;</span>
+
+<span class="fc bfc" id="L657" title="All 2 branches covered.">        if (idx &lt; 0) {</span>
+<span class="fc" id="L658">            throw getRuntime().newIndexError(&quot;offset &quot; + idx + &quot; too small for struct(size:&quot; + values.length + &quot;)&quot;);</span>
+<span class="fc bfc" id="L659" title="All 2 branches covered.">        } else if (idx &gt;= values.length) {</span>
+<span class="fc" id="L660">            throw getRuntime().newIndexError(&quot;offset &quot; + idx + &quot; too large for struct(size:&quot; + values.length + &quot;)&quot;);</span>
+        }
+
+<span class="fc" id="L663">        return values[idx];</span>
+    }
+
+    @JRubyMethod(name = &quot;[]=&quot;, required = 2)
+    public IRubyObject aset(IRubyObject key, IRubyObject value) {
+<span class="fc bfc" id="L668" title="All 4 branches covered.">        if (key instanceof RubyString || key instanceof RubySymbol) {</span>
+<span class="fc" id="L669">            return setByName(key.asJavaString(), value);</span>
+        }
+
+<span class="fc" id="L672">        int idx = RubyNumeric.fix2int(key);</span>
+
+<span class="fc bfc" id="L674" title="All 2 branches covered.">        idx = idx &lt; 0 ? values.length + idx : idx;</span>
+
+<span class="fc bfc" id="L676" title="All 2 branches covered.">        if (idx &lt; 0) {</span>
+<span class="fc" id="L677">            throw getRuntime().newIndexError(&quot;offset &quot; + idx + &quot; too small for struct(size:&quot; + values.length + &quot;)&quot;);</span>
+<span class="fc bfc" id="L678" title="All 2 branches covered.">        } else if (idx &gt;= values.length) {</span>
+<span class="fc" id="L679">            throw getRuntime().newIndexError(&quot;offset &quot; + idx + &quot; too large for struct(size:&quot; + values.length + &quot;)&quot;);</span>
+        }
+
+<span class="fc" id="L682">        modify();</span>
+<span class="fc" id="L683">        return values[idx] = value;</span>
+    }
+    
+    // FIXME: This is copied code from RubyArray.  Both RE, Struct, and Array should share one impl
+    // This is also hacky since I construct ruby objects to access ruby arrays through aref instead
+    // of something lower.
+    @JRubyMethod(rest = true)
+    public IRubyObject values_at(IRubyObject[] args) {
+<span class="fc" id="L691">        int olen = values.length;</span>
+<span class="fc" id="L692">        RubyArray result = getRuntime().newArray(args.length);</span>
+
+<span class="fc bfc" id="L694" title="All 2 branches covered.">        for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="fc bfc" id="L695" title="All 2 branches covered.">            if (args[i] instanceof RubyFixnum) {</span>
+<span class="fc" id="L696">                result.append(aref(args[i]));</span>
+<span class="fc" id="L697">                continue;</span>
+            }
+
+            int beglen[];
+<span class="pc bpc" id="L701" title="1 of 2 branches missed.">            if (!(args[i] instanceof RubyRange)) {</span>
+<span class="pc bpc" id="L702" title="1 of 2 branches missed.">            } else if ((beglen = ((RubyRange) args[i]).begLenInt(olen, 0)) == null) {</span>
+<span class="nc" id="L703">                continue;</span>
+            } else {
+<span class="fc" id="L705">                int beg = beglen[0];</span>
+<span class="fc" id="L706">                int len = beglen[1];</span>
+<span class="fc" id="L707">                int end = len;</span>
+<span class="fc bfc" id="L708" title="All 2 branches covered.">                for (int j = 0; j &lt; end; j++) {</span>
+<span class="fc" id="L709">                    result.append(aref(getRuntime().newFixnum(j + beg)));</span>
+                }
+<span class="fc" id="L711">                continue;</span>
+            }
+<span class="nc" id="L713">            result.append(aref(getRuntime().newFixnum(RubyNumeric.num2long(args[i]))));</span>
+        }
+
+<span class="fc" id="L716">        return result;</span>
+    }
+
+    public static void marshalTo(RubyStruct struct, MarshalStream output) throws java.io.IOException {
+<span class="fc" id="L720">        output.registerLinkTarget(struct);</span>
+<span class="fc" id="L721">        output.dumpDefaultObjectHeader('S', struct.getMetaClass());</span>
+
+<span class="fc" id="L723">        RubyArray member = __member__(struct.classOf());</span>
+<span class="fc" id="L724">        output.writeInt(member.size());</span>
+
+<span class="fc bfc" id="L726" title="All 2 branches covered.">        for (int i = 0; i &lt; member.size(); i++) {</span>
+<span class="fc" id="L727">            RubySymbol name = (RubySymbol) member.eltInternal(i);</span>
+<span class="fc" id="L728">            output.dumpObject(name);</span>
+<span class="fc" id="L729">            output.dumpObject(struct.values[i]);</span>
+        }
+<span class="fc" id="L731">    }</span>
+
+    public static RubyStruct unmarshalFrom(UnmarshalStream input) throws java.io.IOException {
+<span class="fc" id="L734">        Ruby runtime = input.getRuntime();</span>
+
+<span class="fc" id="L736">        RubySymbol className = (RubySymbol) input.unmarshalObject(false);</span>
+<span class="fc" id="L737">        RubyClass rbClass = pathToClass(runtime, className.asJavaString());</span>
+<span class="pc bpc" id="L738" title="1 of 2 branches missed.">        if (rbClass == null) {</span>
+<span class="nc" id="L739">            throw runtime.newNameError(&quot;uninitialized constant &quot; + className, className.asJavaString());</span>
+        }
+
+<span class="fc" id="L742">        RubyArray mem = members(rbClass, Block.NULL_BLOCK);</span>
+
+<span class="fc" id="L744">        int len = input.unmarshalInt();</span>
+
+        // FIXME: This could all be more efficient, but it's how struct works
+        RubyStruct result;
+        // 1.9 does not appear to call initialize (JRUBY-5875)
+<span class="fc" id="L749">        result = new RubyStruct(runtime, rbClass);</span>
+<span class="fc" id="L750">        input.registerLinkTarget(result);</span>
+
+<span class="fc bfc" id="L752" title="All 2 branches covered.">        for (int i = 0; i &lt; len; i++) {</span>
+<span class="fc" id="L753">            IRubyObject slot = input.unmarshalObject(false);</span>
+<span class="pc bpc" id="L754" title="1 of 2 branches missed.">            if (!mem.eltInternal(i).toString().equals(slot.toString())) {</span>
+<span class="nc" id="L755">                throw runtime.newTypeError(&quot;struct &quot; + rbClass.getName() + &quot; not compatible (:&quot; + slot + &quot; for :&quot; + mem.eltInternal(i) + &quot;)&quot;);</span>
+            }
+<span class="fc" id="L757">            result.aset(runtime.newFixnum(i), input.unmarshalObject());</span>
+        }
+<span class="fc" id="L759">        return result;</span>
+    }
+
+    private static RubyClass pathToClass(Ruby runtime, String path) {
+        // FIXME: Throw the right ArgumentError's if the class is missing
+        // or if it's a module.
+<span class="fc" id="L765">        return (RubyClass) runtime.getClassFromPath(path);</span>
+    }
+    
+<span class="fc" id="L768">    private static ObjectAllocator STRUCT_INSTANCE_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L771">            RubyStruct instance = new RubyStruct(runtime, klass);</span>
+            
+<span class="fc" id="L773">            instance.setMetaClass(klass);</span>
+            
+<span class="fc" id="L775">            return instance;</span>
+        }
+    };
+    
+    @Override
+    @JRubyMethod(required = 1, visibility = Visibility.PRIVATE)
+    public IRubyObject initialize_copy(IRubyObject arg) {
+<span class="pc bpc" id="L782" title="1 of 2 branches missed.">        if (this == arg) return this;</span>
+<span class="fc" id="L783">        RubyStruct original = (RubyStruct) arg;</span>
+
+<span class="fc" id="L785">        checkFrozen();</span>
+        
+<span class="fc" id="L787">        System.arraycopy(original.values, 0, values, 0, original.values.length);</span>
+
+<span class="fc" id="L789">        return this;</span>
+    }
+    
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

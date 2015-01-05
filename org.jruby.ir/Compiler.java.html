@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Compiler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir</a> &gt; <span class="el_source">Compiler.java</span></div><h1>Compiler.java</h1><pre class="source lang-java linenums">/*
+ * To change this template, choose Tools | Templates
+ * and open the template in the editor.
+ */
+package org.jruby.ir;
+
+import org.jruby.Ruby;
+import org.jruby.RubyModule;
+import org.jruby.ast.executable.AbstractScript;
+import org.jruby.ast.executable.Script;
+import org.jruby.ast.executable.ScriptAndCode;
+import org.jruby.compiler.NotCompilableException;
+import org.jruby.ir.interpreter.BeginEndInterpreterContext;
+import org.jruby.ir.operands.IRException;
+import org.jruby.ir.runtime.IRBreakJump;
+import org.jruby.ir.targets.JVMVisitor;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.DynamicScope;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.Visibility;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ClassDefininngJRubyClassLoader;
+
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+
+public class Compiler extends IRTranslator&lt;ScriptAndCode, ClassDefininngJRubyClassLoader&gt; {
+
+    // Compiler is singleton
+<span class="fc" id="L34">    private Compiler() {}</span>
+
+<span class="nc" id="L36">    private static class CompilerHolder {</span>
+        // FIXME: Remove as singleton unless lifus does later
+<span class="fc" id="L38">        public static final Compiler instance = new Compiler();</span>
+    }
+
+    public static Compiler getInstance() {
+<span class="fc" id="L42">        return CompilerHolder.instance;</span>
+    }
+
+    @Override
+    protected ScriptAndCode execute(final Ruby runtime, final IRScriptBody scope, ClassDefininngJRubyClassLoader classLoader) {
+        JVMVisitor visitor;
+        byte[] bytecode;
+        Class compiled;
+
+        MethodHandle _compiledHandle;
+        try {
+<span class="fc" id="L53">            visitor = new JVMVisitor();</span>
+<span class="fc" id="L54">            bytecode = visitor.compileToBytecode(scope);</span>
+<span class="fc" id="L55">            compiled = visitor.defineFromBytecode(scope, bytecode, classLoader);</span>
+
+<span class="fc" id="L57">            Method compiledMethod = compiled.getMethod(&quot;__script__&quot;, ThreadContext.class,</span>
+                    StaticScope.class, IRubyObject.class, IRubyObject[].class, Block.class, RubyModule.class);
+<span class="fc" id="L59">            _compiledHandle = MethodHandles.publicLookup().unreflect(compiledMethod);</span>
+<span class="nc" id="L60">        } catch (NotCompilableException nce) {</span>
+<span class="nc" id="L61">            throw nce;</span>
+<span class="nc" id="L62">        } catch (Throwable t) {</span>
+<span class="nc" id="L63">            throw new NotCompilableException(&quot;failed to compile script &quot; + scope.getName(), t);</span>
+<span class="fc" id="L64">        }</span>
+
+<span class="fc" id="L66">        final MethodHandle compiledHandle = _compiledHandle;</span>
+
+<span class="fc" id="L68">        Script script = new AbstractScript() {</span>
+            @Override
+            public IRubyObject __file__(ThreadContext context, IRubyObject self, IRubyObject[] args, Block block) {
+                try {
+<span class="fc" id="L72">                    return (IRubyObject) compiledHandle.invokeWithArguments(context, scope.getStaticScope(), self, IRubyObject.NULL_ARRAY, block, self.getMetaClass());</span>
+<span class="nc" id="L73">                } catch (Throwable t) {</span>
+<span class="nc" id="L74">                    Helpers.throwException(t);</span>
+<span class="nc" id="L75">                    return null; // not reached</span>
+                }
+            }
+
+            @Override
+            public IRubyObject load(ThreadContext context, IRubyObject self, boolean wrap) {
+                // Compiler does not support BEGIN/END yet and should fail to compile above
+                {
+//                BeginEndInterpreterContext ic = (BeginEndInterpreterContext) irScope.prepareForInterpretation();
+
+                    // We get the live object ball rolling here.
+                    // This give a valid value for the top of this lexical tree.
+                    // All new scopes can then retrieve and set based on lexical parent.
+//                StaticScope scope = ic.getStaticScope();
+                }
+                // Copied from Interpreter
+<span class="fc" id="L91">                StaticScope sscope = scope.getStaticScope();</span>
+<span class="fc" id="L92">                RubyModule currModule = sscope.getModule();</span>
+<span class="pc bpc" id="L93" title="1 of 2 branches missed.">                if (currModule == null) {</span>
+                    // SSS FIXME: Looks like this has to do with Kernel#load
+                    // and the wrap parameter. Figure it out and document it here.
+<span class="nc" id="L96">                    currModule = context.getRuntime().getObject();</span>
+                }
+
+<span class="fc" id="L99">                sscope.setModule(currModule);</span>
+<span class="fc" id="L100">                DynamicScope tlbScope = scope.getToplevelScope();</span>
+<span class="pc bpc" id="L101" title="1 of 2 branches missed.">                if (tlbScope == null) {</span>
+<span class="nc" id="L102">                    context.preMethodScopeOnly(sscope);</span>
+                } else {
+<span class="fc" id="L104">                    sscope = tlbScope.getStaticScope();</span>
+<span class="fc" id="L105">                    context.preScopedBody(tlbScope);</span>
+<span class="fc" id="L106">                    tlbScope.growIfNeeded();</span>
+                }
+<span class="fc" id="L108">                context.setCurrentVisibility(Visibility.PRIVATE);</span>
+
+                try {
+//                    runBeginEndBlocks(ic.getBeginBlocks(), context, self, scope, null);
+<span class="fc" id="L112">                    return (IRubyObject) compiledHandle.invokeWithArguments(context, sscope, self, IRubyObject.NULL_ARRAY, Block.NULL_BLOCK, currModule);</span>
+<span class="nc" id="L113">                } catch (IRBreakJump bj) {</span>
+<span class="nc" id="L114">                    throw IRException.BREAK_LocalJumpError.getException(context.runtime);</span>
+<span class="nc" id="L115">                } catch (Throwable t) {</span>
+<span class="nc" id="L116">                    Helpers.throwException(t);</span>
+<span class="nc" id="L117">                    return null; // not reached</span>
+                } finally {
+//                    runEndBlocks(ic.getEndBlocks(), context, self, scope, null);
+<span class="pc" id="L120">                    context.popScope();</span>
+                }
+            }
+        };
+
+<span class="fc" id="L125">        return new ScriptAndCode(bytecode, script);</span>
+
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

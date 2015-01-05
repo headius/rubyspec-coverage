@@ -1,0 +1,416 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyContext.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.runtime</a> &gt; <span class="el_source">RubyContext.java</span></div><h1>RubyContext.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2013, 2014 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.runtime;
+
+import com.oracle.truffle.api.*;
+import com.oracle.truffle.api.frame.MaterializedFrame;
+import com.oracle.truffle.api.object.Shape;
+import com.oracle.truffle.api.source.BytesDecoder;
+import com.oracle.truffle.api.source.Source;
+import org.jcodings.Encoding;
+import org.jcodings.specific.UTF8Encoding;
+import org.jruby.Ruby;
+import org.jruby.RubyNil;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.truffle.TruffleHooks;
+import org.jruby.truffle.nodes.RubyNode;
+import org.jruby.truffle.nodes.RubyRootNode;
+import org.jruby.truffle.nodes.methods.SetFrameVisibilityNode;
+import org.jruby.truffle.nodes.rubinius.RubiniusPrimitiveManager;
+import org.jruby.truffle.runtime.control.RaiseException;
+import org.jruby.truffle.runtime.core.*;
+import org.jruby.truffle.runtime.subsystems.*;
+import org.jruby.truffle.translator.NodeWrapper;
+import org.jruby.truffle.translator.TranslatorDriver;
+import org.jruby.util.ByteList;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.ArrayDeque;
+import java.util.Queue;
+import java.util.Random;
+import java.util.concurrent.atomic.AtomicLong;
+
+/**
+ * The global state of a running Ruby system.
+ */
+<span class="nc bnc" id="L46" title="All 2 branches missed.">public class RubyContext extends ExecutionContext {</span>
+
+    private final Ruby runtime;
+    private final TranslatorDriver translator;
+    private final CoreLibrary coreLibrary;
+    private final FeatureManager featureManager;
+    private final TraceManager traceManager;
+    private final ObjectSpaceManager objectSpaceManager;
+    private final ThreadManager threadManager;
+    private final FiberManager fiberManager;
+    private final AtExitManager atExitManager;
+<span class="nc" id="L57">    private final RubySymbol.SymbolTable symbolTable = new RubySymbol.SymbolTable(this);</span>
+    private final Shape emptyShape;
+    private final Warnings warnings;
+    private final SafepointManager safepointManager;
+<span class="nc" id="L61">    private final Random random = new Random();</span>
+    private final LexicalScope rootLexicalScope;
+    private final CompilerOptions compilerOptions;
+    private final RubiniusPrimitiveManager rubiniusPrimitiveManager;
+
+<span class="nc" id="L66">    private final AtomicLong nextObjectID = new AtomicLong(ObjectIDOperations.FIRST_OBJECT_ID);</span>
+
+<span class="nc" id="L68">    private final ThreadLocal&lt;Queue&lt;Object&gt;&gt; throwTags = new ThreadLocal&lt;Queue&lt;Object&gt;&gt;() {</span>
+
+        @Override
+        protected Queue&lt;Object&gt; initialValue() {
+<span class="nc" id="L72">            return new ArrayDeque&lt;&gt;();</span>
+        }
+
+    };
+
+<span class="nc" id="L77">    public RubyContext(Ruby runtime) {</span>
+<span class="nc bnc" id="L78" title="All 4 branches missed.">        assert runtime != null;</span>
+
+<span class="nc" id="L80">        compilerOptions = Truffle.getRuntime().createCompilerOptions();</span>
+
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        if (compilerOptions.supportsOption(&quot;MinTimeThreshold&quot;)) {</span>
+<span class="nc" id="L83">            compilerOptions.setOption(&quot;MinTimeThreshold&quot;, 100000000);</span>
+        }
+
+<span class="nc bnc" id="L86" title="All 2 branches missed.">        if (compilerOptions.supportsOption(&quot;MinInliningMaxCallerSize&quot;)) {</span>
+<span class="nc" id="L87">            compilerOptions.setOption(&quot;MinInliningMaxCallerSize&quot;, 5000);</span>
+        }
+
+<span class="nc" id="L90">        safepointManager = new SafepointManager(this);</span>
+
+<span class="nc" id="L92">        this.runtime = runtime;</span>
+<span class="nc" id="L93">        translator = new TranslatorDriver();</span>
+
+<span class="nc" id="L95">        warnings = new Warnings(this);</span>
+
+        // Object space manager needs to come early before we create any objects
+<span class="nc" id="L98">        objectSpaceManager = new ObjectSpaceManager(this);</span>
+
+<span class="nc" id="L100">        emptyShape = RubyBasicObject.LAYOUT.createShape(new RubyOperations(this));</span>
+
+        // See note in CoreLibrary#initialize to see why we need to break this into two statements
+<span class="nc" id="L103">        coreLibrary = new CoreLibrary(this);</span>
+<span class="nc" id="L104">        coreLibrary.initialize();</span>
+
+<span class="nc" id="L106">        featureManager = new FeatureManager(this);</span>
+<span class="nc" id="L107">        traceManager = new TraceManager();</span>
+<span class="nc" id="L108">        atExitManager = new AtExitManager();</span>
+
+        // Must initialize threads before fibers
+
+<span class="nc" id="L112">        threadManager = new ThreadManager(this);</span>
+<span class="nc" id="L113">        fiberManager = new FiberManager(this);</span>
+
+<span class="nc" id="L115">        rootLexicalScope = new LexicalScope(null, coreLibrary.getObjectClass());</span>
+
+<span class="nc" id="L117">        rubiniusPrimitiveManager = RubiniusPrimitiveManager.create();</span>
+<span class="nc" id="L118">    }</span>
+
+    public Shape getEmptyShape() {
+<span class="nc" id="L121">        return emptyShape;</span>
+    }
+
+    public static String checkInstanceVariableName(RubyContext context, String name, RubyNode currentNode) {
+<span class="nc" id="L125">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        if (!name.startsWith(&quot;@&quot;)) {</span>
+<span class="nc" id="L128">            throw new RaiseException(context.getCoreLibrary().nameErrorInstanceNameNotAllowable(name, currentNode));</span>
+        }
+
+<span class="nc" id="L131">        return name;</span>
+    }
+
+    public static String checkClassVariableName(RubyContext context, String name, RubyNode currentNode) {
+<span class="nc" id="L135">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L137" title="All 2 branches missed.">        if (!name.startsWith(&quot;@@&quot;)) {</span>
+<span class="nc" id="L138">            throw new RaiseException(context.getCoreLibrary().nameErrorInstanceNameNotAllowable(name, currentNode));</span>
+        }
+
+<span class="nc" id="L141">        return name;</span>
+    }
+
+    public void loadFile(String fileName, RubyNode currentNode) {
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (new File(fileName).isAbsolute()) {</span>
+<span class="nc" id="L146">            loadFileAbsolute(fileName, currentNode);</span>
+        } else {
+<span class="nc" id="L148">            loadFileAbsolute(this.getRuntime().getCurrentDirectory() + File.separator + fileName, currentNode);</span>
+        }
+<span class="nc" id="L150">    }</span>
+
+    private void loadFileAbsolute(String fileName, RubyNode currentNode) {
+        final byte[] bytes;
+
+        try {
+<span class="nc" id="L156">            bytes = Files.readAllBytes(Paths.get(fileName));</span>
+<span class="nc" id="L157">        } catch (IOException e) {</span>
+<span class="nc" id="L158">            throw new RuntimeException(e);</span>
+<span class="nc" id="L159">        }</span>
+
+        // Assume UTF-8 for the moment
+<span class="nc" id="L162">        final Source source = Source.fromBytes(bytes, fileName, new BytesDecoder.UTF8BytesDecoder());</span>
+
+<span class="nc" id="L164">        load(source, currentNode, SetFrameVisibilityNode.PRIVATE_VISIBILITY_WRAPPER);</span>
+<span class="nc" id="L165">    }</span>
+
+    public void load(Source source, RubyNode currentNode) {
+<span class="nc" id="L168">        load(source, currentNode, NodeWrapper.IDENTITY);</span>
+<span class="nc" id="L169">    }</span>
+
+    public void load(Source source, RubyNode currentNode, NodeWrapper nodeWrapper) {
+<span class="nc" id="L172">        execute(this, source, UTF8Encoding.INSTANCE, TranslatorDriver.ParserContext.TOP_LEVEL, coreLibrary.getMainObject(), null, currentNode, nodeWrapper);</span>
+<span class="nc" id="L173">    }</span>
+
+    public RubySymbol.SymbolTable getSymbolTable() {
+<span class="nc" id="L176">        return symbolTable;</span>
+    }
+
+    @CompilerDirectives.TruffleBoundary
+    public RubySymbol newSymbol(String name) {
+<span class="nc" id="L181">        return symbolTable.getSymbol(name);</span>
+    }
+
+    @CompilerDirectives.TruffleBoundary
+    public RubySymbol newSymbol(ByteList name) {
+<span class="nc" id="L186">        return symbolTable.getSymbol(name);</span>
+    }
+
+    public Object eval(ByteList code, RubyNode currentNode) {
+<span class="nc" id="L190">        final Source source = Source.fromText(code, &quot;(eval)&quot;);</span>
+<span class="nc" id="L191">        return execute(this, source, code.getEncoding(), TranslatorDriver.ParserContext.TOP_LEVEL, coreLibrary.getMainObject(), null, currentNode);</span>
+    }
+
+    public Object eval(ByteList code, Object self, RubyNode currentNode) {
+<span class="nc" id="L195">        final Source source = Source.fromText(code, &quot;(eval)&quot;);</span>
+<span class="nc" id="L196">        return execute(this, source, code.getEncoding(), TranslatorDriver.ParserContext.TOP_LEVEL, self, null, currentNode);</span>
+    }
+
+    public Object eval(ByteList code, RubyBinding binding, RubyNode currentNode) {
+<span class="nc" id="L200">        final Source source = Source.fromText(code, &quot;(eval)&quot;);</span>
+<span class="nc" id="L201">        return execute(this, source, code.getEncoding(), TranslatorDriver.ParserContext.TOP_LEVEL, binding.getSelf(), binding.getFrame(), currentNode);</span>
+    }
+
+    public Object execute(RubyContext context, Source source, Encoding defaultEncoding, TranslatorDriver.ParserContext parserContext, Object self, MaterializedFrame parentFrame, RubyNode currentNode) {
+<span class="nc" id="L205">        return execute(context, source, defaultEncoding, parserContext, self, parentFrame, currentNode, NodeWrapper.IDENTITY);</span>
+    }
+
+    public Object execute(RubyContext context, Source source, Encoding defaultEncoding, TranslatorDriver.ParserContext parserContext, Object self, MaterializedFrame parentFrame, RubyNode currentNode, NodeWrapper wrapper) {
+<span class="nc" id="L209">        final RubyRootNode rootNode = translator.parse(context, source, defaultEncoding, parserContext, parentFrame, currentNode, wrapper);</span>
+<span class="nc" id="L210">        final CallTarget callTarget = Truffle.getRuntime().createCallTarget(rootNode);</span>
+
+        // TODO(CS): we really need a method here - it's causing problems elsewhere
+<span class="nc" id="L213">        return callTarget.call(RubyArguments.pack(null, parentFrame, self, null, new Object[]{}));</span>
+    }
+
+    public long getNextObjectID() {
+        // TODO(CS): We can theoretically run out of long values
+
+<span class="nc" id="L219">        final long id = nextObjectID.getAndAdd(2);</span>
+
+<span class="nc bnc" id="L221" title="All 2 branches missed.">        if (id &lt; 0) {</span>
+<span class="nc" id="L222">            nextObjectID.set(Long.MIN_VALUE);</span>
+<span class="nc" id="L223">            throw new RuntimeException(&quot;Object IDs exhausted&quot;);</span>
+        }
+
+<span class="nc" id="L226">        return id;</span>
+    }
+
+    public void shutdown() {
+<span class="nc" id="L230">        atExitManager.run();</span>
+
+<span class="nc" id="L232">        threadManager.leaveGlobalLock();</span>
+
+<span class="nc" id="L234">        objectSpaceManager.shutdown();</span>
+
+<span class="nc bnc" id="L236" title="All 2 branches missed.">        if (fiberManager != null) {</span>
+<span class="nc" id="L237">            fiberManager.shutdown();</span>
+        }
+<span class="nc" id="L239">    }</span>
+
+    public RubyString makeString(String string) {
+<span class="nc" id="L242">        return RubyString.fromJavaString(coreLibrary.getStringClass(), string);</span>
+    }
+
+    public RubyString makeString(char string) {
+<span class="nc" id="L246">        return makeString(Character.toString(string));</span>
+    }
+
+    public RubyString makeString(ByteList bytes) {
+<span class="nc" id="L250">        return RubyString.fromByteList(coreLibrary.getStringClass(), bytes);</span>
+    }
+
+    public IRubyObject toJRuby(Object object) {
+<span class="nc" id="L254">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L256" title="All 2 branches missed.">        if (object instanceof RubyNilClass) {</span>
+<span class="nc" id="L257">            return runtime.getNil();</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">        } else if (object == getCoreLibrary().getKernelModule()) {</span>
+<span class="nc" id="L259">            return runtime.getKernel();</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">        } else if (object == getCoreLibrary().getMainObject()) {</span>
+<span class="nc" id="L261">            return runtime.getTopSelf();</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">        } else if (object instanceof Boolean) {</span>
+<span class="nc" id="L263">            return runtime.newBoolean((boolean) object);</span>
+<span class="nc bnc" id="L264" title="All 2 branches missed.">        } else if (object instanceof Integer) {</span>
+<span class="nc" id="L265">            return runtime.newFixnum((int) object);</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">        } else if (object instanceof Long) {</span>
+<span class="nc" id="L267">            return runtime.newFixnum((long) object);</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">        } else if (object instanceof Double) {</span>
+<span class="nc" id="L269">            return runtime.newFloat((double) object);</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">        } else if (object instanceof RubyString) {</span>
+<span class="nc" id="L271">            return toJRuby((RubyString) object);</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">        } else if (object instanceof RubyArray) {</span>
+<span class="nc" id="L273">            return toJRuby((RubyArray) object);</span>
+        } else {
+<span class="nc" id="L275">            throw getRuntime().newRuntimeError(&quot;cannot pass &quot; + object + &quot; to JRuby&quot;);</span>
+        }
+    }
+
+    public org.jruby.RubyArray toJRuby(RubyArray array) {
+<span class="nc" id="L280">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L282">        final Object[] objects = array.slowToArray();</span>
+<span class="nc" id="L283">        final IRubyObject[] store = new IRubyObject[objects.length];</span>
+
+<span class="nc bnc" id="L285" title="All 2 branches missed.">        for (int n = 0; n &lt; objects.length; n++) {</span>
+<span class="nc" id="L286">            store[n] = toJRuby(objects[n]);</span>
+        }
+
+<span class="nc" id="L289">        return runtime.newArray(store);</span>
+    }
+
+    public org.jruby.RubyString toJRuby(RubyString string) {
+<span class="nc" id="L293">        return runtime.newString(string.getBytes().dup());</span>
+    }
+
+    public Object toTruffle(IRubyObject object) {
+<span class="nc" id="L297">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L299" title="All 2 branches missed.">        if (object == runtime.getTopSelf()) {</span>
+<span class="nc" id="L300">            return getCoreLibrary().getMainObject();</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">        } else if (object == runtime.getKernel()) {</span>
+<span class="nc" id="L302">            return getCoreLibrary().getKernelModule();</span>
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        } else if (object instanceof RubyNil) {</span>
+<span class="nc" id="L304">            return getCoreLibrary().getNilObject();</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">        } else if (object instanceof org.jruby.RubyBoolean.True) {</span>
+<span class="nc" id="L306">            return true;</span>
+<span class="nc bnc" id="L307" title="All 2 branches missed.">        } else if (object instanceof org.jruby.RubyBoolean.False) {</span>
+<span class="nc" id="L308">            return false;</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">        } else if (object instanceof org.jruby.RubyFixnum) {</span>
+<span class="nc" id="L310">            final long value = ((org.jruby.RubyFixnum) object).getLongValue();</span>
+
+<span class="nc bnc" id="L312" title="All 4 branches missed.">            if (value &lt; Integer.MIN_VALUE || value &gt; Integer.MAX_VALUE) {</span>
+<span class="nc" id="L313">                throw new UnsupportedOperationException();</span>
+            }
+
+<span class="nc" id="L316">            return (int) value;</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">        } else if (object instanceof org.jruby.RubyFloat) {</span>
+<span class="nc" id="L318">            return ((org.jruby.RubyFloat) object).getDoubleValue();</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">        } else if (object instanceof org.jruby.RubyString) {</span>
+<span class="nc" id="L320">            return toTruffle((org.jruby.RubyString) object);</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">        } else if (object instanceof org.jruby.RubySymbol) {</span>
+<span class="nc" id="L322">            return getSymbolTable().getSymbol(object.toString());</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">        } else if (object instanceof org.jruby.RubyArray) {</span>
+<span class="nc" id="L324">            final org.jruby.RubyArray jrubyArray = (org.jruby.RubyArray) object;</span>
+
+<span class="nc" id="L326">            final Object[] truffleArray = new Object[jrubyArray.size()];</span>
+
+<span class="nc bnc" id="L328" title="All 2 branches missed.">            for (int n = 0; n &lt; truffleArray.length; n++) {</span>
+<span class="nc" id="L329">                truffleArray[n] = toTruffle((IRubyObject) jrubyArray.get(n));</span>
+            }
+
+<span class="nc" id="L332">            return new RubyArray(coreLibrary.getArrayClass(), truffleArray, truffleArray.length);</span>
+        } else {
+<span class="nc" id="L334">            throw object.getRuntime().newRuntimeError(&quot;cannot pass &quot; + object.inspect() + &quot; to Truffle&quot;);</span>
+        }
+    }
+
+    public RubyString toTruffle(org.jruby.RubyString string) {
+<span class="nc" id="L339">        return new RubyString(getCoreLibrary().getStringClass(), string.getByteList().dup());</span>
+    }
+
+    public Ruby getRuntime() {
+<span class="nc" id="L343">        return runtime;</span>
+    }
+
+    public CoreLibrary getCoreLibrary() {
+<span class="nc" id="L347">        return coreLibrary;</span>
+    }
+
+    public FeatureManager getFeatureManager() {
+<span class="nc" id="L351">        return featureManager;</span>
+    }
+
+    public ObjectSpaceManager getObjectSpaceManager() {
+<span class="nc" id="L355">        return objectSpaceManager;</span>
+    }
+
+    public FiberManager getFiberManager() {
+<span class="nc" id="L359">        return fiberManager;</span>
+    }
+
+    public ThreadManager getThreadManager() {
+<span class="nc" id="L363">        return threadManager;</span>
+    }
+
+    public TranslatorDriver getTranslator() {
+<span class="nc" id="L367">        return translator;</span>
+    }
+
+    public AtExitManager getAtExitManager() {
+<span class="nc" id="L371">        return atExitManager;</span>
+    }
+
+    @Override
+    public String getLanguageShortName() {
+<span class="nc" id="L376">        return &quot;ruby&quot;;</span>
+    }
+
+    public TruffleHooks getHooks() {
+<span class="nc" id="L380">        return (TruffleHooks) runtime.getInstanceConfig().getTruffleHooks();</span>
+    }
+
+    public TraceManager getTraceManager() {
+<span class="nc" id="L384">        return traceManager;</span>
+    }
+
+    public Warnings getWarnings() {
+<span class="nc" id="L388">        return warnings;</span>
+    }
+
+    public Queue&lt;Object&gt; getThrowTags() {
+<span class="nc" id="L392">        return throwTags.get();</span>
+    }
+
+    public SafepointManager getSafepointManager() {
+<span class="nc" id="L396">        return safepointManager;</span>
+    }
+
+    public Random getRandom() {
+<span class="nc" id="L400">        return random;</span>
+    }
+
+    public LexicalScope getRootLexicalScope() {
+<span class="nc" id="L404">        return rootLexicalScope;</span>
+    }
+
+    public CompilerOptions getCompilerOptions() {
+<span class="nc" id="L408">        return compilerOptions;</span>
+    }
+
+    public RubiniusPrimitiveManager getRubiniusPrimitiveManager() {
+<span class="nc" id="L412">        return rubiniusPrimitiveManager;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

@@ -1,0 +1,416 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Struct.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.ffi</a> &gt; <span class="el_source">Struct.java</span></div><h1>Struct.java</h1><pre class="source lang-java linenums">
+package org.jruby.ext.ffi;
+
+import java.nio.ByteOrder;
+import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
+
+import org.jruby.*;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import static org.jruby.runtime.Visibility.*;
+
+@JRubyClass(name=&quot;FFI::Struct&quot;, parent=&quot;Object&quot;)
+public class Struct extends MemoryObject implements StructLayout.Storage {
+    private StructLayout layout;
+    private AbstractMemory memory;
+    private volatile Object[] referenceCache;
+    private volatile IRubyObject[] valueCache;
+    
+<span class="fc" id="L23">    private static final class Allocator implements ObjectAllocator {</span>
+        public final IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L25">            return new Struct(runtime, klass);</span>
+        }
+<span class="fc" id="L27">        private static final ObjectAllocator INSTANCE = new Allocator();</span>
+    }
+
+    /**
+     * Registers the StructLayout class in the JRuby runtime.
+     * @param runtime The JRuby runtime to register the new class in.
+     * @return The new class
+     */
+    public static RubyClass createStructClass(Ruby runtime, RubyModule module) {
+        
+<span class="pc bpc" id="L37" title="1 of 2 branches missed.">        RubyClass structClass = runtime.defineClassUnder(&quot;Struct&quot;, runtime.getObject(),</span>
+<span class="fc" id="L38">                RubyInstanceConfig.REIFY_RUBY_CLASSES ? new ReifyingAllocator(Struct.class): Allocator.INSTANCE, module);</span>
+<span class="fc" id="L39">        structClass.defineAnnotatedMethods(Struct.class);</span>
+<span class="fc" id="L40">        structClass.defineAnnotatedConstants(Struct.class);</span>
+<span class="fc" id="L41">        structClass.setReifiedClass(Struct.class);</span>
+<span class="fc" id="L42">        structClass.kindOf = new RubyModule.KindOf() {</span>
+            @Override
+            public boolean isKindOf(IRubyObject obj, RubyModule type) {
+<span class="nc bnc" id="L45" title="All 4 branches missed.">                return obj instanceof Struct &amp;&amp; super.isKindOf(obj, type);</span>
+            }
+        };
+        
+<span class="fc" id="L49">        return structClass;</span>
+    }
+
+    /**
+     * Creates a new &lt;tt&gt;StructLayout&lt;/tt&gt; instance using defaults.
+     *
+     * @param runtime The runtime for the &lt;tt&gt;StructLayout&lt;/tt&gt;
+     */
+    Struct(Ruby runtime) {
+<span class="nc" id="L58">        this(runtime, runtime.getFFI().structClass);</span>
+<span class="nc" id="L59">    }</span>
+
+    /**
+     * Creates a new &lt;tt&gt;StructLayout&lt;/tt&gt; instance.
+     *
+     * @param runtime The runtime for the &lt;tt&gt;StructLayout&lt;/tt&gt;
+     * @param klass the ruby class to use for the &lt;tt&gt;StructLayout&lt;/tt&gt;
+     */
+    public Struct(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L68">        this(runtime, klass, getStructLayout(runtime, klass), null);</span>
+<span class="nc" id="L69">    }</span>
+
+    /**
+     * Creates a new &lt;tt&gt;StructLayout&lt;/tt&gt; instance.
+     *
+     * @param runtime The runtime for the &lt;tt&gt;StructLayout&lt;/tt&gt;
+     * @param klass the ruby class to use for the &lt;tt&gt;StructLayout&lt;/tt&gt;
+     */
+    Struct(Ruby runtime, RubyClass klass, StructLayout layout, IRubyObject memory) {
+<span class="nc" id="L78">        super(runtime, klass);</span>
+<span class="nc" id="L79">        this.layout = layout;</span>
+
+<span class="nc bnc" id="L81" title="All 4 branches missed.">        if (!(memory == null || memory instanceof AbstractMemory)) {</span>
+<span class="nc" id="L82">            throw runtime.newTypeError(&quot;wrong argument type &quot;</span>
+<span class="nc" id="L83">                    + memory.getMetaClass().getName() + &quot; (expected Pointer or Buffer)&quot;);</span>
+        }
+
+<span class="nc" id="L86">        this.memory = (AbstractMemory) memory;</span>
+<span class="nc" id="L87">    }</span>
+
+    static final boolean isStruct(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L90">        return klass.isKindOfModule(runtime.getFFI().structClass);</span>
+    }
+
+    static final int getStructSize(Ruby runtime, IRubyObject structClass) {
+<span class="nc" id="L94">        return getStructLayout(runtime, structClass).getSize();</span>
+    }
+    
+    static final StructLayout getStructLayout(Ruby runtime, IRubyObject structClass) {
+        try {
+<span class="nc" id="L99">            Object layout = ((RubyClass) structClass).getFFIHandle();</span>
+<span class="nc bnc" id="L100" title="All 2 branches missed.">            if (layout instanceof StructLayout) {</span>
+<span class="nc" id="L101">                return (StructLayout) layout;</span>
+            }
+
+<span class="nc" id="L104">            RubyClass klass = (RubyClass) structClass;</span>
+<span class="nc bnc" id="L105" title="All 4 branches missed.">            while (klass != runtime.getObject() &amp;&amp; !((layout = klass.getInstanceVariable(&quot;@layout&quot;)) instanceof StructLayout)) {</span>
+<span class="nc" id="L106">                klass = klass.getSuperClass();</span>
+            }
+
+<span class="nc bnc" id="L109" title="All 2 branches missed.">            if (!(layout instanceof StructLayout)) {</span>
+<span class="nc" id="L110">                throw runtime.newRuntimeError(&quot;no valid struct layout for &quot; + ((RubyClass) structClass).getName());</span>
+            }
+
+            // Cache the layout on the Struct metaclass for faster retrieval next time
+<span class="nc" id="L114">            ((RubyClass) structClass).setFFIHandle(layout);</span>
+<span class="nc" id="L115">            return (StructLayout) layout;</span>
+
+<span class="nc" id="L117">        } catch (ClassCastException ex) {</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">            if (!(structClass instanceof RubyClass)) {</span>
+<span class="nc" id="L119">                throw runtime.newTypeError(&quot;wrong argument type &quot;</span>
+<span class="nc" id="L120">                        + structClass.getMetaClass().getName() + &quot; (expected subclass of Struct)&quot;);</span>
+            }
+<span class="nc" id="L122">            throw runtime.newRuntimeError(&quot;invalid layout set for struct &quot; + ((RubyClass) structClass).getName());</span>
+        }
+    }
+
+    @JRubyMethod(name = &quot;initialize&quot;, visibility = PRIVATE)
+    public IRubyObject initialize(ThreadContext context) {
+
+<span class="nc" id="L129">        memory = MemoryPointer.allocate(context.runtime, layout.getSize(), 1, true);</span>
+
+<span class="nc" id="L131">        return this;</span>
+    }
+
+    @JRubyMethod(name = &quot;initialize&quot;, visibility = PRIVATE)
+    public IRubyObject initialize(ThreadContext context, IRubyObject ptr) {
+        
+<span class="nc bnc" id="L137" title="All 2 branches missed.">        if (!(ptr instanceof AbstractMemory)) {</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">            if (ptr.isNil()) {</span>
+<span class="nc" id="L139">                return initialize(context);</span>
+            }
+
+<span class="nc" id="L142">            throw context.runtime.newTypeError(&quot;wrong argument type &quot;</span>
+<span class="nc" id="L143">                    + ptr.getMetaClass().getName() + &quot; (expected Pointer or Buffer)&quot;);</span>
+        }
+
+<span class="nc bnc" id="L146" title="All 2 branches missed.">        if (((AbstractMemory) ptr).getSize() &lt; layout.getSize()) {</span>
+<span class="nc" id="L147">            throw context.runtime.newArgumentError(&quot;memory object has insufficient space for &quot;</span>
+<span class="nc" id="L148">                    + getMetaClass().getName());</span>
+        }
+
+<span class="nc" id="L151">        memory = (AbstractMemory) ptr;</span>
+<span class="nc" id="L152">        setMemoryIO(memory.getMemoryIO());</span>
+        
+<span class="nc" id="L154">        return this;</span>
+    }
+
+    @JRubyMethod(name = &quot;initialize&quot;, visibility = PRIVATE, rest = true)
+    public IRubyObject initialize(ThreadContext context, IRubyObject[] args) {
+<span class="nc bnc" id="L159" title="All 3 branches missed.">        switch (args.length) {</span>
+            default: // &gt; 1
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                IRubyObject result = getMetaClass().callMethod(context, &quot;layout&quot;, args[1] instanceof RubyArray</span>
+<span class="nc" id="L162">                        ? ((RubyArray) args[1]).toJavaArrayUnsafe()</span>
+<span class="nc" id="L163">                        : java.util.Arrays.copyOfRange(args, 1, args.length));</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">                if (!(result instanceof StructLayout)) {</span>
+<span class="nc" id="L165">                    throw context.runtime.newTypeError(&quot;Struct.layout did not return a FFI::StructLayout instance&quot;);</span>
+                }
+<span class="nc" id="L167">                layout = (StructLayout) result;</span>
+<span class="nc" id="L168">            case 1: return initialize(context, args[0]);</span>
+<span class="nc" id="L169">            case 0: return initialize(context);</span>
+        }
+    }
+
+    @JRubyMethod(name = &quot;initialize_copy&quot;, visibility = PRIVATE)
+    public IRubyObject initialize_copy(ThreadContext context, IRubyObject other) {
+<span class="nc bnc" id="L175" title="All 2 branches missed.">        if (other == this) {</span>
+<span class="nc" id="L176">            return this;</span>
+        }
+<span class="nc bnc" id="L178" title="All 2 branches missed.">        if (!(other instanceof Struct)) {</span>
+<span class="nc" id="L179">            throw context.runtime.newTypeError(&quot;not an instance of Struct&quot;);</span>
+        }
+<span class="nc" id="L181">        Struct orig = (Struct) other;</span>
+<span class="nc" id="L182">        memory = (AbstractMemory) orig.getMemory().slice(context.runtime, 0, layout.getSize()).dup();</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">        if (orig.referenceCache != null) {</span>
+<span class="nc" id="L184">            referenceCache = new Object[layout.getReferenceFieldCount()];</span>
+<span class="nc" id="L185">            System.arraycopy(orig.referenceCache, 0, referenceCache, 0, referenceCache.length);</span>
+        }
+<span class="nc" id="L187">        setMemoryIO(memory.getMemoryIO());</span>
+
+<span class="nc" id="L189">        return this;</span>
+    }
+
+
+    private static final Struct allocateStruct(ThreadContext context, IRubyObject klass, int flags) {
+<span class="nc" id="L194">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L195">        StructLayout layout = getStructLayout(runtime, klass);</span>
+<span class="nc" id="L196">        return new Struct(runtime, (RubyClass) klass, layout, new Buffer(runtime, layout.getSize(), flags));</span>
+    }
+
+    @JRubyMethod(name = { &quot;new_in&quot;, &quot;alloc_in&quot; }, meta = true)
+    public static IRubyObject allocateIn(ThreadContext context, IRubyObject klass) {
+<span class="nc" id="L201">        return allocateStruct(context, klass, Buffer.IN);</span>
+    }
+    @JRubyMethod(name = { &quot;new_in&quot;, &quot;alloc_in&quot; }, meta = true)
+    public static IRubyObject allocateIn(ThreadContext context, IRubyObject klass, IRubyObject clearArg) {
+<span class="nc" id="L205">        return allocateStruct(context, klass, Buffer.IN);</span>
+    }
+    @JRubyMethod(name = { &quot;new_out&quot;, &quot;alloc_out&quot; }, meta = true)
+    public static IRubyObject allocateOut(ThreadContext context, IRubyObject klass) {
+<span class="nc" id="L209">        return allocateStruct(context, klass, Buffer.OUT);</span>
+    }
+    @JRubyMethod(name = { &quot;new_out&quot;, &quot;alloc_out&quot; }, meta = true)
+    public static IRubyObject allocateOut(ThreadContext context, IRubyObject klass, IRubyObject clearArg) {
+<span class="nc" id="L213">        return allocateStruct(context, klass, Buffer.OUT);</span>
+    }
+    @JRubyMethod(name = { &quot;new_inout&quot;, &quot;alloc_inout&quot; }, meta = true)
+    public static IRubyObject allocateInOut(ThreadContext context, IRubyObject klass) {
+<span class="nc" id="L217">        return allocateStruct(context, klass, Buffer.IN | Buffer.OUT);</span>
+    }
+    @JRubyMethod(name = { &quot;new_inout&quot;, &quot;alloc_inout&quot; }, meta = true)
+    public static IRubyObject allocateInOut(ThreadContext context, IRubyObject klass, IRubyObject clearArg) {
+<span class="nc" id="L221">        return allocateStruct(context, klass, Buffer.IN | Buffer.OUT);</span>
+    }
+
+    @JRubyMethod(name = { &quot;size&quot; }, meta = true)
+    public static IRubyObject size(ThreadContext context, IRubyObject structClass) {
+<span class="nc bnc" id="L226" title="All 2 branches missed.">        if (!(structClass instanceof RubyClass)) {</span>
+<span class="nc" id="L227">            throw context.runtime.newTypeError(structClass, context.runtime.getClassClass());</span>
+        }
+<span class="nc" id="L229">        RubyClass klass = (RubyClass) structClass;</span>
+
+<span class="nc" id="L231">        Object obj = klass.getFFIHandle();</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">        if (obj instanceof StructLayout) {</span>
+<span class="nc" id="L233">            return ((StructLayout) obj).size(context);</span>
+        }
+
+<span class="nc bnc" id="L236" title="All 2 branches missed.">        if ((obj = ((RubyClass) structClass).getInstanceVariable(&quot;@layout&quot;)) instanceof StructLayout) {</span>
+<span class="nc" id="L237">            return ((StructLayout) obj).size(context);</span>
+
+        } else {
+<span class="nc" id="L240">            obj = ((RubyClass) structClass).getInstanceVariable(&quot;@size&quot;);</span>
+        }
+
+<span class="nc bnc" id="L243" title="All 2 branches missed.">        return obj instanceof RubyFixnum ? (RubyFixnum) obj : RubyFixnum.zero(context.runtime);</span>
+    }
+
+    @JRubyMethod(name = { &quot;alignment&quot;, &quot;align&quot; }, meta = true)
+    public static IRubyObject alignment(ThreadContext context, IRubyObject structClass) {
+<span class="nc" id="L248">        return getStructLayout(context.runtime, structClass).alignment(context);</span>
+    }
+
+    @JRubyMethod(name = { &quot;layout=&quot; }, meta = true)
+    public static IRubyObject set_layout(ThreadContext context, IRubyObject structClass, IRubyObject layout) {
+<span class="pc bpc" id="L253" title="1 of 2 branches missed.">        if (!(structClass instanceof RubyClass)) {</span>
+<span class="nc" id="L254">            throw context.runtime.newTypeError(structClass, context.runtime.getClassClass());</span>
+        }
+
+<span class="pc bpc" id="L257" title="1 of 2 branches missed.">        if (!(layout instanceof StructLayout)) {</span>
+<span class="nc" id="L258">            throw context.runtime.newTypeError(layout,</span>
+<span class="nc" id="L259">                    context.runtime.getModule(&quot;FFI&quot;).getClass(&quot;StructLayout&quot;));</span>
+        }
+
+<span class="fc" id="L262">        RubyClass klass = (RubyClass) structClass;</span>
+<span class="fc" id="L263">        klass.setFFIHandle(layout);</span>
+<span class="fc" id="L264">        klass.setInstanceVariable(&quot;@layout&quot;, layout);</span>
+
+<span class="fc" id="L266">        return structClass;</span>
+    }
+
+    @JRubyMethod(name = &quot;members&quot;, meta = true)
+    public static IRubyObject members(ThreadContext context, IRubyObject structClass) {
+<span class="nc" id="L271">        return getStructLayout(context.runtime, structClass).members(context);</span>
+    }
+
+    @JRubyMethod(name = &quot;offsets&quot;, meta = true)
+    public static IRubyObject offsets(ThreadContext context, IRubyObject structClass) {
+<span class="nc" id="L276">        return getStructLayout(context.runtime, structClass).offsets(context);</span>
+    }
+
+    @JRubyMethod(name = &quot;offset_of&quot;, meta = true)
+    public static IRubyObject offset_of(ThreadContext context, IRubyObject structClass, IRubyObject fieldName) {
+<span class="nc" id="L281">        return getStructLayout(context.runtime, structClass).offset_of(context, fieldName);</span>
+    }
+
+
+    /* ------------- instance methods ------------- */
+
+    @JRubyMethod(name = &quot;[]&quot;)
+    public IRubyObject getFieldValue(ThreadContext context, IRubyObject fieldName) {
+<span class="nc" id="L289">        return layout.getMember(context.runtime, fieldName).get(context, this, getMemory());</span>
+    }
+
+    @JRubyMethod(name = &quot;[]=&quot;)
+    public IRubyObject setFieldValue(ThreadContext context, IRubyObject fieldName, IRubyObject fieldValue) {
+<span class="nc" id="L294">        layout.getMember(context.runtime, fieldName).put(context, this, getMemory(), fieldValue);</span>
+
+<span class="nc" id="L296">        return fieldValue;</span>
+    }
+
+    @JRubyMethod(name = { &quot;cspec&quot;, &quot;layout&quot; })
+    public IRubyObject getLayout(ThreadContext context) {
+<span class="nc" id="L301">        return layout;</span>
+    }
+
+    @JRubyMethod(name = { &quot;pointer&quot;, &quot;to_ptr&quot; })
+    public IRubyObject pointer(ThreadContext context) {
+<span class="nc" id="L306">        return getMemory();</span>
+    }
+    
+    @JRubyMethod(name = &quot;members&quot;)
+    public IRubyObject members(ThreadContext context) {
+<span class="nc" id="L311">        return layout.members(context);</span>
+    }
+
+
+    @JRubyMethod(name = &quot;values&quot;)
+    public IRubyObject values(ThreadContext context) {
+<span class="nc" id="L317">        IRubyObject[] values = new IRubyObject[layout.getFieldCount()];</span>
+
+<span class="nc" id="L319">        int i = 0;</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">        for (StructLayout.Member m : layout.getMembers()) {</span>
+<span class="nc" id="L321">            values[i++] = m.get(context, this, getMemory());</span>
+<span class="nc" id="L322">        }</span>
+
+<span class="nc" id="L324">        return RubyArray.newArrayNoCopy(context.runtime, values);</span>
+    }
+
+    @JRubyMethod(name = &quot;offsets&quot;)
+    public IRubyObject offsets(ThreadContext context) {
+<span class="nc" id="L329">        return layout.offsets(context);</span>
+    }
+
+    @JRubyMethod(name = &quot;offset_of&quot;)
+    public IRubyObject offset_of(ThreadContext context, IRubyObject fieldName) {
+<span class="nc" id="L334">        return layout.offset_of(context, fieldName);</span>
+    }
+
+
+    @JRubyMethod(name = &quot;size&quot;)
+    public IRubyObject size(ThreadContext context) {
+<span class="nc" id="L340">        return layout.size(context);</span>
+    }
+
+    @JRubyMethod(name = { &quot;alignment&quot; })
+    public IRubyObject alignment(ThreadContext context) {
+<span class="nc" id="L345">        return layout.alignment(context);</span>
+    }
+
+    @JRubyMethod(name=&quot;null?&quot;)
+    public IRubyObject null_p(ThreadContext context) {
+<span class="nc" id="L350">        return context.runtime.newBoolean(getMemory().getMemoryIO().isNull());</span>
+    }
+
+    @JRubyMethod(name = &quot;order&quot;, required = 0)
+    public final IRubyObject order(ThreadContext context) {
+<span class="nc bnc" id="L355" title="All 2 branches missed.">        return context.runtime.newSymbol(getMemoryIO().order().equals(ByteOrder.LITTLE_ENDIAN) ? &quot;little&quot; : &quot;big&quot;);</span>
+    }
+
+    @JRubyMethod(name = &quot;order&quot;, required = 1)
+    public final IRubyObject order(ThreadContext context, IRubyObject byte_order) {
+<span class="nc" id="L360">        ByteOrder order = Util.parseByteOrder(context.runtime, byte_order);</span>
+<span class="nc" id="L361">        return new Struct(context.runtime, getMetaClass(), layout,</span>
+<span class="nc" id="L362">                getMemory().order(context.runtime, order));</span>
+    }
+
+    @JRubyMethod(name = &quot;clear&quot;)
+    public IRubyObject clear(ThreadContext context) {
+<span class="nc" id="L367">        getMemoryIO().setMemory(0, layout.size, (byte) 0);</span>
+<span class="nc" id="L368">        return this;</span>
+    }
+
+
+    public final AbstractMemory getMemory() {
+<span class="nc bnc" id="L373" title="All 2 branches missed.">        return memory != null ? memory : (memory = MemoryPointer.allocate(getRuntime(), layout.getSize(), 1, true));</span>
+    }
+
+    protected final MemoryIO allocateMemoryIO() {
+<span class="nc" id="L377">        return getMemory().getMemoryIO();</span>
+    }
+
+    public final IRubyObject getCachedValue(StructLayout.Member member) {
+<span class="nc bnc" id="L381" title="All 2 branches missed.">        return valueCache != null ? valueCache[layout.getCacheableFieldIndex(member)] : null;</span>
+    }
+
+    public final void putCachedValue(StructLayout.Member member, IRubyObject value) {
+<span class="nc" id="L385">        getValueCacheForWrite()[layout.getCacheableFieldIndex(member)] = value;</span>
+<span class="nc" id="L386">    }</span>
+
+    private IRubyObject[] getValueCacheForWrite() {
+<span class="nc bnc" id="L389" title="All 2 branches missed.">        return valueCache != null ? valueCache : initValueCache();</span>
+    }
+
+<span class="fc" id="L392">    private static final AtomicReferenceFieldUpdater&lt;Struct, IRubyObject[]&gt; valueCacheUpdater</span>
+<span class="fc" id="L393">            = AtomicReferenceFieldUpdater.newUpdater(Struct.class, IRubyObject[].class, &quot;valueCache&quot;);</span>
+
+    private IRubyObject[] initValueCache() {
+<span class="nc" id="L396">        valueCacheUpdater.compareAndSet(this, null, new IRubyObject[layout.getCacheableFieldCount()]);</span>
+<span class="nc" id="L397">        return valueCache;</span>
+    }
+
+    private Object[] getReferenceCache() {
+<span class="nc bnc" id="L401" title="All 2 branches missed.">        return referenceCache != null ? referenceCache : initReferenceCache();</span>
+    }
+
+<span class="fc" id="L404">    private static final AtomicReferenceFieldUpdater&lt;Struct, Object[]&gt; referenceCacheUpdater</span>
+<span class="fc" id="L405">            = AtomicReferenceFieldUpdater.newUpdater(Struct.class, Object[].class, &quot;referenceCache&quot;);</span>
+
+    private Object[] initReferenceCache() {
+<span class="nc" id="L408">        referenceCacheUpdater.compareAndSet(this, null, new Object[layout.getReferenceFieldCount()]);</span>
+<span class="nc" id="L409">        return referenceCache;</span>
+    }
+    
+    public void putReference(StructLayout.Member member, Object value) {
+<span class="nc" id="L413">        getReferenceCache()[layout.getReferenceFieldIndex(member)] = value;</span>
+<span class="nc" id="L414">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

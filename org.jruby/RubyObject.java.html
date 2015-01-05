@@ -1,0 +1,573 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyObject.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyObject.java</span></div><h1>RubyObject.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2001 Chad Fowler &lt;chadfowler@chadfowler.com&gt;
+ * Copyright (C) 2001 Alan Moore &lt;alan_moore@gmx.net&gt;
+ * Copyright (C) 2001-2002 Benoit Cerrina &lt;b.cerrina@wanadoo.fr&gt;
+ * Copyright (C) 2001-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2004-2006 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004-2005 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2006 Ola Bini &lt;ola.bini@ki.se&gt;
+ * Copyright (C) 2006 Miguel Covarrubias &lt;mlcovarrubias@gmail.com&gt;
+ * Copyright (C) 2007 MenTaLguY &lt;mental@rydia.net&gt;
+ * Copyright (C) 2007 William N Dortch &lt;bill.dortch@gmail.com&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.util.List;
+import java.util.Set;
+
+import org.jruby.anno.JRubyClass;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.marshal.DataType;
+
+import static org.jruby.runtime.Helpers.invokedynamic;
+import static org.jruby.runtime.invokedynamic.MethodNames.EQL;
+import static org.jruby.runtime.invokedynamic.MethodNames.OP_EQUAL;
+import static org.jruby.runtime.invokedynamic.MethodNames.HASH;
+import org.jruby.util.cli.Options;
+
+/**
+ * RubyObject represents the implementation of the Object class in Ruby. As such,
+ * it defines very few methods of its own, inheriting most from the included
+ * Kernel module.
+ * 
+ * Methods that are implemented here, such as &quot;initialize&quot; should be implemented
+ * with care; reification of Ruby classes into Java classes can produce
+ * conflicting method names in rare cases. See JRUBY-5906 for an example.
+ * @author headius
+ */
+@JRubyClass(name=&quot;Object&quot;, include=&quot;Kernel&quot;)
+public class RubyObject extends RubyBasicObject {
+    // Equivalent of T_DATA
+    public static class Data extends RubyObject implements DataType {
+        public Data(Ruby runtime, RubyClass metaClass, Object data) {
+<span class="nc" id="L78">            super(runtime, metaClass);</span>
+<span class="nc" id="L79">            dataWrapStruct(data);</span>
+<span class="nc" id="L80">        }</span>
+
+        public Data(RubyClass metaClass, Object data) {
+<span class="nc" id="L83">            super(metaClass);</span>
+<span class="nc" id="L84">            dataWrapStruct(data);</span>
+<span class="nc" id="L85">        }</span>
+    }
+
+    /**
+     * Standard path for object creation. Objects are entered into ObjectSpace
+     * only if ObjectSpace is enabled.
+     */
+    public RubyObject(Ruby runtime, RubyClass metaClass) {
+<span class="fc" id="L93">        super(runtime, metaClass);</span>
+<span class="fc" id="L94">    }</span>
+
+    /**
+     * Path for objects that don't taint and don't enter objectspace.
+     */
+    public RubyObject(RubyClass metaClass) {
+<span class="fc" id="L100">        super(metaClass);</span>
+<span class="fc" id="L101">    }</span>
+
+    @Deprecated
+    protected RubyObject(Ruby runtime, RubyClass metaClass, boolean useObjectSpace, boolean canBeTainted) {
+<span class="nc" id="L105">        super(runtime, metaClass, useObjectSpace, canBeTainted);</span>
+<span class="nc" id="L106">    }</span>
+
+    /**
+     * Path for objects who want to decide whether they don't want to be in
+     * ObjectSpace even when it is on. (notably used by objects being
+     * considered immediate, they'll always pass false here)
+     */
+    protected RubyObject(Ruby runtime, RubyClass metaClass, boolean useObjectSpace) {
+<span class="fc" id="L114">        super(runtime, metaClass, useObjectSpace);</span>
+<span class="fc" id="L115">    }</span>
+
+    /**
+     * Will create the Ruby class Object in the runtime
+     * specified. This method needs to take the actual class as an
+     * argument because of the Object class' central part in runtime
+     * initialization.
+     */
+    public static RubyClass createObjectClass(Ruby runtime, RubyClass objectClass) {
+<span class="fc" id="L124">        objectClass.setClassIndex(ClassIndex.OBJECT);</span>
+<span class="fc" id="L125">        objectClass.setReifiedClass(RubyObject.class);</span>
+
+<span class="fc" id="L127">        objectClass.defineAnnotatedMethods(RubyObject.class);</span>
+
+<span class="fc" id="L129">        return objectClass;</span>
+    }
+
+    /**
+     * Default allocator instance for all Ruby objects. The only
+     * reason to not use this allocator is if you actually need to
+     * have all instances of something be a subclass of RubyObject.
+     *
+     * @see org.jruby.runtime.ObjectAllocator
+     */
+<span class="fc" id="L139">    public static final ObjectAllocator OBJECT_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L142">            return new RubyObject(runtime, klass);</span>
+        }
+    };
+    
+<span class="fc" id="L146">    public static final ObjectAllocator OBJECT_VAR0_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L149">            return new RubyObjectVar0(runtime, klass);</span>
+        }
+    };
+    
+<span class="fc" id="L153">    public static final ObjectAllocator OBJECT_VAR1_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L156">            return new RubyObjectVar1(runtime, klass);</span>
+        }
+    };
+    
+<span class="fc" id="L160">    public static final ObjectAllocator OBJECT_VAR2_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L163">            return new RubyObjectVar2(runtime, klass);</span>
+        }
+    };
+    
+<span class="fc" id="L167">    public static final ObjectAllocator OBJECT_VAR3_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L170">            return new RubyObjectVar3(runtime, klass);</span>
+        }
+    };
+    
+<span class="fc" id="L174">    public static final ObjectAllocator OBJECT_VAR4_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L177">            return new RubyObjectVar4(runtime, klass);</span>
+        }
+    };
+    
+<span class="fc" id="L181">    public static final ObjectAllocator OBJECT_VAR5_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L184">            return new RubyObjectVar5(runtime, klass);</span>
+        }
+    };
+    
+<span class="fc" id="L188">    public static final ObjectAllocator OBJECT_VAR6_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L191">            return new RubyObjectVar6(runtime, klass);</span>
+        }
+    };
+    
+<span class="fc" id="L195">    public static final ObjectAllocator OBJECT_VAR7_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L198">            return new RubyObjectVar7(runtime, klass);</span>
+        }
+    };
+    
+<span class="fc" id="L202">    public static final ObjectAllocator OBJECT_VAR8_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L205">            return new RubyObjectVar8(runtime, klass);</span>
+        }
+    };
+    
+<span class="fc" id="L209">    public static final ObjectAllocator OBJECT_VAR9_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L212">            return new RubyObjectVar9(runtime, klass);</span>
+        }
+    };
+    
+<span class="fc" id="L216">    public static final ObjectAllocator[] FIELD_ALLOCATORS = {</span>
+        OBJECT_ALLOCATOR,
+        OBJECT_VAR0_ALLOCATOR,
+        OBJECT_VAR1_ALLOCATOR,
+        OBJECT_VAR2_ALLOCATOR,
+        OBJECT_VAR3_ALLOCATOR,
+        OBJECT_VAR4_ALLOCATOR,
+        OBJECT_VAR5_ALLOCATOR,
+        OBJECT_VAR6_ALLOCATOR,
+        OBJECT_VAR7_ALLOCATOR,
+        OBJECT_VAR8_ALLOCATOR,
+        OBJECT_VAR9_ALLOCATOR
+    };
+    
+<span class="fc" id="L230">    public static final Class[] FIELD_ALLOCATED_CLASSES = {</span>
+        RubyObject.class,
+        RubyObjectVar0.class,
+        RubyObjectVar1.class,
+        RubyObjectVar2.class,
+        RubyObjectVar3.class,
+        RubyObjectVar4.class,
+        RubyObjectVar5.class,
+        RubyObjectVar6.class,
+        RubyObjectVar7.class,
+        RubyObjectVar8.class,
+        RubyObjectVar9.class,
+    };
+    
+    /**
+     * Allocator that inspects all methods for instance variables and chooses
+     * a concrete class to construct based on that. This allows using
+     * specialized subclasses to hold instance variables in fields rather than
+     * always holding them in an array.
+     */
+<span class="fc" id="L250">    public static final ObjectAllocator IVAR_INSPECTING_OBJECT_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L253">            Set&lt;String&gt; foundVariables = klass.discoverInstanceVariables();</span>
+
+<span class="nc bnc" id="L255" title="All 2 branches missed.">            if (Options.DUMP_INSTANCE_VARS.load()) {</span>
+<span class="nc" id="L256">                System.err.println(klass + &quot;;&quot; + foundVariables);</span>
+            }
+            
+<span class="nc" id="L259">            int count = 0;</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">            for (String name : foundVariables) {</span>
+<span class="nc" id="L261">                klass.getVariableTableManager().getVariableAccessorForVar(name, count);</span>
+<span class="nc" id="L262">                count++;</span>
+<span class="nc bnc" id="L263" title="All 2 branches missed.">                if (count &gt;= 10) break;</span>
+<span class="nc" id="L264">            }</span>
+            
+<span class="nc" id="L266">            ObjectAllocator allocator = FIELD_ALLOCATORS[count];</span>
+<span class="nc" id="L267">            Class reified = FIELD_ALLOCATED_CLASSES[count];</span>
+<span class="nc" id="L268">            klass.setAllocator(allocator);</span>
+<span class="nc" id="L269">            klass.setReifiedClass(reified);</span>
+            
+<span class="nc" id="L271">            return allocator.allocate(runtime, klass);</span>
+        }
+    };
+
+<span class="fc" id="L275">    public static final ObjectAllocator REIFYING_OBJECT_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L278">            klass.reifyWithAncestors();</span>
+<span class="nc" id="L279">            return klass.allocate();</span>
+        }
+    };
+
+    @Deprecated
+    @Override
+    public IRubyObject initialize() {
+<span class="nc" id="L286">        return getRuntime().getNil();</span>
+    }
+
+    public IRubyObject initialize(ThreadContext context) {
+<span class="nc" id="L290">        return initialize19(context);</span>
+    }
+
+    /**
+     * Will make sure that this object is added to the current object
+     * space.
+     *
+     * @see org.jruby.runtime.ObjectSpace
+     */
+    public void attachToObjectSpace() {
+<span class="nc" id="L300">        getRuntime().getObjectSpace().add(this);</span>
+<span class="nc" id="L301">    }</span>
+
+    /**
+     * This is overridden in the other concrete Java builtins to provide a fast way
+     * to determine what type they are.
+     *
+     * Will generally return a value from org.jruby.runtime.ClassIndex
+     *
+     * @see org.jruby.runtime.ClassIndex
+     */
+    @Override
+    public ClassIndex getNativeClassIndex() {
+<span class="fc" id="L313">        return ClassIndex.OBJECT;</span>
+    }
+
+    /**
+     * Simple helper to print any objects.
+     */
+    public static void puts(Object obj) {
+<span class="nc" id="L320">        System.out.println(obj.toString());</span>
+<span class="nc" id="L321">    }</span>
+
+    /**
+     * This method is just a wrapper around the Ruby &quot;==&quot; method,
+     * provided so that RubyObjects can be used as keys in the Java
+     * HashMap object underlying RubyHash.
+     */
+    @Override
+    public boolean equals(Object other) {
+<span class="pc bpc" id="L330" title="1 of 4 branches missed.">        return other == this ||</span>
+                other instanceof IRubyObject &amp;&amp;
+<span class="fc bfc" id="L332" title="All 2 branches covered.">                invokedynamic(getRuntime().getCurrentContext(), this, OP_EQUAL, (IRubyObject) other).isTrue();</span>
+    }
+
+    /**
+     * The default toString method is just a wrapper that calls the
+     * Ruby &quot;to_s&quot; method.
+     */
+    @Override
+    public String toString() {
+<span class="fc" id="L341">        RubyString rubyString = Helpers.invoke(getRuntime().getCurrentContext(), this, &quot;to_s&quot;).convertToString();</span>
+<span class="fc" id="L342">        return rubyString.getUnicodeValue();</span>
+    }
+
+    /**
+     * Call the Ruby initialize method with the supplied arguments and block.
+     */
+    public final void callInit(IRubyObject[] args, Block block) {
+<span class="fc" id="L349">        Helpers.invoke(getRuntime().getCurrentContext(), this, &quot;initialize&quot;, args, block);</span>
+<span class="fc" id="L350">    }</span>
+
+    /**
+     * Call the Ruby initialize method with the supplied arguments and block.
+     */
+    public final void callInit(Block block) {
+<span class="fc" id="L356">        Helpers.invoke(getRuntime().getCurrentContext(), this, &quot;initialize&quot;, block);</span>
+<span class="fc" id="L357">    }</span>
+
+    /**
+     * Call the Ruby initialize method with the supplied arguments and block.
+     */
+    public final void callInit(IRubyObject arg0, Block block) {
+<span class="fc" id="L363">        Helpers.invoke(getRuntime().getCurrentContext(), this, &quot;initialize&quot;, arg0, block);</span>
+<span class="fc" id="L364">    }</span>
+
+    /**
+     * Call the Ruby initialize method with the supplied arguments and block.
+     */
+    public final void callInit(IRubyObject arg0, IRubyObject arg1, Block block) {
+<span class="nc" id="L370">        Helpers.invoke(getRuntime().getCurrentContext(), this, &quot;initialize&quot;, arg0, arg1, block);</span>
+<span class="nc" id="L371">    }</span>
+
+    /**
+     * Call the Ruby initialize method with the supplied arguments and block.
+     */
+    public final void callInit(IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="fc" id="L377">        Helpers.invoke(getRuntime().getCurrentContext(), this, &quot;initialize&quot;, arg0, arg1, arg2, block);</span>
+<span class="fc" id="L378">    }</span>
+
+    public final void callInit(ThreadContext context, IRubyObject[] args, Block block) {
+<span class="fc" id="L381">        getMetaClass().getBaseCallSite(RubyClass.CS_IDX_INITIALIZE).call(context, this, this, args, block);</span>
+<span class="fc" id="L382">    }</span>
+
+    public final void callInit(ThreadContext context, Block block) {
+<span class="nc" id="L385">        getMetaClass().getBaseCallSite(RubyClass.CS_IDX_INITIALIZE).call(context, this, this, block);</span>
+<span class="nc" id="L386">    }</span>
+
+    public final void callInit(ThreadContext context, IRubyObject arg0, Block block) {
+<span class="nc" id="L389">        getMetaClass().getBaseCallSite(RubyClass.CS_IDX_INITIALIZE).call(context, this, this, arg0, block);</span>
+<span class="nc" id="L390">    }</span>
+
+    public final void callInit(ThreadContext context, IRubyObject arg0, IRubyObject arg1, Block block) {
+<span class="nc" id="L393">        getMetaClass().getBaseCallSite(RubyClass.CS_IDX_INITIALIZE).call(context, this, this, arg0, arg1, block);</span>
+<span class="nc" id="L394">    }</span>
+
+    public final void callInit(ThreadContext context, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="nc" id="L397">        getMetaClass().getBaseCallSite(RubyClass.CS_IDX_INITIALIZE).call(context, this, this, arg0, arg1, arg2, block);</span>
+<span class="nc" id="L398">    }</span>
+
+    /**
+     * Tries to convert this object to the specified Ruby type, using
+     * a specific conversion method.
+     */
+    @Deprecated
+    public final IRubyObject convertToType(RubyClass target, int convertMethodIndex) {
+<span class="nc" id="L406">        throw new RuntimeException(&quot;Not supported; use the String versions&quot;);</span>
+    }
+
+    /** specific_eval
+     *
+     * Evaluates the block or string inside of the context of this
+     * object, using the supplied arguments. If a block is given, this
+     * will be yielded in the specific context of this object. If no
+     * block is given then a String-like object needs to be the first
+     * argument, and this string will be evaluated. Second and third
+     * arguments in the args-array is optional, but can contain the
+     * filename and line of the string under evaluation.
+     */
+    @Deprecated
+    public IRubyObject specificEval(ThreadContext context, RubyModule mod, IRubyObject[] args, Block block, EvalType evalType) {
+<span class="nc bnc" id="L421" title="All 2 branches missed.">        if (block.isGiven()) {</span>
+<span class="nc bnc" id="L422" title="All 2 branches missed.">            if (args.length &gt; 0) throw getRuntime().newArgumentError(args.length, 0);</span>
+
+<span class="nc" id="L424">            return yieldUnder(context, mod, block, evalType);</span>
+        }
+
+<span class="nc bnc" id="L427" title="All 2 branches missed.">        if (args.length == 0) {</span>
+<span class="nc" id="L428">            throw getRuntime().newArgumentError(&quot;block not supplied&quot;);</span>
+<span class="nc bnc" id="L429" title="All 2 branches missed.">        } else if (args.length &gt; 3) {</span>
+<span class="nc" id="L430">            String lastFuncName = context.getFrameName();</span>
+<span class="nc" id="L431">            throw getRuntime().newArgumentError(</span>
+                &quot;wrong number of arguments: &quot; + lastFuncName + &quot;(src) or &quot; + lastFuncName + &quot;{..}&quot;);
+        }
+
+        // We just want the TypeError if the argument doesn't convert to a String (JRUBY-386)
+        RubyString evalStr;
+<span class="nc bnc" id="L437" title="All 2 branches missed.">        if (args[0] instanceof RubyString) {</span>
+<span class="nc" id="L438">            evalStr = (RubyString)args[0];</span>
+        } else {
+<span class="nc" id="L440">            evalStr = args[0].convertToString();</span>
+        }
+
+        String file;
+        int line;
+<span class="nc bnc" id="L445" title="All 2 branches missed.">        if (args.length &gt; 1) {</span>
+<span class="nc" id="L446">            file = args[1].convertToString().asJavaString();</span>
+<span class="nc bnc" id="L447" title="All 2 branches missed.">            if (args.length &gt; 2) {</span>
+<span class="nc" id="L448">                line = (int)(args[2].convertToInteger().getLongValue() - 1);</span>
+            } else {
+<span class="nc" id="L450">                line = 0;</span>
+            }
+        } else {
+<span class="nc" id="L453">            file = &quot;(eval)&quot;;</span>
+<span class="nc" id="L454">            line = 0;</span>
+        }
+
+<span class="nc" id="L457">        return evalUnder(context, mod, evalStr, file, line, evalType);</span>
+    }
+
+    // Methods of the Object class (rb_obj_*):
+
+    /** rb_equal
+     *
+     * The Ruby &quot;===&quot; method is used by default in case/when
+     * statements. The Object implementation first checks Java identity
+     * equality and then calls the &quot;==&quot; method too.
+     */
+    @Override
+    public IRubyObject op_eqq(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L470">        return context.runtime.newBoolean(equalInternal(context, this, other));</span>
+    }
+
+    /**
+     * Helper method for checking equality, first using Java identity
+     * equality, and then calling the &quot;==&quot; method.
+     */
+    protected static boolean equalInternal(final ThreadContext context, final IRubyObject a, final IRubyObject b){
+<span class="fc bfc" id="L478" title="All 2 branches covered.">        if (a == b) {</span>
+<span class="fc" id="L479">            return true;</span>
+<span class="fc bfc" id="L480" title="All 2 branches covered.">        } else if (a instanceof RubySymbol) {</span>
+<span class="fc" id="L481">            return false;</span>
+<span class="fc bfc" id="L482" title="All 4 branches covered.">        } else if (a instanceof RubyFixnum &amp;&amp; b instanceof RubyFixnum) {</span>
+<span class="fc" id="L483">            return ((RubyFixnum)a).fastEqual((RubyFixnum)b);</span>
+<span class="fc bfc" id="L484" title="All 4 branches covered.">        } else if (a instanceof RubyFloat &amp;&amp; b instanceof RubyFloat) {</span>
+<span class="fc" id="L485">            return ((RubyFloat)a).fastEqual((RubyFloat)b);</span>
+        } else {
+<span class="fc" id="L487">            return invokedynamic(context, a, OP_EQUAL, b).isTrue();</span>
+        }
+    }
+
+    /**
+     * Helper method for checking equality, first using Java identity
+     * equality, and then calling the &quot;eql?&quot; method.
+     */
+    protected static boolean eqlInternal(final ThreadContext context, final IRubyObject a, final IRubyObject b){
+<span class="pc bpc" id="L496" title="1 of 2 branches missed.">        if (a == b) {</span>
+<span class="nc" id="L497">            return true;</span>
+<span class="pc bpc" id="L498" title="1 of 2 branches missed.">        } else if (a instanceof RubySymbol) {</span>
+<span class="nc" id="L499">            return false;</span>
+<span class="fc bfc" id="L500" title="All 2 branches covered.">        } else if (a instanceof RubyNumeric) {</span>
+<span class="pc bpc" id="L501" title="1 of 2 branches missed.">            if (a.getClass() != b.getClass()) return false;</span>
+<span class="nc" id="L502">            return equalInternal(context, a, b);</span>
+        } else {
+<span class="fc" id="L504">            return invokedynamic(context, a, EQL, b).isTrue();</span>
+        }
+    }
+
+    /**
+     * Override the Object#hashCode method to make sure that the Ruby
+     * hash is actually used as the hashcode for Ruby objects. If the
+     * Ruby &quot;hash&quot; method doesn't return a number, the Object#hashCode
+     * implementation will be used instead.
+     */
+    @Override
+    public int hashCode() {
+<span class="fc" id="L516">        IRubyObject hashValue = invokedynamic(getRuntime().getCurrentContext(), this, HASH);</span>
+<span class="pc bpc" id="L517" title="1 of 2 branches missed.">        if (hashValue instanceof RubyFixnum) return (int) RubyNumeric.fix2long(hashValue);</span>
+<span class="nc" id="L518">        return nonFixnumHashCode(hashValue);</span>
+    }
+
+    private int nonFixnumHashCode(IRubyObject hashValue) {
+<span class="nc" id="L522">        Ruby runtime = getRuntime();</span>
+<span class="nc" id="L523">        RubyInteger integer = hashValue.convertToInteger();</span>
+<span class="nc bnc" id="L524" title="All 2 branches missed.">        if (integer instanceof RubyBignum) {</span>
+<span class="nc" id="L525">            return (int)integer.getBigIntegerValue().intValue();</span>
+        } else {
+<span class="nc" id="L527">            return (int)integer.getLongValue();</span>
+        }
+    }
+
+    /** rb_inspect
+     *
+     * The internal helper that ensures a RubyString instance is returned
+     * so dangerous casting can be omitted
+     * Prefered over callMethod(context, &quot;inspect&quot;)
+     */
+    public static RubyString inspect(ThreadContext context, IRubyObject object) {
+<span class="fc" id="L538">        return RubyString.objAsString(context, object.callMethod(context, &quot;inspect&quot;));</span>
+    }
+
+    /**
+     * Tries to support Java serialization of Ruby objects. This is
+     * still experimental and might not work.
+     */
+    // NOTE: Serialization is primarily supported for testing purposes, and there is no general
+    // guarantee that serialization will work correctly. Specifically, instance variables pointing
+    // at symbols, threads, modules, classes, and other unserializable types are not detected.
+    private void writeObject(ObjectOutputStream out) throws IOException {
+<span class="nc" id="L549">        out.defaultWriteObject();</span>
+        // write out ivar count followed by name/value pairs
+<span class="nc" id="L551">        List&lt;String&gt; names = getInstanceVariableNameList();</span>
+<span class="nc" id="L552">        out.writeInt(names.size());</span>
+<span class="nc bnc" id="L553" title="All 2 branches missed.">        for (String name : names) {</span>
+<span class="nc" id="L554">            out.writeObject(name);</span>
+<span class="nc" id="L555">            out.writeObject(getInstanceVariables().getInstanceVariable(name));</span>
+<span class="nc" id="L556">        }</span>
+<span class="nc" id="L557">    }</span>
+
+    /**
+     * Tries to support Java unserialization of Ruby objects. This is
+     * still experimental and might not work.
+     */
+    private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+<span class="nc" id="L564">        in.defaultReadObject();</span>
+        // rest in ivar count followed by name/value pairs
+<span class="nc" id="L566">        int ivarCount = in.readInt();</span>
+<span class="nc bnc" id="L567" title="All 2 branches missed.">        for (int i = 0; i &lt; ivarCount; i++) {</span>
+<span class="nc" id="L568">            setInstanceVariable((String)in.readObject(), (IRubyObject)in.readObject());</span>
+        }
+<span class="nc" id="L570">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

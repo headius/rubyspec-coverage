@@ -1,0 +1,350 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Profiler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.interpreter</a> &gt; <span class="el_source">Profiler.java</span></div><h1>Profiler.java</h1><pre class="source lang-java linenums">package org.jruby.ir.interpreter;
+
+import org.jruby.RubyModule;
+import org.jruby.internal.runtime.methods.InterpretedIRMethod;
+import org.jruby.ir.*;
+import org.jruby.ir.instructions.CallBase;
+import org.jruby.ir.instructions.Instr;
+import org.jruby.ir.operands.Operand;
+import org.jruby.ir.operands.WrappedIRClosure;
+import org.jruby.runtime.CallSite;
+import org.jruby.runtime.callsite.CacheEntry;
+import org.jruby.runtime.callsite.CachingCallSite;
+
+import java.util.*;
+
+<span class="nc" id="L16">public class Profiler {</span>
+    private static class IRCallSite {
+        IRScope  s;
+        int      v; // scope version
+        CallBase call;
+        long     count;
+        InterpretedIRMethod tgtM;
+
+<span class="nc" id="L24">        public IRCallSite() {}</span>
+
+<span class="nc" id="L26">        public IRCallSite(IRCallSite cs) {</span>
+<span class="nc" id="L27">            this.s     = cs.s;</span>
+<span class="nc" id="L28">            this.v     = cs.v;</span>
+<span class="nc" id="L29">            this.call  = cs.call;</span>
+<span class="nc" id="L30">            this.count = 0;</span>
+<span class="nc" id="L31">        }</span>
+
+        public int hashCode() {
+<span class="nc" id="L34">            return (int)this.call.callSiteId;</span>
+        }
+    }
+
+<span class="nc" id="L38">    private static class CallSiteProfile {</span>
+        IRCallSite cs;
+        HashMap&lt;IRScope, Counter&gt; counters;
+
+<span class="nc" id="L42">        public CallSiteProfile(IRCallSite cs) {</span>
+<span class="nc" id="L43">            this.cs = new IRCallSite(cs);</span>
+<span class="nc" id="L44">            this.counters = new HashMap&lt;IRScope,Counter&gt;();</span>
+<span class="nc" id="L45">        }</span>
+    }
+
+<span class="nc" id="L48">    private static IRCallSite callerSite = new IRCallSite();</span>
+
+<span class="nc" id="L50">    private static int inlineCount = 0;</span>
+<span class="nc" id="L51">    private static int globalThreadPollCount = 0;</span>
+<span class="nc" id="L52">    private static int codeModificationsCount = 0;</span>
+<span class="nc" id="L53">    private static int numCyclesWithNoModifications = 0;</span>
+<span class="nc" id="L54">    private static int versionCount = 1;</span>
+
+<span class="nc" id="L56">    private static HashMap&lt;IRScope, Integer&gt; scopeVersionMap = new HashMap&lt;IRScope, Integer&gt;();</span>
+<span class="nc" id="L57">    private static HashMap&lt;IRScope, Counter&gt; scopeThreadPollCounts = new HashMap&lt;IRScope, Counter&gt;();</span>
+<span class="nc" id="L58">    private static HashMap&lt;Long, CallSiteProfile&gt; callProfile = new HashMap&lt;Long, CallSiteProfile&gt;();</span>
+<span class="nc" id="L59">    private static HashMap&lt;Operation, Counter&gt; opStats = new HashMap&lt;Operation, Counter&gt;();</span>
+
+    private static void analyzeProfile() {
+<span class="nc" id="L62">        versionCount++;</span>
+
+        //if (inlineCount == 2) return;
+
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        if (codeModificationsCount == 0) numCyclesWithNoModifications++;</span>
+<span class="nc" id="L67">        else numCyclesWithNoModifications = 0;</span>
+
+<span class="nc" id="L69">        codeModificationsCount = 0;</span>
+
+<span class="nc bnc" id="L71" title="All 2 branches missed.">        if (numCyclesWithNoModifications &lt; 3) return;</span>
+
+        // We are now good to go -- start analyzing the profile
+
+        // System.out.println(&quot;-------------------start analysis-----------------------&quot;);
+
+<span class="nc" id="L77">        final HashMap&lt;IRScope, Long&gt; scopeCounts = new HashMap&lt;IRScope, Long&gt;();</span>
+<span class="nc" id="L78">        final ArrayList&lt;IRCallSite&gt; callSites = new ArrayList&lt;IRCallSite&gt;();</span>
+<span class="nc" id="L79">        HashMap&lt;IRCallSite, Long&gt; callSiteCounts = new HashMap&lt;IRCallSite, Long&gt;();</span>
+        // System.out.println(&quot;# call sites: &quot; + callProfile.keySet().size());
+<span class="nc" id="L81">        long total = 0;</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        for (Long id: callProfile.keySet()) {</span>
+            Long c;
+
+<span class="nc" id="L85">            CallSiteProfile csp = callProfile.get(id);</span>
+<span class="nc" id="L86">            IRCallSite      cs  = csp.cs;</span>
+
+<span class="nc bnc" id="L88" title="All 2 branches missed.">            if (cs.v != scopeVersionMap.get(cs.s).intValue()) {</span>
+<span class="nc" id="L89">                System.out.println(&quot;Skipping callsite: &lt;&quot; + cs.s + &quot;,&quot; + cs.v + &quot;&gt; with compiled version: &quot; + scopeVersionMap.get(cs.s));</span>
+<span class="nc" id="L90">                continue;</span>
+            }
+
+<span class="nc" id="L93">            Set&lt;IRScope&gt; calledScopes = csp.counters.keySet();</span>
+<span class="nc" id="L94">            cs.count = 0;</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">            for (IRScope s: calledScopes) {</span>
+<span class="nc" id="L96">                c = scopeCounts.get(s);</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">                if (c == null) {</span>
+<span class="nc" id="L98">                    c = new Long(0);</span>
+<span class="nc" id="L99">                    scopeCounts.put(s, c);</span>
+                }
+
+<span class="nc" id="L102">                long x = csp.counters.get(s).count;</span>
+<span class="nc" id="L103">                c += x;</span>
+<span class="nc" id="L104">                cs.count += x;</span>
+<span class="nc" id="L105">            }</span>
+
+<span class="nc" id="L107">            CallBase call = cs.call;</span>
+<span class="nc bnc" id="L108" title="All 4 branches missed.">            if (calledScopes.size() == 1 &amp;&amp; !call.inliningBlocked()) {</span>
+<span class="nc" id="L109">                CallSite runtimeCS = call.getCallSite();</span>
+<span class="nc bnc" id="L110" title="All 4 branches missed.">                if (runtimeCS != null &amp;&amp; (runtimeCS instanceof CachingCallSite)) {</span>
+<span class="nc" id="L111">                    CachingCallSite ccs = (CachingCallSite)runtimeCS;</span>
+<span class="nc" id="L112">                    CacheEntry ce = ccs.getCache();</span>
+
+<span class="nc bnc" id="L114" title="All 2 branches missed.">                    if (!(ce.method instanceof InterpretedIRMethod)) {</span>
+                        // System.out.println(&quot;NOT IR-M!&quot;);
+<span class="nc" id="L116">                        continue;</span>
+                    } else {
+<span class="nc" id="L118">                        callSites.add(cs);</span>
+<span class="nc" id="L119">                        cs.tgtM = (InterpretedIRMethod)ce.method;</span>
+                    }
+                }
+            }
+
+<span class="nc" id="L124">            total += cs.count;</span>
+<span class="nc" id="L125">        }</span>
+
+<span class="nc" id="L127">        Collections.sort(callSites, new java.util.Comparator&lt;IRCallSite&gt; () {</span>
+            @Override
+            public int compare(IRCallSite a, IRCallSite b) {
+<span class="nc bnc" id="L130" title="All 2 branches missed.">                if (a.count == b.count) return 0;</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">                return (a.count &lt; b.count) ? 1 : -1;</span>
+            }
+        });
+
+        // Find top N call sites
+<span class="nc" id="L136">        double freq = 0.0;</span>
+<span class="nc" id="L137">        int i = 0;</span>
+<span class="nc" id="L138">        boolean noInlining = true;</span>
+<span class="nc" id="L139">        Set&lt;IRScope&gt; inlinedScopes = new HashSet&lt;IRScope&gt;();</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">        for (IRCallSite ircs: callSites) {</span>
+<span class="nc" id="L141">            double contrib = (ircs.count*100.0)/total;</span>
+
+            // 1% is arbitrary
+<span class="nc bnc" id="L144" title="All 2 branches missed.">            if (contrib &lt; 1.0) break;</span>
+
+<span class="nc" id="L146">            i++;</span>
+<span class="nc" id="L147">            freq += contrib;</span>
+
+            // This check is arbitrary
+<span class="nc bnc" id="L150" title="All 4 branches missed.">            if (i == 100 || freq &gt; 99.0) break;</span>
+
+<span class="nc" id="L152">            System.out.println(&quot;Considering: &quot; + ircs.call + &quot; with id: &quot; + ircs.call.callSiteId +</span>
+            &quot; in scope &quot; + ircs.s + &quot; with count &quot; + ircs.count + &quot;; contrib &quot; + contrib + &quot;; freq: &quot; + freq);
+
+            // Now inline here!
+<span class="nc" id="L156">            CallBase call = ircs.call;</span>
+
+<span class="nc" id="L158">            IRScope hs = ircs.s;</span>
+<span class="nc" id="L159">            boolean isHotClosure = hs instanceof IRClosure;</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">            IRScope hc = isHotClosure ? hs : null;</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">            hs = isHotClosure ? hs.getLexicalParent() : hs;</span>
+
+<span class="nc" id="L163">            IRScope tgtMethod = ircs.tgtM.getIRMethod();</span>
+
+<span class="nc" id="L165">            Instr[] instrs = tgtMethod.getInterpreterContext().getInstructions();</span>
+            // Dont inline large methods -- 500 is arbitrary
+            // Can be null if a previously inlined method hasn't been rebuilt
+<span class="nc bnc" id="L168" title="All 4 branches missed.">            if ((instrs == null) || instrs.length &gt; 500) {</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">                if (instrs == null) System.out.println(&quot;no instrs!&quot;);</span>
+<span class="nc" id="L170">                else System.out.println(&quot;large method with &quot; + instrs.length + &quot; instrs. skipping!&quot;);</span>
+<span class="nc" id="L171">                continue;</span>
+            }
+
+<span class="nc" id="L174">            RubyModule implClass = ircs.tgtM.getImplementationClass();</span>
+<span class="nc" id="L175">            int classToken = implClass.getGeneration();</span>
+<span class="nc" id="L176">            String n = tgtMethod.getName();</span>
+<span class="nc" id="L177">            boolean inlineCall = true;</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">            if (isHotClosure) {</span>
+<span class="nc" id="L179">                Operand clArg = call.getClosureArg(null);</span>
+<span class="nc bnc" id="L180" title="All 4 branches missed.">                inlineCall = (clArg instanceof WrappedIRClosure) &amp;&amp; (((WrappedIRClosure)clArg).getClosure() == hc);</span>
+            }
+/*
+            if (inlineCall) {
+                noInlining = false;
+                long start = new java.util.Date().getTime();
+                hs.inlineMethod(tgtMethod, implClass, classToken, null, call, !inlinedScopes.contains(hs));
+                inlinedScopes.add(hs);
+                long end = new java.util.Date().getTime();
+                // System.out.println(&quot;Inlined &quot; + tgtMethod + &quot; in &quot; + hs +
+                //     &quot; @ instr &quot; + call + &quot; in time (ms): &quot;
+                //     + (end-start) + &quot; # instrs: &quot; + instrs.length);
+
+                inlineCount++;
+            } else {
+                //System.out.println(&quot;--no inlining--&quot;);
+            }
+*/
+<span class="nc" id="L198">        }</span>
+
+<span class="nc bnc" id="L200" title="All 2 branches missed.">        for (IRScope x: inlinedScopes) {</span>
+            // Update version count for inlined scopes
+<span class="nc" id="L202">            scopeVersionMap.put(x, versionCount);</span>
+            // System.out.println(&quot;Updating version of &quot; + x + &quot; to &quot; + versionCount);
+            //System.out.println(&quot;--- pre-inline-instrs ---&quot;);
+            //System.out.println(x.getCFG().toStringInstrs());
+            //System.out.println(&quot;--- post-inline-instrs ---&quot;);
+            //System.out.println(x.getCFG().toStringInstrs());
+<span class="nc" id="L208">        }</span>
+
+        // Reset
+<span class="nc" id="L211">        codeModificationsCount = 0;</span>
+<span class="nc" id="L212">        callProfile = new HashMap&lt;Long, CallSiteProfile&gt;();</span>
+
+        // Every 1M thread polls, discard stats
+<span class="nc bnc" id="L215" title="All 2 branches missed.">        if (globalThreadPollCount % 1000000 == 0)  {</span>
+<span class="nc" id="L216">            globalThreadPollCount = 0;</span>
+        }
+<span class="nc" id="L218">    }</span>
+
+    private static void outputProfileStats() {
+<span class="nc" id="L221">        ArrayList&lt;IRScope&gt; scopes = new ArrayList&lt;IRScope&gt;(scopeThreadPollCounts.keySet());</span>
+<span class="nc" id="L222">        Collections.sort(scopes, new java.util.Comparator&lt;IRScope&gt; () {</span>
+            @Override
+            public int compare(IRScope a, IRScope b) {
+                // In non-methods and non-closures, we may not have any thread poll instrs.
+<span class="nc" id="L226">                int aden = a.getThreadPollInstrsCount();</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">                if (aden == 0) aden = 1;</span>
+<span class="nc" id="L228">                int bden = b.getThreadPollInstrsCount();</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">                if (bden == 0) bden = 1;</span>
+
+                // Use estimated instr count to order scopes -- rather than raw thread-poll count
+<span class="nc" id="L232">                float aCount = scopeThreadPollCounts.get(a).count * (1.0f * a.getInterpreterContext().getInstructions().length/aden);</span>
+<span class="nc" id="L233">                float bCount = scopeThreadPollCounts.get(b).count * (1.0f * b.getInterpreterContext().getInstructions().length/bden);</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">                if (aCount == bCount) return 0;</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">                return (aCount &lt; bCount) ? 1 : -1;</span>
+            }
+        });
+
+
+        /*
+        LOG.info(&quot;------------------------&quot;);
+        LOG.info(&quot;Stats after &quot; + globalThreadPollCount + &quot; thread polls:&quot;);
+        LOG.info(&quot;------------------------&quot;);
+        LOG.info(&quot;# instructions: &quot; + interpInstrsCount);
+        LOG.info(&quot;# code modifications in this period : &quot; + codeModificationsCount);
+        LOG.info(&quot;------------------------&quot;);
+        */
+<span class="nc" id="L248">        int i = 0;</span>
+<span class="nc" id="L249">        float f1 = 0.0f;</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">        for (IRScope s: scopes) {</span>
+<span class="nc" id="L251">            long n = scopeThreadPollCounts.get(s).count;</span>
+<span class="nc" id="L252">            float p1 =  ((n*1000)/globalThreadPollCount)/10.0f;</span>
+<span class="nc" id="L253">            String msg = i + &quot;. &quot; + s + &quot; [file:&quot; + s.getFileName() + &quot;:&quot; + s.getLineNumber() + &quot;] = &quot; + n + &quot;; (&quot; + p1 + &quot;%)&quot;;</span>
+<span class="nc bnc" id="L254" title="All 2 branches missed.">            if (s instanceof IRClosure) {</span>
+<span class="nc" id="L255">                IRMethod m = s.getNearestMethod();</span>
+                //if (m != null) LOG.info(msg + &quot; -- nearest enclosing method: &quot; + m);
+                //else LOG.info(msg + &quot; -- no enclosing method --&quot;);
+            } else {
+                //LOG.info(msg);
+            }
+
+<span class="nc" id="L262">            i++;</span>
+<span class="nc" id="L263">            f1 += p1;</span>
+
+            // Top 20 or those that account for 95% of thread poll events.
+<span class="nc bnc" id="L266" title="All 4 branches missed.">            if (i == 20 || f1 &gt;= 95.0) break;</span>
+<span class="nc" id="L267">        }</span>
+
+        // reset code modification counter
+<span class="nc" id="L270">        codeModificationsCount = 0;</span>
+
+        // Every 1M thread polls, discard stats by reallocating the thread-poll count map
+<span class="nc bnc" id="L273" title="All 2 branches missed.">         if (globalThreadPollCount % 1000000 == 0)  {</span>
+            //System.out.println(&quot;---- resetting thread-poll counters ----&quot;);
+<span class="nc" id="L275">            scopeThreadPollCounts = new HashMap&lt;IRScope, Counter&gt;();</span>
+<span class="nc" id="L276">            globalThreadPollCount = 0;</span>
+        }
+<span class="nc" id="L278">    }</span>
+
+    public static Integer initProfiling(IRScope scope) {
+<span class="nc bnc" id="L281" title="All 2 branches missed.">        if (scope == null) return null;</span>
+
+        /* SSS: Not being used currently
+        tpCount = scopeThreadPollCounts.get(scope);
+        if (tpCount == null) {
+            tpCount = new Counter();
+            scopeThreadPollCounts.put(scope, tpCount);
+        }
+        */
+
+<span class="nc" id="L291">        Integer scopeVersion = scopeVersionMap.get(scope);</span>
+<span class="nc bnc" id="L292" title="All 2 branches missed.">        if (scopeVersion == null) {</span>
+<span class="nc" id="L293">            scopeVersionMap.put(scope, versionCount);</span>
+<span class="nc" id="L294">            scopeVersion = new Integer(versionCount);</span>
+        }
+
+<span class="nc bnc" id="L297" title="All 2 branches missed.">        if (callerSite.call != null) {</span>
+<span class="nc" id="L298">            Long id = callerSite.call.callSiteId;</span>
+<span class="nc" id="L299">            CallSiteProfile csp = callProfile.get(id);</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">            if (csp == null) {</span>
+<span class="nc" id="L301">                csp = new CallSiteProfile(callerSite);</span>
+<span class="nc" id="L302">                callProfile.put(id, csp);</span>
+            }
+
+<span class="nc" id="L305">            Counter csCount = csp.counters.get(scope);</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">            if (csCount == null) {</span>
+<span class="nc" id="L307">                csCount = new Counter();</span>
+<span class="nc" id="L308">                csp.counters.put(scope, csCount);</span>
+            }
+<span class="nc" id="L310">            csCount.count++;</span>
+        }
+
+<span class="nc" id="L313">        return scopeVersion;</span>
+    }
+
+    public static void updateCallSite(Instr instr, IRScope scope, Integer scopeVersion) {
+<span class="nc bnc" id="L317" title="All 2 branches missed.">        if (scope == null) return;</span>
+
+<span class="nc bnc" id="L319" title="All 2 branches missed.">        if (instr instanceof CallBase) {</span>
+<span class="nc" id="L320">            callerSite.s = scope;</span>
+<span class="nc" id="L321">            callerSite.v = scopeVersion;</span>
+<span class="nc" id="L322">            callerSite.call = (CallBase)instr;</span>
+        }
+<span class="nc" id="L324">    }</span>
+
+    public static void clockTick() {
+        // tpCount.count++; // SSS: Not being used currently
+<span class="nc" id="L328">        globalThreadPollCount++;</span>
+
+        // 20K is arbitrary
+        // Every 20K profile counts, spit out profile stats
+<span class="nc bnc" id="L332" title="All 2 branches missed.">        if (globalThreadPollCount % 20000 == 0) {</span>
+<span class="nc" id="L333">            analyzeProfile();</span>
+            // outputProfileStats();
+        }
+<span class="nc" id="L336">    }</span>
+
+    public static void instrTick(Operation operation) {
+<span class="nc bnc" id="L339" title="All 2 branches missed.">        if (operation.modifiesCode()) codeModificationsCount++;</span>
+        /*
+        Counter cnt = opStats.get(operation);
+        if (cnt == null) {
+            cnt = new Counter();
+            opStats.put(operation, cnt);
+        }
+        cnt.count++;
+        */
+<span class="nc" id="L348">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

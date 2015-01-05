@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MethodBlock.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime</a> &gt; <span class="el_source">MethodBlock.java</span></div><h1>MethodBlock.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2001-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002 Benoit Cerrina &lt;b.cerrina@wanadoo.fr&gt;
+ * Copyright (C) 2004-2007 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.runtime;
+
+import org.jruby.RubyMethod;
+import org.jruby.RubyModule;
+import org.jruby.RubyProc;
+import org.jruby.exceptions.JumpException;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.backtrace.BacktraceElement;
+import org.jruby.runtime.builtin.IRubyObject;
+
+/**
+ *  Internal live representation of a block ({...} or do ... end).
+ */
+public abstract class MethodBlock extends ContextAwareBlockBody {
+    private final RubyMethod method;
+    private final String filename;
+    private final int line;
+    
+    public static Block createMethodBlock(ThreadContext context, IRubyObject self, DynamicScope dynamicScope, MethodBlock body) {
+<span class="nc" id="L51">        RubyMethod method = body.method;</span>
+<span class="nc" id="L52">        RubyModule module = method.getMethod().getImplementationClass();</span>
+<span class="nc" id="L53">        Frame frame = new Frame();</span>
+
+<span class="nc" id="L55">        frame.setKlazz(module);</span>
+<span class="nc" id="L56">        frame.setName(method.getMethodName());</span>
+<span class="nc" id="L57">        frame.setSelf(method.receiver(context));</span>
+<span class="nc" id="L58">        frame.setVisibility(method.getMethod().getVisibility());</span>
+        
+<span class="nc" id="L60">        Binding binding = new Binding(</span>
+                frame,
+                dynamicScope,
+<span class="nc" id="L63">                new BacktraceElement(method.getMethodName(), body.getFile(), body.getLine()));</span>
+
+<span class="nc" id="L65">        return new Block(body, binding);</span>
+    }
+
+    public MethodBlock(RubyMethod method, StaticScope staticScope) {
+<span class="nc" id="L69">        super(staticScope, Arity.createArity((int) method.arity().getLongValue()), BlockBody.SINGLE_RESTARG);</span>
+        
+<span class="nc" id="L71">        this.method = method;</span>
+<span class="nc" id="L72">        String filename = method.getFilename();</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">        if (filename == null) filename = &quot;(method)&quot;;</span>
+<span class="nc" id="L74">        this.filename = filename;</span>
+<span class="nc" id="L75">        this.line = method.getLine();</span>
+<span class="nc" id="L76">    }</span>
+
+    public abstract IRubyObject callback(IRubyObject value, IRubyObject method, IRubyObject self, Block block);
+
+    @Override
+    public IRubyObject call(ThreadContext context, IRubyObject[] args, Binding binding, Block.Type type) {
+<span class="nc" id="L82">        return yield(context, args, null, binding, type, Block.NULL_BLOCK);</span>
+    }
+
+    @Override
+    public IRubyObject call(ThreadContext context, IRubyObject[] args, Binding binding, Block.Type type, Block block) {
+<span class="nc" id="L87">        return yield(context, args, null, binding, type, block);</span>
+    }
+    
+    @Override
+    protected Frame pre(ThreadContext context, Binding binding) {
+<span class="nc" id="L92">        return context.preYieldNoScope(binding);</span>
+    }
+    
+    @Override
+    protected void post(ThreadContext context, Binding binding, Visibility visibility, Frame lastFrame) {
+<span class="nc" id="L97">        context.postYieldNoScope(lastFrame);</span>
+<span class="nc" id="L98">    }</span>
+
+    @Override
+    public IRubyObject yieldSpecific(ThreadContext context, Binding binding, Block.Type type) {
+<span class="nc" id="L102">        return yield(context, null, binding, type);</span>
+    }
+
+    @Override
+    public IRubyObject yieldSpecific(ThreadContext context, IRubyObject arg0, Binding binding, Block.Type type) {
+<span class="nc" id="L107">        return yield(context, arg0, binding, type);</span>
+    }
+
+    @Override
+    public IRubyObject yieldSpecific(ThreadContext context, IRubyObject arg0, IRubyObject arg1, Binding binding, Block.Type type) {
+<span class="nc" id="L112">        return yield(context, new IRubyObject[] { arg0, arg1 }, null, binding, type);</span>
+    }
+
+    @Override
+    public IRubyObject yieldSpecific(ThreadContext context, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Binding binding, Block.Type type) {
+<span class="nc" id="L117">        return yield(context, new IRubyObject[] { arg0, arg1, arg2 }, null, binding, type);</span>
+    }
+    
+    @Override
+    protected IRubyObject doYield(ThreadContext context, IRubyObject value, Binding binding, Block.Type type) {
+<span class="nc" id="L122">        return yield(context, value, binding, type);</span>
+    }
+
+    @Override
+    public IRubyObject yield(ThreadContext context, IRubyObject value, Binding binding, Block.Type type, Block block) {
+<span class="nc" id="L127">        return yield(context, value, binding, type);</span>
+    }
+
+    @Override
+    protected IRubyObject doYield(ThreadContext context, IRubyObject[] args, IRubyObject self,
+                                  Binding binding, Block.Type type) {
+<span class="nc" id="L133">        return yield(context, args, self, binding, type, Block.NULL_BLOCK);</span>
+    }
+
+    protected IRubyObject prepareSelf(Binding binding) {
+<span class="nc" id="L137">        IRubyObject self = binding.getSelf();</span>
+<span class="nc" id="L138">        binding.getFrame().setSelf(self);</span>
+
+<span class="nc" id="L140">        return self;</span>
+    }
+
+    /**
+     * Yield to this block, usually passed to the current call.
+     * 
+     * @param context represents the current thread-specific data
+     * @param args The args for yield
+     * @param self The current self
+     * @return
+     */
+    @Override
+    public IRubyObject yield(ThreadContext context, IRubyObject[] args, IRubyObject self,
+                             Binding binding, Block.Type type, Block block) {
+        // SSS FIXME: This is now being done unconditionally compared to if (klass == null) earlier
+<span class="nc" id="L155">        self = prepareSelf(binding);</span>
+        
+<span class="nc" id="L157">        Frame lastFrame = pre(context, binding);</span>
+
+        try {
+            // This while loop is for restarting the block call in case a 'redo' fires.
+            while (true) {
+                try {
+<span class="nc" id="L163">                    IRubyObject[] preppedArgs = RubyProc.prepareArgs(context, type, arity, args);</span>
+<span class="nc" id="L164">                    return callback(context.runtime.newArrayNoCopyLight(preppedArgs), method, self, block);</span>
+<span class="nc" id="L165">                } catch (JumpException.RedoJump rj) {</span>
+<span class="nc" id="L166">                    context.pollThreadEvents();</span>
+                    // do nothing, allow loop to redo
+<span class="nc" id="L168">                } catch (JumpException.BreakJump bj) {</span>
+//                    if (bj.getTarget() == 0) {
+//                        bj.setTarget(this);
+//                    }                  
+<span class="nc" id="L172">                    throw bj;</span>
+<span class="nc" id="L173">                }</span>
+            }
+<span class="nc" id="L175">        } catch (JumpException.FlowControlException jump) {</span>
+<span class="nc" id="L176">            return Helpers.handleBlockJump(context, jump, type);</span>
+        } finally {
+<span class="nc" id="L178">            post(context, binding, null, lastFrame);</span>
+        }
+    }
+
+    public String getFile() {
+<span class="nc" id="L183">        return filename;</span>
+    }
+
+    public int getLine() {
+<span class="nc" id="L187">        return line;</span>
+    }
+
+    public RubyMethod getMethod() {
+<span class="nc" id="L191">        return method;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

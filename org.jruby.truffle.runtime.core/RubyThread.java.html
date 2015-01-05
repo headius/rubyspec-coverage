@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyThread.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.runtime.core</a> &gt; <span class="el_source">RubyThread.java</span></div><h1>RubyThread.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2013, 2014 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.runtime.core;
+
+import org.jruby.RubyThread.Status;
+import org.jruby.truffle.nodes.RubyNode;
+import org.jruby.truffle.nodes.objects.Allocator;
+import org.jruby.truffle.runtime.RubyContext;
+import org.jruby.truffle.runtime.control.RaiseException;
+import org.jruby.truffle.runtime.control.ReturnException;
+import org.jruby.truffle.runtime.control.ThreadExitException;
+import org.jruby.truffle.runtime.subsystems.ThreadManager;
+
+import java.util.concurrent.CountDownLatch;
+
+/**
+ * Represents the Ruby {@code Thread} class. Implemented using Java threads, but note that there is
+ * not a one-to-one mapping between Ruby threads and Java threads - specifically in combination with
+ * fibers as they are currently implemented as their own Java threads.
+ */
+public class RubyThread extends RubyBasicObject {
+
+    public Object getValue() {
+<span class="nc" id="L31">        return value;</span>
+    }
+
+    public RubyException getException() {
+<span class="nc" id="L35">        return exception;</span>
+    }
+
+    public void shutdown() {
+<span class="nc" id="L39">    }</span>
+
+    private final ThreadManager manager;
+
+<span class="nc" id="L43">    private final CountDownLatch finished = new CountDownLatch(1);</span>
+
+<span class="nc" id="L45">    private Status status = Status.RUN;</span>
+
+    private RubyException exception;
+    private Object value;
+
+    private RubyBasicObject threadLocals;
+
+    public RubyThread(RubyClass rubyClass, ThreadManager manager) {
+<span class="nc" id="L53">        super(rubyClass);</span>
+<span class="nc" id="L54">        this.manager = manager;</span>
+<span class="nc" id="L55">        threadLocals = new RubyBasicObject(rubyClass.getContext().getCoreLibrary().getObjectClass());</span>
+<span class="nc" id="L56">    }</span>
+
+    public void initialize(RubyContext context, RubyNode currentNode, RubyProc block) {
+<span class="nc" id="L59">        final RubyProc finalBlock = block;</span>
+
+<span class="nc" id="L61">        initialize(context, currentNode, new Runnable() {</span>
+
+            @Override
+            public void run() {
+<span class="nc" id="L65">                value = finalBlock.rootCall();</span>
+<span class="nc" id="L66">            }</span>
+
+        });
+<span class="nc" id="L69">    }</span>
+
+    public void initialize(final RubyContext context, final RubyNode currentNode, Runnable runnable) {
+<span class="nc" id="L72">        final RubyThread finalThread = this;</span>
+<span class="nc" id="L73">        final Runnable finalRunnable = runnable;</span>
+
+<span class="nc" id="L75">        new Thread(new Runnable() {</span>
+
+            @Override
+            public void run() {
+<span class="nc" id="L79">                finalThread.manager.registerThread(finalThread);</span>
+<span class="nc" id="L80">                finalThread.manager.enterGlobalLock(finalThread);</span>
+<span class="nc" id="L81">                context.getSafepointManager().enterThread();</span>
+
+                try {
+<span class="nc" id="L84">                    finalRunnable.run();</span>
+<span class="nc" id="L85">                } catch (ThreadExitException e) {</span>
+<span class="nc" id="L86">                    return;</span>
+<span class="nc" id="L87">                } catch (RaiseException e) {</span>
+<span class="nc" id="L88">                    exception = e.getRubyException();</span>
+<span class="nc" id="L89">                } catch (ReturnException e) {</span>
+<span class="nc" id="L90">                    exception = getContext().getCoreLibrary().unexpectedReturn(currentNode);</span>
+                } finally {
+<span class="nc" id="L92">                    finalThread.manager.leaveGlobalLock();</span>
+<span class="nc" id="L93">                    finalThread.manager.unregisterThread(finalThread);</span>
+<span class="nc" id="L94">                    finalThread.finished.countDown();</span>
+<span class="nc" id="L95">                    context.getSafepointManager().leaveThread();</span>
+<span class="nc" id="L96">                    status = Status.DEAD;</span>
+<span class="nc" id="L97">                }</span>
+<span class="nc" id="L98">            }</span>
+
+<span class="nc" id="L100">        }).start();</span>
+<span class="nc" id="L101">    }</span>
+
+    public void join() {
+<span class="nc" id="L104">        final RubyThread runningThread = getContext().getThreadManager().leaveGlobalLock();</span>
+
+        try {
+            while (true) {
+                try {
+<span class="nc" id="L109">                    finished.await();</span>
+<span class="nc" id="L110">                    break;</span>
+<span class="nc" id="L111">                } catch (InterruptedException e) {</span>
+                    // Await again
+<span class="nc" id="L113">                }</span>
+            }
+        } finally {
+<span class="nc" id="L116">            getContext().getThreadManager().enterGlobalLock(runningThread);</span>
+<span class="nc" id="L117">        }</span>
+
+<span class="nc bnc" id="L119" title="All 2 branches missed.">        if (exception != null) {</span>
+<span class="nc" id="L120">            throw new RaiseException(exception);</span>
+        }
+<span class="nc" id="L122">    }</span>
+
+    public Status getStatus() {
+<span class="nc" id="L125">        return status;</span>
+    }
+
+    public RubyBasicObject getThreadLocals() {
+<span class="nc" id="L129">        return threadLocals;</span>
+    }
+
+<span class="nc" id="L132">    public static class ThreadAllocator implements Allocator {</span>
+
+        @Override
+        public RubyBasicObject allocate(RubyContext context, RubyClass rubyClass, RubyNode currentNode) {
+<span class="nc" id="L136">            return new RubyThread(rubyClass, context.getThreadManager());</span>
+        }
+
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

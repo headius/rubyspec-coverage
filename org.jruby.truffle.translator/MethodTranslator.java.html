@@ -1,0 +1,257 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MethodTranslator.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.translator</a> &gt; <span class="el_source">MethodTranslator.java</span></div><h1>MethodTranslator.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2013, 2015 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.translator;
+
+import com.oracle.truffle.api.CallTarget;
+import com.oracle.truffle.api.Truffle;
+import com.oracle.truffle.api.frame.FrameSlot;
+import com.oracle.truffle.api.nodes.NodeUtil;
+import com.oracle.truffle.api.source.Source;
+import com.oracle.truffle.api.source.SourceSection;
+import org.jruby.ast.ArgsNode;
+import org.jruby.truffle.nodes.RubyNode;
+import org.jruby.truffle.nodes.RubyRootNode;
+import org.jruby.truffle.nodes.cast.ArrayCastNodeFactory;
+import org.jruby.truffle.nodes.cast.BooleanCastNodeFactory;
+import org.jruby.truffle.nodes.control.IfNode;
+import org.jruby.truffle.nodes.control.SequenceNode;
+import org.jruby.truffle.nodes.literal.ObjectLiteralNode;
+import org.jruby.truffle.nodes.methods.*;
+import org.jruby.truffle.nodes.methods.arguments.*;
+import org.jruby.truffle.nodes.methods.locals.FlipFlopStateNode;
+import org.jruby.truffle.nodes.methods.locals.WriteLocalVariableNodeFactory;
+import org.jruby.truffle.nodes.respondto.RespondToNode;
+import org.jruby.truffle.nodes.supercall.GeneralSuperCallNode;
+import org.jruby.truffle.nodes.supercall.GeneralSuperReCallNode;
+import org.jruby.truffle.runtime.RubyContext;
+import org.jruby.truffle.runtime.methods.Arity;
+import org.jruby.truffle.runtime.methods.SharedMethodInfo;
+
+class MethodTranslator extends BodyTranslator {
+
+    private boolean isTopLevel;
+    private boolean isBlock;
+
+    public MethodTranslator(RubyNode currentNode, RubyContext context, BodyTranslator parent, TranslatorEnvironment environment, boolean isBlock, boolean isTopLevel, Source source) {
+<span class="nc" id="L43">        super(currentNode, context, parent, environment, source, false);</span>
+<span class="nc" id="L44">        this.isBlock = isBlock;</span>
+<span class="nc" id="L45">        this.isTopLevel = isTopLevel;</span>
+<span class="nc" id="L46">    }</span>
+
+    public RubyNode compileFunctionNode(SourceSection sourceSection, String methodName, ArgsNode argsNode, org.jruby.ast.Node bodyNode, boolean ignoreLocalVisiblity, SharedMethodInfo sharedMethodInfo) {
+<span class="nc bnc" id="L49" title="All 2 branches missed.">        if (PRINT_PARSE_TREE_METHOD_NAMES.contains(methodName)) {</span>
+<span class="nc" id="L50">            System.err.println(methodName);</span>
+<span class="nc" id="L51">            System.err.println(sharedMethodInfo.getParseTree().toString(true, 0));</span>
+        }
+
+<span class="nc" id="L54">        final ParameterCollector parameterCollector = new ParameterCollector();</span>
+<span class="nc" id="L55">        argsNode.accept(parameterCollector);</span>
+
+<span class="nc bnc" id="L57" title="All 2 branches missed.">        for (String parameter : parameterCollector.getParameters()) {</span>
+<span class="nc" id="L58">            environment.declareVar(parameter);</span>
+<span class="nc" id="L59">        }</span>
+
+<span class="nc" id="L61">        final Arity arity = getArity(argsNode);</span>
+
+        final Arity arityForCheck;
+
+        /*
+         * If you have a block with parameters |a,| Ruby checks the arity as if was minimum 1, maximum 1. That's
+         * counter-intuitive - as you'd expect the anonymous rest argument to cause it to have no maximum. Indeed,
+         * that's how JRuby reports it, and by the look of their failing spec they consider this to be correct. We'll
+         * follow the specs for now until we see a reason to do something else.
+         */
+
+<span class="nc bnc" id="L72" title="All 6 branches missed.">        if (isBlock &amp;&amp; argsNode.childNodes().size() == 2 &amp;&amp; argsNode.getRestArgNode() instanceof org.jruby.ast.UnnamedRestArgNode) {</span>
+<span class="nc" id="L73">            arityForCheck = new Arity(arity.getRequired(), 0, false, false);</span>
+        } else {
+<span class="nc" id="L75">            arityForCheck = arity;</span>
+        }
+
+        RubyNode body;
+
+<span class="nc bnc" id="L80" title="All 2 branches missed.">        if (bodyNode != null) {</span>
+<span class="nc" id="L81">            parentSourceSection = sourceSection;</span>
+
+            try {
+<span class="nc" id="L84">                body = bodyNode.accept(this);</span>
+            } finally {
+<span class="nc" id="L86">                parentSourceSection = null;</span>
+<span class="nc" id="L87">            }</span>
+        } else {
+<span class="nc" id="L89">            body = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+        }
+
+<span class="nc" id="L92">        final LoadArgumentsTranslator loadArgumentsTranslator = new LoadArgumentsTranslator(currentNode, context, source, isBlock, this);</span>
+<span class="nc" id="L93">        final RubyNode loadArguments = argsNode.accept(loadArgumentsTranslator);</span>
+
+        final RubyNode prelude;
+
+<span class="nc bnc" id="L97" title="All 2 branches missed.">        if (isBlock) {</span>
+<span class="nc" id="L98">            boolean shouldConsiderDestructuringArrayArg = true;</span>
+
+<span class="nc bnc" id="L100" title="All 8 branches missed.">            if (argsNode.getPreCount() == 0 &amp;&amp; argsNode.getOptionalArgsCount() == 0 &amp;&amp; argsNode.getPostCount() == 0 &amp;&amp; argsNode.getRestArgNode() == null) {</span>
+<span class="nc" id="L101">                shouldConsiderDestructuringArrayArg = false;</span>
+            }
+
+<span class="nc bnc" id="L104" title="All 6 branches missed.">            if (argsNode.getPreCount() + argsNode.getPostCount() == 1 &amp;&amp; argsNode.getOptionalArgsCount() == 0 &amp;&amp; argsNode.getRestArgNode() == null) {</span>
+<span class="nc" id="L105">                shouldConsiderDestructuringArrayArg = false;</span>
+            }
+
+<span class="nc bnc" id="L108" title="All 4 branches missed.">            if (argsNode.getPreCount() == 0 &amp;&amp; argsNode.getRestArgNode() != null) {</span>
+<span class="nc" id="L109">                shouldConsiderDestructuringArrayArg = false;</span>
+            }
+
+            RubyNode preludeBuilder;
+
+<span class="nc bnc" id="L114" title="All 2 branches missed.">            if (shouldConsiderDestructuringArrayArg) {</span>
+<span class="nc" id="L115">                final RubyNode readArrayNode = new ReadPreArgumentNode(context, sourceSection, 0, MissingArgumentBehaviour.RUNTIME_ERROR);</span>
+<span class="nc" id="L116">                final RubyNode castArrayNode = ArrayCastNodeFactory.create(context, sourceSection, readArrayNode);</span>
+<span class="nc" id="L117">                final FrameSlot arraySlot = environment.declareVar(environment.allocateLocalTemp(&quot;destructure&quot;));</span>
+<span class="nc" id="L118">                final RubyNode writeArrayNode = WriteLocalVariableNodeFactory.create(context, sourceSection, arraySlot, castArrayNode);</span>
+
+<span class="nc" id="L120">                final LoadArgumentsTranslator destructureArgumentsTranslator = new LoadArgumentsTranslator(currentNode, context, source, isBlock, this);</span>
+<span class="nc" id="L121">                destructureArgumentsTranslator.pushArraySlot(arraySlot);</span>
+<span class="nc" id="L122">                final RubyNode newDestructureArguments = argsNode.accept(destructureArgumentsTranslator);</span>
+
+<span class="nc" id="L124">                preludeBuilder =</span>
+                        new BehaveAsBlockNode(context, sourceSection,
+                                new IfNode(context, sourceSection,
+<span class="nc" id="L127">                                        BooleanCastNodeFactory.create(context, sourceSection,</span>
+                                            new ShouldDestructureNode(context, sourceSection, arity,
+                                                    new RespondToNode(context, sourceSection, readArrayNode, &quot;to_ary&quot;))),
+<span class="nc" id="L130">                                        SequenceNode.sequence(context, sourceSection, writeArrayNode, newDestructureArguments),</span>
+<span class="nc" id="L131">                                        NodeUtil.cloneNode(loadArguments)),</span>
+<span class="nc" id="L132">                                NodeUtil.cloneNode(loadArguments));</span>
+<span class="nc" id="L133">            } else {</span>
+<span class="nc" id="L134">                preludeBuilder = loadArguments;</span>
+            }
+
+<span class="nc" id="L137">            prelude = SequenceNode.sequence(context, sourceSection,</span>
+                    new BehaveAsBlockNode(context, sourceSection,
+<span class="nc" id="L139">                            new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject()),</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">                            new CheckArityNode(context, sourceSection, arityForCheck, parameterCollector.getKeywords(), argsNode.getKeyRest() != null)), preludeBuilder);</span>
+<span class="nc" id="L141">        } else {</span>
+<span class="nc" id="L142">            prelude = SequenceNode.sequence(context, sourceSection,</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">                    new CheckArityNode(context, sourceSection, arityForCheck, parameterCollector.getKeywords(), argsNode.getKeyRest() != null),</span>
+                    loadArguments);
+        }
+
+<span class="nc" id="L147">        body = SequenceNode.sequence(context, sourceSection, prelude, body);</span>
+
+<span class="nc bnc" id="L149" title="All 2 branches missed.">        if (environment.getFlipFlopStates().size() &gt; 0) {</span>
+<span class="nc" id="L150">            body = SequenceNode.sequence(context, sourceSection, initFlipFlopStates(sourceSection), body);</span>
+        }
+
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        if (isBlock) {</span>
+<span class="nc" id="L154">            body = new RedoableNode(context, sourceSection, body);</span>
+<span class="nc" id="L155">            body = new CatchReturnPlaceholderNode(context, sourceSection, body, environment.getReturnID());</span>
+        } else {
+<span class="nc" id="L157">            body = new CatchReturnNode(context, sourceSection, body, environment.getReturnID());</span>
+        }
+
+<span class="nc" id="L160">        body = new CatchNextNode(context, sourceSection, body);</span>
+<span class="nc" id="L161">        body = new CatchRetryAsErrorNode(context, sourceSection, body);</span>
+
+<span class="nc bnc" id="L163" title="All 4 branches missed.">        if (isBlock &amp;&amp; isTopLevel) {</span>
+<span class="nc" id="L164">            body = new CatchBreakAsReturnNode(context, sourceSection, body);</span>
+        }
+
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        if (!isBlock) {</span>
+<span class="nc" id="L168">            body = new ExceptionTranslatingNode(context, sourceSection, body);</span>
+        }
+
+<span class="nc" id="L171">        final RubyRootNode rootNode = new RubyRootNode(</span>
+<span class="nc" id="L172">                context, sourceSection, environment.getFrameDescriptor(), environment.getSharedMethodInfo(), body);</span>
+
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        if (PRINT_AST_METHOD_NAMES.contains(methodName)) {</span>
+<span class="nc" id="L175">            System.err.println(methodName);</span>
+<span class="nc" id="L176">            NodeUtil.printCompactTree(System.err, rootNode);</span>
+        }
+
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (PRINT_FULL_AST_METHOD_NAMES.contains(methodName)) {</span>
+<span class="nc" id="L180">            System.err.println(methodName);</span>
+<span class="nc" id="L181">            NodeUtil.printTree(System.err, rootNode);</span>
+        }
+
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        if (isBlock) {</span>
+<span class="nc" id="L185">            final CallTarget callTarget = Truffle.getRuntime().createCallTarget(withBlockDestructureSemantics(rootNode));</span>
+<span class="nc" id="L186">            final CallTarget callTargetForMethods = Truffle.getRuntime().createCallTarget(withoutBlockDestructureSemantics(rootNode));</span>
+<span class="nc" id="L187">            return new BlockDefinitionNode(context, sourceSection, environment.getSharedMethodInfo(), environment.needsDeclarationFrame(), callTarget, callTargetForMethods);</span>
+        } else {
+<span class="nc" id="L189">            return new MethodDefinitionNode(context, sourceSection, methodName, environment.getSharedMethodInfo(), environment.needsDeclarationFrame(), Truffle.getRuntime().createCallTarget(rootNode), ignoreLocalVisiblity);</span>
+        }
+    }
+
+    private RubyRootNode withBlockDestructureSemantics(RubyRootNode rootNode) {
+<span class="nc" id="L194">        final RubyRootNode newRootNode = rootNode.cloneRubyRootNode();</span>
+
+<span class="nc bnc" id="L196" title="All 2 branches missed.">        for (BehaveAsBlockNode behaveAsBlockNode : NodeUtil.findAllNodeInstances(newRootNode, BehaveAsBlockNode.class)) {</span>
+<span class="nc" id="L197">            behaveAsBlockNode.replace(behaveAsBlockNode.getAsBlockNode());</span>
+<span class="nc" id="L198">        }</span>
+
+<span class="nc" id="L200">        return newRootNode;</span>
+    }
+
+    private RubyRootNode withoutBlockDestructureSemantics(RubyRootNode rootNode) {
+<span class="nc" id="L204">        final RubyRootNode newRootNode = rootNode.cloneRubyRootNode();</span>
+
+<span class="nc bnc" id="L206" title="All 2 branches missed.">        for (BehaveAsBlockNode behaveAsBlockNode : NodeUtil.findAllNodeInstances(newRootNode, BehaveAsBlockNode.class)) {</span>
+<span class="nc" id="L207">            behaveAsBlockNode.replace(behaveAsBlockNode.getAsMethodNode());</span>
+<span class="nc" id="L208">        }</span>
+
+<span class="nc" id="L210">        final RubyRootNode newRootNodeWithCatchReturn = new RubyRootNode(</span>
+                context,
+<span class="nc" id="L212">                newRootNode.getSourceSection(),</span>
+<span class="nc" id="L213">                newRootNode.getFrameDescriptor(), newRootNode.getSharedMethodInfo(),</span>
+<span class="nc" id="L214">                new CatchReturnNode(context, newRootNode.getSourceSection(), newRootNode.getBody(), getEnvironment().getReturnID()));</span>
+
+<span class="nc" id="L216">        return newRootNodeWithCatchReturn;</span>
+    }
+
+    private static Arity getArity(org.jruby.ast.ArgsNode argsNode) {
+<span class="nc" id="L220">        final int minimum = argsNode.getRequiredArgsCount();</span>
+<span class="nc" id="L221">        final int maximum = argsNode.getMaxArgumentsCount();</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">        return new Arity(minimum, argsNode.getOptionalArgsCount(), maximum == -1, argsNode.hasKwargs());</span>
+    }
+
+    @Override
+    public RubyNode visitSuperNode(org.jruby.ast.SuperNode node) {
+<span class="nc" id="L227">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L229">        final ArgumentsAndBlockTranslation argumentsAndBlock = translateArgumentsAndBlock(sourceSection, node.getIterNode(), node.getArgsNode(), null, environment.getNamedMethodName());</span>
+
+<span class="nc" id="L231">        return new GeneralSuperCallNode(context, sourceSection, argumentsAndBlock.getBlock(), argumentsAndBlock.getArguments(), argumentsAndBlock.isSplatted());</span>
+    }
+
+    @Override
+    public RubyNode visitZSuperNode(org.jruby.ast.ZSuperNode node) {
+<span class="nc" id="L236">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        if (environment.isBlock()) {</span>
+            // We need the declaration frame to get the arguments to use
+<span class="nc" id="L240">            environment.setNeedsDeclarationFrame();</span>
+        }
+
+<span class="nc" id="L243">        return new GeneralSuperReCallNode(context, sourceSection, environment.isBlock());</span>
+    }
+
+    @Override
+    protected FlipFlopStateNode createFlipFlopState(SourceSection sourceSection, int depth) {
+<span class="nc bnc" id="L248" title="All 2 branches missed.">        if (isBlock) {</span>
+<span class="nc" id="L249">            environment.setNeedsDeclarationFrame();</span>
+<span class="nc" id="L250">            return parent.createFlipFlopState(sourceSection, depth + 1);</span>
+        } else {
+<span class="nc" id="L252">            return super.createFlipFlopState(sourceSection, depth);</span>
+        }
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

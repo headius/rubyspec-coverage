@@ -1,0 +1,755 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyEnumerator.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyEnumerator.java</span></div><h1>RubyEnumerator.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2006 Michael Studman &lt;me@michaelstudman.com&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import org.jruby.anno.JRubyMethod;
+import org.jruby.anno.JRubyModule;
+import org.jruby.exceptions.JumpException;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.BlockCallback;
+import org.jruby.runtime.CallBlock;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
+import org.jruby.util.cli.Options;
+
+import java.util.Arrays;
+import java.util.concurrent.Future;
+import java.util.concurrent.SynchronousQueue;
+
+import static org.jruby.runtime.Visibility.PRIVATE;
+
+/**
+ * Implementation of Ruby's Enumerator module.
+ */
+@JRubyModule(name=&quot;Enumerable::Enumerator&quot;, include=&quot;Enumerable&quot;)
+public class RubyEnumerator extends RubyObject {
+    /** target for each operation */
+    private IRubyObject object;
+
+    /** method to invoke for each operation */
+    private String method;
+
+    /** args to each method */
+    private IRubyObject[] methodArgs;
+    
+    /** A value or proc to provide the size of the Enumerator contents*/
+    private IRubyObject size;
+
+    /** Function object for lazily computing size (used for internally created enumerators) */
+    private SizeFn sizeFn;
+
+    public static void defineEnumerator(Ruby runtime) {
+<span class="fc" id="L72">        RubyModule enm = runtime.getClassFromPath(&quot;Enumerable&quot;);</span>
+        
+        final RubyClass enmr;
+<span class="fc" id="L75">        enmr = runtime.defineClass(&quot;Enumerator&quot;, runtime.getObject(), ENUMERATOR_ALLOCATOR);</span>
+
+<span class="fc" id="L77">        enmr.includeModule(enm);</span>
+<span class="fc" id="L78">        enmr.defineAnnotatedMethods(RubyEnumerator.class);</span>
+<span class="fc" id="L79">        runtime.setEnumerator(enmr);</span>
+
+<span class="fc" id="L81">        RubyGenerator.createGeneratorClass(runtime);</span>
+<span class="fc" id="L82">        RubyYielder.createYielderClass(runtime);</span>
+<span class="fc" id="L83">    }</span>
+
+<span class="fc" id="L85">    private static ObjectAllocator ENUMERATOR_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L88">            return new RubyEnumerator(runtime, klass);</span>
+        }
+    };
+
+    private RubyEnumerator(Ruby runtime, RubyClass type) {
+<span class="fc" id="L93">        super(runtime, type);</span>
+<span class="fc" id="L94">        object = runtime.getNil();</span>
+<span class="fc" id="L95">        initialize(runtime.getNil(), RubyString.newEmptyString(runtime), IRubyObject.NULL_ARRAY);</span>
+<span class="fc" id="L96">    }</span>
+
+    private RubyEnumerator(Ruby runtime, RubyClass type, IRubyObject object, IRubyObject method, IRubyObject[]args, IRubyObject size) {
+<span class="nc" id="L99">        super(runtime, type);</span>
+<span class="nc" id="L100">        initialize20(object, method, args, size, null);</span>
+<span class="nc" id="L101">    }</span>
+
+    private RubyEnumerator(Ruby runtime, RubyClass type, IRubyObject object, IRubyObject method, IRubyObject[]args, SizeFn sizeFn) {
+<span class="fc" id="L104">        super(runtime, type);</span>
+<span class="fc" id="L105">        initialize20(object, method, args, null, sizeFn);</span>
+<span class="fc" id="L106">    }</span>
+
+    private RubyEnumerator(Ruby runtime, RubyClass type, IRubyObject object, IRubyObject method, IRubyObject[]args) {
+<span class="fc" id="L109">        super(runtime, type);</span>
+<span class="fc" id="L110">        initialize(object, method, args);</span>
+<span class="fc" id="L111">    }</span>
+
+    /**
+     * Transform object into an Enumerator with the given size
+     */
+    public static IRubyObject enumeratorizeWithSize(ThreadContext context, final IRubyObject object, String method, IRubyObject[] args, SizeFn sizeFn) {
+<span class="fc" id="L117">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L118">        return new RubyEnumerator(runtime, runtime.getEnumerator(), object, runtime.fastNewSymbol(method), args, sizeFn);</span>
+    }
+
+    public static IRubyObject enumeratorizeWithSize(ThreadContext context, IRubyObject object, String method, SizeFn sizeFn) {
+<span class="fc" id="L122">        return enumeratorizeWithSize(context, object, method, NULL_ARRAY, sizeFn);</span>
+    }
+
+    public static IRubyObject enumeratorize(Ruby runtime, IRubyObject object, String method) {
+<span class="fc" id="L126">        return new RubyEnumerator(runtime, runtime.getEnumerator(), object, runtime.fastNewSymbol(method), IRubyObject.NULL_ARRAY);</span>
+    }
+
+    public static IRubyObject enumeratorize(Ruby runtime, IRubyObject object, String method, IRubyObject arg) {
+<span class="fc" id="L130">        return new RubyEnumerator(runtime, runtime.getEnumerator(), object, runtime.fastNewSymbol(method), new IRubyObject[] {arg});</span>
+    }
+
+    public static IRubyObject enumeratorize(Ruby runtime, IRubyObject object, String method, IRubyObject[] args) {
+<span class="fc" id="L134">        return new RubyEnumerator(runtime, runtime.getEnumerator(), object, runtime.fastNewSymbol(method), args); // TODO: make sure it's really safe to not to copy it</span>
+    }
+
+    public static IRubyObject enumeratorize(Ruby runtime, RubyClass type, IRubyObject object, String method) {
+<span class="nc" id="L138">        return new RubyEnumerator(runtime, type, object, runtime.fastNewSymbol(method), IRubyObject.NULL_ARRAY);</span>
+    }
+
+    public static IRubyObject enumeratorize(Ruby runtime, RubyClass type, IRubyObject object, String method, IRubyObject arg) {
+<span class="nc" id="L142">        return new RubyEnumerator(runtime, type, object, runtime.fastNewSymbol(method), new IRubyObject[] {arg});</span>
+    }
+
+    public static IRubyObject enumeratorize(Ruby runtime, RubyClass type, IRubyObject object, String method, IRubyObject[] args) {
+<span class="nc" id="L146">        return new RubyEnumerator(runtime, type, object, runtime.fastNewSymbol(method), args); // TODO: make sure it's really safe to not to copy it</span>
+    }
+
+    @Override
+    public IRubyObject initialize(ThreadContext context) {
+<span class="nc" id="L151">        return initialize20(context, Block.NULL_BLOCK);</span>
+    }
+
+    public IRubyObject initialize19(ThreadContext context, Block block) {
+<span class="nc" id="L155">        return initialize20(context, block);</span>
+    }
+
+    @JRubyMethod(name = &quot;initialize&quot;, visibility = PRIVATE)
+    public IRubyObject initialize20(ThreadContext context, Block block) {
+<span class="fc" id="L160">        return initialize20(context, NULL_ARRAY, block);</span>
+    }
+
+    @JRubyMethod(name = &quot;initialize&quot;, visibility = PRIVATE)
+    public IRubyObject initialize20(ThreadContext context, IRubyObject object, Block block) {
+<span class="fc" id="L165">        return initialize20(context, new IRubyObject[]{ object }, block);</span>
+    }
+
+    @JRubyMethod(name = &quot;initialize&quot;, visibility = PRIVATE, rest = true)
+    public IRubyObject initialize20(ThreadContext context, IRubyObject[] args, Block block) {
+<span class="fc" id="L170">        Ruby runtime = context.runtime;</span>
+        IRubyObject object;
+<span class="fc" id="L172">        IRubyObject method = runtime.newSymbol(&quot;each&quot;);</span>
+<span class="fc" id="L173">        IRubyObject size = null;</span>
+
+<span class="fc bfc" id="L175" title="All 2 branches covered.">        if (block.isGiven()) {</span>
+<span class="fc" id="L176">            Arity.checkArgumentCount(runtime, args, 0, 1);</span>
+<span class="fc bfc" id="L177" title="All 2 branches covered.">            if (args.length &gt; 0) {</span>
+<span class="fc" id="L178">                size = args[0];</span>
+<span class="fc" id="L179">                args = Arrays.copyOfRange(args, 1, args.length);</span>
+
+<span class="fc bfc" id="L181" title="All 4 branches covered.">                if (!(size.isNil() || size.respondsTo(&quot;call&quot;)) &amp;&amp;</span>
+<span class="pc bpc" id="L182" title="2 of 6 branches missed.">                        !(runtime.getFloat().isInstance(size) &amp;&amp; ((RubyFloat)size).getDoubleValue() == Float.POSITIVE_INFINITY) &amp;&amp;</span>
+                        !(size instanceof RubyInteger)) {
+<span class="nc" id="L184">                    throw runtime.newTypeError(size, runtime.getInteger());</span>
+                }
+            }
+<span class="fc" id="L187">            object = context.runtime.getGenerator().newInstance(context, IRubyObject.NULL_ARRAY, block);</span>
+
+        } else {
+<span class="fc" id="L190">            Arity.checkArgumentCount(runtime, args, 1, -1);</span>
+            // TODO need a deprecation WARN here, but can't add it until ruby/jruby/kernel20/enumerable.rb is deleted or stops calling this without a block
+<span class="fc" id="L192">            object = args[0];</span>
+<span class="fc" id="L193">            args = Arrays.copyOfRange(args, 1, args.length);</span>
+<span class="fc bfc" id="L194" title="All 2 branches covered.">            if (args.length &gt; 0) {</span>
+<span class="fc" id="L195">                method = args[0];</span>
+<span class="fc" id="L196">                args = Arrays.copyOfRange(args, 1, args.length);</span>
+            }
+        }
+
+<span class="fc" id="L200">        return initialize20(object, method, args, size, null);</span>
+    }
+
+    public IRubyObject initialize(ThreadContext context, IRubyObject object, IRubyObject method) {
+<span class="nc" id="L204">        return initialize20(context, object, method, Block.NULL_BLOCK);</span>
+    }
+
+    public IRubyObject initialize19(ThreadContext context, IRubyObject object, IRubyObject method, Block block) {
+<span class="nc" id="L208">        return initialize20(context, object, method, block);</span>
+    }
+
+    @JRubyMethod(name = &quot;initialize&quot;, visibility = PRIVATE)
+    public IRubyObject initialize20(ThreadContext context, IRubyObject object, IRubyObject method, Block block) {
+<span class="nc" id="L213">        Ruby runtime = context.runtime;</span>
+
+<span class="nc" id="L215">        IRubyObject size = context.nil;</span>
+
+<span class="nc bnc" id="L217" title="All 2 branches missed.">        if (block.isGiven()) {</span>
+<span class="nc" id="L218">            throw context.runtime.newArgumentError(2, 1);</span>
+        } else {
+<span class="nc" id="L220">            return initialize(object, method, NULL_ARRAY);</span>
+        }
+    }
+
+    public IRubyObject initialize(ThreadContext context, IRubyObject object, IRubyObject method, IRubyObject methodArg) {
+<span class="nc" id="L225">        return initialize20(context, object, method, methodArg, Block.NULL_BLOCK);</span>
+    }
+
+    public IRubyObject initialize19(ThreadContext context, IRubyObject object, IRubyObject method, IRubyObject methodArg, Block block) {
+<span class="nc" id="L229">        return initialize20(context, object, method, methodArg, Block.NULL_BLOCK);</span>
+    }
+
+    @JRubyMethod(name = &quot;initialize&quot;, visibility = PRIVATE)
+    public IRubyObject initialize20(ThreadContext context, IRubyObject object, IRubyObject method, IRubyObject methodArg, Block block) {
+<span class="nc" id="L234">        Ruby runtime = context.runtime;</span>
+
+<span class="nc" id="L236">        IRubyObject size = context.nil;</span>
+
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        if (block.isGiven()) {</span>
+<span class="nc" id="L239">            throw context.runtime.newArgumentError(3, 1);</span>
+        } else {
+<span class="nc" id="L241">            return initialize(object, method, new IRubyObject[] { methodArg });</span>
+        }
+    }
+
+    public IRubyObject initialize(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L246">        return initialize20(context, args, Block.NULL_BLOCK);</span>
+    }
+
+    public IRubyObject initialize19(ThreadContext context, IRubyObject[] args, Block block) {
+<span class="nc" id="L250">        return initialize20(context, args, block);</span>
+    }
+
+    private IRubyObject initialize(IRubyObject object, IRubyObject method, IRubyObject[] methodArgs) {
+<span class="fc" id="L254">        return initialize20(object, method, methodArgs, null, null);</span>
+    }
+
+    private IRubyObject initialize20(IRubyObject object, IRubyObject method, IRubyObject[] methodArgs, IRubyObject size, SizeFn sizeFn) {
+<span class="fc" id="L258">        this.object = object;</span>
+<span class="fc" id="L259">        this.method = method.asJavaString();</span>
+<span class="fc" id="L260">        this.methodArgs = methodArgs;</span>
+<span class="fc" id="L261">        this.size = size;</span>
+<span class="fc" id="L262">        this.sizeFn = sizeFn;</span>
+<span class="fc" id="L263">        setInstanceVariable(&quot;@__object__&quot;, object);</span>
+<span class="fc" id="L264">        setInstanceVariable(&quot;@__method__&quot;, method);</span>
+<span class="fc" id="L265">        setInstanceVariable(&quot;@__args__&quot;, RubyArray.newArrayNoCopyLight(getRuntime(), methodArgs));</span>
+<span class="fc" id="L266">        return this;</span>
+    }
+
+    @JRubyMethod(name = &quot;dup&quot;)
+    @Override
+    public IRubyObject dup() {
+        // JRUBY-5013: Enumerator needs to copy private fields in order to have a valid structure
+<span class="nc" id="L273">        RubyEnumerator copy = (RubyEnumerator) super.dup();</span>
+<span class="nc" id="L274">        copy.object     = this.object;</span>
+<span class="nc" id="L275">        copy.method     = this.method;</span>
+<span class="nc" id="L276">        copy.methodArgs = this.methodArgs;</span>
+<span class="nc" id="L277">        copy.size       = this.size;</span>
+<span class="nc" id="L278">        copy.sizeFn       = this.sizeFn;</span>
+<span class="nc" id="L279">        return copy;</span>
+    }
+
+    /**
+     * Send current block and supplied args to method on target. According to MRI
+     * Block may not be given and &quot;each&quot; should just ignore it and call on through to
+     * underlying method.
+     */
+    @JRubyMethod
+    public IRubyObject each(ThreadContext context, Block block) {
+<span class="fc" id="L289">        return object.callMethod(context, method, methodArgs, block);</span>
+    }
+    
+    @JRubyMethod(rest = true)
+    public IRubyObject each(ThreadContext context, IRubyObject[] args, Block block) {
+<span class="fc bfc" id="L294" title="All 2 branches covered.">        if (args.length == 0) {</span>
+<span class="fc" id="L295">            return each(context, block);</span>
+        }
+        
+<span class="fc" id="L298">        IRubyObject[] newArgs = new IRubyObject[methodArgs.length + args.length];</span>
+<span class="fc" id="L299">        System.arraycopy(methodArgs, 0, newArgs, 0, methodArgs.length);</span>
+<span class="fc" id="L300">        System.arraycopy(args, 0, newArgs, methodArgs.length, args.length);</span>
+        
+<span class="fc" id="L302">        return new RubyEnumerator(context.runtime, getType(), object, context.runtime.newSymbol(&quot;each&quot;), newArgs);</span>
+    }
+
+    @JRubyMethod(name = &quot;inspect&quot;)
+    public IRubyObject inspect19(ThreadContext context) {
+<span class="nc" id="L307">        Ruby runtime = context.runtime;</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">        if (runtime.isInspecting(this)) return inspect(context, true);</span>
+
+        try {
+<span class="nc" id="L311">            runtime.registerInspecting(this);</span>
+<span class="nc" id="L312">            return inspect(context, false);</span>
+        } finally {
+<span class="nc" id="L314">            runtime.unregisterInspecting(this);</span>
+        }
+    }
+
+    private IRubyObject inspect(ThreadContext context, boolean recurse) {
+<span class="nc" id="L319">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L320">        ByteList bytes = new ByteList();</span>
+<span class="nc" id="L321">        bytes.append((byte)'#').append((byte)'&lt;');</span>
+<span class="nc" id="L322">        bytes.append(getMetaClass().getName().getBytes());</span>
+<span class="nc" id="L323">        bytes.append((byte)':').append((byte)' ');</span>
+
+<span class="nc bnc" id="L325" title="All 2 branches missed.">        if (recurse) {</span>
+<span class="nc" id="L326">            bytes.append(&quot;...&gt;&quot;.getBytes());</span>
+<span class="nc" id="L327">            return RubyString.newStringNoCopy(runtime, bytes).taint(context);</span>
+        } else {
+<span class="nc" id="L329">            boolean tainted = isTaint();</span>
+<span class="nc" id="L330">            bytes.append(RubyObject.inspect(context, object).getByteList());</span>
+<span class="nc" id="L331">            bytes.append((byte)':');</span>
+<span class="nc" id="L332">            bytes.append(method.getBytes());</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">            if (methodArgs.length &gt; 0) {</span>
+<span class="nc" id="L334">                bytes.append((byte)'(');</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">                for (int i= 0; i &lt; methodArgs.length; i++) {</span>
+<span class="nc" id="L336">                    bytes.append(RubyObject.inspect(context, methodArgs[i]).getByteList());</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">                    if (i &lt; methodArgs.length - 1) {</span>
+<span class="nc" id="L338">                        bytes.append((byte)',').append((byte)' ');</span>
+                    } else {
+<span class="nc" id="L340">                        bytes.append((byte)')');</span>
+                    }
+<span class="nc bnc" id="L342" title="All 2 branches missed.">                    if (methodArgs[i].isTaint()) tainted = true;</span>
+                }
+            }
+<span class="nc" id="L345">            bytes.append((byte)'&gt;');</span>
+<span class="nc" id="L346">            RubyString result = RubyString.newStringNoCopy(runtime, bytes);</span>
+<span class="nc bnc" id="L347" title="All 2 branches missed.">            if (tainted) result.setTaint(true);</span>
+<span class="nc" id="L348">            return result;</span>
+        }
+    }
+
+    protected static IRubyObject newEnumerator(ThreadContext context, IRubyObject arg) {
+<span class="nc" id="L353">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L354">        return new RubyEnumerator(runtime, runtime.getEnumerator(), arg, runtime.newSymbol(&quot;each&quot;), IRubyObject.NULL_ARRAY);</span>
+    }
+
+    protected static IRubyObject newEnumerator(ThreadContext context, IRubyObject arg1, IRubyObject arg2) {
+<span class="nc" id="L358">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L359">        return new RubyEnumerator(runtime, runtime.getEnumerator(), arg1, arg2, IRubyObject.NULL_ARRAY);</span>
+    }
+
+    protected static IRubyObject newEnumerator(ThreadContext context, IRubyObject arg1, IRubyObject arg2, IRubyObject arg3) {
+<span class="nc" id="L363">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L364">        return new RubyEnumerator(runtime, runtime.getEnumerator(), arg1, arg2, new IRubyObject[]{arg3});</span>
+    }
+
+    @JRubyMethod(required = 1)
+    public IRubyObject each_with_object(final ThreadContext context, IRubyObject arg, Block block) {
+<span class="fc bfc" id="L369" title="All 2 branches covered.">        return block.isGiven() ? RubyEnumerable.each_with_objectCommon19(context, this, block, arg) :</span>
+<span class="fc" id="L370">                enumeratorizeWithSize(context, this, &quot;each_with_object&quot;, new IRubyObject[]{arg}, enumSizeFn(context));</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject with_object(ThreadContext context, final IRubyObject arg, final Block block) {
+<span class="fc bfc" id="L375" title="All 2 branches covered.">        return block.isGiven() ? RubyEnumerable.each_with_objectCommon19(context, this, block, arg) : enumeratorizeWithSize(context, this, &quot;with_object&quot;, new IRubyObject[]{arg}, enumSizeFn(context));</span>
+    }
+
+    @JRubyMethod(rest = true)
+    public IRubyObject each_entry(ThreadContext context, final IRubyObject[] args, final Block block) {
+<span class="pc bpc" id="L380" title="1 of 2 branches missed.">        return block.isGiven() ? RubyEnumerable.each_entryCommon(context, this, args, block) : enumeratorize(context.runtime, getType(), this, &quot;each_entry&quot;, args);</span>
+    }
+
+    @JRubyMethod(name = &quot;each_slice&quot;)
+    public IRubyObject each_slice19(ThreadContext context, IRubyObject arg, final Block block) {
+<span class="nc bnc" id="L385" title="All 2 branches missed.">        return block.isGiven() ? RubyEnumerable.each_slice(context, this, arg, block) : enumeratorize(context.runtime, getType(), this, &quot;each_slice&quot;, arg);</span>
+    }
+
+    @JRubyMethod(name = &quot;each_cons&quot;)
+    public IRubyObject each_cons19(ThreadContext context, IRubyObject arg, final Block block) {
+<span class="nc bnc" id="L390" title="All 2 branches missed.">        return block.isGiven() ? RubyEnumerable.each_cons(context, this, arg, block) : enumeratorize(context.runtime, getType(), this, &quot;each_cons&quot;, arg);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject size(ThreadContext context) {
+<span class="fc bfc" id="L395" title="All 2 branches covered.">        if (sizeFn != null) {</span>
+<span class="fc" id="L396">            return sizeFn.size(methodArgs);</span>
+        }
+
+<span class="fc bfc" id="L399" title="All 2 branches covered.">        if (size != null) {</span>
+<span class="fc bfc" id="L400" title="All 2 branches covered.">            if (size.respondsTo(&quot;call&quot;)) {</span>
+<span class="fc" id="L401">                return size.callMethod(context, &quot;call&quot;);</span>
+            }
+            
+<span class="fc" id="L404">            return size;</span>
+        }
+
+<span class="fc" id="L407">        return context.nil;</span>
+    }
+
+    private SizeFn enumSizeFn(final ThreadContext context) {
+<span class="fc" id="L411">        final RubyEnumerator self = this;</span>
+<span class="fc" id="L412">        return new SizeFn() {</span>
+            @Override
+            public IRubyObject size(IRubyObject[] args) {
+<span class="nc" id="L415">                return self.size(context);</span>
+            }
+        };
+    }
+
+    private IRubyObject with_index_common(ThreadContext context, final Block block, final String rubyMethodName, IRubyObject arg) {
+<span class="fc" id="L421">        final Ruby runtime = context.runtime;</span>
+<span class="fc bfc" id="L422" title="All 2 branches covered.">        int index = arg.isNil() ? 0 : RubyNumeric.num2int(arg);</span>
+<span class="fc bfc" id="L423" title="All 2 branches covered.">        if (!block.isGiven()) {</span>
+<span class="fc bfc" id="L424" title="All 2 branches covered.">            return arg.isNil() ? enumeratorizeWithSize(context, this, rubyMethodName, enumSizeFn(context)) :</span>
+<span class="fc" id="L425">                enumeratorizeWithSize(context, this, rubyMethodName, new IRubyObject[]{runtime.newFixnum(index)}, enumSizeFn(context));</span>
+        }
+
+<span class="fc" id="L428">        return RubyEnumerable.callEach(runtime, context, this, new RubyEnumerable.EachWithIndex(context, block, index));</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject each_with_index(ThreadContext context, final Block block) {
+<span class="fc" id="L433">        return with_index_common(context, block, &quot;each_with_index&quot;, context.runtime.getNil());</span>
+    }
+
+    public IRubyObject with_index(ThreadContext context, final Block block) {
+<span class="nc" id="L437">        return with_index19(context, block);</span>
+    }
+
+    @JRubyMethod(name = &quot;with_index&quot;)
+    public IRubyObject with_index19(ThreadContext context, final Block block) {
+<span class="fc" id="L442">        return with_index_common(context, block, &quot;with_index&quot;, context.runtime.getNil());</span>
+    }
+
+    @JRubyMethod(name = &quot;with_index&quot;)
+    public IRubyObject with_index19(ThreadContext context, IRubyObject arg, final Block block) {
+<span class="fc" id="L447">        return with_index_common(context, block, &quot;with_index&quot;, arg);</span>
+    }
+    
+<span class="pc" id="L450">    private volatile Nexter nexter = null;</span>
+    
+    @JRubyMethod
+    public synchronized IRubyObject next(ThreadContext context) {
+<span class="fc" id="L454">        ensureNexter(context);</span>
+        
+<span class="fc" id="L456">        return nexter.next();</span>
+    }
+    
+    @JRubyMethod
+    public synchronized IRubyObject rewind(ThreadContext context) {
+<span class="fc bfc" id="L461" title="All 2 branches covered.">        if (object.respondsTo(&quot;rewind&quot;)) object.callMethod(context, &quot;rewind&quot;);</span>
+        
+<span class="fc bfc" id="L463" title="All 2 branches covered.">        if (nexter != null) {</span>
+<span class="fc" id="L464">            nexter.shutdown();</span>
+<span class="fc" id="L465">            nexter = null;</span>
+        }
+        
+<span class="fc" id="L468">        return this;</span>
+    }
+    
+    @JRubyMethod
+    public synchronized IRubyObject peek(ThreadContext context) {
+<span class="fc" id="L473">        ensureNexter(context);</span>
+        
+<span class="fc" id="L475">        return nexter.peek();</span>
+    }
+    
+    private void ensureNexter(ThreadContext context) {
+<span class="fc bfc" id="L479" title="All 2 branches covered.">        if (nexter == null) {</span>
+<span class="pc bpc" id="L480" title="1 of 2 branches missed.">            if (Options.ENUMERATOR_LIGHTWEIGHT.load()) {</span>
+<span class="pc bpc" id="L481" title="2 of 6 branches missed.">                if (object instanceof RubyArray &amp;&amp; method.equals(&quot;each&quot;) &amp;&amp; methodArgs.length == 0) {</span>
+<span class="fc" id="L482">                    nexter = new ArrayNexter(context.runtime, object, method, methodArgs);</span>
+                } else {
+<span class="fc" id="L484">                    nexter = new ThreadedNexter(context.runtime, object, method, methodArgs);</span>
+                }
+            } else {
+<span class="nc" id="L487">                nexter = new ThreadedNexter(context.runtime, object, method, methodArgs);</span>
+            }
+        }
+<span class="fc" id="L490">    }</span>
+    
+    @Override
+    protected void finalize() throws Throwable {
+        try {
+<span class="fc" id="L495">            Nexter nexter = this.nexter;</span>
+<span class="fc bfc" id="L496" title="All 2 branches covered.">            if (nexter != null) {</span>
+<span class="fc" id="L497">                nexter.shutdown();</span>
+<span class="fc" id="L498">                nexter = null;</span>
+            }
+        } finally {
+<span class="pc" id="L501">            super.finalize();</span>
+<span class="fc" id="L502">        }</span>
+<span class="fc" id="L503">    }</span>
+
+    /**
+     * &quot;Function&quot; type for java-created enumerators with size.  Should be implemented so that calls to
+     * SizeFn#size are kept in sync with the size of the created enum (i.e. if the object underlying an enumerator
+     * changes, calls to SizeFn#size should reflect that change).
+     */
+    public interface SizeFn {
+        IRubyObject size(IRubyObject[] args);
+    }
+    
+    private static abstract class Nexter {
+        /** the runtime associated with all objects */
+        protected final Ruby runtime;
+        
+        /** target for each operation */
+        protected final IRubyObject object;
+
+        /** method to invoke for each operation */
+        protected final String method;
+
+        /** args to each method */
+        protected final IRubyObject[] methodArgs;
+        
+<span class="fc" id="L527">        public Nexter(Ruby runtime, IRubyObject object, String method, IRubyObject[] methodArgs) {</span>
+<span class="fc" id="L528">            this.object = object;</span>
+<span class="fc" id="L529">            this.method = method;</span>
+<span class="fc" id="L530">            this.methodArgs = methodArgs;</span>
+<span class="fc" id="L531">            this.runtime = runtime;</span>
+<span class="fc" id="L532">        }</span>
+        
+        public abstract IRubyObject next();
+        
+        public abstract void shutdown();
+        
+        public abstract IRubyObject peek();
+    }
+    
+    private static class ArrayNexter extends Nexter {
+        private final RubyArray array;
+<span class="fc" id="L543">        private int index = 0;</span>
+        
+        public ArrayNexter(Ruby runtime, IRubyObject object, String method, IRubyObject[] methodArgs) {
+<span class="fc" id="L546">            super(runtime, object, method, methodArgs);</span>
+<span class="fc" id="L547">            array = (RubyArray)object;</span>
+<span class="fc" id="L548">        }</span>
+
+        @Override
+        public IRubyObject next() {
+<span class="fc" id="L552">            IRubyObject obj = peek();</span>
+<span class="fc" id="L553">            index += 1;</span>
+<span class="fc" id="L554">            return obj;</span>
+        }
+
+        @Override
+        public void shutdown() {
+            // not really anything to do
+<span class="fc" id="L560">            index = 0;</span>
+<span class="fc" id="L561">        }</span>
+
+        @Override
+        public IRubyObject peek() {
+<span class="fc" id="L565">            checkIndex();</span>
+            
+<span class="fc" id="L567">            return get();</span>
+        }
+        
+        protected IRubyObject get() {
+<span class="fc" id="L571">            return array.eltOk(index);</span>
+        }
+
+        private void checkIndex() throws RaiseException {
+<span class="fc bfc" id="L575" title="All 2 branches covered.">            if (index &gt;= array.size()) throw runtime.newLightweightStopIterationError(&quot;stop iteration&quot;);</span>
+<span class="fc" id="L576">        }</span>
+    }
+    
+    private static class ThreadedNexter extends Nexter implements Runnable {
+        private static final boolean DEBUG = false;
+        
+        /** sync queue to wait for values */
+<span class="fc" id="L583">        private SynchronousQueue&lt;IRubyObject&gt; out = new SynchronousQueue&lt;IRubyObject&gt;();</span>
+        
+        /** thread that's executing this Nexter */
+        private volatile Thread thread;
+        
+        /** whether we're done iterating */
+        private IRubyObject doneObject;
+        
+        /** future to cancel job if it has not started */
+        private Future future;
+        
+        /** death mark */
+<span class="fc" id="L595">        protected volatile boolean die = false;</span>
+
+        /** the last value we got, used for peek */
+        private IRubyObject lastValue;
+        
+        public ThreadedNexter(Ruby runtime, IRubyObject object, String method, IRubyObject[] methodArgs) {
+<span class="fc" id="L601">            super(runtime, object, method, methodArgs);</span>
+<span class="fc" id="L602">        }</span>
+        
+        @Override
+        public synchronized IRubyObject next() {
+<span class="pc bpc" id="L606" title="1 of 2 branches missed.">            if (doneObject != null) {</span>
+<span class="nc" id="L607">                return returnValue(doneObject);</span>
+            }
+            
+<span class="fc" id="L610">            ensureStarted();</span>
+            
+<span class="fc" id="L612">            return returnValue(take());</span>
+        }
+        
+        @Override
+        public synchronized void shutdown() {
+            // cancel future in case we have not been started
+<span class="fc" id="L618">            future.cancel(true);</span>
+                
+            // mark for death
+<span class="fc" id="L621">            die = true;</span>
+            
+<span class="fc" id="L623">            Thread myThread = thread;</span>
+<span class="fc bfc" id="L624" title="All 2 branches covered.">            if (myThread != null) {</span>
+                if (DEBUG) System.out.println(&quot;clearing for shutdown&quot;);
+                
+                // we interrupt twice, to break out of iteration and
+                // (potentially) break out of final exchange
+<span class="fc" id="L629">                myThread.interrupt();</span>
+<span class="fc" id="L630">                myThread.interrupt();</span>
+                
+                // release references
+<span class="fc" id="L633">                thread = null;</span>
+<span class="fc" id="L634">                doneObject = null;</span>
+            }
+<span class="fc" id="L636">        }</span>
+        
+        @Override
+        public synchronized IRubyObject peek() {
+<span class="pc bpc" id="L640" title="1 of 2 branches missed.">            if (doneObject != null) {</span>
+<span class="nc" id="L641">                return returnValue(doneObject);</span>
+            }
+            
+<span class="fc" id="L644">            ensureStarted();</span>
+            
+<span class="pc bpc" id="L646" title="1 of 2 branches missed.">            if (lastValue != null) {</span>
+<span class="nc" id="L647">                return lastValue;</span>
+            }
+            
+<span class="fc" id="L650">            peekTake();</span>
+            
+<span class="fc" id="L652">            return returnValue(lastValue);</span>
+        }
+        
+        private void ensureStarted() {
+<span class="fc bfc" id="L656" title="All 2 branches covered.">            if (thread == null) future = runtime.getFiberExecutor().submit(this);</span>
+<span class="fc" id="L657">        }</span>
+        
+        private IRubyObject peekTake() {
+            try {
+<span class="fc" id="L661">                return lastValue = out.take();</span>
+<span class="nc" id="L662">            } catch (InterruptedException ie) {</span>
+<span class="nc" id="L663">                throw runtime.newThreadError(&quot;interrupted during iteration&quot;);</span>
+            }
+        }
+        
+        private IRubyObject take() {
+            try {
+<span class="pc bpc" id="L669" title="1 of 2 branches missed.">                if (lastValue != null) {</span>
+<span class="nc" id="L670">                    return lastValue;</span>
+                }
+                
+<span class="fc" id="L673">                return out.take();</span>
+<span class="nc" id="L674">            } catch (InterruptedException ie) {</span>
+<span class="nc" id="L675">                throw runtime.newThreadError(&quot;interrupted during iteration&quot;);</span>
+            } finally {
+<span class="pc" id="L677">                lastValue = null;</span>
+            }
+        }
+        
+        private IRubyObject returnValue(IRubyObject value) {
+            // if it's the NEVER object, raise StopIteration
+<span class="fc bfc" id="L683" title="All 2 branches covered.">            if (value == NEVER) {</span>
+<span class="fc" id="L684">                doneObject = value;</span>
+<span class="fc" id="L685">                throw runtime.newLightweightStopIterationError(&quot;stop iteration&quot;);</span>
+            }
+            
+            // if it's an exception, raise it
+<span class="pc bpc" id="L689" title="1 of 2 branches missed.">            if (value instanceof RubyException) {</span>
+<span class="nc" id="L690">                doneObject = value;</span>
+<span class="nc" id="L691">                throw new RaiseException((RubyException)value);</span>
+            }
+            
+            // otherwise, just return it
+<span class="fc" id="L695">            return value;</span>
+        }
+        
+        @Override
+        public void run() {
+<span class="pc bpc" id="L700" title="1 of 2 branches missed.">            if (die) return;</span>
+            
+<span class="fc" id="L702">            thread = Thread.currentThread();</span>
+<span class="fc" id="L703">            ThreadContext context = runtime.getCurrentContext();</span>
+            
+            if (DEBUG) System.out.println(Thread.currentThread().getName() + &quot;: starting up nexter thread&quot;);
+            
+<span class="fc" id="L707">            IRubyObject finalObject = NEVER;</span>
+            
+            try {
+<span class="fc" id="L710">                IRubyObject oldExc = runtime.getGlobalVariables().get(&quot;$!&quot;);</span>
+                try {
+<span class="fc" id="L712">                    object.callMethod(context, method, methodArgs, CallBlock.newCallClosure(object, object.getMetaClass(), Arity.OPTIONAL, new BlockCallback() {</span>
+                        @Override
+                        public IRubyObject call(ThreadContext context, IRubyObject[] args, Block block) {
+                            try {
+                                if (DEBUG) System.out.println(Thread.currentThread().getName() + &quot;: exchanging: &quot; + Arrays.toString(args));
+<span class="pc bpc" id="L717" title="1 of 2 branches missed.">                                if (die) throw new JumpException.BreakJump(-1, NEVER);</span>
+<span class="fc" id="L718">                                out.put(RubyEnumerable.packEnumValues(runtime, args));</span>
+<span class="pc bpc" id="L719" title="1 of 2 branches missed.">                                if (die) throw new JumpException.BreakJump(-1, NEVER);</span>
+<span class="fc" id="L720">                            } catch (InterruptedException ie) {</span>
+                                if (DEBUG) System.out.println(Thread.currentThread().getName() + &quot;: interrupted&quot;);
+
+<span class="fc" id="L723">                                throw new JumpException.BreakJump(-1, NEVER);</span>
+<span class="fc" id="L724">                            }</span>
+
+<span class="fc" id="L726">                            return context.nil;</span>
+                        }
+                    }, context));
+<span class="fc" id="L729">                } catch (JumpException.BreakJump bj) {</span>
+                    // ignore, we're shutting down
+<span class="nc" id="L731">                } catch (RaiseException re) {</span>
+<span class="nc" id="L732">                    runtime.getGlobalVariables().set(&quot;$!&quot;, oldExc);</span>
+                    if (DEBUG) System.out.println(Thread.currentThread().getName() + &quot;: exception at toplevel: &quot; + re.getException());
+<span class="nc" id="L734">                    finalObject = re.getException();</span>
+<span class="nc" id="L735">                } catch (Throwable t) {</span>
+                    if (DEBUG) {
+                        System.out.println(Thread.currentThread().getName() + &quot;: exception at toplevel: &quot; + t);
+                        t.printStackTrace();
+                    }
+<span class="nc" id="L740">                    Helpers.throwException(t);</span>
+<span class="pc" id="L741">                }</span>
+
+                try {
+<span class="fc bfc" id="L744" title="All 2 branches covered.">                    if (!die) out.put(finalObject);</span>
+<span class="fc" id="L745">                } catch (InterruptedException ie) {</span>
+                    // ignore
+<span class="fc" id="L747">                }</span>
+            } finally {
+                // disassociate this Nexter with the thread running it
+<span class="pc" id="L750">                thread = null;</span>
+<span class="fc" id="L751">            }</span>
+<span class="fc" id="L752">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

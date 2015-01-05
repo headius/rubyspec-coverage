@@ -1,0 +1,227 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyCallNode.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.nodes</a> &gt; <span class="el_source">RubyCallNode.java</span></div><h1>RubyCallNode.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2013, 2014 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.nodes;
+
+import com.oracle.truffle.api.CompilerAsserts;
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.nodes.ExplodeLoop;
+import com.oracle.truffle.api.source.SourceSection;
+import com.oracle.truffle.api.utilities.BranchProfile;
+import org.jruby.truffle.nodes.cast.BooleanCastNode;
+import org.jruby.truffle.nodes.cast.BooleanCastNodeFactory;
+import org.jruby.truffle.nodes.cast.ProcOrNullNode;
+import org.jruby.truffle.nodes.cast.ProcOrNullNodeFactory;
+import org.jruby.truffle.nodes.dispatch.Dispatch;
+import org.jruby.truffle.nodes.dispatch.DispatchHeadNode;
+import org.jruby.truffle.runtime.ModuleOperations;
+import org.jruby.truffle.runtime.RubyArguments;
+import org.jruby.truffle.runtime.RubyContext;
+import org.jruby.truffle.runtime.core.RubyArray;
+import org.jruby.truffle.runtime.core.RubyProc;
+import org.jruby.truffle.runtime.methods.RubyMethod;
+import org.jruby.truffle.runtime.util.ArrayUtils;
+
+import java.util.Arrays;
+
+public class RubyCallNode extends RubyNode {
+
+    private final String methodName;
+
+    @Child protected RubyNode receiver;
+    @Child protected ProcOrNullNode block;
+    @Children protected final RubyNode[] arguments;
+
+    private final boolean isSplatted;
+    private final boolean isVCall;
+
+    @Child protected DispatchHeadNode dispatchHead;
+
+<span class="nc" id="L47">    private final BranchProfile splatNotArrayProfile = BranchProfile.create();</span>
+
+<span class="nc" id="L49">    @CompilerDirectives.CompilationFinal private boolean seenNullInUnsplat = false;</span>
+<span class="nc" id="L50">    @CompilerDirectives.CompilationFinal private boolean seenIntegerFixnumInUnsplat = false;</span>
+<span class="nc" id="L51">    @CompilerDirectives.CompilationFinal private boolean seenLongFixnumInUnsplat = false;</span>
+<span class="nc" id="L52">    @CompilerDirectives.CompilationFinal private boolean seenObjectInUnsplat = false;</span>
+
+    @Child protected DispatchHeadNode respondToMissing;
+    @Child protected BooleanCastNode respondToMissingCast;
+
+    private final boolean ignoreVisibility;
+
+    public RubyCallNode(RubyContext context, SourceSection section, String methodName, RubyNode receiver, RubyNode block, boolean isSplatted, RubyNode... arguments) {
+<span class="nc" id="L60">        this(context, section, methodName, receiver, block, isSplatted, false, false, arguments);</span>
+<span class="nc" id="L61">    }</span>
+
+
+    public RubyCallNode(RubyContext context, SourceSection section, String methodName, RubyNode receiver, RubyNode block, boolean isSplatted, boolean ignoreVisibility, boolean rubiniusPrimitive, RubyNode... arguments) {
+<span class="nc" id="L65">        this(context, section, methodName, receiver, block, isSplatted, false, ignoreVisibility, rubiniusPrimitive, arguments);</span>
+<span class="nc" id="L66">    }</span>
+
+    public RubyCallNode(RubyContext context, SourceSection section, String methodName, RubyNode receiver, RubyNode block, boolean isSplatted, boolean isVCall, boolean ignoreVisibility, boolean rubiniusPrimitive, RubyNode... arguments) {
+<span class="nc" id="L69">        super(context, section);</span>
+
+<span class="nc" id="L71">        this.methodName = methodName;</span>
+
+<span class="nc" id="L73">        this.receiver = receiver;</span>
+
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (block == null) {</span>
+<span class="nc" id="L76">            this.block = null;</span>
+        } else {
+<span class="nc" id="L78">            this.block = ProcOrNullNodeFactory.create(context, section, block);</span>
+        }
+
+<span class="nc" id="L81">        this.arguments = arguments;</span>
+<span class="nc" id="L82">        this.isSplatted = isSplatted;</span>
+<span class="nc" id="L83">        this.isVCall = isVCall;</span>
+
+<span class="nc" id="L85">        dispatchHead = new DispatchHeadNode(context, ignoreVisibility, false, Dispatch.MissingBehavior.CALL_METHOD_MISSING);</span>
+<span class="nc" id="L86">        respondToMissing = new DispatchHeadNode(context, true, Dispatch.MissingBehavior.RETURN_MISSING);</span>
+<span class="nc" id="L87">        respondToMissingCast = BooleanCastNodeFactory.create(context, section, null);</span>
+
+<span class="nc" id="L89">        this.ignoreVisibility = ignoreVisibility;</span>
+<span class="nc" id="L90">    }</span>
+
+    @Override
+    public Object execute(VirtualFrame frame) {
+<span class="nc" id="L94">        final Object receiverObject = receiver.execute(frame);</span>
+<span class="nc" id="L95">        final Object[] argumentsObjects = executeArguments(frame);</span>
+<span class="nc" id="L96">        final RubyProc blockObject = executeBlock(frame);</span>
+
+<span class="nc" id="L98">        return dispatchHead.call(frame, receiverObject, methodName, blockObject, argumentsObjects);</span>
+    }
+
+    private RubyProc executeBlock(VirtualFrame frame) {
+<span class="nc bnc" id="L102" title="All 2 branches missed.">        if (block != null) {</span>
+<span class="nc" id="L103">            return block.executeRubyProc(frame);</span>
+        } else {
+<span class="nc" id="L105">            return null;</span>
+        }
+    }
+
+    @ExplodeLoop
+    private Object[] executeArguments(VirtualFrame frame) {
+<span class="nc" id="L111">        final Object[] argumentsObjects = new Object[arguments.length];</span>
+
+<span class="nc bnc" id="L113" title="All 2 branches missed.">        for (int i = 0; i &lt; arguments.length; i++) {</span>
+<span class="nc" id="L114">            argumentsObjects[i] = arguments[i].execute(frame);</span>
+        }
+
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        if (isSplatted) {</span>
+<span class="nc" id="L118">            return splat(argumentsObjects[0]);</span>
+        } else {
+<span class="nc" id="L120">            return argumentsObjects;</span>
+        }
+    }
+
+    private Object[] splat(Object argument) {
+        // TODO(CS): what happens if isn't just one argument, or it isn't an Array?
+
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        if (!(argument instanceof RubyArray)) {</span>
+<span class="nc" id="L128">            splatNotArrayProfile.enter();</span>
+<span class="nc" id="L129">            notDesignedForCompilation();</span>
+<span class="nc" id="L130">            throw new UnsupportedOperationException();</span>
+        }
+
+<span class="nc" id="L133">        final RubyArray array = (RubyArray) argument;</span>
+<span class="nc" id="L134">        final int size = array.getSize();</span>
+<span class="nc" id="L135">        final Object store = array.getStore();</span>
+
+<span class="nc bnc" id="L137" title="All 4 branches missed.">        if (seenNullInUnsplat &amp;&amp; store == null) {</span>
+<span class="nc" id="L138">            return new Object[]{};</span>
+<span class="nc bnc" id="L139" title="All 4 branches missed.">        } else if (seenIntegerFixnumInUnsplat &amp;&amp; store instanceof int[]) {</span>
+<span class="nc" id="L140">            return ArrayUtils.boxUntil((int[]) store, size);</span>
+<span class="nc bnc" id="L141" title="All 4 branches missed.">        } else if (seenLongFixnumInUnsplat &amp;&amp; store instanceof long[]) {</span>
+<span class="nc" id="L142">            return ArrayUtils.boxUntil((long[]) store, size);</span>
+<span class="nc bnc" id="L143" title="All 4 branches missed.">        } else if (seenObjectInUnsplat &amp;&amp; store instanceof Object[]) {</span>
+<span class="nc" id="L144">            return Arrays.copyOfRange((Object[]) store, 0, size);</span>
+        }
+
+<span class="nc" id="L147">        CompilerDirectives.transferToInterpreterAndInvalidate();</span>
+
+<span class="nc bnc" id="L149" title="All 2 branches missed.">        if (store == null) {</span>
+<span class="nc" id="L150">            seenNullInUnsplat = true;</span>
+<span class="nc" id="L151">            return new Object[]{};</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        } else if (store instanceof int[]) {</span>
+<span class="nc" id="L153">            seenIntegerFixnumInUnsplat = true;</span>
+<span class="nc" id="L154">            return ArrayUtils.boxUntil((int[]) store, size);</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        } else if (store instanceof long[]) {</span>
+<span class="nc" id="L156">            seenLongFixnumInUnsplat = true;</span>
+<span class="nc" id="L157">            return ArrayUtils.boxUntil((long[]) store, size);</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">        } else if (store instanceof Object[]) {</span>
+<span class="nc" id="L159">            seenObjectInUnsplat = true;</span>
+<span class="nc" id="L160">            return Arrays.copyOfRange((Object[]) store, 0, size);</span>
+        }
+
+<span class="nc" id="L163">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public Object isDefined(VirtualFrame frame) {
+<span class="nc" id="L168">        notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        if (receiver.isDefined(frame) == getContext().getCoreLibrary().getNilObject()) {</span>
+<span class="nc" id="L171">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        for (RubyNode argument : arguments) {</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">            if (argument.isDefined(frame) == getContext().getCoreLibrary().getNilObject()) {</span>
+<span class="nc" id="L176">                return getContext().getCoreLibrary().getNilObject();</span>
+            }
+        }
+
+<span class="nc" id="L180">        final RubyContext context = getContext();</span>
+
+        Object receiverObject;
+
+        try {
+            /*
+             * TODO(CS): Getting a node via an accessor like this doesn't work with Truffle at the
+             * moment and will cause frame escape errors, so we don't use it in compilation mode.
+             */
+
+<span class="nc" id="L190">            CompilerAsserts.neverPartOfCompilation();</span>
+
+<span class="nc" id="L192">            receiverObject = receiver.execute(frame);</span>
+<span class="nc" id="L193">        } catch (Exception e) {</span>
+<span class="nc" id="L194">            return getContext().getCoreLibrary().getNilObject();</span>
+<span class="nc" id="L195">        }</span>
+
+        // TODO(CS): this lookup should be cached
+
+<span class="nc" id="L199">        final RubyMethod method = ModuleOperations.lookupMethod(context.getCoreLibrary().getMetaClass(receiverObject), methodName);</span>
+
+<span class="nc" id="L201">        final Object self = RubyArguments.getSelf(frame.getArguments());</span>
+
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (method == null) {</span>
+<span class="nc" id="L204">            final Object r = respondToMissing.call(frame, receiverObject, &quot;respond_to_missing?&quot;, null, context.makeString(methodName));</span>
+
+<span class="nc bnc" id="L206" title="All 4 branches missed.">            if (r != Dispatch.MISSING &amp;&amp; !respondToMissingCast.executeBoolean(frame, r)) {</span>
+<span class="nc" id="L207">                return getContext().getCoreLibrary().getNilObject();</span>
+            }
+<span class="nc bnc" id="L209" title="All 2 branches missed.">        } else if (method.isUndefined()) {</span>
+<span class="nc" id="L210">            return getContext().getCoreLibrary().getNilObject();</span>
+<span class="nc bnc" id="L211" title="All 4 branches missed.">        } else if (!ignoreVisibility &amp;&amp; !method.isVisibleTo(this, context.getCoreLibrary().getMetaClass(self))) {</span>
+<span class="nc" id="L212">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+
+<span class="nc" id="L215">        return context.makeString(&quot;method&quot;);</span>
+    }
+
+    public String getName() {
+<span class="nc" id="L219">        return methodName;</span>
+    }
+
+    public boolean isVCall() {
+<span class="nc" id="L223">        return isVCall;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

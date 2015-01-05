@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ThreadSafeLocalContextProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.embed.internal</a> &gt; <span class="el_source">ThreadSafeLocalContextProvider.java</span></div><h1>ThreadSafeLocalContextProvider.java</h1><pre class="source lang-java linenums">/**
+ * **** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2009-2011 Yoko Harada &lt;yokolet@gmail.com&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ * **** END LICENSE BLOCK *****
+ */
+package org.jruby.embed.internal;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicReference;
+import org.jruby.Ruby;
+import org.jruby.embed.LocalVariableBehavior;
+
+/**
+ *
+ * @author Yoko Harada &lt;yokolet@gmail.com&gt;
+ */
+public class ThreadSafeLocalContextProvider extends AbstractLocalContextProvider {
+<span class="nc" id="L43">    private volatile ConcurrentLinkedQueue&lt;AtomicReference&lt;LocalContext&gt;&gt; contextRefs =</span>
+        new ConcurrentLinkedQueue&lt;AtomicReference&lt;LocalContext&gt;&gt;();
+
+<span class="nc" id="L46">    private ThreadLocal&lt;AtomicReference&lt;LocalContext&gt;&gt; contextHolder =</span>
+<span class="nc" id="L47">            new ThreadLocal&lt;AtomicReference&lt;LocalContext&gt;&gt;() {</span>
+                @Override
+                public AtomicReference&lt;LocalContext&gt; initialValue() {
+<span class="nc" id="L50">                    AtomicReference&lt;LocalContext&gt; contextRef = null;</span>
+
+                    try {
+<span class="nc" id="L53">                        contextRef = new AtomicReference&lt;LocalContext&gt;(getInstance());</span>
+<span class="nc" id="L54">                        contextRefs.add(contextRef);</span>
+<span class="nc" id="L55">                        return contextRef;</span>
+<span class="nc" id="L56">                    } catch (NullPointerException npe) {</span>
+<span class="nc bnc" id="L57" title="All 2 branches missed.">                        if (contextRefs == null) {</span>
+                            // contextRefs became null, we've been terminated
+<span class="nc bnc" id="L59" title="All 2 branches missed.">                            if (contextRef != null) {</span>
+<span class="nc" id="L60">                                contextRef.get().remove();</span>
+                            }
+
+<span class="nc" id="L63">                            return null;</span>
+                        } else {
+<span class="nc" id="L65">                            throw npe;</span>
+                        }
+                    }
+                }
+            };
+
+<span class="nc" id="L71">    public ThreadSafeLocalContextProvider(LocalVariableBehavior behavior, boolean lazy) {</span>
+<span class="nc" id="L72">        this.behavior = behavior;</span>
+<span class="nc" id="L73">        this.lazy = lazy;</span>
+<span class="nc" id="L74">    }</span>
+
+    public Ruby getRuntime() {
+<span class="nc" id="L77">        return contextHolder.get().get().getThreadSafeRuntime();</span>
+    }
+
+    public BiVariableMap getVarMap() {
+<span class="nc" id="L81">        return contextHolder.get().get().getVarMap(this);</span>
+    }
+
+    public Map getAttributeMap() {
+<span class="nc" id="L85">        return contextHolder.get().get().getAttributeMap();</span>
+    }
+
+    public boolean isRuntimeInitialized() {
+<span class="nc" id="L89">        return contextHolder.get().get().initialized;</span>
+    }
+
+    public void terminate() {
+<span class="nc" id="L93">        ConcurrentLinkedQueue&lt;AtomicReference&lt;LocalContext&gt;&gt; terminated = contextRefs;</span>
+<span class="nc" id="L94">        contextRefs = null;</span>
+
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        if (terminated != null) {</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">            for (AtomicReference&lt;LocalContext&gt; contextRef : terminated) {</span>
+<span class="nc" id="L98">                contextRef.get().remove();</span>
+<span class="nc" id="L99">                contextRef.lazySet(null);</span>
+<span class="nc" id="L100">            }</span>
+
+<span class="nc" id="L102">            terminated.clear();</span>
+        }
+
+<span class="nc" id="L105">        contextHolder.remove();</span>
+<span class="nc" id="L106">        contextHolder.set(null);</span>
+<span class="nc" id="L107">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

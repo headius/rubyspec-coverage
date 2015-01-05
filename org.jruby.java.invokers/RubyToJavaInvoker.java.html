@@ -1,0 +1,329 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyToJavaInvoker.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.java.invokers</a> &gt; <span class="el_source">RubyToJavaInvoker.java</span></div><h1>RubyToJavaInvoker.java</h1><pre class="source lang-java linenums">package org.jruby.java.invokers;
+
+import java.lang.reflect.AccessibleObject;
+import java.lang.reflect.Array;
+import java.lang.reflect.Member;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import org.jruby.Ruby;
+import org.jruby.RubyModule;
+import org.jruby.internal.runtime.methods.CallConfiguration;
+import org.jruby.internal.runtime.methods.JavaMethod;
+import org.jruby.java.dispatch.CallableSelector;
+import org.jruby.java.proxies.ArrayJavaProxy;
+import org.jruby.java.proxies.JavaProxy;
+import org.jruby.javasupport.JavaCallable;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.Visibility;
+import org.jruby.runtime.builtin.IRubyObject;
+
+<span class="pc bpc" id="L26" title="1 of 2 branches missed.">public abstract class RubyToJavaInvoker extends JavaMethod {</span>
+<span class="fc" id="L27">    protected static final Object[] EMPTY_OBJECT_ARRAY = new Object[0];</span>
+    protected final JavaCallable javaCallable;
+    protected final JavaCallable[][] javaCallables;
+    protected final JavaCallable[] javaVarargsCallables;
+    protected final int minVarargsArity;
+    protected final Map cache;
+    protected final Ruby runtime;
+    private Member[] members;
+    
+    RubyToJavaInvoker(RubyModule host, Member[] members) {
+<span class="fc" id="L37">        super(host, Visibility.PUBLIC, CallConfiguration.FrameNoneScopeNone);</span>
+<span class="fc" id="L38">        this.members = members;</span>
+<span class="fc" id="L39">        this.runtime = host.getRuntime();</span>
+        // we set all Java methods to optional, since many/most have overloads
+<span class="fc" id="L41">        setArity(Arity.OPTIONAL);</span>
+
+<span class="fc" id="L43">        Ruby runtime = host.getRuntime();</span>
+
+        // initialize all the callables for this method
+<span class="fc" id="L46">        JavaCallable callable = null;</span>
+<span class="fc" id="L47">        JavaCallable[][] callables = null;</span>
+<span class="fc" id="L48">        JavaCallable[] varargsCallables = null;</span>
+<span class="fc" id="L49">        int varargsArity = Integer.MAX_VALUE;</span>
+        
+<span class="fc bfc" id="L51" title="All 2 branches covered.">        if (members.length == 1) {</span>
+<span class="fc" id="L52">            callable = createCallable(runtime, members[0]);</span>
+<span class="fc bfc" id="L53" title="All 2 branches covered.">            if (callable.isVarArgs()) {</span>
+<span class="fc" id="L54">                varargsCallables = createCallableArray(callable);</span>
+            }
+        } else {
+<span class="fc" id="L57">            Map&lt;Integer, List&lt;JavaCallable&gt;&gt; methodsMap = new HashMap&lt;Integer, List&lt;JavaCallable&gt;&gt;();</span>
+<span class="fc" id="L58">            List&lt;JavaCallable&gt; varargsMethods = new ArrayList();</span>
+<span class="fc" id="L59">            int maxArity = 0;</span>
+<span class="fc bfc" id="L60" title="All 2 branches covered.">            for (Member method: members) {</span>
+<span class="fc" id="L61">                int currentArity = getMemberParameterTypes(method).length;</span>
+<span class="fc" id="L62">                maxArity = Math.max(currentArity, maxArity);</span>
+<span class="fc" id="L63">                List&lt;JavaCallable&gt; methodsForArity = methodsMap.get(currentArity);</span>
+<span class="fc bfc" id="L64" title="All 2 branches covered.">                if (methodsForArity == null) {</span>
+<span class="fc" id="L65">                    methodsForArity = new ArrayList&lt;JavaCallable&gt;();</span>
+<span class="fc" id="L66">                    methodsMap.put(currentArity,methodsForArity);</span>
+                }
+<span class="fc" id="L68">                JavaCallable javaMethod = createCallable(runtime,method);</span>
+<span class="fc" id="L69">                methodsForArity.add(javaMethod);</span>
+
+<span class="fc bfc" id="L71" title="All 2 branches covered.">                if (isMemberVarArgs(method)) {</span>
+<span class="fc" id="L72">                    varargsArity = Math.min(currentArity - 1, varargsArity);</span>
+<span class="fc" id="L73">                    varargsMethods.add(javaMethod);</span>
+                }
+            }
+
+<span class="fc" id="L77">            callables = createCallableArrayArray(maxArity + 1);</span>
+<span class="fc bfc" id="L78" title="All 2 branches covered.">            for (Map.Entry&lt;Integer,List&lt;JavaCallable&gt;&gt; entry : methodsMap.entrySet()) {</span>
+<span class="fc" id="L79">                List&lt;JavaCallable&gt; methodsForArity = (List&lt;JavaCallable&gt;)entry.getValue();</span>
+
+<span class="fc" id="L81">                JavaCallable[] methodsArray = methodsForArity.toArray(createCallableArray(methodsForArity.size()));</span>
+<span class="fc" id="L82">                callables[((Integer)entry.getKey()).intValue()] = methodsArray;</span>
+<span class="fc" id="L83">            }</span>
+
+<span class="fc bfc" id="L85" title="All 2 branches covered.">            if (varargsMethods.size() &gt; 0) {</span>
+                // have at least one varargs, build that map too
+<span class="fc" id="L87">                varargsCallables = createCallableArray(varargsMethods.size());</span>
+<span class="fc" id="L88">                varargsMethods.toArray(varargsCallables);</span>
+            }
+        }
+<span class="fc" id="L91">        members = null;</span>
+
+        // initialize cache of parameter types to method
+        // FIXME: No real reason to use CHM, is there?
+<span class="fc" id="L95">        cache = new ConcurrentHashMap(0, 0.75f, 1);</span>
+
+<span class="fc" id="L97">        this.javaCallable = callable;</span>
+<span class="fc" id="L98">        this.javaCallables = callables;</span>
+<span class="fc" id="L99">        this.javaVarargsCallables = varargsCallables;</span>
+<span class="fc" id="L100">        this.minVarargsArity = varargsArity;</span>
+        
+        // if it's not overloaded, set up a NativeCall
+<span class="fc bfc" id="L103" title="All 2 branches covered.">        if (javaCallable != null) {</span>
+            // no constructor support yet
+<span class="fc bfc" id="L105" title="All 2 branches covered.">            if (javaCallable instanceof org.jruby.javasupport.JavaMethod) {</span>
+<span class="fc" id="L106">                org.jruby.javasupport.JavaMethod javaMethod = (org.jruby.javasupport.JavaMethod)javaCallable;</span>
+<span class="fc" id="L107">                Method method = (Method)javaMethod.getValue();</span>
+                // only public, since non-public don't bind
+<span class="pc bpc" id="L109" title="1 of 4 branches missed.">                if (Modifier.isPublic(method.getModifiers()) &amp;&amp; Modifier.isPublic(method.getDeclaringClass().getModifiers())) {</span>
+<span class="fc" id="L110">                    setNativeCall(method.getDeclaringClass(), method.getName(), method.getReturnType(), method.getParameterTypes(), Modifier.isStatic(method.getModifiers()), true);</span>
+                }
+<span class="fc" id="L112">            }</span>
+        } else {
+            // use the lowest-arity non-overload
+<span class="fc bfc" id="L115" title="All 2 branches covered.">            for (JavaCallable[] callablesForArity : javaCallables) {</span>
+<span class="fc bfc" id="L116" title="All 6 branches covered.">                if (callablesForArity != null</span>
+                        &amp;&amp; callablesForArity.length == 1
+                        &amp;&amp; callablesForArity[0] instanceof org.jruby.javasupport.JavaMethod) {
+<span class="fc" id="L119">                    Method method = (Method)((org.jruby.javasupport.JavaMethod)callablesForArity[0]).getValue();</span>
+                    // only public, since non-public don't bind
+<span class="pc bpc" id="L121" title="1 of 4 branches missed.">                    if (Modifier.isPublic(method.getModifiers()) &amp;&amp; Modifier.isPublic(method.getDeclaringClass().getModifiers())) {</span>
+<span class="fc" id="L122">                        setNativeCall(method.getDeclaringClass(), method.getName(), method.getReturnType(), method.getParameterTypes(), Modifier.isStatic(method.getModifiers()), true);</span>
+                    }
+                }
+            }
+        }
+<span class="fc" id="L127">    }</span>
+
+    protected Member[] getMembers() {
+<span class="fc" id="L130">        return members;</span>
+    }
+
+    protected AccessibleObject[] getAccessibleObjects() {
+<span class="fc" id="L134">        return (AccessibleObject[])getMembers();</span>
+    }
+
+    protected abstract JavaCallable createCallable(Ruby ruby, Member member);
+
+    protected abstract JavaCallable[] createCallableArray(JavaCallable callable);
+
+    protected abstract JavaCallable[] createCallableArray(int size);
+
+    protected abstract JavaCallable[][] createCallableArrayArray(int size);
+
+    protected abstract Class[] getMemberParameterTypes(Member member);
+
+    protected abstract boolean isMemberVarArgs(Member member);
+
+    static Object convertArg(IRubyObject arg, JavaCallable method, int index) {
+<span class="fc" id="L150">        return arg.toJava(method.getParameterTypes()[index]);</span>
+    }
+
+    static Object convertVarargs(IRubyObject[] args, JavaCallable method) {
+<span class="nc" id="L154">        Class[] types = method.getParameterTypes();</span>
+<span class="nc" id="L155">        Class varargArrayType = types[types.length - 1];</span>
+<span class="nc" id="L156">        Class varargType = varargArrayType.getComponentType();</span>
+<span class="nc" id="L157">        int varargsStart = types.length - 1;</span>
+<span class="nc" id="L158">        int varargsCount = args.length - varargsStart;</span>
+
+        Object varargs;
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        if (args.length == 0) {</span>
+<span class="nc" id="L162">            return Array.newInstance(varargType, 0);</span>
+<span class="nc bnc" id="L163" title="All 4 branches missed.">        } else if (varargsCount == 1 &amp;&amp; args[varargsStart] instanceof ArrayJavaProxy) {</span>
+            // we may have a pre-created array to pass; try that first
+<span class="nc" id="L165">            varargs = args[varargsStart].toJava(varargArrayType);</span>
+        } else {
+<span class="nc" id="L167">            varargs = Array.newInstance(varargType, varargsCount);</span>
+
+<span class="nc bnc" id="L169" title="All 2 branches missed.">            for (int i = 0; i &lt; varargsCount; i++) {</span>
+<span class="nc" id="L170">                Array.set(varargs, i, args[varargsStart + i].toJava(varargType));</span>
+            }
+        }
+<span class="nc" id="L173">        return varargs;</span>
+    }
+
+    static JavaProxy castJavaProxy(IRubyObject self) {
+<span class="pc bpc" id="L177" title="3 of 4 branches missed.">        assert self instanceof JavaProxy : &quot;Java methods can only be invoked on Java objects&quot;;</span>
+<span class="fc" id="L178">        return (JavaProxy)self;</span>
+    }
+
+    static void trySetAccessible(AccessibleObject[] accObjs) {
+<span class="pc bpc" id="L182" title="1 of 2 branches missed.">        if (!Ruby.isSecurityRestricted()) {</span>
+            try {
+<span class="fc" id="L184">                AccessibleObject.setAccessible(accObjs, true);</span>
+<span class="pc" id="L185">            } catch(SecurityException e) {}</span>
+        }
+<span class="fc" id="L187">    }</span>
+
+    void raiseNoMatchingCallableError(String name, IRubyObject proxy, Object... args) {
+<span class="nc" id="L190">        int len = args.length;</span>
+<span class="nc" id="L191">        Class[] argTypes = new Class[args.length];</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">        for (int i = 0; i &lt; len; i++) {</span>
+<span class="nc" id="L193">            argTypes[i] = args[i].getClass();</span>
+        }
+<span class="nc" id="L195">        throw proxy.getRuntime().newArgumentError(&quot;no &quot; + name + &quot; with arguments matching &quot; + Arrays.toString(argTypes) + &quot; on object &quot; + proxy.getMetaClass());</span>
+    }
+
+    protected JavaCallable findCallable(IRubyObject self, String name, IRubyObject[] args, int arity) {
+        JavaCallable callable;
+<span class="pc bpc" id="L200" title="1 of 2 branches missed.">        if ((callable = javaCallable) == null) {</span>
+<span class="nc" id="L201">            JavaCallable[] callablesForArity = null;</span>
+<span class="nc bnc" id="L202" title="All 4 branches missed.">            if (arity &gt;= javaCallables.length || (callablesForArity = javaCallables[arity]) == null) {</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">                if (javaVarargsCallables != null) {</span>
+<span class="nc" id="L204">                    callable = CallableSelector.matchingCallableArityN(runtime, cache, javaVarargsCallables, args, arity);</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">                    if (callable == null) {</span>
+<span class="nc" id="L206">                        throw CallableSelector.argTypesDoNotMatch(self.getRuntime(), self, javaVarargsCallables, (Object[])args);</span>
+                    }
+<span class="nc" id="L208">                    return callable;</span>
+                } else {
+<span class="nc" id="L210">                    throw self.getRuntime().newArgumentError(args.length, javaCallables.length - 1);</span>
+                }
+            }
+<span class="nc" id="L213">            callable = CallableSelector.matchingCallableArityN(runtime, cache, callablesForArity, args, arity);</span>
+<span class="nc bnc" id="L214" title="All 4 branches missed.">            if (callable == null &amp;&amp; javaVarargsCallables != null) {</span>
+<span class="nc" id="L215">                callable = CallableSelector.matchingCallableArityN(runtime, cache, javaVarargsCallables, args, arity);</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">                if (callable == null) {</span>
+<span class="nc" id="L217">                    throw CallableSelector.argTypesDoNotMatch(self.getRuntime(), self, javaVarargsCallables, (Object[])args);</span>
+                }
+<span class="nc" id="L219">                return callable;</span>
+            }
+<span class="nc bnc" id="L221" title="All 2 branches missed.">            if (callable == null) {</span>
+<span class="nc" id="L222">                throw CallableSelector.argTypesDoNotMatch(self.getRuntime(), self, callablesForArity, (Object[])args);</span>
+            }
+<span class="nc" id="L224">        } else {</span>
+<span class="pc bpc" id="L225" title="2 of 4 branches missed.">            if (!callable.isVarArgs() &amp;&amp; callable.getParameterTypes().length != args.length) {</span>
+<span class="nc" id="L226">                throw self.getRuntime().newArgumentError(args.length, callable.getParameterTypes().length);</span>
+            }
+        }
+<span class="fc" id="L229">        return callable;</span>
+    }
+
+    protected JavaCallable findCallableArityZero(IRubyObject self, String name) {
+        JavaCallable callable;
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">        if ((callable = javaCallable) == null) {</span>
+            // TODO: varargs?
+<span class="nc" id="L236">            JavaCallable[] callablesForArity = null;</span>
+<span class="nc bnc" id="L237" title="All 4 branches missed.">            if (javaCallables.length == 0 || (callablesForArity = javaCallables[0]) == null) {</span>
+<span class="nc" id="L238">                raiseNoMatchingCallableError(name, self, EMPTY_OBJECT_ARRAY);</span>
+            }
+<span class="nc" id="L240">            callable = callablesForArity[0];</span>
+<span class="nc" id="L241">        } else {</span>
+<span class="pc bpc" id="L242" title="1 of 2 branches missed.">            if (callable.getParameterTypes().length != 0) {</span>
+<span class="nc" id="L243">                throw self.getRuntime().newArgumentError(0, callable.getParameterTypes().length);</span>
+            }
+        }
+<span class="fc" id="L246">        return callable;</span>
+    }
+
+    protected JavaCallable findCallableArityOne(IRubyObject self, String name, IRubyObject arg0) {
+        JavaCallable callable;
+<span class="fc bfc" id="L251" title="All 2 branches covered.">        if ((callable = javaCallable) == null) {</span>
+            // TODO: varargs?
+<span class="fc" id="L253">            JavaCallable[] callablesForArity = null;</span>
+<span class="pc bpc" id="L254" title="2 of 4 branches missed.">            if (javaCallables.length &lt;= 1 || (callablesForArity = javaCallables[1]) == null) {</span>
+<span class="nc" id="L255">                throw self.getRuntime().newArgumentError(1, javaCallables.length - 1);</span>
+            }
+<span class="fc" id="L257">            callable = CallableSelector.matchingCallableArityOne(runtime, cache, callablesForArity, arg0);</span>
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">            if (callable == null) {</span>
+<span class="nc" id="L259">                throw CallableSelector.argTypesDoNotMatch(self.getRuntime(), self, callablesForArity, arg0);</span>
+            }
+<span class="fc" id="L261">        } else {</span>
+<span class="pc bpc" id="L262" title="1 of 2 branches missed.">            if (callable.getParameterTypes().length != 1) {</span>
+<span class="nc" id="L263">                throw self.getRuntime().newArgumentError(1, callable.getParameterTypes().length);</span>
+            }
+        }
+<span class="fc" id="L266">        return callable;</span>
+    }
+
+    protected JavaCallable findCallableArityTwo(IRubyObject self, String name, IRubyObject arg0, IRubyObject arg1) {
+        JavaCallable callable;
+<span class="nc bnc" id="L271" title="All 2 branches missed.">        if ((callable = javaCallable) == null) {</span>
+            // TODO: varargs?
+<span class="nc" id="L273">            JavaCallable[] callablesForArity = null;</span>
+<span class="nc bnc" id="L274" title="All 4 branches missed.">            if (javaCallables.length &lt;= 2 || (callablesForArity = javaCallables[2]) == null) {</span>
+<span class="nc" id="L275">                throw self.getRuntime().newArgumentError(2, javaCallables.length - 1);</span>
+            }
+<span class="nc" id="L277">            callable = CallableSelector.matchingCallableArityTwo(runtime, cache, callablesForArity, arg0, arg1);</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">            if (callable == null) {</span>
+<span class="nc" id="L279">                throw CallableSelector.argTypesDoNotMatch(self.getRuntime(), self, callablesForArity, arg0, arg1);</span>
+            }
+<span class="nc" id="L281">        } else {</span>
+<span class="nc bnc" id="L282" title="All 2 branches missed.">            if (callable.getParameterTypes().length != 2) {</span>
+<span class="nc" id="L283">                throw self.getRuntime().newArgumentError(2, callable.getParameterTypes().length);</span>
+            }
+        }
+<span class="nc" id="L286">        return callable;</span>
+    }
+
+    protected JavaCallable findCallableArityThree(IRubyObject self, String name, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2) {
+        JavaCallable callable;
+<span class="nc bnc" id="L291" title="All 2 branches missed.">        if ((callable = javaCallable) == null) {</span>
+            // TODO: varargs?
+<span class="nc" id="L293">            JavaCallable[] callablesForArity = null;</span>
+<span class="nc bnc" id="L294" title="All 4 branches missed.">            if (javaCallables.length &lt;= 3 || (callablesForArity = javaCallables[3]) == null) {</span>
+<span class="nc" id="L295">                throw self.getRuntime().newArgumentError(3, javaCallables.length - 1);</span>
+            }
+<span class="nc" id="L297">            callable = CallableSelector.matchingCallableArityThree(runtime, cache, callablesForArity, arg0, arg1, arg2);</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">            if (callable == null) {</span>
+<span class="nc" id="L299">                throw CallableSelector.argTypesDoNotMatch(self.getRuntime(), self, callablesForArity, arg0, arg1, arg2);</span>
+            }
+<span class="nc" id="L301">        } else {</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">            if (callable.getParameterTypes().length != 3) {</span>
+<span class="nc" id="L303">                throw self.getRuntime().newArgumentError(3, callable.getParameterTypes().length);</span>
+            }
+        }
+<span class="nc" id="L306">        return callable;</span>
+    }
+
+    protected JavaCallable findCallableArityFour(IRubyObject self, String name, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, IRubyObject arg3) {
+        JavaCallable callable;
+<span class="nc bnc" id="L311" title="All 2 branches missed.">        if ((callable = javaCallable) == null) {</span>
+            // TODO: varargs?
+<span class="nc" id="L313">            JavaCallable[] callablesForArity = null;</span>
+<span class="nc bnc" id="L314" title="All 4 branches missed.">            if (javaCallables.length &lt;= 4 || (callablesForArity = javaCallables[4]) == null) {</span>
+<span class="nc" id="L315">                throw self.getRuntime().newArgumentError(4, javaCallables.length - 1);</span>
+            }
+<span class="nc" id="L317">            callable = CallableSelector.matchingCallableArityFour(runtime, cache, callablesForArity, arg0, arg1, arg2, arg3);</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">            if (callable == null) {</span>
+<span class="nc" id="L319">                throw CallableSelector.argTypesDoNotMatch(self.getRuntime(), self, callablesForArity, arg0, arg1, arg2, arg3);</span>
+            }
+<span class="nc" id="L321">        } else {</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">            if (callable.getParameterTypes().length != 4) {</span>
+<span class="nc" id="L323">                throw self.getRuntime().newArgumentError(4, callable.getParameterTypes().length);</span>
+            }
+        }
+<span class="nc" id="L326">        return callable;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

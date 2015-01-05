@@ -1,0 +1,460 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyFileStat.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyFileStat.java</span></div><h1>RubyFileStat.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2002-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Joey Gibson &lt;joey@joeygibson.com&gt;
+ * Copyright (C) 2004 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import java.io.FileDescriptor;
+import java.io.IOException;
+import java.nio.file.attribute.FileTime;
+import java.util.concurrent.TimeUnit;
+
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import jnr.posix.FileStat;
+import jnr.posix.POSIX;
+import jnr.posix.util.Platform;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.Visibility;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.FileResource;
+import org.jruby.util.JRubyFile;
+import org.jruby.util.JRubyNonExistentFile;
+
+/**
+ * Implements File::Stat
+ */
+@JRubyClass(name=&quot;File::Stat&quot;, include=&quot;Comparable&quot;)
+public class RubyFileStat extends RubyObject {
+    private static final long serialVersionUID = 1L;
+
+    private static final int S_IRUGO = (FileStat.S_IRUSR | FileStat.S_IRGRP | FileStat.S_IROTH);
+    private static final int S_IWUGO = (FileStat.S_IWUSR | FileStat.S_IWGRP | FileStat.S_IWOTH);
+    private static final int S_IXUGO = (FileStat.S_IXUSR | FileStat.S_IXGRP | FileStat.S_IXOTH);
+
+    private FileResource file;
+    private FileStat stat;
+
+<span class="fc" id="L69">    private static ObjectAllocator ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L72">            return new RubyFileStat(runtime, klass);</span>
+        }
+    };
+
+    public static RubyClass createFileStatClass(Ruby runtime) {
+        // TODO: NOT_ALLOCATABLE_ALLOCATOR is probably ok here. Confirm. JRUBY-415
+<span class="fc" id="L78">        final RubyClass fileStatClass = runtime.getFile().defineClassUnder(&quot;Stat&quot;,runtime.getObject(), ALLOCATOR);</span>
+<span class="fc" id="L79">        runtime.setFileStat(fileStatClass);</span>
+
+<span class="fc" id="L81">        fileStatClass.includeModule(runtime.getModule(&quot;Comparable&quot;));</span>
+<span class="fc" id="L82">        fileStatClass.defineAnnotatedMethods(RubyFileStat.class);</span>
+
+<span class="fc" id="L84">        return fileStatClass;</span>
+    }
+
+    protected RubyFileStat(Ruby runtime, RubyClass clazz) {
+<span class="fc" id="L88">        super(runtime, clazz);</span>
+
+<span class="fc" id="L90">    }</span>
+    
+    public static RubyFileStat newFileStat(Ruby runtime, String filename, boolean lstat) {
+<span class="fc" id="L93">        RubyFileStat stat = new RubyFileStat(runtime, runtime.getFileStat());</span>
+
+<span class="fc" id="L95">        stat.setup(filename, lstat);</span>
+        
+<span class="fc" id="L97">        return stat;</span>
+    }
+
+    public static RubyFileStat newFileStat(Ruby runtime, FileDescriptor descriptor) {
+<span class="nc" id="L101">        RubyFileStat stat = new RubyFileStat(runtime, runtime.getFileStat());</span>
+        
+<span class="nc" id="L103">        stat.setup(descriptor);</span>
+        
+<span class="nc" id="L105">        return stat;</span>
+    }
+
+    public static RubyFileStat newFileStat(Ruby runtime, int fileno) {
+<span class="fc" id="L109">        RubyFileStat stat = new RubyFileStat(runtime, runtime.getFileStat());</span>
+
+<span class="fc" id="L111">        stat.setup(fileno);</span>
+
+<span class="fc" id="L113">        return stat;</span>
+    }
+
+    private void setup(FileDescriptor descriptor) {
+<span class="nc" id="L117">        stat = getRuntime().getPosix().fstat(descriptor);</span>
+<span class="nc" id="L118">    }</span>
+
+    private void setup(int fileno) {
+<span class="fc" id="L121">        stat = getRuntime().getPosix().fstat(fileno);</span>
+<span class="fc" id="L122">    }</span>
+    
+    private void setup(String filename, boolean lstat) {
+<span class="fc" id="L125">        Ruby runtime = getRuntime();</span>
+
+<span class="pc bpc" id="L127" title="3 of 4 branches missed.">        if (Platform.IS_WINDOWS &amp;&amp; filename.length() == 2</span>
+<span class="nc bnc" id="L128" title="All 4 branches missed.">                &amp;&amp; filename.charAt(1) == ':' &amp;&amp; Character.isLetter(filename.charAt(0))) {</span>
+<span class="nc" id="L129">            filename += &quot;/&quot;;</span>
+        }
+
+<span class="fc" id="L132">        file = JRubyFile.createResource(runtime.getPosix(), runtime.getCurrentDirectory(), filename);</span>
+<span class="fc bfc" id="L133" title="All 2 branches covered.">        stat = lstat ? file.lstat() : file.stat();</span>
+
+<span class="fc bfc" id="L135" title="All 2 branches covered.">        if (stat == null) throw runtime.newErrnoFromInt(file.errno(), filename);</span>
+<span class="fc" id="L136">    }</span>
+
+    public IRubyObject initialize(IRubyObject fname, Block unusedBlock) {
+<span class="nc" id="L139">        return initialize19(fname, unusedBlock);</span>
+    }
+
+    @JRubyMethod(name = &quot;initialize&quot;, required = 1, visibility = Visibility.PRIVATE)
+    public IRubyObject initialize19(IRubyObject fname, Block unusedBlock) {
+<span class="fc" id="L144">        setup(RubyFile.get_path(getRuntime().getCurrentContext(), fname).convertToString().toString(), false);</span>
+
+<span class="fc" id="L146">        return this;    </span>
+    }
+    
+    @JRubyMethod(name = &quot;atime&quot;)
+    public IRubyObject atime() {
+<span class="fc" id="L151">        return getRuntime().newTime(stat.atime() * 1000);</span>
+    }
+    
+    @JRubyMethod(name = &quot;blksize&quot;)
+    public RubyFixnum blksize() {
+<span class="fc" id="L156">        return getRuntime().newFixnum(stat.blockSize());</span>
+    }
+
+    @JRubyMethod(name = &quot;blockdev?&quot;)
+    public IRubyObject blockdev_p() {
+<span class="fc" id="L161">        return getRuntime().newBoolean(stat.isBlockDev());</span>
+    }
+
+    @JRubyMethod(name = &quot;blocks&quot;)
+    public IRubyObject blocks() {
+<span class="fc" id="L166">        return getRuntime().newFixnum(stat.blocks());</span>
+    }
+
+    @JRubyMethod(name = &quot;chardev?&quot;)
+    public IRubyObject chardev_p() {
+<span class="fc" id="L171">        return getRuntime().newBoolean(stat.isCharDev());</span>
+    }
+
+    @JRubyMethod(name = &quot;&lt;=&gt;&quot;, required = 1)
+    public IRubyObject cmp(IRubyObject other) {
+<span class="pc bpc" id="L176" title="1 of 2 branches missed.">        if (!(other instanceof RubyFileStat)) return getRuntime().getNil();</span>
+        
+<span class="fc" id="L178">        long time1 = stat.mtime();</span>
+<span class="fc" id="L179">        long time2 = ((RubyFileStat) other).stat.mtime();</span>
+        
+<span class="fc bfc" id="L181" title="All 2 branches covered.">        if (time1 == time2) {</span>
+<span class="fc" id="L182">            return getRuntime().newFixnum(0);</span>
+<span class="fc bfc" id="L183" title="All 2 branches covered.">        } else if (time1 &lt; time2) {</span>
+<span class="fc" id="L184">            return getRuntime().newFixnum(-1);</span>
+        } 
+
+<span class="fc" id="L187">        return getRuntime().newFixnum(1);</span>
+    }
+
+    @JRubyMethod(name = &quot;ctime&quot;)
+    public IRubyObject ctime() {
+<span class="fc" id="L192">        return getRuntime().newTime(stat.ctime() * 1000);</span>
+    }
+
+    @JRubyMethod(name = &quot;birthtime&quot;)
+    public IRubyObject birthtime() {
+<span class="nc" id="L197">        FileTime btime = RubyFile.getBirthtimeWithNIO(file.absolutePath());</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">        if (btime != null) return getRuntime().newTime(btime.toMillis());</span>
+<span class="nc" id="L199">        return ctime();</span>
+    }
+
+    @JRubyMethod(name = &quot;dev&quot;)
+    public IRubyObject dev() {
+<span class="fc" id="L204">        return getRuntime().newFixnum(stat.dev());</span>
+    }
+    
+    @JRubyMethod(name = &quot;dev_major&quot;)
+    public IRubyObject devMajor() {
+<span class="fc" id="L209">        return getRuntime().newFixnum(stat.major(stat.dev()));</span>
+    }
+
+    @JRubyMethod(name = &quot;dev_minor&quot;)
+    public IRubyObject devMinor() {
+<span class="fc" id="L214">        return getRuntime().newFixnum(stat.minor(stat.dev()));</span>
+    }
+
+    @JRubyMethod(name = &quot;directory?&quot;)
+    public RubyBoolean directory_p() {
+<span class="fc" id="L219">        return getRuntime().newBoolean(stat.isDirectory());</span>
+    }
+
+    @JRubyMethod(name = &quot;executable?&quot;)
+    public IRubyObject executable_p() {
+<span class="fc" id="L224">        return getRuntime().newBoolean(stat.isExecutable());</span>
+    }
+
+    @JRubyMethod(name = &quot;executable_real?&quot;)
+    public IRubyObject executableReal_p() {
+<span class="fc" id="L229">        return getRuntime().newBoolean(stat.isExecutableReal());</span>
+    }
+
+    @JRubyMethod(name = &quot;file?&quot;)
+    public RubyBoolean file_p() {
+<span class="fc" id="L234">        return getRuntime().newBoolean(stat.isFile());</span>
+    }
+
+    @JRubyMethod(name = &quot;ftype&quot;)
+    public RubyString ftype() {
+<span class="fc" id="L239">        return getRuntime().newString(stat.ftype());</span>
+    }
+
+    @JRubyMethod(name = &quot;gid&quot;)
+    public IRubyObject gid() {
+<span class="fc" id="L244">        return getRuntime().newFixnum(stat.gid());</span>
+    }
+    
+    @JRubyMethod(name = &quot;grpowned?&quot;)
+    public IRubyObject group_owned_p() {
+<span class="fc" id="L249">        return getRuntime().newBoolean(stat.isGroupOwned());</span>
+    }
+    
+    @JRubyMethod(name = &quot;initialize_copy&quot;, required = 1, visibility = Visibility.PRIVATE)
+    @Override
+    public IRubyObject initialize_copy(IRubyObject original) {
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        if (!(original instanceof RubyFileStat)) {</span>
+<span class="nc" id="L256">            throw getRuntime().newTypeError(&quot;wrong argument class&quot;);</span>
+        }
+
+<span class="nc" id="L259">        checkFrozen();</span>
+        
+<span class="nc" id="L261">        RubyFileStat originalFileStat = (RubyFileStat) original;</span>
+        
+<span class="nc" id="L263">        file = originalFileStat.file;</span>
+<span class="nc" id="L264">        stat = originalFileStat.stat;</span>
+        
+<span class="nc" id="L266">        return this;</span>
+    }
+    
+    @JRubyMethod(name = &quot;ino&quot;)
+    public IRubyObject ino() {
+<span class="fc" id="L271">        return getRuntime().newFixnum(stat.ino());</span>
+    }
+
+    @JRubyMethod(name = &quot;inspect&quot;)
+    @Override
+    public IRubyObject inspect() {
+<span class="fc" id="L277">        StringBuilder buf = new StringBuilder(&quot;#&lt;&quot;);</span>
+<span class="fc" id="L278">        buf.append(getMetaClass().getRealClass().getName());</span>
+<span class="fc" id="L279">        buf.append(&quot; &quot;);</span>
+        // FIXME: Obvious issue that not all platforms can display all attributes.  Ugly hacks.
+        // Using generic posix library makes pushing inspect behavior into specific system impls
+        // rather painful.
+<span class="pc" id="L283">        try { buf.append(&quot;dev=0x&quot;).append(Long.toHexString(stat.dev())); } catch (Exception e) {} finally { buf.append(&quot;, &quot;); }</span>
+<span class="pc" id="L284">        try { buf.append(&quot;ino=&quot;).append(stat.ino()); } catch (Exception e) {} finally { buf.append(&quot;, &quot;); }</span>
+<span class="fc" id="L285">        buf.append(&quot;mode=0&quot;).append(Integer.toOctalString(stat.mode())).append(&quot;, &quot;); </span>
+<span class="pc" id="L286">        try { buf.append(&quot;nlink=&quot;).append(stat.nlink()); } catch (Exception e) {} finally { buf.append(&quot;, &quot;); }</span>
+<span class="pc" id="L287">        try { buf.append(&quot;uid=&quot;).append(stat.uid()); } catch (Exception e) {} finally { buf.append(&quot;, &quot;); }</span>
+<span class="pc" id="L288">        try { buf.append(&quot;gid=&quot;).append(stat.gid()); } catch (Exception e) {} finally { buf.append(&quot;, &quot;); }</span>
+<span class="pc" id="L289">        try { buf.append(&quot;rdev=0x&quot;).append(Long.toHexString(stat.rdev())); } catch (Exception e) {} finally { buf.append(&quot;, &quot;); }</span>
+<span class="fc" id="L290">        buf.append(&quot;size=&quot;).append(sizeInternal()).append(&quot;, &quot;);</span>
+<span class="pc" id="L291">        try { buf.append(&quot;blksize=&quot;).append(stat.blockSize()); } catch (Exception e) {} finally { buf.append(&quot;, &quot;); }</span>
+<span class="pc" id="L292">        try { buf.append(&quot;blocks=&quot;).append(stat.blocks()); } catch (Exception e) {} finally { buf.append(&quot;, &quot;); }</span>
+        
+<span class="fc" id="L294">        buf.append(&quot;atime=&quot;).append(atime()).append(&quot;, &quot;);</span>
+<span class="fc" id="L295">        buf.append(&quot;mtime=&quot;).append(mtime()).append(&quot;, &quot;);</span>
+<span class="fc" id="L296">        buf.append(&quot;ctime=&quot;).append(ctime());</span>
+<span class="fc" id="L297">        buf.append(&quot;&gt;&quot;);</span>
+        
+<span class="fc" id="L299">        return getRuntime().newString(buf.toString());</span>
+    }
+
+    @JRubyMethod(name = &quot;uid&quot;)
+    public IRubyObject uid() {
+<span class="fc" id="L304">        return getRuntime().newFixnum(stat.uid());</span>
+    }
+    
+    @JRubyMethod(name = &quot;mode&quot;)
+    public IRubyObject mode() {
+<span class="fc" id="L309">        return getRuntime().newFixnum(stat.mode());</span>
+    }
+
+    @JRubyMethod(name = &quot;mtime&quot;)
+    public IRubyObject mtime() {
+<span class="fc" id="L314">        return getRuntime().newTime(stat.mtime() * 1000);</span>
+    }
+    
+    public IRubyObject mtimeEquals(IRubyObject other) {
+<span class="nc bnc" id="L318" title="All 2 branches missed.">        return getRuntime().newBoolean(stat.mtime() == newFileStat(getRuntime(), other.convertToString().toString(), false).stat.mtime()); </span>
+    }
+
+    public IRubyObject mtimeGreaterThan(IRubyObject other) {
+<span class="nc bnc" id="L322" title="All 2 branches missed.">        return getRuntime().newBoolean(stat.mtime() &gt; newFileStat(getRuntime(), other.convertToString().toString(), false).stat.mtime()); </span>
+    }
+
+    public IRubyObject mtimeLessThan(IRubyObject other) {
+<span class="nc bnc" id="L326" title="All 2 branches missed.">        return getRuntime().newBoolean(stat.mtime() &lt; newFileStat(getRuntime(), other.convertToString().toString(), false).stat.mtime()); </span>
+    }
+
+    @JRubyMethod(name = &quot;nlink&quot;)
+    public IRubyObject nlink() {
+<span class="fc" id="L331">        return getRuntime().newFixnum(stat.nlink());</span>
+    }
+
+    @JRubyMethod(name = &quot;owned?&quot;)
+    public IRubyObject owned_p() {
+<span class="fc" id="L336">        return getRuntime().newBoolean(stat.isOwned());</span>
+    }
+
+    @JRubyMethod(name = &quot;pipe?&quot;)
+    public IRubyObject pipe_p() {
+<span class="fc" id="L341">        return getRuntime().newBoolean(stat.isNamedPipe());</span>
+    }
+
+    @JRubyMethod(name = &quot;rdev&quot;)
+    public IRubyObject rdev() {
+<span class="fc" id="L346">        return getRuntime().newFixnum(stat.rdev());</span>
+    }
+    
+    @JRubyMethod(name = &quot;rdev_major&quot;)
+    public IRubyObject rdevMajor() {
+<span class="fc" id="L351">        return getRuntime().newFixnum(stat.major(stat.rdev()));</span>
+    }
+
+    @JRubyMethod(name = &quot;rdev_minor&quot;)
+    public IRubyObject rdevMinor() {
+<span class="fc" id="L356">        return getRuntime().newFixnum(stat.minor(stat.rdev()));</span>
+    }
+
+    @JRubyMethod(name = &quot;readable?&quot;)
+    public IRubyObject readable_p() {
+<span class="fc" id="L361">        return getRuntime().newBoolean(stat.isReadable());</span>
+    }
+
+    @JRubyMethod(name = &quot;readable_real?&quot;)
+    public IRubyObject readableReal_p() {
+<span class="fc" id="L366">        return getRuntime().newBoolean(stat.isReadableReal());</span>
+    }
+
+    @JRubyMethod(name = &quot;setgid?&quot;)
+    public IRubyObject setgid_p() {
+<span class="nc" id="L371">        return getRuntime().newBoolean(stat.isSetgid());</span>
+    }
+
+    @JRubyMethod(name = &quot;setuid?&quot;)
+    public IRubyObject setuid_p() {
+<span class="nc" id="L376">        return getRuntime().newBoolean(stat.isSetuid());</span>
+    }
+
+    private long sizeInternal() {
+        // Workaround for JRUBY-4149
+<span class="pc bpc" id="L381" title="3 of 4 branches missed.">        if (Platform.IS_WINDOWS &amp;&amp; file != null) {</span>
+            try {
+<span class="nc" id="L383">                return file.length();</span>
+<span class="nc" id="L384">            } catch (SecurityException ex) {</span>
+<span class="nc" id="L385">                return 0L;</span>
+            }
+        } else {
+<span class="fc" id="L388">            return stat.st_size();</span>
+        }
+    }
+
+    @JRubyMethod(name = &quot;size&quot;)
+    public IRubyObject size() {
+<span class="fc" id="L394">        return getRuntime().newFixnum(sizeInternal());</span>
+    }
+    
+    @JRubyMethod(name = &quot;size?&quot;)
+    public IRubyObject size_p() {
+<span class="fc" id="L399">        long size = sizeInternal();</span>
+        
+<span class="fc bfc" id="L401" title="All 2 branches covered.">        if (size == 0) return getRuntime().getNil();</span>
+        
+<span class="fc" id="L403">        return getRuntime().newFixnum(size);</span>
+    }
+
+    @JRubyMethod(name = &quot;socket?&quot;)
+    public IRubyObject socket_p() {
+<span class="nc" id="L408">        return getRuntime().newBoolean(stat.isSocket());</span>
+    }
+    
+    @JRubyMethod(name = &quot;sticky?&quot;)
+    public IRubyObject sticky_p() {
+<span class="nc" id="L413">        Ruby runtime = getRuntime();</span>
+        
+<span class="nc bnc" id="L415" title="All 2 branches missed.">        if (runtime.getPosix().isNative()) {</span>
+<span class="nc" id="L416">            return runtime.newBoolean(stat.isSticky());</span>
+        }
+        
+<span class="nc" id="L419">        return runtime.getNil();</span>
+    }
+
+    @JRubyMethod(name = &quot;symlink?&quot;)
+    public IRubyObject symlink_p() {
+<span class="fc" id="L424">        return getRuntime().newBoolean(stat.isSymlink());</span>
+    }
+
+    @JRubyMethod(name = &quot;writable?&quot;)
+    public IRubyObject writable_p() {
+<span class="fc" id="L429">    	return getRuntime().newBoolean(stat.isWritable());</span>
+    }
+    
+    @JRubyMethod(name = &quot;writable_real?&quot;)
+    public IRubyObject writableReal_p() {
+<span class="fc" id="L434">        return getRuntime().newBoolean(stat.isWritableReal());</span>
+    }
+    
+    @JRubyMethod(name = &quot;zero?&quot;)
+    public IRubyObject zero_p() {
+<span class="fc" id="L439">        return getRuntime().newBoolean(stat.isEmpty());</span>
+    }
+
+    @JRubyMethod(name = &quot;world_readable?&quot;)
+    public IRubyObject worldReadable(ThreadContext context) {
+<span class="fc" id="L444">        return getWorldMode(context, FileStat.S_IROTH);</span>
+    }
+
+    @JRubyMethod(name = &quot;world_writable?&quot;)
+    public IRubyObject worldWritable(ThreadContext context) {
+<span class="fc" id="L449">        return getWorldMode(context, FileStat.S_IWOTH);</span>
+    }
+
+    private IRubyObject getWorldMode(ThreadContext context, int mode) {
+<span class="fc bfc" id="L453" title="All 2 branches covered.">        if ((stat.mode() &amp; mode) == mode) {</span>
+<span class="fc" id="L454">            return RubyNumeric.int2fix(context.runtime,</span>
+<span class="fc" id="L455">                    (stat.mode() &amp; (S_IRUGO | S_IWUGO | S_IXUGO) ));</span>
+        }
+<span class="fc" id="L457">        return context.runtime.getNil();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

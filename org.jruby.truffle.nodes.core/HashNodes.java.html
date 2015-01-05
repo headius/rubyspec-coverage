@@ -1,0 +1,1191 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>HashNodes.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.nodes.core</a> &gt; <span class="el_source">HashNodes.java</span></div><h1>HashNodes.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2013, 2014 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.nodes.core;
+
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.dsl.ImportGuards;
+import com.oracle.truffle.api.dsl.Specialization;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.nodes.ExplodeLoop;
+import com.oracle.truffle.api.source.SourceSection;
+import com.oracle.truffle.api.utilities.BranchProfile;
+import org.jruby.runtime.Visibility;
+import org.jruby.truffle.nodes.RubyRootNode;
+import org.jruby.truffle.nodes.dispatch.DispatchHeadNode;
+import org.jruby.truffle.nodes.dispatch.PredicateDispatchHeadNode;
+import org.jruby.truffle.nodes.hash.FindEntryNode;
+import org.jruby.truffle.nodes.yield.YieldDispatchHeadNode;
+import org.jruby.truffle.runtime.DebugOperations;
+import org.jruby.truffle.runtime.RubyContext;
+import org.jruby.truffle.runtime.UndefinedPlaceholder;
+import org.jruby.truffle.runtime.core.*;
+import org.jruby.truffle.runtime.hash.Entry;
+import org.jruby.truffle.runtime.hash.HashOperations;
+import org.jruby.truffle.runtime.hash.HashSearchResult;
+import org.jruby.truffle.runtime.hash.KeyValue;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+@CoreClass(name = &quot;Hash&quot;)
+<span class="nc" id="L39">public abstract class HashNodes {</span>
+
+    @CoreMethod(names = &quot;==&quot;, required = 1)
+    public abstract static class EqualNode extends HashCoreMethodNode {
+
+        @Child protected PredicateDispatchHeadNode equalNode;
+
+        public EqualNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L47">            super(context, sourceSection);</span>
+<span class="nc" id="L48">            equalNode = new PredicateDispatchHeadNode(context);</span>
+<span class="nc" id="L49">        }</span>
+
+        public EqualNode(EqualNode prev) {
+<span class="nc" id="L52">            super(prev);</span>
+<span class="nc" id="L53">            equalNode = prev.equalNode;</span>
+<span class="nc" id="L54">        }</span>
+
+        @Specialization(guards = {&quot;isNull&quot;, &quot;isNull(arguments[1])&quot;})
+        public boolean equalNull(RubyHash a, RubyHash b) {
+<span class="nc" id="L58">            return true;</span>
+        }
+
+        @Specialization
+        public boolean equal(VirtualFrame frame, RubyHash a, RubyHash b) {
+<span class="nc" id="L63">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L65">            final List&lt;KeyValue&gt; aEntries = HashOperations.verySlowToKeyValues(a);</span>
+<span class="nc" id="L66">            final List&lt;KeyValue&gt; bEntries = HashOperations.verySlowToKeyValues(a);</span>
+
+<span class="nc bnc" id="L68" title="All 2 branches missed.">            if (aEntries.size() != bEntries.size()) {</span>
+<span class="nc" id="L69">                return false;</span>
+            }
+
+            // For each entry in a, check that there is a corresponding entry in b, and don't use entries in b more than once
+
+<span class="nc" id="L74">            final boolean[] bUsed = new boolean[bEntries.size()];</span>
+
+<span class="nc bnc" id="L76" title="All 2 branches missed.">            for (KeyValue aKeyValue : aEntries) {</span>
+<span class="nc" id="L77">                boolean found = false;</span>
+
+<span class="nc bnc" id="L79" title="All 2 branches missed.">                for (int n = 0; n &lt; bEntries.size(); n++) {</span>
+<span class="nc bnc" id="L80" title="All 2 branches missed.">                    if (!bUsed[n]) {</span>
+                        // TODO: cast
+
+<span class="nc bnc" id="L83" title="All 2 branches missed.">                        if ((boolean) DebugOperations.send(getContext(), aKeyValue.getKey(), &quot;eql?&quot;, null, bEntries.get(n).getKey())) {</span>
+<span class="nc" id="L84">                            bUsed[n] = true;</span>
+<span class="nc" id="L85">                            found = true;</span>
+<span class="nc" id="L86">                            break;</span>
+                        }
+                    }
+                }
+
+<span class="nc bnc" id="L91" title="All 2 branches missed.">                if (!found) {</span>
+<span class="nc" id="L92">                    return false;</span>
+                }
+<span class="nc" id="L94">            }</span>
+
+<span class="nc" id="L96">            return true;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;[]&quot;, onSingleton = true, argumentsAsArray = true)
+    public abstract static class ConstructNode extends HashCoreMethodNode {
+
+<span class="nc" id="L103">        private final BranchProfile singleObject = BranchProfile.create();</span>
+<span class="nc" id="L104">        private final BranchProfile singleArray = BranchProfile.create();</span>
+<span class="nc" id="L105">        private final BranchProfile objectArray = BranchProfile.create();</span>
+<span class="nc" id="L106">        private final BranchProfile smallPackedArray = BranchProfile.create();</span>
+<span class="nc" id="L107">        private final BranchProfile largePackedArray = BranchProfile.create();</span>
+<span class="nc" id="L108">        private final BranchProfile otherArray = BranchProfile.create();</span>
+<span class="nc" id="L109">        private final BranchProfile singleOther = BranchProfile.create();</span>
+<span class="nc" id="L110">        private final BranchProfile keyValues = BranchProfile.create();</span>
+
+        public ConstructNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L113">            super(context, sourceSection);</span>
+<span class="nc" id="L114">        }</span>
+
+        public ConstructNode(ConstructNode prev) {
+<span class="nc" id="L117">            super(prev);</span>
+<span class="nc" id="L118">        }</span>
+
+        @ExplodeLoop
+        @Specialization
+        public RubyHash construct(Object[] args) {
+<span class="nc bnc" id="L123" title="All 2 branches missed.">            if (args.length == 1) {</span>
+<span class="nc" id="L124">                singleObject.enter();</span>
+
+<span class="nc" id="L126">                final Object arg = args[0];</span>
+
+<span class="nc bnc" id="L128" title="All 2 branches missed.">                if (arg instanceof RubyArray) {</span>
+<span class="nc" id="L129">                    singleArray.enter();</span>
+
+<span class="nc" id="L131">                    final RubyArray array = (RubyArray) arg;</span>
+
+<span class="nc bnc" id="L133" title="All 2 branches missed.">                    if (array.getStore() instanceof Object[]) {</span>
+<span class="nc" id="L134">                        objectArray.enter();</span>
+
+<span class="nc" id="L136">                        final Object[] store = (Object[]) array.getStore();</span>
+
+                        // TODO(CS): zero length arrays might be a good specialisation
+
+<span class="nc bnc" id="L140" title="All 2 branches missed.">                        if (store.length &lt;= HashOperations.SMALL_HASH_SIZE) {</span>
+<span class="nc" id="L141">                            smallPackedArray.enter();</span>
+
+<span class="nc" id="L143">                            final int size = array.getSize();</span>
+<span class="nc" id="L144">                            final Object[] newStore = new Object[HashOperations.SMALL_HASH_SIZE * 2];</span>
+
+<span class="nc bnc" id="L146" title="All 2 branches missed.">                            for (int n = 0; n &lt; HashOperations.SMALL_HASH_SIZE; n++) {</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">                                if (n &lt; size) {</span>
+<span class="nc" id="L148">                                    final Object pair = store[n];</span>
+
+<span class="nc bnc" id="L150" title="All 2 branches missed.">                                    if (!(pair instanceof RubyArray)) {</span>
+<span class="nc" id="L151">                                        CompilerDirectives.transferToInterpreter();</span>
+<span class="nc" id="L152">                                        throw new UnsupportedOperationException();</span>
+                                    }
+
+<span class="nc" id="L155">                                    final RubyArray pairArray = (RubyArray) pair;</span>
+
+<span class="nc bnc" id="L157" title="All 2 branches missed.">                                    if (!(pairArray.getStore() instanceof Object[])) {</span>
+<span class="nc" id="L158">                                        CompilerDirectives.transferToInterpreter();</span>
+<span class="nc" id="L159">                                        throw new UnsupportedOperationException();</span>
+                                    }
+
+<span class="nc" id="L162">                                    final Object[] pairStore = (Object[]) pairArray.getStore();</span>
+
+<span class="nc" id="L164">                                    newStore[n * 2] = pairStore[0];</span>
+<span class="nc" id="L165">                                    newStore[n * 2 + 1] = pairStore[1];</span>
+                                }
+                            }
+
+<span class="nc" id="L169">                            return new RubyHash(getContext().getCoreLibrary().getHashClass(), null, null, newStore, size, null);</span>
+                        } else {
+<span class="nc" id="L171">                            largePackedArray.enter();</span>
+
+<span class="nc" id="L173">                            final List&lt;KeyValue&gt; keyValues = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L175">                            final int size = array.getSize();</span>
+
+<span class="nc bnc" id="L177" title="All 2 branches missed.">                            for (int n = 0; n &lt; size; n++) {</span>
+<span class="nc" id="L178">                                final Object pair = store[n];</span>
+
+<span class="nc bnc" id="L180" title="All 2 branches missed.">                                if (!(pair instanceof RubyArray)) {</span>
+<span class="nc" id="L181">                                    CompilerDirectives.transferToInterpreter();</span>
+<span class="nc" id="L182">                                    throw new UnsupportedOperationException();</span>
+                                }
+
+<span class="nc" id="L185">                                final RubyArray pairArray = (RubyArray) pair;</span>
+
+<span class="nc bnc" id="L187" title="All 2 branches missed.">                                if (!(pairArray.getStore() instanceof Object[])) {</span>
+<span class="nc" id="L188">                                    CompilerDirectives.transferToInterpreter();</span>
+<span class="nc" id="L189">                                    throw new UnsupportedOperationException();</span>
+                                }
+
+<span class="nc" id="L192">                                final Object[] pairStore = (Object[]) pairArray.getStore();</span>
+<span class="nc" id="L193">                                keyValues.add(new KeyValue(pairStore[0], pairStore[1]));</span>
+                            }
+
+<span class="nc" id="L196">                            return HashOperations.verySlowFromEntries(getContext(), keyValues);</span>
+                        }
+                    } else {
+<span class="nc" id="L199">                        otherArray.enter();</span>
+<span class="nc" id="L200">                        throw new UnsupportedOperationException(&quot;other array&quot;);</span>
+                    }
+                } else {
+<span class="nc" id="L203">                    singleOther.enter();</span>
+<span class="nc" id="L204">                    throw new UnsupportedOperationException(&quot;single other&quot;);</span>
+                }
+            } else {
+<span class="nc" id="L207">                keyValues.enter();</span>
+
+<span class="nc" id="L209">                final List&lt;KeyValue&gt; entries = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                for (int n = 0; n &lt; args.length; n += 2) {</span>
+<span class="nc" id="L212">                    entries.add(new KeyValue(args[n], args[n + 1]));</span>
+                }
+
+<span class="nc" id="L215">                return HashOperations.verySlowFromEntries(getContext(), entries);</span>
+            }
+        }
+
+    }
+
+    @CoreMethod(names = &quot;[]&quot;, required = 1)
+    public abstract static class GetIndexNode extends HashCoreMethodNode {
+
+        @Child protected PredicateDispatchHeadNode eqlNode;
+        @Child protected YieldDispatchHeadNode yield;
+        @Child protected FindEntryNode findEntryNode;
+
+<span class="nc" id="L228">        private final BranchProfile notInHashProfile = BranchProfile.create();</span>
+<span class="nc" id="L229">        private final BranchProfile useDefaultProfile = BranchProfile.create();</span>
+
+        public GetIndexNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L232">            super(context, sourceSection);</span>
+<span class="nc" id="L233">            eqlNode = new PredicateDispatchHeadNode(context);</span>
+<span class="nc" id="L234">            yield = new YieldDispatchHeadNode(context);</span>
+<span class="nc" id="L235">            findEntryNode = new FindEntryNode(context, sourceSection);</span>
+<span class="nc" id="L236">        }</span>
+
+        public GetIndexNode(GetIndexNode prev) {
+<span class="nc" id="L239">            super(prev);</span>
+<span class="nc" id="L240">            eqlNode = prev.eqlNode;</span>
+<span class="nc" id="L241">            yield = prev.yield;</span>
+<span class="nc" id="L242">            findEntryNode = prev.findEntryNode;</span>
+<span class="nc" id="L243">        }</span>
+
+        @Specialization(guards = &quot;isNull&quot;)
+        public Object getNull(VirtualFrame frame, RubyHash hash, Object key) {
+<span class="nc" id="L247">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L249" title="All 2 branches missed.">            if (hash.getDefaultBlock() != null) {</span>
+<span class="nc" id="L250">                return yield.dispatch(frame, hash.getDefaultBlock(), hash, key);</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">            } else if (hash.getDefaultValue() != null) {</span>
+<span class="nc" id="L252">                return hash.getDefaultValue();</span>
+            } else {
+<span class="nc" id="L254">                return getContext().getCoreLibrary().getNilObject();</span>
+            }
+        }
+
+        @ExplodeLoop
+        @Specialization(guards = {&quot;!isNull&quot;, &quot;!isBuckets&quot;})
+        public Object getPackedArray(VirtualFrame frame, RubyHash hash, Object key) {
+<span class="nc" id="L261">            final Object[] store = (Object[]) hash.getStore();</span>
+<span class="nc" id="L262">            final int size = hash.getSize();</span>
+
+<span class="nc bnc" id="L264" title="All 2 branches missed.">            for (int n = 0; n &lt; HashOperations.SMALL_HASH_SIZE; n++) {</span>
+<span class="nc bnc" id="L265" title="All 4 branches missed.">                if (n &lt; size &amp;&amp; eqlNode.call(frame, store[n * 2], &quot;eql?&quot;, null, key)) {</span>
+<span class="nc" id="L266">                    return store[n * 2 + 1];</span>
+                }
+            }
+
+<span class="nc" id="L270">            notInHashProfile.enter();</span>
+
+<span class="nc bnc" id="L272" title="All 2 branches missed.">            if (hash.getDefaultBlock() != null) {</span>
+<span class="nc" id="L273">                useDefaultProfile.enter();</span>
+<span class="nc" id="L274">                return yield.dispatch(frame, hash.getDefaultBlock(), hash, key);</span>
+            }
+
+<span class="nc bnc" id="L277" title="All 2 branches missed.">            if (hash.getDefaultValue() != null) {</span>
+<span class="nc" id="L278">                return hash.getDefaultValue();</span>
+            }
+
+<span class="nc" id="L281">            return getContext().getCoreLibrary().getNilObject();</span>
+
+        }
+
+        @Specialization(guards = &quot;isBuckets&quot;)
+        public Object getBuckets(VirtualFrame frame, RubyHash hash, Object key) {
+<span class="nc" id="L287">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L289">            final HashSearchResult hashSearchResult = findEntryNode.search(frame, hash, key);</span>
+
+<span class="nc bnc" id="L291" title="All 2 branches missed.">            if (hashSearchResult.getEntry() != null) {</span>
+<span class="nc" id="L292">                return hashSearchResult.getEntry().getValue();</span>
+            }
+
+<span class="nc" id="L295">            notInHashProfile.enter();</span>
+
+<span class="nc bnc" id="L297" title="All 2 branches missed.">            if (hash.getDefaultBlock() != null) {</span>
+<span class="nc" id="L298">                useDefaultProfile.enter();</span>
+<span class="nc" id="L299">                return yield.dispatch(frame, hash.getDefaultBlock(), hash, key);</span>
+            }
+
+<span class="nc bnc" id="L302" title="All 2 branches missed.">            if (hash.getDefaultValue() != null) {</span>
+<span class="nc" id="L303">                return hash.getDefaultValue();</span>
+            }
+
+<span class="nc" id="L306">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;[]=&quot;, required = 2)
+    public abstract static class SetIndexNode extends HashCoreMethodNode {
+
+        @Child protected PredicateDispatchHeadNode eqlNode;
+
+<span class="nc" id="L316">        private final BranchProfile considerExtendProfile = BranchProfile.create();</span>
+<span class="nc" id="L317">        private final BranchProfile extendProfile = BranchProfile.create();</span>
+
+        public SetIndexNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L320">            super(context, sourceSection);</span>
+<span class="nc" id="L321">            eqlNode = new PredicateDispatchHeadNode(context);</span>
+<span class="nc" id="L322">        }</span>
+
+        public SetIndexNode(SetIndexNode prev) {
+<span class="nc" id="L325">            super(prev);</span>
+<span class="nc" id="L326">            eqlNode = prev.eqlNode;</span>
+<span class="nc" id="L327">        }</span>
+
+        @Specialization(guards = &quot;isNull&quot;)
+        public Object setNull(RubyHash hash, Object key, Object value) {
+<span class="nc" id="L331">            hash.checkFrozen(this);</span>
+<span class="nc" id="L332">            final Object[] store = new Object[HashOperations.SMALL_HASH_SIZE * 2];</span>
+<span class="nc" id="L333">            store[0] = key;</span>
+<span class="nc" id="L334">            store[1] = value;</span>
+<span class="nc" id="L335">            hash.setStore(store, 1, null, null);</span>
+<span class="nc" id="L336">            return value;</span>
+        }
+
+        @ExplodeLoop
+        @Specialization(guards = {&quot;!isNull&quot;, &quot;!isBuckets&quot;})
+        public Object setPackedArray(VirtualFrame frame, RubyHash hash, Object key, Object value) {
+<span class="nc" id="L342">            hash.checkFrozen(this);</span>
+
+<span class="nc" id="L344">            final Object[] store = (Object[]) hash.getStore();</span>
+<span class="nc" id="L345">            final int size = hash.getSize();</span>
+
+<span class="nc bnc" id="L347" title="All 2 branches missed.">            for (int n = 0; n &lt; HashOperations.SMALL_HASH_SIZE; n++) {</span>
+<span class="nc bnc" id="L348" title="All 4 branches missed.">                if (n &lt; size &amp;&amp; eqlNode.call(frame, store[n * 2], &quot;eql?&quot;, null, key)) {</span>
+<span class="nc" id="L349">                    store[n * 2 + 1] = value;</span>
+<span class="nc" id="L350">                    return value;</span>
+                }
+            }
+
+<span class="nc" id="L354">            considerExtendProfile.enter();</span>
+
+<span class="nc" id="L356">            final int newSize = size + 1;</span>
+
+<span class="nc bnc" id="L358" title="All 2 branches missed.">            if (newSize &lt;= HashOperations.SMALL_HASH_SIZE) {</span>
+<span class="nc" id="L359">                extendProfile.enter();</span>
+<span class="nc" id="L360">                store[size * 2] = key;</span>
+<span class="nc" id="L361">                store[size * 2 + 1] = value;</span>
+<span class="nc" id="L362">                hash.setSize(newSize);</span>
+<span class="nc" id="L363">                return value;</span>
+            }
+
+<span class="nc" id="L366">            CompilerDirectives.transferToInterpreter();</span>
+
+            // TODO(CS): need to watch for that transfer until we make the following fast path
+
+<span class="nc" id="L370">            final List&lt;KeyValue&gt; entries = HashOperations.verySlowToKeyValues(hash);</span>
+
+<span class="nc" id="L372">            hash.setStore(new Entry[HashOperations.capacityGreaterThan(newSize)], newSize, null, null);</span>
+
+<span class="nc bnc" id="L374" title="All 2 branches missed.">            for (KeyValue keyValue : entries) {</span>
+<span class="nc" id="L375">                HashOperations.verySlowSetInBuckets(hash, keyValue.getKey(), keyValue.getValue());</span>
+<span class="nc" id="L376">            }</span>
+
+<span class="nc" id="L378">            HashOperations.verySlowSetInBuckets(hash, key, value);</span>
+
+<span class="nc" id="L380">            return value;</span>
+        }
+
+        @Specialization(guards = &quot;isBuckets&quot;)
+        public Object setBuckets(RubyHash hash, Object key, Object value) {
+<span class="nc" id="L385">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L387" title="All 2 branches missed.">            if (HashOperations.verySlowSetInBuckets(hash, key, value)) {</span>
+<span class="nc" id="L388">                hash.setSize(hash.getSize() + 1);</span>
+            }
+
+<span class="nc" id="L391">            return value;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;clear&quot;)
+    public abstract static class ClearNode extends HashCoreMethodNode {
+
+        public ClearNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L400">            super(context, sourceSection);</span>
+<span class="nc" id="L401">        }</span>
+
+        public ClearNode(ClearNode prev) {
+<span class="nc" id="L404">            super(prev);</span>
+<span class="nc" id="L405">        }</span>
+
+        @Specialization(guards = &quot;isNull&quot;)
+        public RubyHash emptyNull(RubyHash hash) {
+<span class="nc" id="L409">            return hash;</span>
+        }
+
+        @Specialization(guards = &quot;!isNull&quot;)
+        public RubyHash empty(RubyHash hash) {
+<span class="nc" id="L414">            hash.setStore(null, 0, null, null);</span>
+<span class="nc" id="L415">            return hash;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;delete&quot;, required = 1)
+    public abstract static class DeleteNode extends HashCoreMethodNode {
+
+        @Child protected PredicateDispatchHeadNode eqlNode;
+        @Child protected FindEntryNode findEntryNode;
+
+        public DeleteNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L427">            super(context, sourceSection);</span>
+<span class="nc" id="L428">            eqlNode = new PredicateDispatchHeadNode(context);</span>
+<span class="nc" id="L429">            findEntryNode = new FindEntryNode(context, sourceSection);</span>
+<span class="nc" id="L430">        }</span>
+
+        public DeleteNode(DeleteNode prev) {
+<span class="nc" id="L433">            super(prev);</span>
+<span class="nc" id="L434">            eqlNode = prev.eqlNode;</span>
+<span class="nc" id="L435">            findEntryNode = prev.findEntryNode;</span>
+<span class="nc" id="L436">        }</span>
+
+        @Specialization(guards = &quot;isNull&quot;)
+        public RubyNilClass deleteNull(RubyHash hash, Object key) {
+<span class="nc" id="L440">            hash.checkFrozen(this);</span>
+<span class="nc" id="L441">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+
+        @Specialization(guards = {&quot;!isNull&quot;, &quot;!isBuckets&quot;})
+        public Object deletePackedArray(VirtualFrame frame, RubyHash hash, Object key) {
+<span class="nc" id="L446">            hash.checkFrozen(this);</span>
+
+<span class="nc" id="L448">            final Object[] store = (Object[]) hash.getStore();</span>
+<span class="nc" id="L449">            final int size = hash.getSize();</span>
+
+<span class="nc bnc" id="L451" title="All 2 branches missed.">            for (int n = 0; n &lt; HashOperations.SMALL_HASH_SIZE * 2; n += 2) {</span>
+<span class="nc bnc" id="L452" title="All 4 branches missed.">                if (n &lt; size &amp;&amp; eqlNode.call(frame, store[n], &quot;eql?&quot;, null, key)) {</span>
+<span class="nc" id="L453">                    final Object value = store[n + 1];</span>
+
+                    // Move the later values down
+<span class="nc" id="L456">                    System.arraycopy(store, n + 2, store, n, HashOperations.SMALL_HASH_SIZE * 2 - n - 2);</span>
+
+<span class="nc" id="L458">                    hash.setSize(size - 1);</span>
+
+<span class="nc" id="L460">                    return value;</span>
+                }
+            }
+
+<span class="nc" id="L464">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+
+        @Specialization(guards = &quot;isBuckets&quot;)
+        public Object delete(VirtualFrame frame, RubyHash hash, Object key) {
+<span class="nc" id="L469">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L471">            final HashSearchResult hashSearchResult = findEntryNode.search(frame, hash, key);</span>
+
+<span class="nc bnc" id="L473" title="All 2 branches missed.">            if (hashSearchResult.getEntry() == null) {</span>
+<span class="nc" id="L474">                return getContext().getCoreLibrary().getNilObject();</span>
+            }
+
+<span class="nc" id="L477">            final Entry entry = hashSearchResult.getEntry();</span>
+
+            // Remove from the sequence chain
+
+<span class="nc bnc" id="L481" title="All 2 branches missed.">            if (entry.getPreviousInSequence() == null) {</span>
+<span class="nc" id="L482">                hash.setFirstInSequence(entry.getNextInSequence());</span>
+            } else {
+<span class="nc" id="L484">                entry.getPreviousInSequence().setNextInSequence(entry.getNextInSequence());</span>
+            }
+
+<span class="nc bnc" id="L487" title="All 2 branches missed.">            if (entry.getNextInSequence() == null) {</span>
+<span class="nc" id="L488">                hash.setLastInSequence(entry.getPreviousInSequence());</span>
+            } else {
+<span class="nc" id="L490">                entry.getNextInSequence().setPreviousInSequence(entry.getPreviousInSequence());</span>
+            }
+
+            // Remove from the lookup chain
+
+<span class="nc bnc" id="L495" title="All 2 branches missed.">            if (hashSearchResult.getPreviousEntry() == null) {</span>
+<span class="nc" id="L496">                ((Entry[]) hash.getStore())[hashSearchResult.getIndex()] = entry.getNextInLookup();</span>
+            } else {
+<span class="nc" id="L498">                hashSearchResult.getPreviousEntry().setNextInLookup(entry.getNextInLookup());</span>
+            }
+
+<span class="nc" id="L501">            hash.setSize(hash.getSize() - 1);</span>
+
+<span class="nc" id="L503">            return entry.getValue();</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;each&quot;, needsBlock = true)
+    @ImportGuards(HashGuards.class)
+    public abstract static class EachNode extends YieldingCoreMethodNode {
+
+        public EachNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L513">            super(context, sourceSection);</span>
+<span class="nc" id="L514">        }</span>
+
+        public EachNode(EachNode prev) {
+<span class="nc" id="L517">            super(prev);</span>
+<span class="nc" id="L518">        }</span>
+
+        @Specialization(guards = &quot;isNull&quot;)
+        public RubyHash eachNull(RubyHash hash, RubyProc block) {
+<span class="nc" id="L522">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L524">            return hash;</span>
+        }
+
+        @ExplodeLoop
+        @Specialization(guards = {&quot;!isNull&quot;, &quot;!isBuckets&quot;})
+        public RubyHash eachPackedArray(VirtualFrame frame, RubyHash hash, RubyProc block) {
+<span class="nc" id="L530">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L532">            final Object[] store = (Object[]) hash.getStore();</span>
+<span class="nc" id="L533">            final int size = hash.getSize();</span>
+
+<span class="nc" id="L535">            int count = 0;</span>
+
+            try {
+<span class="nc bnc" id="L538" title="All 2 branches missed.">                for (int n = 0; n &lt; HashOperations.SMALL_HASH_SIZE; n++) {</span>
+<span class="nc bnc" id="L539" title="All 2 branches missed.">                    if (CompilerDirectives.inInterpreter()) {</span>
+<span class="nc" id="L540">                        count++;</span>
+                    }
+
+<span class="nc bnc" id="L543" title="All 2 branches missed.">                    if (n &lt; size) {</span>
+<span class="nc" id="L544">                        yield(frame, block, RubyArray.fromObjects(getContext().getCoreLibrary().getArrayClass(), store[n * 2], store[n * 2 + 1]));</span>
+                    }
+                }
+            } finally {
+<span class="nc bnc" id="L548" title="All 4 branches missed.">                if (CompilerDirectives.inInterpreter()) {</span>
+<span class="nc" id="L549">                    ((RubyRootNode) getRootNode()).reportLoopCount(count);</span>
+                }
+            }
+
+<span class="nc" id="L553">            return hash;</span>
+        }
+
+        @Specialization(guards = &quot;isBuckets&quot;)
+        public RubyHash eachBuckets(VirtualFrame frame, RubyHash hash, RubyProc block) {
+<span class="nc" id="L558">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L560" title="All 2 branches missed.">            for (KeyValue keyValue : HashOperations.verySlowToKeyValues(hash)) {</span>
+<span class="nc" id="L561">                yield(frame, block, RubyArray.fromObjects(getContext().getCoreLibrary().getArrayClass(), keyValue.getKey(), keyValue.getValue()));</span>
+<span class="nc" id="L562">            }</span>
+
+<span class="nc" id="L564">            return hash;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;empty?&quot;)
+    public abstract static class EmptyNode extends HashCoreMethodNode {
+
+        public EmptyNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L573">            super(context, sourceSection);</span>
+<span class="nc" id="L574">        }</span>
+
+        public EmptyNode(EmptyNode prev) {
+<span class="nc" id="L577">            super(prev);</span>
+<span class="nc" id="L578">        }</span>
+
+        @Specialization(guards = &quot;isNull&quot;)
+        public boolean emptyNull(RubyHash hash) {
+<span class="nc" id="L582">            return true;</span>
+        }
+
+        @Specialization(guards = &quot;!isNull&quot;)
+        public boolean emptyPackedArray(RubyHash hash) {
+<span class="nc bnc" id="L587" title="All 2 branches missed.">            return hash.getSize() == 0;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;initialize&quot;, needsBlock = true, optional = 1)
+    public abstract static class InitializeNode extends HashCoreMethodNode {
+
+        public InitializeNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L596">            super(context, sourceSection);</span>
+<span class="nc" id="L597">        }</span>
+
+        public InitializeNode(InitializeNode prev) {
+<span class="nc" id="L600">            super(prev);</span>
+<span class="nc" id="L601">        }</span>
+
+        @Specialization
+        public RubyNilClass initialize(RubyHash hash, UndefinedPlaceholder defaultValue, UndefinedPlaceholder block) {
+<span class="nc" id="L605">            notDesignedForCompilation();</span>
+<span class="nc" id="L606">            hash.setStore(null, 0, null, null);</span>
+<span class="nc" id="L607">            hash.setDefaultBlock(null);</span>
+<span class="nc" id="L608">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+
+        @Specialization
+        public RubyNilClass initialize(RubyHash hash, UndefinedPlaceholder defaultValue, RubyProc block) {
+<span class="nc" id="L613">            notDesignedForCompilation();</span>
+<span class="nc" id="L614">            hash.setStore(null, 0, null, null);</span>
+<span class="nc" id="L615">            hash.setDefaultBlock(block);</span>
+<span class="nc" id="L616">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+
+        @Specialization
+        public RubyNilClass initialize(RubyHash hash, Object defaultValue, UndefinedPlaceholder block) {
+<span class="nc" id="L621">            notDesignedForCompilation();</span>
+<span class="nc" id="L622">            hash.setDefaultValue(defaultValue);</span>
+<span class="nc" id="L623">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;initialize_copy&quot;, visibility = Visibility.PRIVATE, required = 1)
+    public abstract static class InitializeCopyNode extends HashCoreMethodNode {
+
+        public InitializeCopyNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L632">            super(context, sourceSection);</span>
+<span class="nc" id="L633">        }</span>
+
+        public InitializeCopyNode(InitializeCopyNode prev) {
+<span class="nc" id="L636">            super(prev);</span>
+<span class="nc" id="L637">        }</span>
+
+        @Specialization(guards = &quot;isNull(arguments[1])&quot;)
+        public RubyHash dupNull(RubyHash self, RubyHash from) {
+<span class="nc" id="L641">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L643" title="All 2 branches missed.">            if (self == from) {</span>
+<span class="nc" id="L644">                return self;</span>
+            }
+
+<span class="nc" id="L647">            self.setDefaultBlock(from.getDefaultBlock());</span>
+<span class="nc" id="L648">            self.setDefaultValue(from.getDefaultValue());</span>
+<span class="nc" id="L649">            self.setStore(null, 0, null, null);</span>
+
+<span class="nc" id="L651">            return self;</span>
+        }
+
+        @Specialization(guards = {&quot;!isNull(arguments[1])&quot;, &quot;!isBuckets(arguments[1])&quot;})
+        public RubyHash dupPackedArray(RubyHash self, RubyHash from) {
+<span class="nc" id="L656">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L658" title="All 2 branches missed.">            if (self == from) {</span>
+<span class="nc" id="L659">                return self;</span>
+            }
+
+<span class="nc" id="L662">            final Object[] store = (Object[]) from.getStore();</span>
+<span class="nc" id="L663">            self.setStore(Arrays.copyOf(store, HashOperations.SMALL_HASH_SIZE * 2), store.length, null, null);</span>
+<span class="nc" id="L664">            self.setDefaultBlock(from.getDefaultBlock());</span>
+<span class="nc" id="L665">            self.setDefaultValue(from.getDefaultValue());</span>
+
+<span class="nc" id="L667">            return self;</span>
+        }
+
+        @Specialization(guards = &quot;isBuckets(arguments[1])&quot;)
+        public RubyHash dupBuckets(RubyHash self, RubyHash from) {
+<span class="nc" id="L672">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L674" title="All 2 branches missed.">            if (self == from) {</span>
+<span class="nc" id="L675">                return self;</span>
+            }
+
+<span class="nc" id="L678">            HashOperations.verySlowSetKeyValues(self, HashOperations.verySlowToKeyValues(from));</span>
+
+<span class="nc" id="L680">            return self;</span>
+        }
+
+    }
+
+    @CoreMethod(names = {&quot;inspect&quot;, &quot;to_s&quot;})
+    public abstract static class InspectNode extends HashCoreMethodNode {
+
+        @Child protected DispatchHeadNode inspect;
+
+        public InspectNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L691">            super(context, sourceSection);</span>
+<span class="nc" id="L692">            inspect = new DispatchHeadNode(context);</span>
+<span class="nc" id="L693">        }</span>
+
+        public InspectNode(InspectNode prev) {
+<span class="nc" id="L696">            super(prev);</span>
+<span class="nc" id="L697">            inspect = prev.inspect;</span>
+<span class="nc" id="L698">        }</span>
+
+        @Specialization(guards = &quot;isNull&quot;)
+        public RubyString inspectNull(RubyHash hash) {
+<span class="nc" id="L702">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L704">            return getContext().makeString(&quot;{}&quot;);</span>
+        }
+
+        @Specialization
+        public RubyString inspectPackedArray(VirtualFrame frame, RubyHash hash) {
+<span class="nc" id="L709">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L711">            final StringBuilder builder = new StringBuilder();</span>
+
+<span class="nc" id="L713">            builder.append(&quot;{&quot;);</span>
+
+<span class="nc bnc" id="L715" title="All 2 branches missed.">            for (KeyValue keyValue : HashOperations.verySlowToKeyValues(hash)) {</span>
+<span class="nc bnc" id="L716" title="All 2 branches missed.">                if (builder.length() &gt; 1) {</span>
+<span class="nc" id="L717">                    builder.append(&quot;, &quot;);</span>
+                }
+
+                // TODO(CS): to string
+
+<span class="nc" id="L722">                builder.append(inspect.call(frame, keyValue.getKey(), &quot;inspect&quot;, null));</span>
+<span class="nc" id="L723">                builder.append(&quot;=&gt;&quot;);</span>
+<span class="nc" id="L724">                builder.append(inspect.call(frame, keyValue.getValue(), &quot;inspect&quot;, null));</span>
+<span class="nc" id="L725">            }</span>
+
+<span class="nc" id="L727">            builder.append(&quot;}&quot;);</span>
+
+<span class="nc" id="L729">            return getContext().makeString(builder.toString());</span>
+        }
+
+    }
+
+    @CoreMethod(names = { &quot;has_key?&quot;, &quot;key?&quot; }, required = 1)
+    public abstract static class KeyNode extends HashCoreMethodNode {
+
+        @Child protected PredicateDispatchHeadNode eqlNode;
+
+        public KeyNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L740">            super(context, sourceSection);</span>
+<span class="nc" id="L741">            eqlNode = new PredicateDispatchHeadNode(context);</span>
+<span class="nc" id="L742">        }</span>
+
+        public KeyNode(KeyNode prev) {
+<span class="nc" id="L745">            super(prev);</span>
+<span class="nc" id="L746">            eqlNode = prev.eqlNode;</span>
+<span class="nc" id="L747">        }</span>
+
+        @Specialization(guards = &quot;isNull&quot;)
+        public boolean keyNull(RubyHash hash, Object key) {
+<span class="nc" id="L751">            return false;</span>
+        }
+
+        @Specialization(guards = {&quot;!isNull&quot;, &quot;!isBuckets&quot;})
+        public boolean keyPackedArray(VirtualFrame frame, RubyHash hash, Object key) {
+<span class="nc" id="L756">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L758">            final int size = hash.getSize();</span>
+<span class="nc" id="L759">            final Object[] store = (Object[]) hash.getStore();</span>
+
+<span class="nc bnc" id="L761" title="All 2 branches missed.">            for (int n = 0; n &lt; store.length; n += 2) {</span>
+<span class="nc bnc" id="L762" title="All 4 branches missed.">                if (n &lt; size &amp;&amp; eqlNode.call(frame, store[n], &quot;eql?&quot;, null, key)) {</span>
+<span class="nc" id="L763">                    return true;</span>
+                }
+            }
+
+<span class="nc" id="L767">            return false;</span>
+        }
+
+        @Specialization(guards = &quot;isBuckets&quot;)
+        public boolean keyBuckets(VirtualFrame frame, RubyHash hash, Object key) {
+<span class="nc" id="L772">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L774" title="All 2 branches missed.">            for (KeyValue keyValue : HashOperations.verySlowToKeyValues(hash)) {</span>
+<span class="nc bnc" id="L775" title="All 2 branches missed.">                if (eqlNode.call(frame, keyValue.getKey(), &quot;eql?&quot;, null, key)) {</span>
+<span class="nc" id="L776">                    return true;</span>
+                }
+<span class="nc" id="L778">            }</span>
+
+<span class="nc" id="L780">            return false;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;keys&quot;)
+    public abstract static class KeysNode extends HashCoreMethodNode {
+
+        public KeysNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L789">            super(context, sourceSection);</span>
+<span class="nc" id="L790">        }</span>
+
+        public KeysNode(KeysNode prev) {
+<span class="nc" id="L793">            super(prev);</span>
+<span class="nc" id="L794">        }</span>
+
+        @Specialization(guards = &quot;isNull&quot;)
+        public RubyArray keysNull(RubyHash hash) {
+<span class="nc" id="L798">            return new RubyArray(getContext().getCoreLibrary().getArrayClass(), null, 0);</span>
+        }
+
+        @Specialization(guards = {&quot;!isNull&quot;, &quot;!isBuckets&quot;})
+        public RubyArray keysPackedArray(RubyHash hash) {
+<span class="nc" id="L803">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L805">            final Object[] store = (Object[]) hash.getStore();</span>
+
+<span class="nc" id="L807">            final Object[] keys = new Object[hash.getSize()];</span>
+
+<span class="nc bnc" id="L809" title="All 2 branches missed.">            for (int n = 0; n &lt; keys.length; n++) {</span>
+<span class="nc" id="L810">                keys[n] = store[n * 2];</span>
+            }
+
+<span class="nc" id="L813">            return new RubyArray(getContext().getCoreLibrary().getArrayClass(), keys, keys.length);</span>
+        }
+
+        @Specialization(guards = &quot;isBuckets&quot;)
+        public RubyArray keysBuckets(RubyHash hash) {
+<span class="nc" id="L818">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L820">            final Object[] keys = new Object[hash.getSize()];</span>
+
+<span class="nc" id="L822">            Entry entry = hash.getFirstInSequence();</span>
+<span class="nc" id="L823">            int n = 0;</span>
+
+<span class="nc bnc" id="L825" title="All 2 branches missed.">            while (entry != null) {</span>
+<span class="nc" id="L826">                keys[n] = entry.getKey();</span>
+<span class="nc" id="L827">                n++;</span>
+<span class="nc" id="L828">                entry = entry.getNextInSequence();</span>
+            }
+
+<span class="nc" id="L831">            return new RubyArray(getContext().getCoreLibrary().getArrayClass(), keys, keys.length);</span>
+        }
+
+    }
+
+    @CoreMethod(names = {&quot;map&quot;, &quot;collect&quot;}, needsBlock = true)
+    @ImportGuards(HashGuards.class)
+    public abstract static class MapNode extends YieldingCoreMethodNode {
+
+        public MapNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L841">            super(context, sourceSection);</span>
+<span class="nc" id="L842">        }</span>
+
+        public MapNode(MapNode prev) {
+<span class="nc" id="L845">            super(prev);</span>
+<span class="nc" id="L846">        }</span>
+
+        @ExplodeLoop
+        @Specialization(guards = {&quot;!isNull&quot;, &quot;!isBuckets&quot;})
+        public RubyArray mapPackedArray(VirtualFrame frame, RubyHash hash, RubyProc block) {
+<span class="nc" id="L851">            final Object[] store = (Object[]) hash.getStore();</span>
+<span class="nc" id="L852">            final int size = hash.getSize();</span>
+
+<span class="nc" id="L854">            final int resultSize = store.length / 2;</span>
+<span class="nc" id="L855">            final Object[] result = new Object[resultSize];</span>
+
+<span class="nc" id="L857">            int count = 0;</span>
+
+            try {
+<span class="nc bnc" id="L860" title="All 2 branches missed.">                for (int n = 0; n &lt; HashOperations.SMALL_HASH_SIZE; n++) {</span>
+<span class="nc bnc" id="L861" title="All 2 branches missed.">                    if (n &lt; size) {</span>
+<span class="nc" id="L862">                        final Object key = store[n * 2];</span>
+<span class="nc" id="L863">                        final Object value = store[n * 2 + 1];</span>
+<span class="nc" id="L864">                        result[n] = yield(frame, block, key, value);</span>
+
+<span class="nc bnc" id="L866" title="All 2 branches missed.">                        if (CompilerDirectives.inInterpreter()) {</span>
+<span class="nc" id="L867">                            count++;</span>
+                        }
+                    }
+                }
+            } finally {
+<span class="nc bnc" id="L872" title="All 4 branches missed.">                if (CompilerDirectives.inInterpreter()) {</span>
+<span class="nc" id="L873">                    ((RubyRootNode) getRootNode()).reportLoopCount(count);</span>
+                }
+            }
+
+<span class="nc" id="L877">            return new RubyArray(getContext().getCoreLibrary().getArrayClass(), result, resultSize);</span>
+        }
+
+        @Specialization(guards = &quot;isBuckets&quot;)
+        public RubyArray mapBuckets(VirtualFrame frame, RubyHash hash, RubyProc block) {
+<span class="nc" id="L882">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L884">            final RubyArray array = new RubyArray(getContext().getCoreLibrary().getArrayClass(), null, 0);</span>
+
+<span class="nc bnc" id="L886" title="All 2 branches missed.">            for (KeyValue keyValue : HashOperations.verySlowToKeyValues(hash)) {</span>
+<span class="nc" id="L887">                array.slowPush(yield(frame, block, keyValue.getKey(), keyValue.getValue()));</span>
+<span class="nc" id="L888">            }</span>
+
+<span class="nc" id="L890">            return array;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;merge&quot;, required = 1)
+    public abstract static class MergeNode extends HashCoreMethodNode {
+
+        @Child protected PredicateDispatchHeadNode eqlNode;
+
+<span class="nc" id="L900">        private final BranchProfile nothingFromFirstProfile = BranchProfile.create();</span>
+<span class="nc" id="L901">        private final BranchProfile considerNothingFromSecondProfile = BranchProfile.create();</span>
+<span class="nc" id="L902">        private final BranchProfile nothingFromSecondProfile = BranchProfile.create();</span>
+<span class="nc" id="L903">        private final BranchProfile considerResultIsSmallProfile = BranchProfile.create();</span>
+<span class="nc" id="L904">        private final BranchProfile resultIsSmallProfile = BranchProfile.create();</span>
+
+<span class="nc" id="L906">        private final int smallHashSize = HashOperations.SMALL_HASH_SIZE;</span>
+
+        public MergeNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L909">            super(context, sourceSection);</span>
+<span class="nc" id="L910">            eqlNode = new PredicateDispatchHeadNode(context);</span>
+<span class="nc" id="L911">        }</span>
+
+        public MergeNode(MergeNode prev) {
+<span class="nc" id="L914">            super(prev);</span>
+<span class="nc" id="L915">            eqlNode = prev.eqlNode;</span>
+<span class="nc" id="L916">        }</span>
+
+        @Specialization(guards = {&quot;!isNull&quot;, &quot;!isBuckets&quot;, &quot;isNull(arguments[1])&quot;})
+        public RubyHash mergePackedArrayNull(RubyHash hash, RubyHash other) {
+<span class="nc" id="L920">            final Object[] store = (Object[]) hash.getStore();</span>
+<span class="nc" id="L921">            final Object[] copy = Arrays.copyOf(store, HashOperations.SMALL_HASH_SIZE * 2);</span>
+
+<span class="nc" id="L923">            return new RubyHash(getContext().getCoreLibrary().getHashClass(), hash.getDefaultBlock(), hash.getDefaultValue(), copy, hash.getSize(), null);</span>
+        }
+
+        @ExplodeLoop
+        @Specialization(guards = {&quot;!isNull&quot;, &quot;!isBuckets&quot;, &quot;!isNull(arguments[1])&quot;, &quot;!isBuckets(arguments[1])&quot;})
+        public RubyHash mergePackedArrayPackedArray(VirtualFrame frame, RubyHash hash, RubyHash other) {
+            // TODO(CS): what happens with the default block here? Which side does it get merged from?
+
+<span class="nc" id="L931">            final Object[] storeA = (Object[]) hash.getStore();</span>
+<span class="nc" id="L932">            final int storeASize = hash.getSize();</span>
+
+<span class="nc" id="L934">            final Object[] storeB = (Object[]) other.getStore();</span>
+<span class="nc" id="L935">            final int storeBSize = hash.getSize();</span>
+
+<span class="nc" id="L937">            final boolean[] mergeFromA = new boolean[storeASize];</span>
+<span class="nc" id="L938">            int mergeFromACount = 0;</span>
+
+<span class="nc bnc" id="L940" title="All 2 branches missed.">            for (int a = 0; a &lt; HashOperations.SMALL_HASH_SIZE; a++) {</span>
+<span class="nc bnc" id="L941" title="All 2 branches missed.">                if (a &lt; storeASize) {</span>
+<span class="nc" id="L942">                    boolean merge = true;</span>
+
+<span class="nc bnc" id="L944" title="All 2 branches missed.">                    for (int b = 0; b &lt; HashOperations.SMALL_HASH_SIZE; b++) {</span>
+<span class="nc bnc" id="L945" title="All 2 branches missed.">                        if (b &lt; storeBSize) {</span>
+<span class="nc bnc" id="L946" title="All 2 branches missed.">                            if (eqlNode.call(frame, storeA[a * 2], &quot;eql?&quot;, null, storeB[b * 2])) {</span>
+<span class="nc" id="L947">                                merge = false;</span>
+<span class="nc" id="L948">                                break;</span>
+                            }
+                        }
+                    }
+
+<span class="nc bnc" id="L953" title="All 2 branches missed.">                    if (merge) {</span>
+<span class="nc" id="L954">                        mergeFromACount++;</span>
+                    }
+
+<span class="nc" id="L957">                    mergeFromA[a] = merge;</span>
+                }
+            }
+
+<span class="nc bnc" id="L961" title="All 2 branches missed.">            if (mergeFromACount == 0) {</span>
+<span class="nc" id="L962">                nothingFromFirstProfile.enter();</span>
+<span class="nc" id="L963">                return new RubyHash(getContext().getCoreLibrary().getHashClass(), hash.getDefaultBlock(), hash.getDefaultValue(), Arrays.copyOf(storeB, HashOperations.SMALL_HASH_SIZE * 2), storeBSize, null);</span>
+            }
+
+<span class="nc" id="L966">            considerNothingFromSecondProfile.enter();</span>
+
+<span class="nc bnc" id="L968" title="All 2 branches missed.">            if (mergeFromACount == storeB.length) {</span>
+<span class="nc" id="L969">                nothingFromSecondProfile.enter();</span>
+<span class="nc" id="L970">                return new RubyHash(getContext().getCoreLibrary().getHashClass(), hash.getDefaultBlock(), hash.getDefaultValue(), Arrays.copyOf(storeB, HashOperations.SMALL_HASH_SIZE * 2), storeBSize, null);</span>
+            }
+
+<span class="nc" id="L973">            considerResultIsSmallProfile.enter();</span>
+
+<span class="nc" id="L975">            final int mergedSize = storeBSize + mergeFromACount;</span>
+
+<span class="nc bnc" id="L977" title="All 2 branches missed.">            if (storeBSize + mergeFromACount &lt;= smallHashSize) {</span>
+<span class="nc" id="L978">                resultIsSmallProfile.enter();</span>
+
+<span class="nc" id="L980">                final Object[] merged = new Object[HashOperations.SMALL_HASH_SIZE * 2];</span>
+
+<span class="nc" id="L982">                int index = 0;</span>
+
+<span class="nc bnc" id="L984" title="All 2 branches missed.">                for (int n = 0; n &lt; storeASize; n++) {</span>
+<span class="nc bnc" id="L985" title="All 2 branches missed.">                    if (mergeFromA[n]) {</span>
+<span class="nc" id="L986">                        merged[index] = storeA[n * 2];</span>
+<span class="nc" id="L987">                        merged[index + 1] = storeA[n * 2 + 1];</span>
+<span class="nc" id="L988">                        index += 2;</span>
+                    }
+                }
+
+<span class="nc bnc" id="L992" title="All 2 branches missed.">                for (int n = 0; n &lt; storeBSize; n++) {</span>
+<span class="nc" id="L993">                    merged[index] = storeB[n * 2];</span>
+<span class="nc" id="L994">                    merged[index + 1] = storeB[n * 2 + 1];</span>
+<span class="nc" id="L995">                    index += 2;</span>
+                }
+
+<span class="nc" id="L998">                return new RubyHash(getContext().getCoreLibrary().getHashClass(), hash.getDefaultBlock(), hash.getDefaultValue(), merged, mergedSize, null);</span>
+            }
+
+<span class="nc" id="L1001">            CompilerDirectives.transferToInterpreter();</span>
+<span class="nc" id="L1002">            throw new UnsupportedOperationException();</span>
+        }
+
+
+        @Specialization
+        public RubyHash mergeBucketsBuckets(RubyHash hash, RubyHash other) {
+<span class="nc" id="L1008">            final RubyHash merged = new RubyHash(getContext().getCoreLibrary().getHashClass(), null, null, new Entry[HashOperations.capacityGreaterThan(hash.getSize() + other.getSize())], 0, null);</span>
+
+<span class="nc" id="L1010">            int size = 0;</span>
+
+<span class="nc bnc" id="L1012" title="All 2 branches missed.">            for (KeyValue keyValue : HashOperations.verySlowToKeyValues(hash)) {</span>
+<span class="nc" id="L1013">                HashOperations.verySlowSetInBuckets(merged, keyValue.getKey(), keyValue.getValue());</span>
+<span class="nc" id="L1014">                size++;</span>
+<span class="nc" id="L1015">            }</span>
+
+<span class="nc bnc" id="L1017" title="All 2 branches missed.">            for (KeyValue keyValue : HashOperations.verySlowToKeyValues(other)) {</span>
+<span class="nc bnc" id="L1018" title="All 2 branches missed.">                if (HashOperations.verySlowSetInBuckets(merged, keyValue.getKey(), keyValue.getValue())) {</span>
+<span class="nc" id="L1019">                    size++;</span>
+                }
+<span class="nc" id="L1021">            }</span>
+
+<span class="nc" id="L1023">            merged.setSize(size);</span>
+
+<span class="nc" id="L1025">            return merged;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;default&quot;, optional = 1)
+    public abstract static class DefaultNode extends HashCoreMethodNode {
+
+        public DefaultNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1034">            super(context, sourceSection);</span>
+<span class="nc" id="L1035">        }</span>
+
+        public DefaultNode(DefaultNode prev) {
+<span class="nc" id="L1038">            super(prev);</span>
+<span class="nc" id="L1039">        }</span>
+
+        @Specialization
+        public Object defaultElement(VirtualFrame frame, RubyHash hash, UndefinedPlaceholder undefined) {
+<span class="nc" id="L1043">            Object ret = hash.getDefaultValue();</span>
+
+            // TODO (nirvdrum Dec. 1, 2014): This needs to evaluate the defaultProc if it exists before it tries defaultValue.
+<span class="nc bnc" id="L1046" title="All 2 branches missed.">            if (ret != null) {</span>
+<span class="nc" id="L1047">                return ret;</span>
+            } else {
+<span class="nc" id="L1049">                return getContext().getCoreLibrary().getNilObject();</span>
+            }
+        }
+
+        @Specialization
+        public Object defaultElement(VirtualFrame frame, RubyHash hash, Object key) {
+<span class="nc" id="L1055">            Object ret = hash.getDefaultValue();</span>
+
+            // TODO (nirvdrum Dec. 1, 2014): This really needs to do something with the key.  Dummy stub for now.
+<span class="nc bnc" id="L1058" title="All 2 branches missed.">            if (ret != null) {</span>
+<span class="nc" id="L1059">                return ret;</span>
+            } else {
+<span class="nc" id="L1061">                return getContext().getCoreLibrary().getNilObject();</span>
+            }
+        }
+    }
+
+    @CoreMethod(names = &quot;size&quot;)
+    public abstract static class SizeNode extends HashCoreMethodNode {
+
+        public SizeNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1070">            super(context, sourceSection);</span>
+<span class="nc" id="L1071">        }</span>
+
+        public SizeNode(SizeNode prev) {
+<span class="nc" id="L1074">            super(prev);</span>
+<span class="nc" id="L1075">        }</span>
+
+        @Specialization(guards = &quot;isNull&quot;)
+        public int sizeNull(RubyHash hash) {
+<span class="nc" id="L1079">            return 0;</span>
+        }
+
+        @Specialization(guards = &quot;!isNull&quot;)
+        public int sizePackedArray(RubyHash hash) {
+<span class="nc" id="L1084">            return hash.getSize();</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;values&quot;)
+    public abstract static class ValuesNode extends HashCoreMethodNode {
+
+        public ValuesNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1093">            super(context, sourceSection);</span>
+<span class="nc" id="L1094">        }</span>
+
+        public ValuesNode(ValuesNode prev) {
+<span class="nc" id="L1097">            super(prev);</span>
+<span class="nc" id="L1098">        }</span>
+
+        @Specialization(guards = &quot;isNull&quot;)
+        public RubyArray valuesNull(RubyHash hash) {
+<span class="nc" id="L1102">            return new RubyArray(getContext().getCoreLibrary().getArrayClass(), null, 0);</span>
+        }
+
+        @Specialization(guards = {&quot;!isNull&quot;, &quot;!isBuckets&quot;})
+        public RubyArray valuesPackedArray(RubyHash hash) {
+<span class="nc" id="L1107">            final Object[] store = (Object[]) hash.getStore();</span>
+
+<span class="nc" id="L1109">            final Object[] values = new Object[hash.getSize()];</span>
+
+<span class="nc bnc" id="L1111" title="All 2 branches missed.">            for (int n = 0; n &lt; values.length; n++) {</span>
+<span class="nc" id="L1112">                values[n] = store[n * 2 + 1];</span>
+            }
+
+<span class="nc" id="L1115">            return new RubyArray(getContext().getCoreLibrary().getArrayClass(), values, values.length);</span>
+        }
+
+        @Specialization(guards = &quot;isBuckets&quot;)
+        public RubyArray valuesBuckets(RubyHash hash) {
+<span class="nc" id="L1120">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1122">            final Object[] values = new Object[hash.getSize()];</span>
+
+<span class="nc" id="L1124">            Entry entry = hash.getFirstInSequence();</span>
+<span class="nc" id="L1125">            int n = 0;</span>
+
+<span class="nc bnc" id="L1127" title="All 2 branches missed.">            while (entry != null) {</span>
+<span class="nc" id="L1128">                values[n] = entry.getValue();</span>
+<span class="nc" id="L1129">                n++;</span>
+<span class="nc" id="L1130">                entry = entry.getNextInSequence();</span>
+            }
+
+<span class="nc" id="L1133">            return new RubyArray(getContext().getCoreLibrary().getArrayClass(), values, values.length);</span>
+        }
+
+    }
+
+<span class="nc" id="L1138">    @CoreMethod(names = &quot;to_a&quot;)</span>
+    public abstract static class ToArrayNode extends HashCoreMethodNode {
+
+        public ToArrayNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1142">            super(context, sourceSection);</span>
+<span class="nc" id="L1143">        }</span>
+
+        public ToArrayNode(ToArrayNode prev) {
+<span class="nc" id="L1146">            super(prev);</span>
+<span class="nc" id="L1147">        }</span>
+
+        @Specialization(guards = &quot;isNull&quot;)
+        public RubyArray toArrayNull(RubyHash hash) {
+<span class="nc" id="L1151">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1153">            return new RubyArray(getContext().getCoreLibrary().getArrayClass(), null, 0);</span>
+        }
+
+        @Specialization(guards = {&quot;!isNull&quot;, &quot;!isBuckets&quot;})
+        public RubyArray toArrayPackedArray(RubyHash hash) {
+<span class="nc" id="L1158">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1160">            final Object[] store = (Object[]) hash.getStore();</span>
+<span class="nc" id="L1161">            final int size = hash.getSize();</span>
+<span class="nc" id="L1162">            final Object[] pairs = new Object[size];</span>
+
+<span class="nc bnc" id="L1164" title="All 2 branches missed.">            for (int n = 0; n &lt; size; n++) {</span>
+<span class="nc" id="L1165">                pairs[n] = RubyArray.fromObjects(getContext().getCoreLibrary().getArrayClass(), store[n * 2], store[n * 2 + 1]);</span>
+            }
+
+<span class="nc" id="L1168">            return new RubyArray(getContext().getCoreLibrary().getArrayClass(), pairs, size);</span>
+        }
+
+        @Specialization(guards = &quot;isBuckets&quot;)
+        public RubyArray toArrayBuckets(RubyHash hash) {
+<span class="nc" id="L1173">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1175">            final int size = hash.getSize();</span>
+<span class="nc" id="L1176">            final Object[] pairs = new Object[size];</span>
+
+<span class="nc" id="L1178">            int n = 0;</span>
+
+<span class="nc bnc" id="L1180" title="All 2 branches missed.">            for (KeyValue keyValue : HashOperations.verySlowToKeyValues(hash)) {</span>
+<span class="nc" id="L1181">                pairs[n] = RubyArray.fromObjects(getContext().getCoreLibrary().getArrayClass(), keyValue.getValue(), keyValue.getValue());</span>
+<span class="nc" id="L1182">                n++;</span>
+<span class="nc" id="L1183">            }</span>
+
+<span class="nc" id="L1185">            return new RubyArray(getContext().getCoreLibrary().getArrayClass(), pairs, size);</span>
+        }
+
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

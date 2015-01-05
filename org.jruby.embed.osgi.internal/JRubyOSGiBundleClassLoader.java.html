@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JRubyOSGiBundleClassLoader.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.embed.osgi.internal</a> &gt; <span class="el_source">JRubyOSGiBundleClassLoader.java</span></div><h1>JRubyOSGiBundleClassLoader.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002-2011 JRuby Community
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+
+package org.jruby.embed.osgi.internal;
+
+import java.io.IOException;
+import java.net.URL;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
+import java.util.List;
+
+import org.jruby.embed.ScriptingContainer;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+import org.osgi.framework.Bundle;
+import org.osgi.framework.BundleReference;
+import org.osgi.framework.FrameworkUtil;
+
+/**
+ * Closest thing to JRubyClassLoader's addURL but for OSGi bundles.
+ * Used as the parent classloader the usual jruby's bundle's classloader.
+ * 
+ * @author hmalphettes
+ *
+ */
+public class JRubyOSGiBundleClassLoader extends ClassLoader implements BundleReference {
+
+<span class="nc" id="L55">    private static final Logger LOG = LoggerFactory.getLogger(JRubyOSGiBundleClassLoader.class.getName());</span>
+    private static final IOSGiClassLoaderAdapter ADAPTER;
+
+    static {
+<span class="nc" id="L59">        IOSGiClassLoaderAdapter chosenAdapter = null;</span>
+        try {
+<span class="nc" id="L61">            Bundle b = FrameworkUtil.getBundle(JRubyOSGiBundleClassLoader.class);</span>
+            // I don't want to actually reference this class, in case it's unavailable
+<span class="nc" id="L63">            b.loadClass(&quot;org.osgi.framework.wiring.BundleWiring&quot;);</span>
+            // But, if it can be loaded, we know we can use the BundleWiringOSGiClassLoaderAdapter
+<span class="nc" id="L65">            chosenAdapter = new BundleWiringOSGiClassLoaderAdapter();</span>
+<span class="nc" id="L66">        } catch (Exception e) {</span>
+<span class="nc" id="L67">            LOG.warn(&quot;Could not load BundleWiring.  Falling back to reflection.&quot;);</span>
+            // Otherwise, just use the old method.
+<span class="nc" id="L69">            chosenAdapter = new ReflectiveOSGiClassLoaderAdapter();</span>
+<span class="nc" id="L70">        }</span>
+<span class="nc" id="L71">        ADAPTER = chosenAdapter;</span>
+<span class="nc" id="L72">    }</span>
+
+    /**
+     * look in OSGi first? true by default for now.
+     * we could look in jruby first if that makes more sense.
+     */
+<span class="nc" id="L78">    private boolean _lookInOsgiFirst = true;</span>
+    
+    private LinkedHashMap&lt;Bundle,ClassLoader&gt; _libraries;
+
+    /**
+     * @param 
+     * @throws IOException
+     */
+    public JRubyOSGiBundleClassLoader()
+    {
+<span class="nc" id="L88">        super(ScriptingContainer.class.getClassLoader());</span>
+<span class="nc" id="L89">        _libraries = new LinkedHashMap&lt;Bundle, ClassLoader&gt;();</span>
+<span class="nc" id="L90">    }</span>
+    /**
+     * @param 
+     * @throws IOException
+     */
+    public JRubyOSGiBundleClassLoader(Bundle creator)
+    {
+<span class="nc" id="L97">        this();</span>
+<span class="nc" id="L98">        addBundle(creator);</span>
+<span class="nc" id="L99">    }</span>
+    /**
+     * @param 
+     * @throws IOException
+     */
+    public void addBundle(Class&lt;?&gt; classInOsgiBundle)
+    {
+<span class="nc" id="L106">        Bundle b = FrameworkUtil.getBundle(classInOsgiBundle);</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        if (b == null) {</span>
+<span class="nc" id="L108">            throw new IllegalArgumentException(classInOsgiBundle</span>
+                    + &quot; is not loaded by a bundle. Its classloader is &quot;
+<span class="nc" id="L110">                    + classInOsgiBundle.getClassLoader() + &quot; does not implement &quot;</span>
+                    + &quot;org.osgi.framework.BundleReference&quot;);
+        }
+<span class="nc" id="L113">        _libraries.put(b, classInOsgiBundle.getClassLoader());</span>
+<span class="nc" id="L114">    }</span>
+    /**
+     * @param parent The parent classloader. In this case jrubyLoader
+     * @param context The WebAppContext
+     * @param contributor The bundle that defines this web-application.
+     * @throws IOException
+     */
+    public boolean addBundle(Bundle bundle)
+    {
+<span class="nc bnc" id="L123" title="All 2 branches missed.">        return _libraries.put(bundle, ADAPTER.getClassLoader(bundle)) != null;</span>
+    }
+    
+    /**
+     * @param parent The parent classloader. In this case jrubyLoader
+     * @param context The WebAppContext
+     * @param contributor The bundle that defines this web-application.
+     * @throws IOException
+     */
+    public boolean removeBundle(Bundle bundle)
+    throws IOException
+    {
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        return _libraries.remove(bundle) != null;</span>
+    }
+    
+    /**
+     * Returns the &lt;code&gt;Bundle&lt;/code&gt; that defined this web-application.
+     * 
+     * @return The &lt;code&gt;Bundle&lt;/code&gt; object associated with this
+     *         &lt;code&gt;BundleReference&lt;/code&gt;.
+     */
+    public Bundle getBundle()
+    {
+<span class="nc" id="L146">        return _libraries.keySet().iterator().next();</span>
+    }
+
+    /**
+     * TODO: optimize: we should not have to look for the resources everywhere
+     * until called for it.
+     */
+    @Override
+    public Enumeration&lt;URL&gt; getResources(String name) throws IOException
+    {
+<span class="nc" id="L156">        LinkedList&lt;Enumeration&lt;URL&gt;&gt; enums = new LinkedList&lt;Enumeration&lt;URL&gt;&gt;();</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        for (ClassLoader cl : _libraries.values()) {</span>
+<span class="nc" id="L158">            enums.add(cl.getResources(name));</span>
+<span class="nc" id="L159">        }</span>
+<span class="nc" id="L160">        Enumeration&lt;URL&gt; urls = super.getResources(name);</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        if (_lookInOsgiFirst)</span>
+        {
+<span class="nc" id="L163">            enums.addFirst(urls);</span>
+        }
+        else
+        {
+<span class="nc" id="L167">            enums.addLast(urls);</span>
+        }
+<span class="nc" id="L169">        return Collections.enumeration(toList(enums));</span>
+    }
+    
+    @Override
+    public URL getResource(String name)
+    {
+<span class="nc bnc" id="L175" title="All 2 branches missed.">        if (_lookInOsgiFirst)</span>
+        {
+<span class="nc" id="L177">            URL url = null;</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">            for (ClassLoader cl : _libraries.values()) { </span>
+<span class="nc" id="L179">                url = cl.getResource(name);</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">                if (url != null) {</span>
+<span class="nc" id="L181">                    return url;</span>
+                }
+<span class="nc" id="L183">            }</span>
+<span class="nc" id="L184">            return super.getResource(name);</span>
+        }
+        else 
+        {
+<span class="nc" id="L188">            URL url = super.getResource(name);</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">            if (url != null) {</span>
+<span class="nc" id="L190">                return url;</span>
+            }
+<span class="nc bnc" id="L192" title="All 2 branches missed.">            for (ClassLoader cl : _libraries.values()) { </span>
+<span class="nc" id="L193">                url = cl.getResource(name);</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">                if (url != null) {</span>
+<span class="nc" id="L195">                    return url;</span>
+                }
+<span class="nc" id="L197">            }</span>
+<span class="nc" id="L198">            return null;</span>
+        }       
+    }
+    
+    private List&lt;URL&gt; toList(List&lt;Enumeration&lt;URL&gt;&gt; l)
+    {
+<span class="nc" id="L204">        List&lt;URL&gt; list = new LinkedList&lt;URL&gt;();</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">        for (Enumeration&lt;URL&gt; e : l) {</span>
+<span class="nc bnc" id="L206" title="All 4 branches missed.">            while (e!=null &amp;&amp; e.hasMoreElements()) {</span>
+<span class="nc" id="L207">                list.add(e.nextElement());</span>
+            }
+<span class="nc" id="L209">        }</span>
+<span class="nc" id="L210">        return list;</span>
+    }
+
+    /**
+     * 
+     */
+    protected Class&lt;?&gt; findClass(String name) throws ClassNotFoundException
+    {
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        if (_lookInOsgiFirst) {</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            for (ClassLoader cl : _libraries.values()) {</span>
+                try {
+<span class="nc" id="L221">                    return cl.loadClass(name);</span>
+<span class="nc" id="L222">                } catch (ClassNotFoundException cne) {</span>
+                }
+<span class="nc" id="L224">            }</span>
+<span class="nc" id="L225">            return super.findClass(name);</span>
+        } else {
+            try {
+<span class="nc" id="L228">                return super.findClass(name);</span>
+<span class="nc" id="L229">            } catch (ClassNotFoundException cne) {</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">                for (ClassLoader cl : _libraries.values()) {</span>
+                    try {
+<span class="nc" id="L232">                        return cl.loadClass(name);</span>
+<span class="nc" id="L233">                    } catch (ClassNotFoundException cnfe) {</span>
+                    }
+<span class="nc" id="L235">                }</span>
+<span class="nc" id="L236">                throw cne;</span>
+            }
+            
+        }
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

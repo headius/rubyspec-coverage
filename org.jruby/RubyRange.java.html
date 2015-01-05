@@ -1,0 +1,789 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyRange.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyRange.java</span></div><h1>RubyRange.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2001 Chad Fowler &lt;chadfowler@chadfowler.com&gt;
+ * Copyright (C) 2001 Alan Moore &lt;alan_moore@gmx.net&gt;
+ * Copyright (C) 2001 Ed Sinjiashvili &lt;slorcim@users.sourceforge.net&gt;
+ * Copyright (C) 2001-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002 Benoit Cerrina &lt;b.cerrina@wanadoo.fr&gt;
+ * Copyright (C) 2002-2006 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2005 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2006 Miguel Covarrubias &lt;mlcovarrubias@gmail.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import java.io.IOException;
+import java.util.List;
+
+import org.jcodings.Encoding;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.exceptions.JumpException;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.BlockBody;
+import org.jruby.runtime.BlockCallback;
+import org.jruby.runtime.CallBlock;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ObjectMarshal;
+import org.jruby.runtime.ThreadContext;
+
+import static org.jruby.RubyEnumerator.enumeratorizeWithSize;
+import static org.jruby.runtime.Visibility.*;
+
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.builtin.Variable;
+import org.jruby.runtime.component.VariableEntry;
+import org.jruby.runtime.marshal.MarshalStream;
+import org.jruby.runtime.marshal.UnmarshalStream;
+import org.jruby.util.ByteList;
+import org.jruby.util.TypeConverter;
+
+import static org.jruby.runtime.Helpers.invokedynamic;
+import static org.jruby.RubyEnumerator.SizeFn;
+import static org.jruby.RubyNumeric.intervalStepSize;
+
+import org.jruby.runtime.invokedynamic.MethodNames;
+
+/**
+ * @author jpetersen
+ */
+@JRubyClass(name=&quot;Range&quot;, include=&quot;Enumerable&quot;)
+public class RubyRange extends RubyObject {
+    private IRubyObject begin;
+    private IRubyObject end;
+    private boolean isExclusive;
+
+    public static RubyClass createRangeClass(Ruby runtime) {
+<span class="fc" id="L85">        RubyClass result = runtime.defineClass(&quot;Range&quot;, runtime.getObject(), RANGE_ALLOCATOR);</span>
+<span class="fc" id="L86">        runtime.setRange(result);</span>
+
+<span class="fc" id="L88">        result.setClassIndex(ClassIndex.RANGE);</span>
+<span class="fc" id="L89">        result.setReifiedClass(RubyRange.class);</span>
+
+<span class="fc" id="L91">        result.kindOf = new RubyModule.JavaClassKindOf(RubyRange.class);</span>
+        
+<span class="fc" id="L93">        result.setMarshal(RANGE_MARSHAL);</span>
+<span class="fc" id="L94">        result.includeModule(runtime.getEnumerable());</span>
+
+<span class="fc" id="L96">        result.defineAnnotatedMethods(RubyRange.class);</span>
+<span class="fc" id="L97">        return result;</span>
+    }
+
+<span class="fc" id="L100">    private static final ObjectAllocator RANGE_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L103">            return new RubyRange(runtime, klass);</span>
+        }
+    };    
+
+    private RubyRange(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L108">        super(runtime, klass);</span>
+<span class="fc" id="L109">        begin = end = runtime.getNil();</span>
+<span class="fc" id="L110">    }</span>
+
+    public static RubyRange newRange(ThreadContext context, IRubyObject begin, IRubyObject end, boolean isExclusive) {
+<span class="fc" id="L113">        RubyRange range = new RubyRange(context.runtime, context.runtime.getRange());</span>
+<span class="fc" id="L114">        range.init(context, begin, end, isExclusive);</span>
+<span class="fc" id="L115">        return range;</span>
+    }
+
+    @Override
+    public void copySpecialInstanceVariables(IRubyObject clone) {
+<span class="nc" id="L120">        RubyRange range = (RubyRange)clone;</span>
+<span class="nc" id="L121">        range.begin = begin;</span>
+<span class="nc" id="L122">        range.end = end;</span>
+<span class="nc" id="L123">        range.isExclusive = isExclusive;</span>
+<span class="nc" id="L124">    }</span>
+
+    final boolean checkBegin(long length) {
+<span class="fc" id="L127">        long beg = RubyNumeric.num2long(this.begin);</span>
+<span class="fc bfc" id="L128" title="All 2 branches covered.">        if(beg &lt; 0) {</span>
+<span class="fc" id="L129">            beg += length;</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">            if(beg &lt; 0) {</span>
+<span class="fc" id="L131">                return false;</span>
+            }
+<span class="fc bfc" id="L133" title="All 2 branches covered.">        } else if(length &lt; beg) {</span>
+<span class="fc" id="L134">            return false;</span>
+        }
+<span class="fc" id="L136">        return true;</span>
+    }
+
+    final long[] begLen(long len, int err){
+<span class="fc" id="L140">        long beg = RubyNumeric.num2long(this.begin);</span>
+<span class="fc" id="L141">        long end = RubyNumeric.num2long(this.end);</span>
+
+<span class="fc bfc" id="L143" title="All 2 branches covered.">        if (beg &lt; 0) {</span>
+<span class="fc" id="L144">            beg += len;</span>
+<span class="fc bfc" id="L145" title="All 2 branches covered.">            if (beg &lt; 0) {</span>
+<span class="pc bpc" id="L146" title="3 of 4 branches missed.">                if (err != 0) throw getRuntime().newRangeError(beg + &quot;..&quot; + (isExclusive ? &quot;.&quot; : &quot;&quot;) + end + &quot; out of range&quot;);</span>
+<span class="fc" id="L147">                return null;</span>
+            }
+        }
+
+<span class="pc bpc" id="L151" title="3 of 4 branches missed.">        if (err == 0 || err == 2) {</span>
+<span class="fc bfc" id="L152" title="All 2 branches covered.">            if (beg &gt; len) {</span>
+<span class="pc bpc" id="L153" title="3 of 4 branches missed.">                if (err != 0) throw getRuntime().newRangeError(beg + &quot;..&quot; + (isExclusive ? &quot;.&quot; : &quot;&quot;) + end + &quot; out of range&quot;);</span>
+<span class="fc" id="L154">                return null;</span>
+            }
+<span class="fc bfc" id="L156" title="All 2 branches covered.">            if (end &gt; len) end = len;</span>
+        }
+
+<span class="fc bfc" id="L159" title="All 2 branches covered.">        if (end &lt; 0) end += len;</span>
+<span class="fc bfc" id="L160" title="All 2 branches covered.">        if (!isExclusive) end++;</span>
+<span class="fc" id="L161">        len = end - beg;</span>
+<span class="fc bfc" id="L162" title="All 2 branches covered.">        if (len &lt; 0) len = 0;</span>
+
+<span class="fc" id="L164">        return new long[]{beg, len};</span>
+    }
+
+    final long begLen0(long len){
+<span class="fc" id="L168">        long beg = RubyNumeric.num2long(this.begin);</span>
+
+<span class="fc bfc" id="L170" title="All 2 branches covered.">        if (beg &lt; 0) {</span>
+<span class="fc" id="L171">            beg += len;</span>
+<span class="fc bfc" id="L172" title="All 2 branches covered.">            if (beg &lt; 0) {</span>
+<span class="fc bfc" id="L173" title="All 2 branches covered.">                throw getRuntime().newRangeError(beg + &quot;..&quot; + (isExclusive ? &quot;.&quot; : &quot;&quot;) + end + &quot; out of range&quot;);</span>
+            }
+        }
+        
+<span class="fc" id="L177">        return beg;</span>
+    }
+
+    final long begLen1(long len, long beg){
+<span class="fc" id="L181">        long end = RubyNumeric.num2long(this.end);</span>
+
+<span class="fc bfc" id="L183" title="All 2 branches covered.">        if (end &lt; 0) end += len;</span>
+<span class="fc bfc" id="L184" title="All 2 branches covered.">        if (!isExclusive) end++;</span>
+<span class="fc" id="L185">        len = end - beg;</span>
+<span class="fc bfc" id="L186" title="All 2 branches covered.">        if (len &lt; 0) len = 0;</span>
+
+<span class="fc" id="L188">        return len;</span>
+    }
+
+    final int[] begLenInt(int len, int err){
+<span class="fc" id="L192">        int beg = RubyNumeric.num2int(this.begin);</span>
+<span class="fc" id="L193">        int end = RubyNumeric.num2int(this.end);</span>
+
+<span class="fc bfc" id="L195" title="All 2 branches covered.">        if (beg &lt; 0) {</span>
+<span class="fc" id="L196">            beg += len;</span>
+<span class="fc bfc" id="L197" title="All 2 branches covered.">            if (beg &lt; 0) {</span>
+<span class="fc bfc" id="L198" title="All 4 branches covered.">                if (err != 0) throw getRuntime().newRangeError(beg + &quot;..&quot; + (isExclusive ? &quot;.&quot; : &quot;&quot;) + end + &quot; out of range&quot;);</span>
+<span class="fc" id="L199">                return null;</span>
+            }
+        }
+
+<span class="fc bfc" id="L203" title="All 4 branches covered.">        if (err == 0 || err == 2) {</span>
+<span class="fc bfc" id="L204" title="All 2 branches covered.">            if (beg &gt; len) {</span>
+<span class="pc bpc" id="L205" title="1 of 4 branches missed.">                if (err != 0) throw getRuntime().newRangeError(beg + &quot;..&quot; + (isExclusive ? &quot;.&quot; : &quot;&quot;) + end + &quot; out of range&quot;);</span>
+<span class="fc" id="L206">                return null;</span>
+            }
+<span class="fc bfc" id="L208" title="All 2 branches covered.">            if (end &gt; len) end = len;</span>
+        }
+
+<span class="fc bfc" id="L211" title="All 2 branches covered.">        if (end &lt; 0) end += len;</span>
+<span class="fc bfc" id="L212" title="All 2 branches covered.">        if (!isExclusive) end++;</span>
+<span class="fc" id="L213">        len = end - beg;</span>
+<span class="fc bfc" id="L214" title="All 2 branches covered.">        if (len &lt; 0) len = 0;</span>
+
+<span class="fc" id="L216">        return new int[]{beg, len};</span>
+    }
+
+    private void init(ThreadContext context, IRubyObject begin, IRubyObject end, boolean isExclusive) {
+<span class="fc bfc" id="L220" title="All 4 branches covered.">        if (!(begin instanceof RubyFixnum &amp;&amp; end instanceof RubyFixnum)) {</span>
+            try {
+<span class="fc" id="L222">                IRubyObject result = invokedynamic(context, begin, MethodNames.OP_CMP, end);</span>
+<span class="fc bfc" id="L223" title="All 2 branches covered.">                if (result.isNil()) throw getRuntime().newArgumentError(&quot;bad value for range&quot;);</span>
+<span class="fc" id="L224">            } catch (RaiseException re) {</span>
+<span class="fc" id="L225">                throw getRuntime().newArgumentError(&quot;bad value for range&quot;);</span>
+<span class="fc" id="L226">            }</span>
+        }
+
+<span class="fc" id="L229">        this.begin = begin;</span>
+<span class="fc" id="L230">        this.end = end;</span>
+<span class="fc" id="L231">        this.isExclusive = isExclusive;</span>
+<span class="fc" id="L232">    }</span>
+    
+    @JRubyMethod(required = 2, optional = 1, visibility = PRIVATE)
+    public IRubyObject initialize(ThreadContext context, IRubyObject[] args, Block unusedBlock) {
+<span class="pc bpc" id="L236" title="1 of 4 branches missed.">        if (!begin.isNil() || !end.isNil()) {</span>
+<span class="fc" id="L237">            throw getRuntime().newNameError(&quot;`initialize' called twice&quot;, &quot;initialize&quot;);</span>
+        }
+<span class="fc bfc" id="L239" title="All 4 branches covered.">        init(context, args[0], args[1], args.length &gt; 2 &amp;&amp; args[2].isTrue());</span>
+<span class="fc" id="L240">        return getRuntime().getNil();</span>
+    }
+
+    @JRubyMethod(required = 1, visibility = PRIVATE)
+    public IRubyObject initialize_copy(ThreadContext context, IRubyObject original) {
+<span class="nc bnc" id="L245" title="All 4 branches missed.">        if (!begin.isNil() || !end.isNil()) {</span>
+<span class="nc" id="L246">            throw context.runtime.newNameError(&quot;`initialize' called twice&quot;, &quot;initialize&quot;);</span>
+        }
+
+<span class="nc" id="L249">        RubyRange other = (RubyRange) original;</span>
+<span class="nc" id="L250">        init(context, other.begin, other.end, other.isExclusive);</span>
+<span class="nc" id="L251">        return getRuntime().getNil();</span>
+    }
+
+    @JRubyMethod(name = &quot;hash&quot;)
+    public RubyFixnum hash(ThreadContext context) {
+<span class="fc bfc" id="L256" title="All 2 branches covered.">        long hash = isExclusive ? 1 : 0;</span>
+<span class="fc" id="L257">        long h = hash;</span>
+        
+<span class="fc" id="L259">        long v = invokedynamic(context, begin, MethodNames.HASH).convertToInteger().getLongValue();</span>
+<span class="fc" id="L260">        hash ^= v &lt;&lt; 1;</span>
+<span class="fc" id="L261">        v = invokedynamic(context, end, MethodNames.HASH).convertToInteger().getLongValue();</span>
+<span class="fc" id="L262">        hash ^= v &lt;&lt; 9;</span>
+<span class="fc" id="L263">        hash ^= h &lt;&lt; 24;</span>
+<span class="fc" id="L264">        return getRuntime().newFixnum(hash);</span>
+    }
+    
+<span class="fc" id="L267">    private static byte[] DOTDOTDOT = &quot;...&quot;.getBytes();</span>
+<span class="fc" id="L268">    private static byte[] DOTDOT = &quot;..&quot;.getBytes();</span>
+
+    private IRubyObject inspectValue(final ThreadContext context, IRubyObject value) {
+<span class="fc" id="L271">        return getRuntime().execRecursiveOuter(new Ruby.RecursiveFunction() {</span>
+            public IRubyObject call(IRubyObject obj, boolean recur) {
+<span class="pc bpc" id="L273" title="1 of 2 branches missed.">                if(recur) {</span>
+<span class="nc bnc" id="L274" title="All 2 branches missed.">                    return RubyString.newString(context.runtime, isExclusive ? &quot;(... ... ...)&quot; : &quot;(... .. ...)&quot;);</span>
+                } else {
+<span class="fc" id="L276">                    return inspect(context, obj);</span>
+                }
+            }
+        }, value);
+    }
+
+    @JRubyMethod(name = &quot;inspect&quot;)
+    public IRubyObject inspect(final ThreadContext context) {
+<span class="fc" id="L284">        RubyString i1 = ((RubyString) inspectValue(context, begin)).strDup(context.runtime);</span>
+<span class="fc" id="L285">        RubyString i2 = (RubyString) inspectValue(context, end);</span>
+<span class="fc bfc" id="L286" title="All 2 branches covered.">        i1.cat(isExclusive ? DOTDOTDOT : DOTDOT);</span>
+<span class="fc" id="L287">        i1.append(i2);</span>
+<span class="fc" id="L288">        i1.infectBy(i2);</span>
+<span class="fc" id="L289">        return i1;</span>
+    }
+
+    @JRubyMethod(name = &quot;to_s&quot;)
+    public IRubyObject to_s(final ThreadContext context) {
+<span class="fc" id="L294">        RubyString i1 = begin.asString().strDup(context.runtime);</span>
+<span class="fc" id="L295">        RubyString i2 = end.asString();</span>
+<span class="fc bfc" id="L296" title="All 2 branches covered.">        i1.cat(isExclusive ? DOTDOTDOT : DOTDOT);</span>
+<span class="fc" id="L297">        i1.append(i2);</span>
+<span class="fc" id="L298">        i1.infectBy(i2);</span>
+<span class="fc" id="L299">        return i1;</span>
+    }
+
+    @JRubyMethod(name = &quot;exclude_end?&quot;)
+    public RubyBoolean exclude_end_p() {
+<span class="fc" id="L304">        return getRuntime().newBoolean(isExclusive);</span>
+    }
+
+    @JRubyMethod(name = {&quot;==&quot;, &quot;eql?&quot;}, required = 1)
+    @Override
+    public IRubyObject op_equal(ThreadContext context, IRubyObject other) {
+<span class="pc bpc" id="L310" title="1 of 2 branches missed.">        if (this == other) return getRuntime().getTrue();</span>
+<span class="fc bfc" id="L311" title="All 2 branches covered.">        if (!(other instanceof RubyRange)) return getRuntime().getFalse();</span>
+<span class="fc" id="L312">        RubyRange otherRange = (RubyRange) other;</span>
+
+<span class="fc bfc" id="L314" title="All 2 branches covered.">        if (equalInternal(context, begin, otherRange.begin) &amp;&amp;</span>
+<span class="fc bfc" id="L315" title="All 4 branches covered.">            equalInternal(context, end, otherRange.end) &amp;&amp;</span>
+<span class="fc" id="L316">            isExclusive == otherRange.isExclusive) return getRuntime().getTrue();</span>
+
+<span class="fc" id="L318">        return getRuntime().getFalse();</span>
+    }
+
+<span class="fc" id="L321">    private static abstract class RangeCallBack {</span>
+        abstract void call(ThreadContext context, IRubyObject arg);
+    }
+
+    private static final class StepBlockCallBack extends RangeCallBack implements BlockCallback {
+        final Block block;
+        IRubyObject iter;
+        final IRubyObject step;
+
+<span class="fc" id="L330">        StepBlockCallBack(Block block, IRubyObject iter, IRubyObject step) {</span>
+<span class="fc" id="L331">            this.block = block;</span>
+<span class="fc" id="L332">            this.iter = iter;</span>
+<span class="fc" id="L333">            this.step = step;</span>
+<span class="fc" id="L334">        }</span>
+
+        @Override
+        public IRubyObject call(ThreadContext context, IRubyObject[] args, Block originalBlock) {
+<span class="fc" id="L338">            call(context, args[0]);</span>
+<span class="fc" id="L339">            return context.runtime.getNil();</span>
+        }
+
+        @Override
+        void call(ThreadContext context, IRubyObject arg) {
+<span class="pc bpc" id="L344" title="1 of 2 branches missed.">            if (iter instanceof RubyFixnum) {</span>
+<span class="fc" id="L345">                iter = RubyFixnum.newFixnum(context.runtime, ((RubyFixnum)iter).getLongValue() - 1);</span>
+            } else {
+<span class="nc" id="L347">                iter = iter.callMethod(context, &quot;-&quot;, RubyFixnum.one(context.runtime));</span>
+            }
+<span class="fc bfc" id="L349" title="All 2 branches covered.">            if (iter == RubyFixnum.zero(context.runtime)) {</span>
+<span class="fc" id="L350">                block.yield(context, arg);</span>
+<span class="fc" id="L351">                iter = step;</span>
+            }
+<span class="fc" id="L353">        }</span>
+    }
+
+    private IRubyObject rangeLt(ThreadContext context, IRubyObject a, IRubyObject b) {
+<span class="fc" id="L357">        IRubyObject result = invokedynamic(context, a, MethodNames.OP_CMP, b);</span>
+<span class="pc bpc" id="L358" title="1 of 2 branches missed.">        if (result.isNil()) return null;</span>
+<span class="fc bfc" id="L359" title="All 2 branches covered.">        return RubyComparable.cmpint(context, result, a, b) &lt; 0 ? getRuntime().getTrue() : null;</span>
+    }
+
+    private IRubyObject rangeLe(ThreadContext context, IRubyObject a, IRubyObject b) {
+<span class="fc" id="L363">        IRubyObject result = invokedynamic(context, a, MethodNames.OP_CMP, b);</span>
+<span class="fc bfc" id="L364" title="All 2 branches covered.">        if (result.isNil()) return null;</span>
+<span class="fc" id="L365">        int c = RubyComparable.cmpint(context, result, a, b);</span>
+<span class="fc bfc" id="L366" title="All 2 branches covered.">        if (c == 0) return RubyFixnum.zero(getRuntime());</span>
+<span class="fc bfc" id="L367" title="All 2 branches covered.">        return c &lt; 0 ? getRuntime().getTrue() : null;</span>
+    }    
+
+    private void rangeEach(ThreadContext context, RangeCallBack callback) {
+<span class="fc" id="L371">        IRubyObject v = begin;</span>
+<span class="fc bfc" id="L372" title="All 2 branches covered.">        if (isExclusive) {</span>
+<span class="fc bfc" id="L373" title="All 2 branches covered.">            while (rangeLt(context, v, end) != null) {</span>
+<span class="fc" id="L374">                callback.call(context, v);</span>
+<span class="fc" id="L375">                v = v.callMethod(context, &quot;succ&quot;);</span>
+            }
+        } else {
+            IRubyObject c;
+<span class="pc bpc" id="L379" title="1 of 4 branches missed.">            while ((c = rangeLe(context, v, end)) != null &amp;&amp; c.isTrue()) {</span>
+<span class="fc" id="L380">                callback.call(context, v);</span>
+<span class="fc bfc" id="L381" title="All 2 branches covered.">                if (c == RubyFixnum.zero(getRuntime())) break;</span>
+<span class="fc" id="L382">                v = v.callMethod(context, &quot;succ&quot;);</span>
+            }
+        }
+<span class="fc" id="L385">    }</span>
+
+    @JRubyMethod
+    public IRubyObject to_a(ThreadContext context, final Block block) {
+<span class="fc" id="L389">        final Ruby runtime = context.runtime;</span>
+
+<span class="pc bpc" id="L391" title="1 of 4 branches missed.">        if (begin instanceof RubyFixnum &amp;&amp; end instanceof RubyFixnum) {</span>
+<span class="fc" id="L392">            long lim = ((RubyFixnum) end).getLongValue();</span>
+<span class="fc bfc" id="L393" title="All 2 branches covered.">            if (!isExclusive) lim++;</span>
+
+<span class="fc" id="L395">            long base = ((RubyFixnum) begin).getLongValue();</span>
+<span class="fc" id="L396">            long size = lim - base;</span>
+<span class="pc bpc" id="L397" title="1 of 2 branches missed.">            if (size &gt; Integer.MAX_VALUE) {</span>
+<span class="nc" id="L398">                throw runtime.newRangeError(&quot;Range size too large for to_a&quot;);</span>
+            }
+<span class="fc bfc" id="L400" title="All 2 branches covered.">            if (size &lt; 0) return RubyArray.newEmptyArray(runtime);</span>
+<span class="fc" id="L401">            IRubyObject[] array = new IRubyObject[(int)size];</span>
+<span class="fc bfc" id="L402" title="All 2 branches covered.">            for (int i = 0; i &lt; size; i++) {</span>
+<span class="fc" id="L403">                array[i] = RubyFixnum.newFixnum(runtime, base + i);</span>
+            }
+<span class="fc" id="L405">            return RubyArray.newArrayNoCopy(runtime, array);</span>
+        } else {
+<span class="fc" id="L407">            return RubyEnumerable.to_a(context, this);</span>
+        }
+    }
+
+    public IRubyObject each(ThreadContext context, final Block block) {
+<span class="nc" id="L412">        return each19(context, block);</span>
+    }
+
+    private void fixnumEach(ThreadContext context, Ruby runtime, Block block) {
+        // We must avoid integer overflows.
+<span class="fc" id="L417">        long to = ((RubyFixnum) end).getLongValue();</span>
+<span class="fc bfc" id="L418" title="All 2 branches covered.">        if (isExclusive) {</span>
+<span class="pc bpc" id="L419" title="1 of 2 branches missed.">            if (to == Long.MIN_VALUE) return;</span>
+<span class="fc" id="L420">            to--;</span>
+        }
+<span class="fc" id="L422">        long from = ((RubyFixnum) begin).getLongValue();</span>
+<span class="pc bpc" id="L423" title="1 of 2 branches missed.">        if (block.getBody().getArgumentType() == BlockBody.ZERO_ARGS) {</span>
+<span class="nc" id="L424">            IRubyObject nil = runtime.getNil();</span>
+            long i;
+<span class="nc bnc" id="L426" title="All 2 branches missed.">            for (i = from; i &lt; to; i++) {</span>
+<span class="nc" id="L427">                block.yield(context, nil);</span>
+            }
+<span class="nc bnc" id="L429" title="All 2 branches missed.">            if (i &lt;= to) {</span>
+<span class="nc" id="L430">                block.yield(context, nil);</span>
+            }
+<span class="nc" id="L432">        } else {</span>
+            long i;
+<span class="fc bfc" id="L434" title="All 2 branches covered.">            for (i = from; i &lt; to; i++) {</span>
+<span class="fc" id="L435">                block.yield(context, RubyFixnum.newFixnum(runtime, i));</span>
+            }
+<span class="fc bfc" id="L437" title="All 2 branches covered.">            if (i &lt;= to) {</span>
+<span class="fc" id="L438">                block.yield(context, RubyFixnum.newFixnum(runtime, i));</span>
+            }
+        }
+<span class="fc" id="L441">    }</span>
+
+    @JRubyMethod(name = &quot;each&quot;)
+    public IRubyObject each19(final ThreadContext context, final Block block) {
+<span class="fc" id="L445">        Ruby runtime = context.runtime;</span>
+<span class="fc bfc" id="L446" title="All 2 branches covered.">        if (!block.isGiven()) return enumeratorizeWithSize(context, this, &quot;each&quot;, enumSizeFn(context));</span>
+
+<span class="fc bfc" id="L448" title="All 2 branches covered.">        if (begin instanceof RubyTime) {</span>
+<span class="fc" id="L449">            throw runtime.newTypeError(&quot;can't iterate from Time&quot;);</span>
+<span class="fc bfc" id="L450" title="All 4 branches covered.">        } else if (begin instanceof RubyFixnum &amp;&amp; end instanceof RubyFixnum) {</span>
+<span class="fc" id="L451">            fixnumEach(context, runtime, block);</span>
+<span class="fc bfc" id="L452" title="All 2 branches covered.">        } else if (begin instanceof RubySymbol) {</span>
+<span class="fc" id="L453">            begin.asString().uptoCommon19(context, end.asString(), isExclusive, block, true);</span>
+        } else {
+<span class="fc" id="L455">            IRubyObject tmp = begin.checkStringType();</span>
+<span class="fc bfc" id="L456" title="All 2 branches covered.">            if(!tmp.isNil()) {</span>
+<span class="fc" id="L457">                ((RubyString) tmp).uptoCommon19(context, end, isExclusive, block);</span>
+            } else {
+<span class="fc bfc" id="L459" title="All 2 branches covered.">                if (!begin.respondsTo(&quot;succ&quot;)) throw getRuntime().newTypeError(&quot;can't iterate from &quot; +</span>
+<span class="fc" id="L460">                        begin.getMetaClass().getName());</span>
+<span class="fc" id="L461">                rangeEach(context, new RangeCallBack() {</span>
+                    @Override
+                    void call(ThreadContext context, IRubyObject arg) {
+<span class="fc" id="L464">                        block.yield(context, arg);</span>
+<span class="fc" id="L465">                    }</span>
+                });
+            }
+        }
+<span class="fc" id="L469">        return this;</span>
+    }
+
+    public IRubyObject step(ThreadContext context, IRubyObject step, Block block) {
+<span class="nc" id="L473">        return step19(context, step, block);</span>
+    }
+
+    public IRubyObject step(ThreadContext context, Block block) {
+<span class="nc" id="L477">        return step19(context, block);</span>
+    }
+
+    private void fixnumStep(ThreadContext context, Ruby runtime, long step, Block block) {
+        // We must avoid integer overflows.
+        // Any method calling this method must ensure that &quot;step&quot; is greater than 0.
+<span class="fc" id="L483">        long to = ((RubyFixnum) end).getLongValue();</span>
+<span class="fc bfc" id="L484" title="All 2 branches covered.">        if (isExclusive) {</span>
+<span class="pc bpc" id="L485" title="1 of 2 branches missed.">            if (to == Long.MIN_VALUE) return;</span>
+<span class="fc" id="L486">            to--;</span>
+        }
+<span class="fc" id="L488">        long tov = Long.MAX_VALUE - step;</span>
+<span class="pc bpc" id="L489" title="1 of 2 branches missed.">        if (to &lt; tov) tov = to;</span>
+        long i;
+<span class="fc bfc" id="L491" title="All 2 branches covered.">        for (i = ((RubyFixnum)begin).getLongValue(); i &lt;= tov; i += step) {</span>
+<span class="fc" id="L492">            block.yield(context, RubyFixnum.newFixnum(runtime, i));</span>
+        }
+<span class="pc bpc" id="L494" title="1 of 2 branches missed.">        if (i &lt;= to) {</span>
+<span class="nc" id="L495">            block.yield(context, RubyFixnum.newFixnum(runtime, i));</span>
+        }
+<span class="fc" id="L497">    }</span>
+
+    @JRubyMethod(name = &quot;step&quot;)
+    public IRubyObject step19(final ThreadContext context, final Block block) {
+<span class="pc bpc" id="L501" title="1 of 2 branches missed.">        return block.isGiven() ? stepCommon19(context, RubyFixnum.one(context.runtime), block) : enumeratorizeWithSize(context, this, &quot;step&quot;, stepSizeFn(context));</span>
+    }
+
+    @JRubyMethod(name = &quot;step&quot;)
+    public IRubyObject step19(final ThreadContext context, IRubyObject step, final Block block) {
+<span class="fc" id="L506">        Ruby runtime = context.runtime;</span>
+<span class="fc bfc" id="L507" title="All 2 branches covered.">        if (!block.isGiven()) return enumeratorizeWithSize(context, this, &quot;step&quot;, new IRubyObject[] { step }, stepSizeFn(context));</span>
+
+<span class="fc bfc" id="L509" title="All 2 branches covered.">        if (!(step instanceof RubyNumeric)) step = step.convertToInteger(&quot;to_int&quot;);</span>
+<span class="fc" id="L510">        IRubyObject zero = RubyFixnum.zero(runtime);</span>
+<span class="fc bfc" id="L511" title="All 2 branches covered.">        if (step.callMethod(context, &quot;&lt;&quot;, zero).isTrue()) throw runtime.newArgumentError(&quot;step can't be negative&quot;);</span>
+<span class="fc bfc" id="L512" title="All 2 branches covered.">        if (!step.callMethod(context, &quot;&gt;&quot;, zero).isTrue()) throw runtime.newArgumentError(&quot;step can't be 0&quot;);</span>
+<span class="fc" id="L513">        return stepCommon19(context, step, block);</span>
+    }
+
+    private IRubyObject stepCommon19(ThreadContext context, IRubyObject step, Block block) {
+<span class="fc" id="L517">        Ruby runtime = context.runtime;</span>
+<span class="fc bfc" id="L518" title="All 6 branches covered.">        if (begin instanceof RubyFixnum &amp;&amp; end instanceof RubyFixnum &amp;&amp; step instanceof RubyFixnum) {</span>
+<span class="fc" id="L519">            fixnumStep(context, runtime, ((RubyFixnum)step).getLongValue(), block);</span>
+<span class="fc bfc" id="L520" title="All 6 branches covered.">        } else if (begin instanceof RubyFloat || end instanceof RubyFloat || step instanceof RubyFloat) {</span>
+<span class="fc" id="L521">            RubyNumeric.floatStep19(context, runtime, begin, end, step, isExclusive, block);</span>
+<span class="pc bpc" id="L522" title="1 of 2 branches missed.">        } else if (begin instanceof RubyNumeric ||</span>
+<span class="pc bpc" id="L523" title="1 of 2 branches missed.">                        !TypeConverter.checkIntegerType(runtime, begin, &quot;to_int&quot;).isNil() ||</span>
+<span class="pc bpc" id="L524" title="1 of 2 branches missed.">                        !TypeConverter.checkIntegerType(runtime, end, &quot;to_int&quot;).isNil()) {</span>
+<span class="nc" id="L525">            numericStep19(context, runtime, step, block);</span>
+        } else {
+<span class="fc" id="L527">            IRubyObject tmp = begin.checkStringType();</span>
+<span class="fc bfc" id="L528" title="All 2 branches covered.">            if (!tmp.isNil()) {</span>
+<span class="fc" id="L529">                StepBlockCallBack callback = new StepBlockCallBack(block, RubyFixnum.one(runtime), step);</span>
+<span class="fc" id="L530">                Block blockCallback = CallBlock.newCallClosure(this, runtime.getRange(), Arity.singleArgument(), callback, context);</span>
+<span class="fc" id="L531">                ((RubyString)tmp).uptoCommon19(context, end, isExclusive, blockCallback);</span>
+<span class="fc" id="L532">            } else {</span>
+<span class="fc bfc" id="L533" title="All 2 branches covered.">                if (!begin.respondsTo(&quot;succ&quot;)) throw runtime.newTypeError(&quot;can't iterate from &quot; + begin.getMetaClass().getName());</span>
+                // range_each_func(range, step_i, b, e, args);
+<span class="fc" id="L535">                rangeEach(context, new StepBlockCallBack(block, RubyFixnum.one(runtime), step));</span>
+            }
+        }
+<span class="fc" id="L538">        return this;</span>
+    }
+
+    private void numericStep19(ThreadContext context, Ruby runtime, IRubyObject step, Block block) {
+<span class="nc bnc" id="L542" title="All 2 branches missed.">        final String method = isExclusive ? &quot;&lt;&quot; : &quot;&lt;=&quot;;</span>
+<span class="nc" id="L543">        IRubyObject beg = begin;</span>
+<span class="nc" id="L544">        long i = 0;</span>
+<span class="nc bnc" id="L545" title="All 2 branches missed.">        while (beg.callMethod(context, method, end).isTrue()) {</span>
+<span class="nc" id="L546">            block.yield(context, beg);</span>
+<span class="nc" id="L547">            i++;</span>
+<span class="nc" id="L548">            beg = begin.callMethod(context, &quot;+&quot;, RubyFixnum.newFixnum(runtime, i).callMethod(context, &quot;*&quot;, step));</span>
+        }
+<span class="nc" id="L550">    }</span>
+
+    private SizeFn enumSizeFn(final ThreadContext context) {
+<span class="fc" id="L553">        final RubyRange self = this;</span>
+<span class="fc" id="L554">        return new SizeFn() {</span>
+            @Override
+            public IRubyObject size(IRubyObject[] args) {
+<span class="nc" id="L557">                return self.size(context);</span>
+            }
+        };
+    }
+
+    private SizeFn stepSizeFn(final ThreadContext context) {
+<span class="fc" id="L563">        final RubyRange self = this;</span>
+<span class="fc" id="L564">        return new SizeFn() {</span>
+            @Override
+            public IRubyObject size(IRubyObject[] args) {
+<span class="nc" id="L567">                Ruby runtime = context.runtime;</span>
+<span class="nc" id="L568">                IRubyObject begin = self.begin;</span>
+<span class="nc" id="L569">                IRubyObject end = self.end;</span>
+                IRubyObject step;
+
+<span class="nc bnc" id="L572" title="All 4 branches missed.">                if (args != null &amp;&amp; args.length &gt; 0) {</span>
+<span class="nc" id="L573">                    step = args[0];</span>
+<span class="nc bnc" id="L574" title="All 2 branches missed.">                    if (!(step instanceof RubyNumeric)) {</span>
+<span class="nc" id="L575">                        step.convertToInteger();</span>
+                    }
+                } else {
+<span class="nc" id="L578">                    step = RubyFixnum.one(runtime);</span>
+                }
+
+<span class="nc bnc" id="L581" title="All 2 branches missed.">                if (step.callMethod(context, &quot;&lt;&quot;, RubyFixnum.zero(runtime)).isTrue()) {</span>
+<span class="nc" id="L582">                    throw runtime.newArgumentError(&quot;step can't be negative&quot;);</span>
+<span class="nc bnc" id="L583" title="All 2 branches missed.">                } else if (!step.callMethod(context, &quot;&gt;&quot;, RubyFixnum.zero(runtime)).isTrue()) {</span>
+<span class="nc" id="L584">                    throw runtime.newArgumentError(&quot;step can't be 0&quot;);</span>
+                }
+
+<span class="nc bnc" id="L587" title="All 4 branches missed.">                if (begin instanceof RubyNumeric &amp;&amp; end instanceof RubyNumeric) {</span>
+<span class="nc" id="L588">                    return intervalStepSize(context, begin, end, step, self.isExclusive);</span>
+                }
+
+<span class="nc" id="L591">                return runtime.getNil();</span>
+            }
+        };
+    }
+
+    public RubyBoolean include_p(ThreadContext context, IRubyObject obj) {
+<span class="nc" id="L597">        return (RubyBoolean) include_p19(context, obj);</span>
+    }
+
+    // framed for invokeSuper
+    @JRubyMethod(name = {&quot;include?&quot;, &quot;member?&quot;}, frame = true)
+    public IRubyObject include_p19(ThreadContext context, IRubyObject obj) {
+<span class="fc" id="L603">        Ruby runtime = context.runtime;</span>
+<span class="pc bpc" id="L604" title="1 of 4 branches missed.">        if (begin instanceof RubyNumeric || end instanceof RubyNumeric ||</span>
+<span class="fc bfc" id="L605" title="All 2 branches covered.">                !TypeConverter.convertToTypeWithCheck(begin, runtime.getInteger(), &quot;to_int&quot;).isNil() ||</span>
+<span class="pc bpc" id="L606" title="1 of 2 branches missed.">                !TypeConverter.convertToTypeWithCheck(end, runtime.getInteger(), &quot;to_int&quot;).isNil()) {</span>
+<span class="fc" id="L607">            return cover_p(context, obj);</span>
+<span class="pc bpc" id="L608" title="1 of 4 branches missed.">        } else if (begin instanceof RubyString &amp;&amp; end instanceof RubyString &amp;&amp;</span>
+<span class="fc bfc" id="L609" title="All 2 branches covered.">                ((RubyString) begin).getByteList().getRealSize() == 1 &amp;&amp;</span>
+<span class="pc bpc" id="L610" title="1 of 2 branches missed.">                ((RubyString) end).getByteList().getRealSize() == 1) {</span>
+<span class="pc bpc" id="L611" title="1 of 2 branches missed.">            if (obj.isNil()) return runtime.getFalse();</span>
+<span class="fc bfc" id="L612" title="All 2 branches covered.">            if (obj instanceof RubyString) {</span>
+<span class="fc" id="L613">                ByteList Vbytes = ((RubyString)obj).getByteList();</span>
+<span class="fc bfc" id="L614" title="All 2 branches covered.">                if (Vbytes.getRealSize() != 1) return runtime.getFalse();</span>
+<span class="fc" id="L615">                int v = Vbytes.getUnsafeBytes()[Vbytes.getBegin()] &amp; 0xff;</span>
+<span class="fc" id="L616">                ByteList Bbytes = ((RubyString)begin).getByteList();</span>
+<span class="fc" id="L617">                int b = Bbytes.getUnsafeBytes()[Bbytes.getBegin()] &amp; 0xff;</span>
+<span class="fc" id="L618">                ByteList Ebytes = ((RubyString)end).getByteList();</span>
+<span class="fc" id="L619">                int e = Ebytes.getUnsafeBytes()[Ebytes.getBegin()] &amp; 0xff;</span>
+<span class="pc bpc" id="L620" title="3 of 6 branches missed.">                if (Encoding.isAscii(v) &amp;&amp; Encoding.isAscii(b) &amp;&amp; Encoding.isAscii(e)) {</span>
+<span class="fc bfc" id="L621" title="All 8 branches covered.">                    if ((b &lt;= v &amp;&amp; v &lt; e) || (!isExclusive &amp;&amp; v == e)) return runtime.getTrue();</span>
+<span class="fc" id="L622">                    return runtime.getFalse();</span>
+                }
+            }
+        }
+<span class="fc" id="L626">        return Helpers.invokeSuper(context, this, obj, Block.NULL_BLOCK);</span>
+    }
+
+    @JRubyMethod(name = &quot;===&quot;)
+    public IRubyObject eqq_p19(ThreadContext context, IRubyObject obj) {
+<span class="fc" id="L631">        return callMethod(context, &quot;include?&quot;, obj);</span>
+    }
+    
+    @JRubyMethod(name = &quot;cover?&quot;)
+    public IRubyObject cover_p(ThreadContext context, IRubyObject obj) {
+<span class="fc bfc" id="L636" title="All 2 branches covered.">        if (rangeLe(context, begin, obj) == null) return context.runtime.getFalse(); // obj &lt; start...end</span>
+        
+<span class="fc bfc" id="L638" title="All 2 branches covered.">        return context.runtime.newBoolean(isExclusive ?  // begin &lt;= obj &lt; end || begin &lt;= obj &lt;= end</span>
+<span class="fc bfc" id="L639" title="All 4 branches covered.">                rangeLt(context, obj, end) != null : rangeLe(context, obj, end) != null);</span>
+    }
+
+    @JRubyMethod(frame = true)
+    public IRubyObject min(ThreadContext context, Block block) {
+<span class="fc" id="L644">        IRubyObject receiver = getReceiverForMinMax(context, end, block);</span>
+<span class="fc bfc" id="L645" title="All 2 branches covered.">        if(receiver.isNil()) return receiver;</span>
+<span class="fc" id="L646">        return Helpers.invokeSuper(context, receiver, block);</span>
+    }
+
+    @JRubyMethod(frame = true)
+    public IRubyObject max(ThreadContext context, Block block) {
+        IRubyObject rangeEnd;
+<span class="fc bfc" id="L652" title="All 2 branches covered.">        if (isExclusive) {</span>
+<span class="fc bfc" id="L653" title="All 2 branches covered.">            if (!(end instanceof RubyInteger)) {</span>
+<span class="fc" id="L654">                throw context.runtime.newTypeError(&quot;cannot exclude non Integer end value&quot;);</span>
+            }
+<span class="pc bpc" id="L656" title="1 of 2 branches missed.">            if (!(begin instanceof RubyInteger)) {</span>
+<span class="nc" id="L657">                throw context.runtime.newTypeError(&quot;cannot exclude end value with non Integer begin value&quot;);</span>
+            }
+<span class="fc" id="L659">            rangeEnd = RubyFixnum.newFixnum(context.runtime, ((RubyFixnum) end).getLongValue() - 1);</span>
+        } else {
+<span class="fc" id="L661">            rangeEnd = end;</span>
+        }
+
+<span class="fc" id="L664">        IRubyObject receiver = getReceiverForMinMax(context, rangeEnd, block);</span>
+<span class="fc bfc" id="L665" title="All 2 branches covered.">        if(receiver.isNil()) return receiver;</span>
+<span class="fc" id="L666">        return Helpers.invokeSuper(context, receiver, block);</span>
+    }
+
+    @JRubyMethod(frame = true)
+    public IRubyObject min(ThreadContext context, IRubyObject arg, Block block) {
+<span class="nc bnc" id="L671" title="All 2 branches missed.">        if (block.isGiven()) return Helpers.invokeSuper(context, this, block);</span>
+
+<span class="nc" id="L673">        return first(context, arg);</span>
+    }
+
+    @JRubyMethod(frame = true)
+    public IRubyObject max(ThreadContext context, IRubyObject arg, Block block) {
+<span class="nc bnc" id="L678" title="All 2 branches missed.">        if (block.isGiven()) return Helpers.invokeSuper(context, this, block);</span>
+
+<span class="nc" id="L680">        return ((RubyArray) last(context, arg)).reverse();</span>
+    }
+
+    private boolean rangeEmpty_p(ThreadContext context) {
+<span class="fc" id="L684">        int cmp = RubyComparable.cmpint(context, invokedynamic(context, begin, MethodNames.OP_CMP, end), begin, end);</span>
+<span class="fc bfc" id="L685" title="All 6 branches covered.">        return cmp &gt; 0 || (cmp == 0 &amp;&amp; isExclusive);</span>
+    }
+
+    private IRubyObject getReceiverForMinMax(ThreadContext context, IRubyObject rangeEnd, Block block) {
+        RubyObject receiver;
+
+<span class="fc bfc" id="L691" title="All 2 branches covered.">        if (block.isGiven()) {</span>
+<span class="fc" id="L692">            receiver = this;</span>
+        } else {
+<span class="fc bfc" id="L694" title="All 2 branches covered.">            if(rangeEmpty_p(context)) return context.runtime.getNil();</span>
+<span class="fc" id="L695">            receiver = RubyArray.newArray(context.runtime, new IRubyObject[]{begin, rangeEnd});</span>
+        }
+<span class="fc" id="L697">        return receiver;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject first(ThreadContext context) {
+<span class="fc" id="L702">        return begin;</span>
+    }
+    
+    @JRubyMethod
+    public IRubyObject begin(ThreadContext context) {
+<span class="fc" id="L707">        return begin;</span>
+    }    
+
+    @JRubyMethod
+    public IRubyObject first(ThreadContext context, IRubyObject arg) {
+<span class="fc" id="L712">        final Ruby runtime = context.runtime;</span>
+<span class="fc" id="L713">        final int num = RubyNumeric.num2int(arg);</span>
+<span class="fc bfc" id="L714" title="All 2 branches covered.">        if (num &lt; 0) {</span>
+<span class="fc" id="L715">            throw context.runtime.newArgumentError(&quot;negative array size (or size too big)&quot;);</span>
+        }
+<span class="fc" id="L717">        final RubyArray result = runtime.newArray(num);</span>
+        try {
+<span class="fc" id="L719">            RubyEnumerable.callEach(runtime, context, this, Arity.ONE_ARGUMENT, new BlockCallback() {</span>
+<span class="fc" id="L720">                int n = num;</span>
+                @Override
+                public IRubyObject call(ThreadContext ctx, IRubyObject[] largs, Block blk) {
+<span class="fc bfc" id="L723" title="All 2 branches covered.">                    if (n-- &lt;= 0) throw JumpException.SPECIAL_JUMP;</span>
+<span class="fc" id="L724">                    result.append(largs[0]);</span>
+<span class="fc" id="L725">                    return runtime.getNil();</span>
+                }
+            });
+<span class="fc" id="L728">        } catch (JumpException.SpecialJump sj) {}</span>
+<span class="fc" id="L729">        return result;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject last(ThreadContext context) {
+<span class="fc" id="L734">        return end;</span>
+    }
+    
+    @JRubyMethod
+    public IRubyObject end(ThreadContext context) {
+<span class="fc" id="L739">        return end;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject last(ThreadContext context, IRubyObject arg) {
+<span class="fc" id="L744">        return ((RubyArray) RubyKernel.new_array(context, this, this)).last(arg);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject size(ThreadContext context) {
+<span class="pc bpc" id="L749" title="1 of 4 branches missed.">        if (begin instanceof RubyNumeric &amp;&amp; end instanceof RubyNumeric) {</span>
+<span class="fc" id="L750">            return RubyNumeric.intervalStepSize(context, begin, end, RubyFixnum.one(context.runtime), isExclusive);</span>
+        }
+<span class="fc" id="L752">        return context.nil;</span>
+    }
+
+<span class="fc" id="L755">    private static final ObjectMarshal RANGE_MARSHAL = new ObjectMarshal() {</span>
+        @Override
+        public void marshalTo(Ruby runtime, Object obj, RubyClass type,
+                              MarshalStream marshalStream) throws IOException {
+<span class="fc" id="L759">            RubyRange range = (RubyRange)obj;</span>
+
+<span class="fc" id="L761">            marshalStream.registerLinkTarget(range);</span>
+<span class="fc" id="L762">            List&lt;Variable&lt;Object&gt;&gt; attrs = range.getVariableList();</span>
+
+<span class="fc" id="L764">            attrs.add(new VariableEntry&lt;Object&gt;(&quot;begin&quot;, range.begin));</span>
+<span class="fc" id="L765">            attrs.add(new VariableEntry&lt;Object&gt;(&quot;end&quot;, range.end));</span>
+<span class="fc bfc" id="L766" title="All 2 branches covered.">            attrs.add(new VariableEntry&lt;Object&gt;(&quot;excl&quot;, range.isExclusive ? runtime.getTrue() : runtime.getFalse()));</span>
+
+<span class="fc" id="L768">            marshalStream.dumpVariables(attrs);</span>
+<span class="fc" id="L769">        }</span>
+
+        @Override
+        public Object unmarshalFrom(Ruby runtime, RubyClass type,
+                                    UnmarshalStream unmarshalStream) throws IOException {
+<span class="fc" id="L774">            RubyRange range = (RubyRange)type.allocate();</span>
+            
+<span class="fc" id="L776">            unmarshalStream.registerLinkTarget(range);</span>
+
+            // FIXME: Maybe we can just gank these off the line directly?
+<span class="fc" id="L779">            unmarshalStream.defaultVariablesUnmarshal(range);</span>
+            
+<span class="fc" id="L781">            range.begin = (IRubyObject)range.removeInternalVariable(&quot;begin&quot;);</span>
+<span class="fc" id="L782">            range.end = (IRubyObject)range.removeInternalVariable(&quot;end&quot;);</span>
+<span class="fc" id="L783">            range.isExclusive = ((IRubyObject)range.removeInternalVariable(&quot;excl&quot;)).isTrue();</span>
+
+<span class="fc" id="L785">            return range;</span>
+        }
+    };
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

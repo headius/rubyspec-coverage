@@ -1,0 +1,538 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Main.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">Main.java</span></div><h1>Main.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2001 Alan Moore &lt;alan_moore@gmx.net&gt;
+ * Copyright (C) 2001-2002 Benoit Cerrina &lt;b.cerrina@wanadoo.fr&gt;
+ * Copyright (C) 2001-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004-2006 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2005 Kiel Hodges &lt;jruby-devel@selfsosoft.com&gt;
+ * Copyright (C) 2005 Jason Voegele &lt;jason@jvoegele.com&gt;
+ * Copyright (C) 2005 Tim Azzopardi &lt;tim@tigerfive.com&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import com.oracle.truffle.api.Truffle;
+import org.jruby.exceptions.MainExitException;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.exceptions.ThreadKill;
+import org.jruby.main.DripMain;
+import org.jruby.platform.Platform;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.SafePropertyAccessor;
+import org.jruby.util.cli.Options;
+import org.jruby.util.cli.OutputStrings;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+
+import java.io.File;
+import java.io.FileDescriptor;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.PrintStream;
+import java.lang.management.ManagementFactory;
+import java.lang.management.RuntimeMXBean;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/**
+ * Class used to launch the interpreter.
+ * This is the main class as defined in the jruby.mf manifest.
+ * It is very basic and does not support yet the same array of switches
+ * as the C interpreter.
+ *       Usage: java -jar jruby.jar [switches] [rubyfile.rb] [arguments]
+ *           -e 'command'    one line of script. Several -e's allowed. Omit [programfile]
+ * @author  jpetersen
+ */
+public class Main {
+<span class="fc" id="L79">    private static final Logger LOG = LoggerFactory.getLogger(&quot;Main&quot;);</span>
+    
+    public Main(RubyInstanceConfig config) {
+<span class="nc" id="L82">        this(config, false);</span>
+<span class="nc" id="L83">    }</span>
+
+    public Main(final InputStream in, final PrintStream out, final PrintStream err) {
+<span class="nc" id="L86">        this(new RubyInstanceConfig(in, out, err));</span>
+<span class="nc" id="L87">    }</span>
+
+    public Main() {
+<span class="nc" id="L90">        this(new RubyInstanceConfig());</span>
+<span class="nc" id="L91">    }</span>
+
+<span class="nc" id="L93">    private Main(RubyInstanceConfig config, boolean hardExit) {</span>
+<span class="nc" id="L94">        this.config = config;</span>
+<span class="nc" id="L95">        config.setHardExit(hardExit);</span>
+<span class="nc" id="L96">    }</span>
+
+<span class="fc" id="L98">    private Main(boolean hardExit) {</span>
+        // used only from main(String[]), so we process dotfile here
+<span class="fc" id="L100">        processDotfile();</span>
+<span class="fc" id="L101">        this.config = new RubyInstanceConfig();</span>
+<span class="fc" id="L102">        config.setHardExit(hardExit);</span>
+<span class="fc" id="L103">    }</span>
+    
+    private static List&lt;String&gt; getDotfileDirectories() {
+<span class="fc" id="L106">        ArrayList&lt;String&gt; searchList = new ArrayList&lt;String&gt;();</span>
+<span class="fc bfc" id="L107" title="All 2 branches covered.">        for (String homeProp : new String[] {&quot;user.dir&quot;, &quot;user.home&quot;}) {</span>
+<span class="fc" id="L108">            String home = SafePropertyAccessor.getProperty(homeProp);</span>
+<span class="pc bpc" id="L109" title="1 of 2 branches missed.">            if (home != null) searchList.add(home);</span>
+        }
+        
+        // JVM sometimes picks odd location for user.home based on a registry entry
+        // (see http://bugs.sun.com/view_bug.do?bug_id=4787931).  Add extra check in 
+        // case that entry is wrong. Add before user.home in search list.
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">        if (Platform.IS_WINDOWS) {</span>
+<span class="nc" id="L116">            String homeDrive = System.getenv(&quot;HOMEDRIVE&quot;);</span>
+<span class="nc" id="L117">            String homePath = System.getenv(&quot;HOMEPATH&quot;);</span>
+<span class="nc bnc" id="L118" title="All 4 branches missed.">            if (homeDrive != null &amp;&amp; homePath != null) {</span>
+<span class="nc" id="L119">                searchList.add(1, (homeDrive + homePath).replace('\\', '/'));</span>
+            }
+        }
+        
+<span class="fc" id="L123">        return searchList;</span>
+    }
+    
+    public static void processDotfile() {
+<span class="fc bfc" id="L127" title="All 2 branches covered.">        for (String home : getDotfileDirectories()) {</span>
+<span class="fc" id="L128">            File dotfile = new File(home + &quot;/.jrubyrc&quot;);</span>
+<span class="pc bpc" id="L129" title="1 of 2 branches missed.">            if (dotfile.exists()) loadJRubyProperties(dotfile);</span>
+<span class="fc" id="L130">        }</span>
+<span class="fc" id="L131">    }</span>
+
+    private static void loadJRubyProperties(File dotfile) {
+<span class="nc" id="L134">        FileInputStream fis = null;</span>
+        
+        try {
+            // update system properties with long form jruby properties from .jrubyrc
+<span class="nc" id="L138">            Properties sysProps = System.getProperties();</span>
+<span class="nc" id="L139">            Properties newProps = new Properties();</span>
+            // load properties and re-set as jruby.*
+<span class="nc" id="L141">            fis = new FileInputStream(dotfile);</span>
+<span class="nc" id="L142">            newProps.load(fis);</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">            for (Map.Entry entry : newProps.entrySet()) {</span>
+<span class="nc" id="L144">                sysProps.put(&quot;jruby.&quot; + entry.getKey(), entry.getValue());</span>
+<span class="nc" id="L145">            }</span>
+<span class="nc" id="L146">        } catch (IOException ioe) {</span>
+<span class="nc" id="L147">            LOG.debug(&quot;exception loading &quot; + dotfile, ioe);</span>
+<span class="nc" id="L148">        } catch (SecurityException se) {</span>
+<span class="nc" id="L149">            LOG.debug(&quot;exception loading &quot; + dotfile, se);</span>
+        } finally {
+<span class="nc bnc" id="L151" title="All 8 branches missed.">            if (fis != null) try {fis.close();} catch (Exception e) {}        </span>
+        }
+<span class="nc" id="L153">    }</span>
+
+    public static class Status {
+<span class="fc" id="L156">        private boolean isExit = false;</span>
+<span class="fc" id="L157">        private int status = 0;</span>
+
+        /**
+         * Creates a status object with the specified value and with explicit
+         * exit flag. An exit flag means that Kernel.exit() has been explicitly
+         * invoked during the run.
+         *
+         * @param status The status value.
+         */
+<span class="fc" id="L166">        Status(int status) {</span>
+<span class="fc" id="L167">            this.isExit = true;</span>
+<span class="fc" id="L168">            this.status = status;</span>
+<span class="fc" id="L169">        }</span>
+
+        /**
+         * Creates a status object with 0 value and no explicit exit flag.
+         */
+<span class="fc" id="L174">        Status() {}</span>
+
+<span class="fc" id="L176">        public boolean isExit() { return isExit; }</span>
+<span class="fc" id="L177">        public int getStatus() { return status; }</span>
+    }
+
+    /**
+     * This is the command-line entry point for JRuby, and should ONLY be used by
+     * Java when starting up JRuby from a command-line. Use other mechanisms when
+     * embedding JRuby into another application.
+     *
+     * @param args command-line args, provided by the JVM.
+     */
+    public static void main(String[] args) {
+<span class="fc" id="L188">        doGCJCheck();</span>
+        
+        Main main;
+
+<span class="pc bpc" id="L192" title="1 of 2 branches missed.">        if (DripMain.DRIP_RUNTIME != null) {</span>
+<span class="nc" id="L193">            main = new Main(DripMain.DRIP_CONFIG, true);</span>
+        } else {
+<span class="fc" id="L195">            main = new Main(true);</span>
+        }
+        
+        try {
+<span class="fc" id="L199">            Status status = main.run(args);</span>
+<span class="pc bpc" id="L200" title="1 of 2 branches missed.">            if (status.isExit()) {</span>
+<span class="nc" id="L201">                System.exit(status.getStatus());</span>
+            }
+<span class="nc" id="L203">        } catch (RaiseException rj) {</span>
+<span class="nc" id="L204">            System.exit(handleRaiseException(rj));</span>
+<span class="nc" id="L205">        } catch (Throwable t) {</span>
+            // If a Truffle exception gets this far it's a hard failure - don't try and dress it up as a Ruby exception
+
+<span class="nc bnc" id="L208" title="All 2 branches missed.">            if (main.config.getCompileMode() == RubyInstanceConfig.CompileMode.TRUFFLE) {</span>
+<span class="nc" id="L209">                System.err.println(&quot;Truffle internal error: &quot; + t);</span>
+<span class="nc" id="L210">                t.printStackTrace(System.err);</span>
+            } else {
+                // print out as a nice Ruby backtrace
+<span class="nc" id="L213">                System.err.println(ThreadContext.createRawBacktraceStringFromThrowable(t));</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">                while ((t = t.getCause()) != null) {</span>
+<span class="nc" id="L215">                    System.err.println(&quot;Caused by:&quot;);</span>
+<span class="nc" id="L216">                    System.err.println(ThreadContext.createRawBacktraceStringFromThrowable(t));</span>
+                }
+            }
+
+<span class="nc" id="L220">            System.exit(1);</span>
+<span class="pc" id="L221">        }</span>
+<span class="fc" id="L222">    }</span>
+
+    public Status run(String[] args) {
+        try {
+<span class="fc" id="L226">            config.processArguments(args);</span>
+<span class="fc" id="L227">            return internalRun();</span>
+<span class="nc" id="L228">        } catch (MainExitException mee) {</span>
+<span class="nc" id="L229">            return handleMainExit(mee);</span>
+<span class="nc" id="L230">        } catch (OutOfMemoryError oome) {</span>
+<span class="nc" id="L231">            return handleOutOfMemory(oome);</span>
+<span class="nc" id="L232">        } catch (StackOverflowError soe) {</span>
+<span class="nc" id="L233">            return handleStackOverflow(soe);</span>
+<span class="nc" id="L234">        } catch (UnsupportedClassVersionError ucve) {</span>
+<span class="nc" id="L235">            return handleUnsupportedClassVersion(ucve);</span>
+<span class="nc" id="L236">        } catch (ThreadKill kill) {</span>
+<span class="nc" id="L237">            return new Status();</span>
+        }
+    }
+
+    @Deprecated
+    public Status run() {
+<span class="nc" id="L243">        return internalRun();</span>
+    }
+
+    private Status internalRun() {
+<span class="fc" id="L247">        doShowVersion();</span>
+<span class="fc" id="L248">        doShowCopyright();</span>
+
+<span class="pc bpc" id="L250" title="1 of 2 branches missed.">        if (!config.getShouldRunInterpreter() ) {</span>
+<span class="nc" id="L251">            doPrintUsage(false);</span>
+<span class="nc" id="L252">            doPrintProperties();</span>
+<span class="nc" id="L253">            return new Status();</span>
+        }
+
+<span class="fc" id="L256">        InputStream in   = config.getScriptSource();</span>
+<span class="fc" id="L257">        String filename  = config.displayedFileName();</span>
+        
+<span class="fc" id="L259">        doProcessArguments(in);</span>
+        
+        Ruby _runtime;
+
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">        if (DripMain.DRIP_RUNTIME != null) {</span>
+            // use drip's runtime, reinitializing config
+<span class="nc" id="L265">            _runtime = DripMain.DRIP_RUNTIME;</span>
+<span class="nc" id="L266">            _runtime.reinitialize(true);</span>
+        } else {
+<span class="fc" id="L268">            _runtime = Ruby.newInstance(config);</span>
+        }
+        
+<span class="fc" id="L271">        final Ruby runtime = _runtime;</span>
+<span class="fc" id="L272">        final AtomicBoolean didTeardown = new AtomicBoolean();</span>
+        
+<span class="pc bpc" id="L274" title="1 of 2 branches missed.">        if (config.isHardExit()) {</span>
+            // we're the command-line JRuby, and should set a shutdown hook for
+            // teardown.
+<span class="fc" id="L277">            Runtime.getRuntime().addShutdownHook(new Thread() {</span>
+                public void run() {
+<span class="pc bpc" id="L279" title="1 of 2 branches missed.">                    if (didTeardown.compareAndSet(false, true)) {</span>
+<span class="nc" id="L280">                        runtime.tearDown();</span>
+                    }
+<span class="fc" id="L282">                }</span>
+            });
+        }
+
+        try {
+<span class="fc" id="L287">            doSetContextClassLoader(runtime);</span>
+
+<span class="pc bpc" id="L289" title="1 of 2 branches missed.">            if (in == null) {</span>
+                // no script to run, return success
+<span class="nc" id="L291">                return new Status();</span>
+<span class="pc bpc" id="L292" title="3 of 4 branches missed.">            } else if (config.isXFlag() &amp;&amp; !config.hasShebangLine()) {</span>
+                // no shebang was found and x option is set
+<span class="nc" id="L294">                throw new MainExitException(1, &quot;jruby: no Ruby script found in input (LoadError)&quot;);</span>
+<span class="fc bfc" id="L295" title="All 2 branches covered.">            } else if (config.getShouldCheckSyntax()) {</span>
+                // check syntax only and exit
+<span class="fc" id="L297">                return doCheckSyntax(runtime, in, filename);</span>
+            } else {
+                // proceed to run the script
+<span class="fc" id="L300">                return doRunFromMain(runtime, in, filename);</span>
+            }
+        } finally {
+<span class="pc bpc" id="L303" title="6 of 8 branches missed.">            if (didTeardown.compareAndSet(false, true)) {</span>
+<span class="pc" id="L304">                runtime.tearDown();</span>
+            }
+        }
+    }
+
+    private Status handleUnsupportedClassVersion(UnsupportedClassVersionError ucve) {
+<span class="nc" id="L310">        config.getError().println(&quot;Error: Some library (perhaps JRuby) was built with a later JVM version.&quot;);</span>
+<span class="nc" id="L311">        config.getError().println(&quot;Please use libraries built with the version you intend to use or an earlier one.&quot;);</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">        if (config.isVerbose()) {</span>
+<span class="nc" id="L313">            config.getError().println(&quot;Exception trace follows:&quot;);</span>
+<span class="nc" id="L314">            ucve.printStackTrace();</span>
+        } else {
+<span class="nc" id="L316">            config.getError().println(&quot;Specify -w for full UnsupportedClassVersionError stack trace&quot;);</span>
+        }
+<span class="nc" id="L318">        return new Status(1);</span>
+    }
+
+    /**
+     * Print a nicer stack size error since Rubyists aren't used to seeing this.
+     */
+    private Status handleStackOverflow(StackOverflowError soe) {
+<span class="nc" id="L325">        String memoryMax = getRuntimeFlagValue(&quot;-Xss&quot;);</span>
+
+<span class="nc bnc" id="L327" title="All 2 branches missed.">        if (memoryMax != null) {</span>
+<span class="nc" id="L328">            config.getError().println(&quot;Error: Your application used more stack memory than the safety cap of &quot; + memoryMax + &quot;.&quot;);</span>
+        } else {
+<span class="nc" id="L330">            config.getError().println(&quot;Error: Your application used more stack memory than the default safety cap.&quot;);</span>
+        }
+<span class="nc" id="L332">        config.getError().println(&quot;Specify -J-Xss####k to increase it (#### = cap size in KB).&quot;);</span>
+
+<span class="nc bnc" id="L334" title="All 2 branches missed.">        if (config.isVerbose()) {</span>
+<span class="nc" id="L335">            config.getError().println(&quot;Exception trace follows:&quot;);</span>
+<span class="nc" id="L336">            soe.printStackTrace(config.getError());</span>
+        } else {
+<span class="nc" id="L338">            config.getError().println(&quot;Specify -w for full StackOverflowError stack trace&quot;);</span>
+        }
+
+<span class="nc" id="L341">        return new Status(1);</span>
+    }
+
+    /**
+     * Print a nicer memory error since Rubyists aren't used to seeing this.
+     */
+    private Status handleOutOfMemory(OutOfMemoryError oome) {
+<span class="nc" id="L348">        System.gc(); // try to clean up a bit of space, hopefully, so we can report this error</span>
+
+<span class="nc" id="L350">        String oomeMessage = oome.getMessage();</span>
+
+<span class="nc bnc" id="L352" title="All 2 branches missed.">        if (oomeMessage.contains(&quot;PermGen&quot;)) { // report permgen memory error</span>
+<span class="nc" id="L353">            config.getError().println(&quot;Error: Your application exhausted PermGen area of the heap.&quot;);</span>
+<span class="nc" id="L354">            config.getError().println(&quot;Specify -J-XX:MaxPermSize=###M to increase it (### = PermGen size in MB).&quot;);</span>
+
+        } else { // report heap memory error
+
+<span class="nc" id="L358">            String memoryMax = getRuntimeFlagValue(&quot;-Xmx&quot;);</span>
+
+<span class="nc bnc" id="L360" title="All 2 branches missed.">            if (memoryMax != null) {</span>
+<span class="nc" id="L361">                config.getError().println(&quot;Error: Your application used more memory than the safety cap of &quot; + memoryMax + &quot;.&quot;);</span>
+            } else {
+<span class="nc" id="L363">                config.getError().println(&quot;Error: Your application used more memory than the default safety cap.&quot;);</span>
+            }
+<span class="nc" id="L365">            config.getError().println(&quot;Specify -J-Xmx####m to increase it (#### = cap size in MB).&quot;);</span>
+        }
+        
+<span class="nc bnc" id="L368" title="All 2 branches missed.">        if (config.isVerbose()) {</span>
+<span class="nc" id="L369">            config.getError().println(&quot;Exception trace follows:&quot;);</span>
+<span class="nc" id="L370">            oome.printStackTrace(config.getError());</span>
+        } else {
+<span class="nc" id="L372">            config.getError().println(&quot;Specify -w for full OutOfMemoryError stack trace&quot;);</span>
+        }
+
+<span class="nc" id="L375">        return new Status(1);</span>
+    }
+
+    private String getRuntimeFlagValue(String prefix) {
+<span class="nc" id="L379">        RuntimeMXBean runtime = ManagementFactory.getRuntimeMXBean();</span>
+
+<span class="nc bnc" id="L381" title="All 2 branches missed.">        for (String param : runtime.getInputArguments()) {</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">            if (param.startsWith(prefix)) {</span>
+<span class="nc" id="L383">                return param.substring(prefix.length()).toUpperCase();</span>
+            }
+<span class="nc" id="L385">        }</span>
+
+<span class="nc" id="L387">        return null;</span>
+    }
+
+    private Status handleMainExit(MainExitException mee) {
+<span class="nc bnc" id="L391" title="All 2 branches missed.">        if (!mee.isAborted()) {</span>
+<span class="nc" id="L392">            config.getOutput().println(mee.getMessage());</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">            if (mee.isUsageError()) {</span>
+<span class="nc" id="L394">                doPrintUsage(true);</span>
+            }
+        }
+<span class="nc" id="L397">        return new Status(mee.getStatus());</span>
+    }
+
+    private Status doRunFromMain(Ruby runtime, InputStream in, String filename) {
+<span class="fc" id="L401">        long now = -1;</span>
+        try {
+<span class="fc" id="L403">            doCheckSecurityManager();</span>
+
+<span class="fc" id="L405">            runtime.runFromMain(in, filename);</span>
+
+<span class="fc" id="L407">            runtime.shutdownTruffleBridge();</span>
+
+<span class="fc" id="L409">        } catch (RaiseException rj) {</span>
+<span class="fc" id="L410">            return new Status(handleRaiseException(rj));</span>
+<span class="fc" id="L411">        }</span>
+<span class="fc" id="L412">        return new Status();</span>
+    }
+
+    private Status doCheckSyntax(Ruby runtime, InputStream in, String filename) throws RaiseException {
+        // check primary script
+<span class="fc" id="L417">        boolean status = checkStreamSyntax(runtime, in, filename);</span>
+        
+        // check other scripts specified on argv
+<span class="pc bpc" id="L420" title="1 of 2 branches missed.">        for (String arg : config.getArgv()) {</span>
+<span class="nc bnc" id="L421" title="All 4 branches missed.">            status = status &amp;&amp; checkFileSyntax(runtime, arg);</span>
+        }
+        
+<span class="pc bpc" id="L424" title="1 of 2 branches missed.">        return new Status(status ? 0 : -1);</span>
+    }
+    
+    private boolean checkFileSyntax(Ruby runtime, String filename) {
+<span class="nc" id="L428">        File file = new File(filename);</span>
+<span class="nc bnc" id="L429" title="All 2 branches missed.">        if (file.exists()) {</span>
+            try {
+<span class="nc" id="L431">                return checkStreamSyntax(runtime, new FileInputStream(file), filename);</span>
+<span class="nc" id="L432">            } catch (FileNotFoundException fnfe) {</span>
+<span class="nc" id="L433">                config.getError().println(&quot;File not found: &quot; + filename);</span>
+<span class="nc" id="L434">                return false;</span>
+            }
+        } else {
+<span class="nc" id="L437">            return false;</span>
+        }
+    }
+    
+    private boolean checkStreamSyntax(Ruby runtime, InputStream in, String filename) {
+        try {
+<span class="fc" id="L443">            runtime.parseFromMain(in, filename);</span>
+<span class="fc" id="L444">            config.getOutput().println(&quot;Syntax OK&quot;);</span>
+<span class="fc" id="L445">            return true;</span>
+<span class="nc" id="L446">        } catch (RaiseException re) {</span>
+<span class="nc bnc" id="L447" title="All 2 branches missed.">            if (re.getException().getMetaClass().getBaseName().equals(&quot;SyntaxError&quot;)) {</span>
+<span class="nc" id="L448">                config.getError().println(&quot;SyntaxError in &quot; + re.getException().message(runtime.getCurrentContext()));</span>
+            } else {
+<span class="nc" id="L450">                throw re;</span>
+            }
+<span class="nc" id="L452">            return false;</span>
+        }
+    }
+
+    private void doSetContextClassLoader(Ruby runtime) {
+        // set thread context JRuby classloader here, for the main thread
+        try {
+<span class="fc" id="L459">            Thread.currentThread().setContextClassLoader(runtime.getJRubyClassLoader());</span>
+<span class="nc" id="L460">        } catch (SecurityException se) {</span>
+            // can't set TC classloader
+<span class="nc bnc" id="L462" title="All 2 branches missed.">            if (runtime.getInstanceConfig().isVerbose()) {</span>
+<span class="nc" id="L463">                config.getError().println(&quot;WARNING: Security restrictions disallowed setting context classloader for main thread.&quot;);</span>
+            }
+<span class="fc" id="L465">        }</span>
+<span class="fc" id="L466">    }</span>
+
+    private void doProcessArguments(InputStream in) {
+<span class="fc" id="L469">        config.processArguments(config.parseShebangOptions(in));</span>
+<span class="fc" id="L470">    }</span>
+
+    private void doPrintProperties() {
+<span class="nc bnc" id="L473" title="All 2 branches missed.">        if (config.getShouldPrintProperties()) {</span>
+<span class="nc" id="L474">            config.getOutput().print(OutputStrings.getPropertyHelp());</span>
+        }
+<span class="nc" id="L476">    }</span>
+
+    private void doPrintUsage(boolean force) {
+<span class="nc bnc" id="L479" title="All 4 branches missed.">        if (config.getShouldPrintUsage() || force) {</span>
+<span class="nc" id="L480">            config.getOutput().print(OutputStrings.getBasicUsageHelp());</span>
+        }
+<span class="nc" id="L482">    }</span>
+
+    private void doShowCopyright() {
+<span class="pc bpc" id="L485" title="1 of 2 branches missed.">        if (config.isShowCopyright()) {</span>
+<span class="nc" id="L486">            config.getOutput().println(OutputStrings.getCopyrightString());</span>
+        }
+<span class="fc" id="L488">    }</span>
+
+    private void doShowVersion() {
+<span class="fc bfc" id="L491" title="All 2 branches covered.">        if (config.isShowVersion()) {</span>
+<span class="fc" id="L492">            config.getOutput().println(OutputStrings.getVersionString());</span>
+        }
+<span class="fc" id="L494">    }</span>
+
+    private static void doGCJCheck() {
+        // Ensure we're not running on GCJ, since it's not supported and leads to weird errors
+<span class="pc bpc" id="L498" title="1 of 2 branches missed.">        if (Platform.IS_GCJ) {</span>
+<span class="nc" id="L499">            System.err.println(&quot;Fatal: GCJ (GNU Compiler for Java) is not supported by JRuby.&quot;);</span>
+<span class="nc" id="L500">            System.exit(1);</span>
+        }
+<span class="fc" id="L502">    }</span>
+
+    private void doCheckSecurityManager() {
+<span class="pc bpc" id="L505" title="3 of 4 branches missed.">        if (Main.class.getClassLoader() == null &amp;&amp; System.getSecurityManager() != null) {</span>
+<span class="nc" id="L506">            System.err.println(&quot;Warning: security manager and JRuby running from boot classpath.\n&quot; +</span>
+                    &quot;Run from jruby.jar or set env VERIFY_JRUBY=true to enable security.&quot;);
+        }
+<span class="fc" id="L509">    }</span>
+
+    /**
+     * This is only used from the main(String[]) path, in which case the err for this
+     * run should be System.err. In order to avoid the Ruby err being closed and unable
+     * to write, we use System.err unconditionally.
+     *
+     * @param rj
+     * @return
+     */
+    private static int handleRaiseException(RaiseException rj) {
+<span class="fc" id="L520">        RubyException raisedException = rj.getException();</span>
+<span class="fc" id="L521">        Ruby runtime = raisedException.getRuntime();</span>
+<span class="fc bfc" id="L522" title="All 2 branches covered.">        if (runtime.getSystemExit().isInstance(raisedException)) {</span>
+<span class="fc" id="L523">            IRubyObject status = raisedException.callMethod(runtime.getCurrentContext(), &quot;status&quot;);</span>
+<span class="pc bpc" id="L524" title="2 of 4 branches missed.">            if (status != null &amp;&amp; !status.isNil()) {</span>
+<span class="fc" id="L525">                return RubyNumeric.fix2int(status);</span>
+            } else {
+<span class="nc" id="L527">                return 0;</span>
+            }
+        } else {
+<span class="fc" id="L530">            System.err.print(runtime.getInstanceConfig().getTraceType().printBacktrace(raisedException, runtime.getPosix().isatty(FileDescriptor.err)));</span>
+<span class="fc" id="L531">            return 1;</span>
+        }
+    }
+
+    private final RubyInstanceConfig config;
+}
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

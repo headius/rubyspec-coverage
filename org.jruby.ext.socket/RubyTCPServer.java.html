@@ -1,0 +1,283 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyTCPServer.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.socket</a> &gt; <span class="el_source">RubyTCPServer.java</span></div><h1>RubyTCPServer.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2007 Ola Bini &lt;ola@ologix.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.ext.socket;
+
+import java.io.IOException;
+import java.net.BindException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
+import java.net.SocketException;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
+
+import org.jruby.Ruby;
+import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyString;
+import org.jruby.RubyThread;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.Visibility;
+import org.jruby.runtime.builtin.IRubyObject;
+
+import org.jruby.util.io.SelectorFactory;
+import java.nio.channels.spi.SelectorProvider;
+
+/**
+ * @author &lt;a href=&quot;mailto:ola.bini@ki.se&quot;&gt;Ola Bini&lt;/a&gt;
+ */
+@JRubyClass(name=&quot;TCPServer&quot;, parent=&quot;TCPSocket&quot;)
+public class RubyTCPServer extends RubyTCPSocket {
+    static void createTCPServer(Ruby runtime) {
+<span class="fc" id="L63">        RubyClass rb_cTCPServer = runtime.defineClass(</span>
+<span class="fc" id="L64">                &quot;TCPServer&quot;, runtime.getClass(&quot;TCPSocket&quot;), TCPSERVER_ALLOCATOR);</span>
+
+<span class="fc" id="L66">        rb_cTCPServer.defineAnnotatedMethods(RubyTCPServer.class);</span>
+
+<span class="fc" id="L68">        runtime.getObject().setConstant(&quot;TCPserver&quot;,rb_cTCPServer);</span>
+<span class="fc" id="L69">    }</span>
+
+<span class="fc" id="L71">    private static ObjectAllocator TCPSERVER_ALLOCATOR = new ObjectAllocator() {</span>
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L73">            return new RubyTCPServer(runtime, klass);</span>
+        }
+    };
+
+    public RubyTCPServer(Ruby runtime, RubyClass type) {
+<span class="nc" id="L78">        super(runtime, type);</span>
+<span class="nc" id="L79">    }</span>
+
+    @JRubyMethod(name = &quot;initialize&quot;, required = 1, optional = 1, visibility = Visibility.PRIVATE)
+    public IRubyObject initialize(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L83">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L84">        IRubyObject _host = args[0];</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">        IRubyObject _port = args.length &gt; 1 ? args[1] : context.nil;</span>
+
+        String host;
+<span class="nc bnc" id="L88" title="All 6 branches missed.">        if(_host.isNil()|| ((_host instanceof RubyString) &amp;&amp; ((RubyString) _host).isEmpty())) {</span>
+<span class="nc" id="L89">            host = &quot;0.0.0.0&quot;;</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        } else if (_host instanceof RubyFixnum) {</span>
+            // numeric host, use it for port
+<span class="nc" id="L92">            _port = _host;</span>
+<span class="nc" id="L93">            host = &quot;0.0.0.0&quot;;</span>
+        } else {
+<span class="nc" id="L95">            host = _host.convertToString().toString();</span>
+        }
+
+<span class="nc" id="L98">        int port = SocketUtils.getPortFrom(context, _port);</span>
+
+        try {
+<span class="nc" id="L101">            InetAddress addr = InetAddress.getByName(host);</span>
+
+<span class="nc" id="L103">            ServerSocketChannel ssc = ServerSocketChannel.open();</span>
+<span class="nc" id="L104">            InetSocketAddress socket_address = new InetSocketAddress(addr, port);</span>
+
+<span class="nc" id="L106">            ssc.socket().bind(socket_address);</span>
+
+<span class="nc" id="L108">            initSocket(newChannelFD(runtime, ssc));</span>
+
+<span class="nc" id="L110">        } catch(UnknownHostException e) {</span>
+<span class="nc" id="L111">            throw SocketUtils.sockerr(runtime, &quot;initialize: name or service not known&quot;);</span>
+
+<span class="nc" id="L113">        } catch(BindException e) {</span>
+<span class="nc" id="L114">            throw runtime.newErrnoEADDRFromBindException(e);</span>
+
+<span class="nc" id="L116">        } catch(SocketException e) {</span>
+<span class="nc" id="L117">            String msg = e.getMessage();</span>
+
+<span class="nc bnc" id="L119" title="All 2 branches missed.">            if(msg.indexOf(&quot;Permission denied&quot;) != -1) {</span>
+<span class="nc" id="L120">                throw runtime.newErrnoEACCESError(&quot;bind(2)&quot;);</span>
+            } else {
+<span class="nc" id="L122">                throw SocketUtils.sockerr(runtime, &quot;initialize: name or service not known&quot;);</span>
+            }
+
+<span class="nc" id="L125">        } catch(IOException e) {</span>
+<span class="nc" id="L126">            throw SocketUtils.sockerr(runtime, &quot;initialize: name or service not known&quot;);</span>
+
+<span class="nc" id="L128">        } catch (IllegalArgumentException iae) {</span>
+<span class="nc" id="L129">            throw SocketUtils.sockerr(runtime, iae.getMessage());</span>
+<span class="nc" id="L130">        }</span>
+
+<span class="nc" id="L132">        return this;</span>
+    }
+
+    @JRubyMethod(name = &quot;accept&quot;)
+    public IRubyObject accept(ThreadContext context) {
+<span class="nc" id="L137">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L138">        RubyTCPSocket socket = new RubyTCPSocket(runtime, runtime.getClass(&quot;TCPSocket&quot;));</span>
+
+        try {
+<span class="nc" id="L141">            RubyThread thread = context.getThread();</span>
+
+            while (true) {
+<span class="nc" id="L144">                boolean ready = thread.select(this, SelectionKey.OP_ACCEPT);</span>
+
+<span class="nc bnc" id="L146" title="All 2 branches missed.">                if (!ready) {</span>
+                    // we were woken up without being selected...poll for thread events and go back to sleep
+<span class="nc" id="L148">                    context.pollThreadEvents();</span>
+
+                } else {
+<span class="nc" id="L151">                    SocketChannel connected = getServerSocketChannel().accept();</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">                    if (connected == null) continue;</span>
+
+<span class="nc" id="L154">                    connected.finishConnect();</span>
+
+                    // Force the client socket to be blocking
+<span class="nc" id="L157">                    synchronized (connected.blockingLock()) {</span>
+<span class="nc" id="L158">                        connected.configureBlocking(false);</span>
+<span class="nc" id="L159">                        connected.configureBlocking(true);</span>
+<span class="nc" id="L160">                    }</span>
+
+                    // otherwise one key has been selected (ours) so we get the channel and hand it off
+<span class="nc" id="L163">                    socket.initSocket(newChannelFD(runtime, connected));</span>
+
+<span class="nc" id="L165">                    return socket;</span>
+                }
+<span class="nc" id="L167">            }</span>
+
+<span class="nc" id="L169">        } catch(IOException e) {</span>
+<span class="nc" id="L170">            throw SocketUtils.sockerr(runtime, &quot;problem when accepting&quot;);</span>
+        }
+    }
+
+    @JRubyMethod(name = &quot;accept_nonblock&quot;)
+    public IRubyObject accept_nonblock(ThreadContext context) {
+<span class="nc" id="L176">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L177">        RubyTCPSocket socket = new RubyTCPSocket(runtime, runtime.getClass(&quot;TCPSocket&quot;));</span>
+<span class="nc" id="L178">        Selector selector = null;</span>
+<span class="nc" id="L179">        ServerSocketChannel ssc = getServerSocketChannel();</span>
+
+<span class="nc" id="L181">        synchronized (ssc.blockingLock()) {</span>
+<span class="nc" id="L182">            boolean oldBlocking = ssc.isBlocking();</span>
+
+            try {
+<span class="nc" id="L185">                ssc.configureBlocking(false);</span>
+<span class="nc" id="L186">                selector = SelectorFactory.openWithRetryFrom(runtime, SelectorProvider.provider());</span>
+
+<span class="nc" id="L188">                boolean ready = context.getThread().select(this, SelectionKey.OP_ACCEPT, 0);</span>
+
+<span class="nc bnc" id="L190" title="All 2 branches missed.">                if (!ready) {</span>
+                    // no connection immediately accepted, let them try again
+<span class="nc" id="L192">                    throw runtime.newErrnoEAGAINError(&quot;Resource temporarily unavailable&quot;);</span>
+
+                } else {
+                    // otherwise one key has been selected (ours) so we get the channel and hand it off
+<span class="nc" id="L196">                    socket.initSocket(newChannelFD(runtime, ssc.accept()));</span>
+
+<span class="nc" id="L198">                    return socket;</span>
+                }
+
+<span class="nc" id="L201">            } catch(IOException e) {</span>
+<span class="nc" id="L202">                throw SocketUtils.sockerr(context.runtime, &quot;problem when accepting&quot;);</span>
+
+            } finally {
+<span class="nc" id="L205">                try {</span>
+<span class="nc bnc" id="L206" title="All 4 branches missed.">                    if (selector != null) selector.close();</span>
+<span class="nc" id="L207">                } catch (Exception e) {</span>
+<span class="nc" id="L208">                }</span>
+<span class="nc" id="L209">                try {ssc.configureBlocking(oldBlocking);} catch (IOException ioe) {}</span>
+
+            }
+<span class="nc" id="L212">        }</span>
+    }
+
+    @JRubyMethod(name = &quot;listen&quot;, required = 1)
+    public IRubyObject listen(ThreadContext context, IRubyObject backlog) {
+<span class="nc" id="L217">        return RubyFixnum.zero(context.runtime);</span>
+    }
+
+    @JRubyMethod(name = &quot;peeraddr&quot;, rest = true)
+    public IRubyObject peeraddr(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L222">        throw context.runtime.newNotImplementedError(&quot;not supported&quot;);</span>
+    }
+
+    @JRubyMethod(name = &quot;getpeername&quot;, rest = true)
+    public IRubyObject getpeername(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L227">        throw context.runtime.newNotImplementedError(&quot;not supported&quot;);</span>
+    }
+
+    @JRubyMethod(rest = true, meta = true)
+    public static IRubyObject open(ThreadContext context, IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="nc" id="L232">        IRubyObject tcpServer = recv.callMethod(context, &quot;new&quot;, args);</span>
+
+<span class="nc bnc" id="L234" title="All 2 branches missed.">        if (!block.isGiven()) return tcpServer;</span>
+
+        try {
+<span class="nc" id="L237">            return block.yield(context, tcpServer);</span>
+        } finally {
+<span class="nc" id="L239">            tcpServer.callMethod(context, &quot;close&quot;);</span>
+        }
+    }
+
+    public ServerSocketChannel getServerSocketChannel() {
+<span class="nc" id="L244">        return (ServerSocketChannel)getChannel();</span>
+    }
+
+    @Override
+    public IRubyObject shutdown(ThreadContext context, IRubyObject[] args) {
+        // act like a platform that does not support shutdown for server sockets
+<span class="nc" id="L250">        throw context.runtime.newErrnoENOTCONNError();</span>
+    }
+
+    @Override
+    public IRubyObject gets(ThreadContext context) {
+<span class="nc" id="L255">        throw context.runtime.newErrnoENOTCONNError();</span>
+    }
+
+    @Override
+    public IRubyObject gets(ThreadContext context, IRubyObject sep) {
+<span class="nc" id="L260">        throw context.runtime.newErrnoENOTCONNError();</span>
+    }
+
+    @Override
+    public IRubyObject gets(ThreadContext context, IRubyObject sep, IRubyObject limit) {
+<span class="nc" id="L265">        throw context.runtime.newErrnoENOTCONNError();</span>
+    }
+
+    @Deprecated
+    public IRubyObject accept() {
+<span class="nc" id="L270">        return accept(getRuntime().getCurrentContext());</span>
+    }
+
+    @Deprecated
+    public IRubyObject listen(IRubyObject backlog) {
+<span class="nc" id="L275">        return listen(getRuntime().getCurrentContext(), backlog);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject open(IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="nc" id="L280">        return open(recv.getRuntime().getCurrentContext(), recv, args, block);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

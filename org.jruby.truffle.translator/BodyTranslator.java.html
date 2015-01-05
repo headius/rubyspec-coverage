@@ -1,0 +1,2619 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>BodyTranslator.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.translator</a> &gt; <span class="el_source">BodyTranslator.java</span></div><h1>BodyTranslator.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2013, 2015 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.translator;
+
+import com.oracle.truffle.api.frame.FrameSlot;
+import com.oracle.truffle.api.nodes.NodeUtil;
+import com.oracle.truffle.api.source.Source;
+import com.oracle.truffle.api.source.SourceSection;
+import org.joni.NameEntry;
+import org.joni.Regex;
+import org.joni.Syntax;
+import org.jruby.ast.*;
+import org.jruby.common.IRubyWarnings;
+import org.jruby.lexer.yacc.InvalidSourcePosition;
+import org.jruby.truffle.nodes.*;
+import org.jruby.truffle.nodes.DefinedNode;
+import org.jruby.truffle.nodes.ForNode;
+import org.jruby.truffle.nodes.cast.*;
+import org.jruby.truffle.nodes.cast.LambdaNode;
+import org.jruby.truffle.nodes.control.AndNode;
+import org.jruby.truffle.nodes.control.BreakNode;
+import org.jruby.truffle.nodes.control.*;
+import org.jruby.truffle.nodes.control.EnsureNode;
+import org.jruby.truffle.nodes.control.IfNode;
+import org.jruby.truffle.nodes.control.NextNode;
+import org.jruby.truffle.nodes.control.OrNode;
+import org.jruby.truffle.nodes.control.RedoNode;
+import org.jruby.truffle.nodes.control.RescueNode;
+import org.jruby.truffle.nodes.control.RetryNode;
+import org.jruby.truffle.nodes.control.ReturnNode;
+import org.jruby.truffle.nodes.control.WhileNode;
+import org.jruby.truffle.nodes.core.*;
+import org.jruby.truffle.nodes.globals.*;
+import org.jruby.truffle.nodes.literal.*;
+import org.jruby.truffle.nodes.methods.*;
+import org.jruby.truffle.nodes.methods.UndefNode;
+import org.jruby.truffle.nodes.methods.arguments.MissingArgumentBehaviour;
+import org.jruby.truffle.nodes.methods.arguments.ReadPreArgumentNode;
+import org.jruby.truffle.nodes.methods.locals.*;
+import org.jruby.truffle.nodes.objects.*;
+import org.jruby.truffle.nodes.objects.SelfNode;
+import org.jruby.truffle.nodes.rubinius.CallRubiniusPrimitiveNode;
+import org.jruby.truffle.nodes.rubinius.RubiniusPrimitiveConstructor;
+import org.jruby.truffle.nodes.yield.YieldNode;
+import org.jruby.truffle.runtime.LexicalScope;
+import org.jruby.truffle.runtime.RubyContext;
+import org.jruby.truffle.runtime.core.*;
+import org.jruby.truffle.runtime.methods.SharedMethodInfo;
+import org.jruby.util.KeyValuePair;
+import org.jruby.util.cli.Options;
+
+import java.util.*;
+
+/**
+ * A JRuby parser node visitor which translates JRuby AST nodes into truffle Nodes. Therefore there is some namespace
+ * contention here! We make all references to JRuby explicit.
+ */
+<span class="nc bnc" id="L65" title="All 2 branches missed.">public class BodyTranslator extends Translator {</span>
+
+    protected final BodyTranslator parent;
+    protected final TranslatorEnvironment environment;
+    private final boolean topLevel;
+
+<span class="nc" id="L71">    public boolean translatingForStatement = false;</span>
+<span class="nc" id="L72">    public boolean useClassVariablesAsIfInClass = false;</span>
+<span class="nc" id="L73">    private boolean translatingNextExpression = false;</span>
+<span class="nc" id="L74">    private String currentCallMethodName = null;</span>
+
+<span class="nc" id="L76">    private boolean privately = false;</span>
+
+<span class="nc" id="L78">    private static final Set&lt;String&gt; debugIgnoredCalls = new HashSet&lt;&gt;();</span>
+
+    static {
+<span class="nc" id="L81">        debugIgnoredCalls.add(&quot;downto&quot;);</span>
+<span class="nc" id="L82">        debugIgnoredCalls.add(&quot;each&quot;);</span>
+<span class="nc" id="L83">        debugIgnoredCalls.add(&quot;times&quot;);</span>
+<span class="nc" id="L84">        debugIgnoredCalls.add(&quot;upto&quot;);</span>
+    }
+
+<span class="nc" id="L87">    public static final Set&lt;String&gt; FRAME_LOCAL_GLOBAL_VARIABLES = new HashSet&lt;&gt;(Arrays.asList(&quot;$_&quot;, &quot;$+&quot;, &quot;$&amp;&quot;, &quot;$`&quot;, &quot;$'&quot;));</span>
+<span class="nc" id="L88">    public static final Set&lt;String&gt; THREAD_LOCAL_GLOBAL_VARIABLES = new HashSet&lt;&gt;(Arrays.asList(&quot;$~&quot;, &quot;$1&quot;, &quot;$2&quot;, &quot;$3&quot;, &quot;$4&quot;, &quot;$5&quot;, &quot;$6&quot;, &quot;$7&quot;, &quot;$8&quot;, &quot;$9&quot;)); // &quot;$_&quot;</span>
+
+    public BodyTranslator(RubyNode currentNode, RubyContext context, BodyTranslator parent, TranslatorEnvironment environment, Source source, boolean topLevel) {
+<span class="nc" id="L91">        super(currentNode, context, source);</span>
+<span class="nc" id="L92">        this.parent = parent;</span>
+<span class="nc" id="L93">        this.environment = environment;</span>
+<span class="nc" id="L94">        this.topLevel = topLevel;</span>
+<span class="nc" id="L95">        initGlobalVariableAliases();</span>
+<span class="nc" id="L96">        initReadOnlyGlobalVariables();</span>
+<span class="nc" id="L97">    }</span>
+
+    @Override
+    public RubyNode visitAliasNode(org.jruby.ast.AliasNode node) {
+<span class="nc" id="L101">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L103">        final org.jruby.ast.LiteralNode oldName = (org.jruby.ast.LiteralNode) node.getOldName();</span>
+<span class="nc" id="L104">        final org.jruby.ast.LiteralNode newName = (org.jruby.ast.LiteralNode) node.getNewName();</span>
+
+<span class="nc" id="L106">        return AliasNodeFactory.create(context, sourceSection, newName.getName(), oldName.getName(), new SelfNode(context, sourceSection));</span>
+    }
+
+    @Override
+    public RubyNode visitAndNode(org.jruby.ast.AndNode node) {
+<span class="nc" id="L111">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        RubyNode x;
+
+<span class="nc bnc" id="L115" title="All 2 branches missed.">        if (node.getFirstNode() == null) {</span>
+<span class="nc" id="L116">            x = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+        } else {
+<span class="nc" id="L118">            x = node.getFirstNode().accept(this);</span>
+        }
+
+        RubyNode y;
+
+<span class="nc bnc" id="L123" title="All 2 branches missed.">        if (node.getSecondNode() == null) {</span>
+<span class="nc" id="L124">            y = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+        } else {
+<span class="nc" id="L126">            y = node.getSecondNode().accept(this);</span>
+        }
+
+<span class="nc" id="L129">        return new AndNode(context, sourceSection, x, y);</span>
+    }
+
+    @Override
+    public RubyNode visitArgsCatNode(org.jruby.ast.ArgsCatNode node) {
+<span class="nc" id="L134">        final List&lt;org.jruby.ast.Node&gt; nodes = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L135">        collectArgsCatNodes(nodes, node);</span>
+
+<span class="nc" id="L137">        final List&lt;RubyNode&gt; translatedNodes = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        for (org.jruby.ast.Node catNode : nodes) {</span>
+<span class="nc" id="L140">            translatedNodes.add(catNode.accept(this));</span>
+<span class="nc" id="L141">        }</span>
+
+<span class="nc" id="L143">        return new ArrayConcatNode(context, translate(node.getPosition()), translatedNodes.toArray(new RubyNode[translatedNodes.size()]));</span>
+    }
+
+    // ArgsCatNodes can be nested - this collects them into a flat list of children
+    private void collectArgsCatNodes(List&lt;org.jruby.ast.Node&gt; nodes, org.jruby.ast.ArgsCatNode node) {
+<span class="nc bnc" id="L148" title="All 2 branches missed.">        if (node.getFirstNode() instanceof org.jruby.ast.ArgsCatNode) {</span>
+<span class="nc" id="L149">            collectArgsCatNodes(nodes, (org.jruby.ast.ArgsCatNode) node.getFirstNode());</span>
+        } else {
+<span class="nc" id="L151">            nodes.add(node.getFirstNode());</span>
+        }
+
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        if (node.getSecondNode() instanceof org.jruby.ast.ArgsCatNode) {</span>
+<span class="nc" id="L155">            collectArgsCatNodes(nodes, (org.jruby.ast.ArgsCatNode) node.getSecondNode());</span>
+        } else {
+            // ArgsCatNode implicitly splat its second argument. See Helpers.argsCat.
+<span class="nc" id="L158">            Node secondNode = new SplatNode(node.getSecondNode().getPosition(), node.getSecondNode());</span>
+<span class="nc" id="L159">            nodes.add(secondNode);</span>
+        }
+<span class="nc" id="L161">    }</span>
+
+    @Override
+    public RubyNode visitArgsPushNode(org.jruby.ast.ArgsPushNode node) {
+<span class="nc" id="L165">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L167">        return ArrayNodesFactory.PushOneNodeFactory.create(context, sourceSection, new RubyNode[]{</span>
+<span class="nc" id="L168">                KernelNodesFactory.DupNodeFactory.create(context, sourceSection, new RubyNode[]{</span>
+<span class="nc" id="L169">                        node.getFirstNode().accept(this)</span>
+                }),
+<span class="nc" id="L171">                node.getSecondNode().accept(this)</span>
+        });
+    }
+
+    @Override
+    public RubyNode visitArrayNode(org.jruby.ast.ArrayNode node) {
+<span class="nc" id="L177">        final List&lt;org.jruby.ast.Node&gt; values = node.childNodes();</span>
+
+<span class="nc" id="L179">        final RubyNode[] translatedValues = new RubyNode[values.size()];</span>
+
+<span class="nc bnc" id="L181" title="All 2 branches missed.">        for (int n = 0; n &lt; values.size(); n++) {</span>
+<span class="nc" id="L182">            translatedValues[n] = values.get(n).accept(this);</span>
+        }
+
+<span class="nc" id="L185">        return new ArrayLiteralNode.UninitialisedArrayLiteralNode(context, translate(node.getPosition()), translatedValues);</span>
+    }
+
+    @Override
+    public RubyNode visitAttrAssignNode(org.jruby.ast.AttrAssignNode node) {
+<span class="nc" id="L190">        return visitAttrAssignNodeExtraArgument(node, null);</span>
+    }
+
+    /**
+     * See translateDummyAssignment to understand what this is for.
+     */
+    public RubyNode visitAttrAssignNodeExtraArgument(org.jruby.ast.AttrAssignNode node, RubyNode extraArgument) {
+<span class="nc" id="L197">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        // The last argument is the value we assign, and we need to return that as the whole result of this node
+
+<span class="nc" id="L201">        final FrameSlot frameSlot = environment.declareVar(environment.allocateLocalTemp(&quot;attrasgn&quot;));</span>
+        final WriteLocalVariableNode writeValue;
+
+        final org.jruby.ast.ArrayNode newArgsNode;
+
+<span class="nc bnc" id="L206" title="All 2 branches missed.">        if (extraArgument == null) {</span>
+            // Get that last argument out
+<span class="nc" id="L208">            final List&lt;org.jruby.ast.Node&gt; argChildNodes = new ArrayList&lt;&gt;(node.getArgsNode().childNodes());</span>
+<span class="nc" id="L209">            final org.jruby.ast.Node valueNode = argChildNodes.get(argChildNodes.size() - 1);</span>
+<span class="nc" id="L210">            argChildNodes.remove(argChildNodes.size() - 1);</span>
+
+            // Evaluate the value and store it in a local variable
+<span class="nc" id="L213">            writeValue = WriteLocalVariableNodeFactory.create(context, sourceSection, frameSlot, valueNode.accept(this));</span>
+
+            // Recreate the arguments array, reading that local instead of including the RHS for the last argument
+<span class="nc" id="L216">            argChildNodes.add(new ReadLocalDummyNode(node.getPosition(), sourceSection, frameSlot));</span>
+<span class="nc" id="L217">            newArgsNode = new org.jruby.ast.ArrayNode(node.getPosition(), argChildNodes.get(0));</span>
+<span class="nc" id="L218">            argChildNodes.remove(0);</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            for (org.jruby.ast.Node child : argChildNodes) {</span>
+<span class="nc" id="L220">                newArgsNode.add(child);</span>
+<span class="nc" id="L221">            }</span>
+<span class="nc" id="L222">        } else {</span>
+<span class="nc" id="L223">            final RubyNode valueNode = extraArgument;</span>
+
+            // Evaluate the value and store it in a local variable
+<span class="nc" id="L226">            writeValue = WriteLocalVariableNodeFactory.create(context, sourceSection, frameSlot, valueNode);</span>
+
+            // Recreate the arguments array, reading that local instead of including the RHS for the last argument
+<span class="nc" id="L229">            final List&lt;org.jruby.ast.Node&gt; argChildNodes = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">            if (node.getArgsNode() != null) {</span>
+<span class="nc" id="L231">                argChildNodes.addAll(node.getArgsNode().childNodes());</span>
+            }
+<span class="nc" id="L233">            argChildNodes.add(new ReadLocalDummyNode(node.getPosition(), sourceSection, frameSlot));</span>
+<span class="nc" id="L234">            newArgsNode = new org.jruby.ast.ArrayNode(node.getPosition(), argChildNodes.get(0));</span>
+<span class="nc" id="L235">            argChildNodes.remove(0);</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">            for (org.jruby.ast.Node child : argChildNodes) {</span>
+<span class="nc" id="L237">                newArgsNode.add(child);</span>
+<span class="nc" id="L238">            }</span>
+        }
+
+        /*
+         * If the original call was of the form:
+         *
+            (AttrAssignNode:[]= 10
+                (LocalVarNode:f 9)
+                (ArgsPushNode 9
+                    (SplatNode 9
+                        (LocalVarNode:x 9)
+                    )
+                    (FixnumNode 9)
+                )
+            )
+         *
+         * Then we will have lost that args push and we will have ended up with (Array (Splat (Local x) (Fixnum))
+         *
+         * Restory the args push.
+         */
+
+        final org.jruby.ast.Node fixedArgsNode;
+
+<span class="nc bnc" id="L261" title="All 2 branches missed.">        if (node.getArgsNode() instanceof org.jruby.ast.ArgsPushNode) {</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">            if (newArgsNode.size() != 2) {</span>
+<span class="nc" id="L263">                throw new UnsupportedOperationException();</span>
+            }
+
+<span class="nc" id="L266">            fixedArgsNode = new org.jruby.ast.ArgsPushNode(newArgsNode.getPosition(), newArgsNode.childNodes().get(0), newArgsNode.childNodes().get(1));</span>
+        } else {
+<span class="nc" id="L268">            fixedArgsNode = newArgsNode;</span>
+        }
+
+<span class="nc" id="L271">        final CallNode callNode = new CallNode(node.getPosition(), node.getReceiverNode(), node.getName(), fixedArgsNode, null);</span>
+<span class="nc" id="L272">        boolean isAccessorOnSelf = (node.getReceiverNode() instanceof org.jruby.ast.SelfNode);</span>
+<span class="nc" id="L273">        final RubyNode actualCall = visitCallNodeExtraArgument(callNode, null, isAccessorOnSelf, false);</span>
+
+<span class="nc" id="L275">        return SequenceNode.sequence(context, sourceSection,</span>
+                writeValue,
+                actualCall,
+<span class="nc" id="L278">                ReadLocalVariableNodeFactory.create(context, sourceSection, frameSlot));</span>
+    }
+
+    @Override
+    public RubyNode visitBeginNode(org.jruby.ast.BeginNode node) {
+<span class="nc" id="L283">        return node.getBodyNode().accept(this);</span>
+    }
+
+    @Override
+    public RubyNode visitBignumNode(org.jruby.ast.BignumNode node) {
+<span class="nc" id="L288">        return new ObjectLiteralNode(context, translate(node.getPosition()), new RubyBignum(context.getCoreLibrary().getBignumClass(), node.getValue()));</span>
+    }
+
+    @Override
+    public RubyNode visitBlockNode(org.jruby.ast.BlockNode node) {
+<span class="nc" id="L293">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L295">        final List&lt;RubyNode&gt; translatedChildren = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L297" title="All 2 branches missed.">        for (org.jruby.ast.Node child : node.childNodes()) {</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">            if (child.getPosition() == InvalidSourcePosition.INSTANCE) {</span>
+<span class="nc" id="L299">                parentSourceSection = sourceSection;</span>
+            }
+
+            final RubyNode translatedChild;
+
+            try {
+<span class="nc" id="L305">                translatedChild = child.accept(this);</span>
+            } finally {
+<span class="nc bnc" id="L307" title="All 4 branches missed.">                if (child.getPosition() == InvalidSourcePosition.INSTANCE) {</span>
+<span class="nc" id="L308">                    parentSourceSection = null;</span>
+                }
+            }
+
+<span class="nc bnc" id="L312" title="All 2 branches missed.">            if (!(translatedChild instanceof DeadNode)) {</span>
+<span class="nc" id="L313">                translatedChildren.add(translatedChild);</span>
+            }
+<span class="nc" id="L315">        }</span>
+
+<span class="nc bnc" id="L317" title="All 2 branches missed.">        if (translatedChildren.size() == 1) {</span>
+<span class="nc" id="L318">            return translatedChildren.get(0);</span>
+        } else {
+<span class="nc" id="L320">            return SequenceNode.sequence(context, sourceSection, translatedChildren.toArray(new RubyNode[translatedChildren.size()]));</span>
+        }
+    }
+
+    @Override
+    public RubyNode visitBreakNode(org.jruby.ast.BreakNode node) {
+<span class="nc" id="L326">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        RubyNode resultNode;
+
+<span class="nc bnc" id="L330" title="All 2 branches missed.">        if (node.getValueNode() == null) {</span>
+<span class="nc" id="L331">            parentSourceSection = sourceSection;</span>
+
+            try {
+<span class="nc" id="L334">                resultNode = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+            } finally {
+<span class="nc" id="L336">                parentSourceSection = null;</span>
+<span class="nc" id="L337">            }</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">        } else if (node.getValueNode().getPosition() == InvalidSourcePosition.INSTANCE) {</span>
+<span class="nc" id="L339">            parentSourceSection = sourceSection;</span>
+
+            try {
+<span class="nc" id="L342">                resultNode = node.getValueNode().accept(this);</span>
+            } finally {
+<span class="nc" id="L344">                parentSourceSection = null;</span>
+<span class="nc" id="L345">            }</span>
+        } else {
+<span class="nc" id="L347">            resultNode = node.getValueNode().accept(this);</span>
+        }
+
+<span class="nc" id="L350">        return new BreakNode(context, sourceSection, resultNode);</span>
+    }
+
+    @Override
+    public RubyNode visitCallNode(CallNode node) {
+<span class="nc" id="L355">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc bnc" id="L357" title="All 2 branches missed.">        if (node.getReceiverNode() instanceof org.jruby.ast.ConstNode</span>
+<span class="nc bnc" id="L358" title="All 2 branches missed.">                &amp;&amp; ((ConstNode) node.getReceiverNode()).getName() == &quot;Rubinius&quot;) {</span>
+<span class="nc bnc" id="L359" title="All 2 branches missed.">            if (node.getName().equals(&quot;primitive&quot;)) {</span>
+<span class="nc" id="L360">                return translateRubiniusPrimitive(sourceSection, node);</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">            } else if (node.getName().equals(&quot;invoke_primitive&quot;)) {</span>
+<span class="nc" id="L362">                return translateRubiniusInvokePrimitive(sourceSection, node);</span>
+<span class="nc bnc" id="L363" title="All 2 branches missed.">            } else if (node.getName().equals(&quot;privately&quot;)) {</span>
+<span class="nc" id="L364">                return translateRubiniusPrivately(sourceSection, node);</span>
+            }
+        }
+
+<span class="nc" id="L368">        return visitCallNodeExtraArgument(node, null, false, false);</span>
+    }
+
+    private RubyNode translateRubiniusPrimitive(SourceSection sourceSection, CallNode node) {
+        /*
+         * Translates something that looks like
+         *
+         *   Rubinius.primitive :foo
+         *
+         * into
+         *
+         *   CallRubiniusPrimitiveNode(FooNode(arg1, arg2, ..., argN))
+         *
+         * Where the arguments are the same arguments as the method. It looks like this is only exercised with simple
+         * arguments so we're not worrying too much about what happens when they're more complicated (rest,
+         * keywords etc).
+         */
+
+<span class="nc bnc" id="L386" title="All 4 branches missed.">        if (node.getArgsNode().childNodes().size() != 1 || !(node.getArgsNode().childNodes().get(0) instanceof org.jruby.ast.SymbolNode)) {</span>
+<span class="nc" id="L387">            throw new UnsupportedOperationException(&quot;Rubinius.primitive must have a single literal symbol argument&quot;);</span>
+        }
+
+<span class="nc" id="L390">        final String primitiveName = ((org.jruby.ast.SymbolNode) node.getArgsNode().childNodes().get(0)).getName();</span>
+
+<span class="nc" id="L392">        final RubiniusPrimitiveConstructor primitive = context.getRubiniusPrimitiveManager().getPrimitive(primitiveName);</span>
+
+<span class="nc" id="L394">        final List&lt;RubyNode&gt; arguments = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L396">        int argumentsCount = primitive.getFactory().getExecutionSignature().size();</span>
+
+<span class="nc bnc" id="L398" title="All 2 branches missed.">        if (primitive.getAnnotation().needsSelf()) {</span>
+<span class="nc" id="L399">            arguments.add(new SelfNode(context, sourceSection));</span>
+<span class="nc" id="L400">            argumentsCount--;</span>
+        }
+
+<span class="nc bnc" id="L403" title="All 2 branches missed.">        for (int n = 0; n &lt; argumentsCount; n++) {</span>
+<span class="nc" id="L404">            arguments.add(new ReadPreArgumentNode(context, sourceSection, n, MissingArgumentBehaviour.UNDEFINED));</span>
+        }
+
+<span class="nc" id="L407">        return new CallRubiniusPrimitiveNode(context, sourceSection,</span>
+<span class="nc" id="L408">                primitive.getFactory().createNode(context, sourceSection, arguments.toArray(new RubyNode[arguments.size()])),</span>
+<span class="nc" id="L409">                environment.getReturnID());</span>
+    }
+
+    private RubyNode translateRubiniusInvokePrimitive(SourceSection sourceSection, CallNode node) {
+        /*
+         * Translates something that looks like
+         *
+         *   Rubinius.invoke_primitive :foo, arg1, arg2, argN
+         *
+         * into
+         *
+         *   CallRubiniusPrimitiveNode(FooNode(arg1, arg2, ..., argN))
+         */
+
+<span class="nc bnc" id="L423" title="All 4 branches missed.">        if (node.getArgsNode().childNodes().size() &lt; 1 || !(node.getArgsNode().childNodes().get(0) instanceof org.jruby.ast.SymbolNode)) {</span>
+<span class="nc" id="L424">            throw new UnsupportedOperationException(&quot;Rubinius.invoke_primitive must have at least an initial literal symbol argument&quot;);</span>
+        }
+
+<span class="nc" id="L427">        final String primitiveName = ((org.jruby.ast.SymbolNode) node.getArgsNode().childNodes().get(0)).getName();</span>
+
+<span class="nc" id="L429">        final RubiniusPrimitiveConstructor primitive = context.getRubiniusPrimitiveManager().getPrimitive(primitiveName);</span>
+
+<span class="nc" id="L431">        final List&lt;RubyNode&gt; arguments = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L433">        final Iterator&lt;Node&gt; childIterator = node.getArgsNode().childNodes().iterator();</span>
+
+        // The first argument was the symbol, so skip it when gathering arguments to pass to the primitive
+<span class="nc" id="L436">        childIterator.next();</span>
+
+<span class="nc bnc" id="L438" title="All 2 branches missed.">        while (childIterator.hasNext()) {</span>
+<span class="nc" id="L439">            arguments.add(childIterator.next().accept(this));</span>
+        }
+
+<span class="nc" id="L442">        return new CallRubiniusPrimitiveNode(context, sourceSection,</span>
+<span class="nc" id="L443">                primitive.getFactory().createNode(context, sourceSection, arguments.toArray(new RubyNode[arguments.size()])),</span>
+<span class="nc" id="L444">                environment.getReturnID());</span>
+    }
+
+    private RubyNode translateRubiniusPrivately(SourceSection sourceSection, CallNode node) {
+        /*
+         * Translates something that looks like
+         *
+         *   Rubinius.privately { foo }
+         *
+         * into just
+         *
+         *   foo
+         *
+         * While we translate foo we'll mark all call sites as ignoring visbility.
+         */
+
+<span class="nc bnc" id="L460" title="All 2 branches missed.">        if (!(node.getIterNode() instanceof org.jruby.ast.IterNode)) {</span>
+<span class="nc" id="L461">            throw new UnsupportedOperationException(&quot;Rubinius.privately needs a literal block&quot;);</span>
+        }
+
+<span class="nc bnc" id="L464" title="All 4 branches missed.">        if (node.getArgsNode() != null &amp;&amp; node.getArgsNode().childNodes().size() &gt; 0) {</span>
+<span class="nc" id="L465">            throw new UnsupportedOperationException(&quot;Rubinius.privately should not have any arguments&quot;);</span>
+        }
+
+        /*
+         * Normally when you visit an 'iter' (block) node it will set the method name for you, so that we can name the
+         * block something like 'times-block'. Here we bypass the iter node and translate its child. So we set the
+         * name here.
+         */
+
+<span class="nc" id="L474">        currentCallMethodName = &quot;privately&quot;;</span>
+
+        /*
+         * While we translate the body of the iter we want to create all call nodes with the ignore-visbility flag.
+         * This flag is checked in visitCallNodeExtraArgument.
+         */
+
+<span class="nc" id="L481">        final boolean previousPrivately = privately;</span>
+<span class="nc" id="L482">        privately = true;</span>
+
+        try {
+<span class="nc" id="L485">            return (((org.jruby.ast.IterNode) node.getIterNode()).getBodyNode()).accept(this);</span>
+        } finally {
+            // Restore the previous value of the privately flag - allowing for nesting
+
+<span class="nc" id="L489">            privately = previousPrivately;</span>
+        }
+    }
+
+    /**
+     * See translateDummyAssignment to understand what this is for.
+     */
+    public RubyNode visitCallNodeExtraArgument(CallNode node, RubyNode extraArgument, boolean ignoreVisibility, boolean isVCall) {
+<span class="nc" id="L497">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L499">        final RubyNode receiverTranslated = node.getReceiverNode().accept(this);</span>
+
+<span class="nc" id="L501">        org.jruby.ast.Node args = node.getArgsNode();</span>
+<span class="nc" id="L502">        org.jruby.ast.Node block = node.getIterNode();</span>
+
+<span class="nc bnc" id="L504" title="All 4 branches missed.">        if (block == null &amp;&amp; args instanceof org.jruby.ast.IterNode) {</span>
+<span class="nc" id="L505">            final org.jruby.ast.Node temp = args;</span>
+<span class="nc" id="L506">            args = block;</span>
+<span class="nc" id="L507">            block = temp;</span>
+        }
+
+<span class="nc" id="L510">        final ArgumentsAndBlockTranslation argumentsAndBlock = translateArgumentsAndBlock(sourceSection, block, args, extraArgument, node.getName());</span>
+
+<span class="nc bnc" id="L512" title="All 4 branches missed.">        RubyNode translated = new RubyCallNode(context, sourceSection, node.getName(), receiverTranslated, argumentsAndBlock.getBlock(), argumentsAndBlock.isSplatted(), isVCall, privately || ignoreVisibility, false, argumentsAndBlock.getArguments());</span>
+
+        // return instrumenter.instrumentAsCall(translated, node.getName());
+<span class="nc" id="L515">        return translated;</span>
+    }
+
+    protected static class ArgumentsAndBlockTranslation {
+
+        private final RubyNode block;
+        private final RubyNode[] arguments;
+        private final boolean isSplatted;
+
+        public ArgumentsAndBlockTranslation(RubyNode block, RubyNode[] arguments, boolean isSplatted) {
+<span class="nc" id="L525">            super();</span>
+<span class="nc" id="L526">            this.block = block;</span>
+<span class="nc" id="L527">            this.arguments = arguments;</span>
+<span class="nc" id="L528">            this.isSplatted = isSplatted;</span>
+<span class="nc" id="L529">        }</span>
+
+        public RubyNode getBlock() {
+<span class="nc" id="L532">            return block;</span>
+        }
+
+        public RubyNode[] getArguments() {
+<span class="nc" id="L536">            return arguments;</span>
+        }
+
+        public boolean isSplatted() {
+<span class="nc" id="L540">            return isSplatted;</span>
+        }
+
+    }
+
+    protected ArgumentsAndBlockTranslation translateArgumentsAndBlock(SourceSection sourceSection, org.jruby.ast.Node iterNode, org.jruby.ast.Node argsNode, RubyNode extraArgument, String nameToSetWhenTranslatingBlock) {
+<span class="nc bnc" id="L546" title="All 4 branches missed.">        assert !(argsNode instanceof org.jruby.ast.IterNode);</span>
+
+<span class="nc" id="L548">        final List&lt;org.jruby.ast.Node&gt; arguments = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L549">        org.jruby.ast.Node blockPassNode = null;</span>
+
+<span class="nc" id="L551">        boolean isSplatted = false;</span>
+
+<span class="nc bnc" id="L553" title="All 2 branches missed.">        if (argsNode instanceof org.jruby.ast.ListNode) {</span>
+<span class="nc" id="L554">            arguments.addAll(argsNode.childNodes());</span>
+<span class="nc bnc" id="L555" title="All 2 branches missed.">        } else if (argsNode instanceof org.jruby.ast.BlockPassNode) {</span>
+<span class="nc" id="L556">            final org.jruby.ast.BlockPassNode blockPass = (org.jruby.ast.BlockPassNode) argsNode;</span>
+
+<span class="nc" id="L558">            final org.jruby.ast.Node blockPassArgs = blockPass.getArgsNode();</span>
+
+<span class="nc bnc" id="L560" title="All 2 branches missed.">            if (blockPassArgs instanceof org.jruby.ast.ListNode) {</span>
+<span class="nc" id="L561">                arguments.addAll(blockPassArgs.childNodes());</span>
+<span class="nc bnc" id="L562" title="All 2 branches missed.">            } else if (blockPassArgs instanceof org.jruby.ast.ArgsCatNode) {</span>
+<span class="nc" id="L563">                arguments.add(blockPassArgs);</span>
+<span class="nc bnc" id="L564" title="All 2 branches missed.">            } else if (blockPassArgs != null) {</span>
+<span class="nc" id="L565">                throw new UnsupportedOperationException(&quot;Don't know how to block pass &quot; + blockPassArgs);</span>
+            }
+
+<span class="nc" id="L568">            blockPassNode = blockPass.getBodyNode();</span>
+<span class="nc bnc" id="L569" title="All 2 branches missed.">        } else if (argsNode instanceof org.jruby.ast.SplatNode) {</span>
+<span class="nc" id="L570">            isSplatted = true;</span>
+<span class="nc" id="L571">            arguments.add(argsNode);</span>
+<span class="nc bnc" id="L572" title="All 2 branches missed.">        } else if (argsNode instanceof org.jruby.ast.ArgsCatNode) {</span>
+<span class="nc" id="L573">            isSplatted = true;</span>
+<span class="nc" id="L574">            arguments.add(argsNode);</span>
+<span class="nc bnc" id="L575" title="All 2 branches missed.">        } else if (argsNode != null) {</span>
+<span class="nc" id="L576">            isSplatted = true;</span>
+<span class="nc" id="L577">            arguments.add(argsNode);</span>
+        }
+
+<span class="nc bnc" id="L580" title="All 2 branches missed.">        if (iterNode instanceof org.jruby.ast.BlockPassNode) {</span>
+<span class="nc" id="L581">            blockPassNode = ((org.jruby.ast.BlockPassNode) iterNode).getBodyNode();</span>
+        }
+
+<span class="nc" id="L584">        currentCallMethodName = nameToSetWhenTranslatingBlock;</span>
+
+        RubyNode blockTranslated;
+
+<span class="nc bnc" id="L588" title="All 2 branches missed.">        if (blockPassNode != null) {</span>
+<span class="nc" id="L589">            blockTranslated = ProcCastNodeFactory.create(context, sourceSection, blockPassNode.accept(this));</span>
+<span class="nc bnc" id="L590" title="All 2 branches missed.">        } else if (iterNode != null) {</span>
+<span class="nc" id="L591">            blockTranslated = iterNode.accept(this);</span>
+
+<span class="nc bnc" id="L593" title="All 4 branches missed.">            if (blockTranslated instanceof ObjectLiteralNode &amp;&amp; ((ObjectLiteralNode) blockTranslated).getObject() instanceof RubyNilClass) {</span>
+<span class="nc" id="L594">                blockTranslated = null;</span>
+            }
+        } else {
+<span class="nc" id="L597">            blockTranslated = null;</span>
+        }
+
+<span class="nc" id="L600">        final List&lt;RubyNode&gt; argumentsTranslated = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L602" title="All 2 branches missed.">        for (org.jruby.ast.Node argument : arguments) {</span>
+<span class="nc" id="L603">            argumentsTranslated.add(argument.accept(this));</span>
+<span class="nc" id="L604">        }</span>
+
+<span class="nc bnc" id="L606" title="All 2 branches missed.">        if (extraArgument != null) {</span>
+<span class="nc" id="L607">            argumentsTranslated.add(extraArgument);</span>
+        }
+
+<span class="nc" id="L610">        final RubyNode[] argumentsTranslatedArray = argumentsTranslated.toArray(new RubyNode[argumentsTranslated.size()]);</span>
+
+<span class="nc" id="L612">        return new ArgumentsAndBlockTranslation(blockTranslated, argumentsTranslatedArray, isSplatted);</span>
+    }
+
+    @Override
+    public RubyNode visitCaseNode(org.jruby.ast.CaseNode node) {
+<span class="nc" id="L617">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        RubyNode elseNode;
+
+<span class="nc bnc" id="L621" title="All 2 branches missed.">        if (node.getElseNode() != null) {</span>
+<span class="nc" id="L622">            elseNode = node.getElseNode().accept(this);</span>
+        } else {
+<span class="nc" id="L624">            elseNode = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+        }
+
+        /*
+         * There are two sorts of case - one compares a list of expressions against a value, the
+         * other just checks a list of expressions for truth.
+         */
+
+<span class="nc bnc" id="L632" title="All 2 branches missed.">        if (node.getCaseNode() != null) {</span>
+            // Evaluate the case expression and store it in a local
+
+<span class="nc" id="L635">            final String tempName = environment.allocateLocalTemp(&quot;case&quot;);</span>
+
+<span class="nc" id="L637">            final RubyNode readTemp = environment.findLocalVarNode(tempName, sourceSection);</span>
+
+<span class="nc" id="L639">            final RubyNode assignTemp = ((ReadNode) readTemp).makeWriteNode(node.getCaseNode().accept(this));</span>
+
+            /*
+             * Build an if expression from the whens and else. Work backwards because the first if
+             * contains all the others in its else clause.
+             */
+
+<span class="nc bnc" id="L646" title="All 2 branches missed.">            for (int n = node.getCases().size() - 1; n &gt;= 0; n--) {</span>
+<span class="nc" id="L647">                final org.jruby.ast.WhenNode when = (org.jruby.ast.WhenNode) node.getCases().get(n);</span>
+
+                // Make a condition from the one or more expressions combined in an or expression
+
+                final List&lt;org.jruby.ast.Node&gt; expressions;
+
+<span class="nc bnc" id="L653" title="All 4 branches missed.">                if (when.getExpressionNodes() instanceof org.jruby.ast.ListNode &amp;&amp; !(when.getExpressionNodes() instanceof org.jruby.ast.ArrayNode)) {</span>
+<span class="nc" id="L654">                    expressions = when.getExpressionNodes().childNodes();</span>
+                } else {
+<span class="nc" id="L656">                    expressions = Arrays.asList(when.getExpressionNodes());</span>
+                }
+
+<span class="nc" id="L659">                final List&lt;RubyNode&gt; comparisons = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L661" title="All 2 branches missed.">                for (org.jruby.ast.Node expressionNode : expressions) {</span>
+<span class="nc" id="L662">                    final RubyNode rubyExpression = expressionNode.accept(this);</span>
+
+<span class="nc bnc" id="L664" title="All 2 branches missed.">                    if (expressionNode instanceof org.jruby.ast.SplatNode) {</span>
+<span class="nc" id="L665">                        final SplatCastNode splatCastNode = (SplatCastNode) rubyExpression;</span>
+<span class="nc" id="L666">                        comparisons.add(new WhenSplatNode(context, sourceSection, NodeUtil.cloneNode(readTemp), splatCastNode));</span>
+<span class="nc bnc" id="L667" title="All 2 branches missed.">                    } else if (expressionNode instanceof org.jruby.ast.ArgsCatNode) {</span>
+<span class="nc" id="L668">                        final ArrayConcatNode arrayConcatNode = (ArrayConcatNode) rubyExpression;</span>
+<span class="nc" id="L669">                        comparisons.add(new WhenSplatNode(context, sourceSection, NodeUtil.cloneNode(readTemp), arrayConcatNode));</span>
+<span class="nc" id="L670">                    } else {</span>
+<span class="nc" id="L671">                        comparisons.add(new RubyCallNode(context, sourceSection, &quot;===&quot;, rubyExpression, null, false, NodeUtil.cloneNode(readTemp)));</span>
+                    }
+<span class="nc" id="L673">                }</span>
+
+<span class="nc" id="L675">                RubyNode conditionNode = comparisons.get(comparisons.size() - 1);</span>
+
+                // As with the if nodes, we work backwards to make it left associative
+
+<span class="nc bnc" id="L679" title="All 2 branches missed.">                for (int i = comparisons.size() - 2; i &gt;= 0; i--) {</span>
+<span class="nc" id="L680">                    conditionNode = new OrNode(context, sourceSection, comparisons.get(i), conditionNode);</span>
+                }
+
+                // Create the if node
+
+<span class="nc" id="L685">                final BooleanCastNode conditionCastNode = BooleanCastNodeFactory.create(context, sourceSection, conditionNode);</span>
+
+                RubyNode thenNode;
+
+<span class="nc bnc" id="L689" title="All 2 branches missed.">                if (when.getBodyNode() == null) {</span>
+<span class="nc" id="L690">                    thenNode = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+                } else {
+<span class="nc" id="L692">                    thenNode = when.getBodyNode().accept(this);</span>
+                }
+
+<span class="nc" id="L695">                final IfNode ifNode = new IfNode(context, sourceSection, conditionCastNode, thenNode, elseNode);</span>
+
+                // This if becomes the else for the next if
+
+<span class="nc" id="L699">                elseNode = ifNode;</span>
+            }
+
+<span class="nc" id="L702">            final RubyNode ifNode = elseNode;</span>
+
+            // A top-level block assigns the temp then runs the if
+
+<span class="nc" id="L706">            return SequenceNode.sequence(context, sourceSection, assignTemp, ifNode);</span>
+        } else {
+<span class="nc bnc" id="L708" title="All 2 branches missed.">            for (int n = node.getCases().size() - 1; n &gt;= 0; n--) {</span>
+<span class="nc" id="L709">                final org.jruby.ast.WhenNode when = (org.jruby.ast.WhenNode) node.getCases().get(n);</span>
+
+                // Make a condition from the one or more expressions combined in an or expression
+
+                final List&lt;org.jruby.ast.Node&gt; expressions;
+
+<span class="nc bnc" id="L715" title="All 2 branches missed.">                if (when.getExpressionNodes() instanceof org.jruby.ast.ListNode) {</span>
+<span class="nc" id="L716">                    expressions = when.getExpressionNodes().childNodes();</span>
+                } else {
+<span class="nc" id="L718">                    expressions = Arrays.asList(when.getExpressionNodes());</span>
+                }
+
+<span class="nc" id="L721">                final List&lt;RubyNode&gt; tests = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L723" title="All 2 branches missed.">                for (org.jruby.ast.Node expressionNode : expressions) {</span>
+<span class="nc" id="L724">                    final RubyNode rubyExpression = expressionNode.accept(this);</span>
+<span class="nc" id="L725">                    tests.add(rubyExpression);</span>
+<span class="nc" id="L726">                }</span>
+
+<span class="nc" id="L728">                RubyNode conditionNode = tests.get(tests.size() - 1);</span>
+
+                // As with the if nodes, we work backwards to make it left associative
+
+<span class="nc bnc" id="L732" title="All 2 branches missed.">                for (int i = tests.size() - 2; i &gt;= 0; i--) {</span>
+<span class="nc" id="L733">                    conditionNode = new OrNode(context, sourceSection, tests.get(i), conditionNode);</span>
+                }
+
+                // Create the if node
+
+<span class="nc" id="L738">                final BooleanCastNode conditionCastNode = BooleanCastNodeFactory.create(context, sourceSection, conditionNode);</span>
+
+<span class="nc" id="L740">                final RubyNode thenNode = when.getBodyNode().accept(this);</span>
+
+<span class="nc" id="L742">                final IfNode ifNode = new IfNode(context, sourceSection, conditionCastNode, thenNode, elseNode);</span>
+
+                // This if becomes the else for the next if
+
+<span class="nc" id="L746">                elseNode = ifNode;</span>
+            }
+
+<span class="nc" id="L749">            return elseNode;</span>
+        }
+    }
+
+    private RubyNode openModule(SourceSection sourceSection, RubyNode defineOrGetNode, String name, Node bodyNode) {
+<span class="nc" id="L754">        LexicalScope newLexicalScope = environment.pushLexicalScope();</span>
+        try {
+<span class="nc" id="L756">            final SharedMethodInfo sharedMethodInfo = new SharedMethodInfo(sourceSection, newLexicalScope, name, false, bodyNode, false);</span>
+
+<span class="nc" id="L758">            final TranslatorEnvironment newEnvironment = new TranslatorEnvironment(context, environment, environment.getParser(),</span>
+<span class="nc" id="L759">                    environment.getParser().allocateReturnID(), true, true, sharedMethodInfo, name, false);</span>
+
+<span class="nc" id="L761">            final ModuleTranslator classTranslator = new ModuleTranslator(currentNode, context, this, newEnvironment, source);</span>
+
+<span class="nc" id="L763">            final MethodDefinitionNode definitionMethod = classTranslator.compileClassNode(sourceSection, name, bodyNode);</span>
+
+<span class="nc" id="L765">            return new OpenModuleNode(context, sourceSection, defineOrGetNode, definitionMethod);</span>
+        } finally {
+<span class="nc" id="L767">            environment.popLexicalScope();</span>
+        }
+    }
+
+    @Override
+    public RubyNode visitClassNode(org.jruby.ast.ClassNode node) {
+<span class="nc" id="L773">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L775">        final String name = node.getCPath().getName();</span>
+
+<span class="nc" id="L777">        RubyNode lexicalParent = translateCPath(sourceSection, node.getCPath());</span>
+
+        RubyNode superClass;
+<span class="nc bnc" id="L780" title="All 2 branches missed.">        if (node.getSuperNode() != null) {</span>
+<span class="nc" id="L781">            superClass = node.getSuperNode().accept(this);</span>
+        } else {
+<span class="nc" id="L783">            superClass = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getObjectClass());</span>
+        }
+
+<span class="nc" id="L786">        final DefineOrGetClassNode defineOrGetClass = new DefineOrGetClassNode(context, sourceSection, name, lexicalParent, superClass);</span>
+
+<span class="nc" id="L788">        return openModule(sourceSection, defineOrGetClass, name, node.getBodyNode());</span>
+    }
+
+    @Override
+    public RubyNode visitClassVarAsgnNode(org.jruby.ast.ClassVarAsgnNode node) {
+<span class="nc" id="L793">        final SourceSection sourceSection = translate(node.getPosition());</span>
+<span class="nc" id="L794">        final RubyNode rhs = node.getValueNode().accept(this);</span>
+<span class="nc" id="L795">        return new WriteClassVariableNode(context, sourceSection, node.getName(), environment.getLexicalScope(), rhs);</span>
+    }
+
+    @Override
+    public RubyNode visitClassVarNode(org.jruby.ast.ClassVarNode node) {
+<span class="nc" id="L800">        final SourceSection sourceSection = translate(node.getPosition());</span>
+<span class="nc" id="L801">        return new ReadClassVariableNode(context, sourceSection, node.getName(), environment.getLexicalScope());</span>
+    }
+
+    @Override
+    public RubyNode visitColon2Node(org.jruby.ast.Colon2Node node) {
+        // Qualified constant access, as in Mod::CONST
+<span class="nc bnc" id="L807" title="All 2 branches missed.">        if (!(node instanceof Colon2ConstNode)) {</span>
+<span class="nc" id="L808">            throw new UnsupportedOperationException(node.toString());</span>
+        }
+
+<span class="nc" id="L811">        final RubyNode lhs = node.getLeftNode().accept(this);</span>
+
+<span class="nc" id="L813">        return new ReadConstantNode(context, translate(node.getPosition()), node.getName(), lhs, LexicalScope.NONE);</span>
+    }
+
+    @Override
+    public RubyNode visitColon3Node(org.jruby.ast.Colon3Node node) {
+        // Root namespace constant access, as in ::Foo
+
+<span class="nc" id="L820">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L822">        final ObjectLiteralNode root = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getObjectClass());</span>
+
+<span class="nc" id="L824">        return new ReadConstantNode(context, sourceSection, node.getName(), root, LexicalScope.NONE);</span>
+    }
+
+    private RubyNode translateCPath(SourceSection sourceSection, org.jruby.ast.Colon3Node node) {
+<span class="nc bnc" id="L828" title="All 2 branches missed.">        if (node instanceof Colon2ImplicitNode) { // use current lexical scope</span>
+<span class="nc" id="L829">            return new LexicalScopeNode(context, sourceSection, environment.getLexicalScope());</span>
+<span class="nc bnc" id="L830" title="All 2 branches missed.">        } else if (node instanceof Colon2ConstNode) { // A::B</span>
+<span class="nc" id="L831">            return node.childNodes().get(0).accept(this);</span>
+        } else { // Colon3Node: on top-level (Object)
+<span class="nc" id="L833">            return new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getObjectClass());</span>
+        }
+    }
+
+    @Override
+    public RubyNode visitComplexNode(ComplexNode node) {
+<span class="nc" id="L839">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        // TODO: implement Complex
+<span class="nc" id="L842">        return node.getNumber().accept(this);</span>
+    }
+
+    @Override
+    public RubyNode visitConstDeclNode(org.jruby.ast.ConstDeclNode node) {
+<span class="nc" id="L847">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        RubyNode moduleNode;
+<span class="nc" id="L850">        Node constNode = node.getConstNode();</span>
+<span class="nc bnc" id="L851" title="All 4 branches missed.">        if (constNode == null || constNode instanceof Colon2ImplicitNode) {</span>
+<span class="nc" id="L852">            moduleNode = new LexicalScopeNode(context, sourceSection, environment.getLexicalScope());</span>
+<span class="nc bnc" id="L853" title="All 2 branches missed.">        } else if (constNode instanceof Colon2ConstNode) {</span>
+<span class="nc" id="L854">            constNode = ((Colon2Node) constNode).getLeftNode(); // Misleading doc, we only want the defined part.</span>
+<span class="nc" id="L855">            moduleNode = constNode.accept(this);</span>
+<span class="nc bnc" id="L856" title="All 2 branches missed.">        } else if (constNode instanceof Colon3Node) {</span>
+<span class="nc" id="L857">            moduleNode = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getObjectClass());</span>
+        } else {
+<span class="nc" id="L859">            throw new UnsupportedOperationException();</span>
+        }
+
+<span class="nc" id="L862">        return new WriteConstantNode(context, sourceSection, node.getName(), environment.getLexicalScope(), moduleNode, node.getValueNode().accept(this));</span>
+    }
+
+    @Override
+    public RubyNode visitConstNode(org.jruby.ast.ConstNode node) {
+        // Unqualified constant access, as in CONST
+<span class="nc" id="L868">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L870">        final LexicalScope lexicalScope = environment.getLexicalScope();</span>
+<span class="nc" id="L871">        final RubyNode moduleNode = new LexicalScopeNode(context, sourceSection, lexicalScope);</span>
+
+<span class="nc" id="L873">        return new ReadConstantNode(context, sourceSection, node.getName(), moduleNode, lexicalScope);</span>
+    }
+
+    @Override
+    public RubyNode visitDAsgnNode(org.jruby.ast.DAsgnNode node) {
+<span class="nc" id="L878">        return new org.jruby.ast.LocalAsgnNode(node.getPosition(), node.getName(), node.getDepth(), node.getValueNode()).accept(this);</span>
+    }
+
+    @Override
+    public RubyNode visitDRegxNode(org.jruby.ast.DRegexpNode node) {
+<span class="nc" id="L883">        SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L885">        final List&lt;RubyNode&gt; children = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L887" title="All 2 branches missed.">        for (org.jruby.ast.Node child : node.childNodes()) {</span>
+<span class="nc" id="L888">            children.add(child.accept(this));</span>
+<span class="nc" id="L889">        }</span>
+
+<span class="nc" id="L891">        final InteroplatedRegexpNode i = new InteroplatedRegexpNode(context, sourceSection, children.toArray(new RubyNode[children.size()]), node.getOptions());</span>
+
+<span class="nc bnc" id="L893" title="All 2 branches missed.">        if (node.getOptions().isOnce()) {</span>
+<span class="nc" id="L894">            return new OnceNode(context, i.getEncapsulatingSourceSection(), i);</span>
+        }
+
+<span class="nc" id="L897">        return i;</span>
+    }
+
+    @Override
+    public RubyNode visitDStrNode(org.jruby.ast.DStrNode node) {
+<span class="nc" id="L902">        return translateInterpolatedString(translate(node.getPosition()), node.childNodes());</span>
+    }
+
+    @Override
+    public RubyNode visitDSymbolNode(org.jruby.ast.DSymbolNode node) {
+<span class="nc" id="L907">        SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L909">        final RubyNode stringNode = translateInterpolatedString(sourceSection, node.childNodes());</span>
+
+<span class="nc" id="L911">        return StringToSymbolNodeFactory.create(context, sourceSection, stringNode);</span>
+    }
+
+    private RubyNode translateInterpolatedString(SourceSection sourceSection, List&lt;org.jruby.ast.Node&gt; childNodes) {
+<span class="nc" id="L915">        final List&lt;ToSNode&gt; children = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L917" title="All 2 branches missed.">        for (org.jruby.ast.Node child : childNodes) {</span>
+<span class="nc" id="L918">            children.add(ToSNodeFactory.create(context, sourceSection, child.accept(this)));</span>
+<span class="nc" id="L919">        }</span>
+
+<span class="nc" id="L921">        return new InterpolatedStringNode(context, sourceSection, children.toArray(new ToSNode[children.size()]));</span>
+    }
+
+    @Override
+    public RubyNode visitDVarNode(org.jruby.ast.DVarNode node) {
+<span class="nc" id="L926">        RubyNode readNode = environment.findLocalVarNode(node.getName(), translate(node.getPosition()));</span>
+
+<span class="nc bnc" id="L928" title="All 2 branches missed.">        if (readNode == null) {</span>
+            // If we haven't seen this dvar before it's possible that it's a block local variable
+
+<span class="nc" id="L931">            final int depth = node.getDepth();</span>
+
+<span class="nc" id="L933">            TranslatorEnvironment e = environment;</span>
+
+<span class="nc bnc" id="L935" title="All 2 branches missed.">            for (int n = 0; n &lt; depth; n++) {</span>
+<span class="nc" id="L936">                e = e.getParent();</span>
+            }
+
+<span class="nc" id="L939">            e.declareVar(node.getName());</span>
+<span class="nc" id="L940">            readNode = e.findLocalVarNode(node.getName(), translate(node.getPosition()));</span>
+        }
+
+<span class="nc" id="L943">        return readNode;</span>
+    }
+
+    @Override
+    public RubyNode visitDXStrNode(org.jruby.ast.DXStrNode node) {
+<span class="nc" id="L948">        SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L950">        final RubyNode string = translateInterpolatedString(sourceSection, node.childNodes());</span>
+
+<span class="nc" id="L952">        return new SystemNode(context, sourceSection, string);</span>
+    }
+
+    @Override
+    public RubyNode visitDefinedNode(org.jruby.ast.DefinedNode node) {
+<span class="nc" id="L957">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L959">        org.jruby.ast.Node expressionNode = node.getExpressionNode();</span>
+
+<span class="nc bnc" id="L961" title="All 2 branches missed.">        while (expressionNode instanceof org.jruby.ast.NewlineNode) {</span>
+<span class="nc" id="L962">            expressionNode = ((org.jruby.ast.NewlineNode) expressionNode).getNextNode();</span>
+        }
+
+<span class="nc" id="L965">        return new DefinedNode(context, sourceSection, node.getExpressionNode().accept(this));</span>
+    }
+
+    @Override
+    public RubyNode visitDefnNode(org.jruby.ast.DefnNode node) {
+<span class="nc" id="L970">        final SourceSection sourceSection = translate(node.getPosition());</span>
+        final RubyNode classNode;
+
+<span class="nc bnc" id="L973" title="All 2 branches missed.">        if (topLevel) {</span>
+            // TODO: different for Kernel#load(..., true)
+<span class="nc" id="L975">            classNode = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getObjectClass());</span>
+        } else {
+<span class="nc" id="L977">            classNode = new SelfNode(context, sourceSection);</span>
+        }
+
+<span class="nc" id="L980">        return translateMethodDefinition(sourceSection, classNode, node.getName(), node, node.getArgsNode(), node.getBodyNode(), false);</span>
+    }
+
+    @Override
+    public RubyNode visitDefsNode(org.jruby.ast.DefsNode node) {
+<span class="nc" id="L985">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L987">        final RubyNode objectNode = node.getReceiverNode().accept(this);</span>
+
+<span class="nc" id="L989">        final SingletonClassNode singletonClassNode = SingletonClassNodeFactory.create(context, sourceSection, objectNode);</span>
+
+<span class="nc" id="L991">        return translateMethodDefinition(sourceSection, singletonClassNode, node.getName(), node, node.getArgsNode(), node.getBodyNode(), true);</span>
+    }
+
+    protected RubyNode translateMethodDefinition(SourceSection sourceSection, RubyNode classNode, String methodName, org.jruby.ast.Node parseTree, org.jruby.ast.ArgsNode argsNode, org.jruby.ast.Node bodyNode, boolean ignoreLocalVisiblity) {
+<span class="nc" id="L995">        final SharedMethodInfo sharedMethodInfo = new SharedMethodInfo(sourceSection, environment.getSharedMethodInfo().getLexicalScope(), methodName, false, parseTree, false);</span>
+
+<span class="nc" id="L997">        final TranslatorEnvironment newEnvironment = new TranslatorEnvironment(</span>
+<span class="nc" id="L998">                context, environment, environment.getParser(), environment.getParser().allocateReturnID(), true, true, sharedMethodInfo, methodName, false);</span>
+
+        // ownScopeForAssignments is the same for the defined method as the current one.
+
+<span class="nc bnc" id="L1002" title="All 2 branches missed.">        final MethodTranslator methodCompiler = new MethodTranslator(currentNode, context, this, newEnvironment, false, parent == null, source);</span>
+
+<span class="nc" id="L1004">        final MethodDefinitionNode functionExprNode = (MethodDefinitionNode) methodCompiler.compileFunctionNode(sourceSection, methodName, argsNode, bodyNode, ignoreLocalVisiblity, sharedMethodInfo);</span>
+
+        /*
+         * In the top-level, methods are defined in the class of the main object. This is
+         * counter-intuitive - I would have expected them to be defined in the singleton class.
+         * Apparently this is a design decision to make top-level methods sort of global.
+         * 
+         * http://stackoverflow.com/questions/1761148/where-are-methods-defined-at-the-ruby-top-level
+         */
+
+<span class="nc" id="L1014">        return new AddMethodNode(context, sourceSection, classNode, functionExprNode, topLevel);</span>
+    }
+
+    @Override
+    public RubyNode visitDotNode(org.jruby.ast.DotNode node) {
+<span class="nc" id="L1019">        final RubyNode begin = node.getBeginNode().accept(this);</span>
+<span class="nc" id="L1020">        final RubyNode end = node.getEndNode().accept(this);</span>
+<span class="nc" id="L1021">        SourceSection sourceSection = translate(node.getPosition());</span>
+
+        // See RangeNode for why there is a node specifically for creating this one type
+<span class="nc" id="L1024">        return RangeLiteralNodeFactory.create(context, sourceSection, node.isExclusive(), begin, end);</span>
+    }
+
+    @Override
+    public RubyNode visitEncodingNode(org.jruby.ast.EncodingNode node) {
+<span class="nc" id="L1029">        SourceSection sourceSection = translate(node.getPosition());</span>
+<span class="nc" id="L1030">        return new ObjectLiteralNode(context, sourceSection, RubyEncoding.getEncoding(context, node.getEncoding()));</span>
+    }
+
+    @Override
+    public RubyNode visitEnsureNode(org.jruby.ast.EnsureNode node) {
+<span class="nc" id="L1035">        final RubyNode tryPart = node.getBodyNode().accept(this);</span>
+<span class="nc" id="L1036">        final RubyNode ensurePart = node.getEnsureNode().accept(this);</span>
+<span class="nc" id="L1037">        return new EnsureNode(context, translate(node.getPosition()), tryPart, ensurePart);</span>
+    }
+
+    @Override
+    public RubyNode visitEvStrNode(org.jruby.ast.EvStrNode node) {
+<span class="nc" id="L1042">        return node.getBody().accept(this);</span>
+    }
+
+    @Override
+    public RubyNode visitFCallNode(org.jruby.ast.FCallNode node) {
+<span class="nc bnc" id="L1047" title="All 4 branches missed.">        if (Options.TRUFFLE_DEBUG_ENABLE_ASSERT_CONSTANT.load() &amp;&amp; node.getName().equals(&quot;truffle_assert_constant&quot;)) {</span>
+<span class="nc" id="L1048">            SourceSection sourceSection = translate(node.getPosition());</span>
+<span class="nc" id="L1049">            return AssertCompilationConstantNodeFactory.create(context, sourceSection, node.getArgsNode().childNodes().get(0).accept(this));</span>
+        }
+
+<span class="nc" id="L1052">        final org.jruby.ast.Node receiver = new org.jruby.ast.SelfNode(node.getPosition());</span>
+<span class="nc" id="L1053">        final CallNode callNode = new CallNode(node.getPosition(), receiver, node.getName(), node.getArgsNode(), node.getIterNode());</span>
+
+<span class="nc" id="L1055">        return visitCallNodeExtraArgument(callNode, null, true, false);</span>
+    }
+
+    @Override
+    public RubyNode visitFalseNode(org.jruby.ast.FalseNode node) {
+<span class="nc" id="L1060">        return new BooleanLiteralNode(context, translate(node.getPosition()), false);</span>
+    }
+
+    @Override
+    public RubyNode visitFixnumNode(org.jruby.ast.FixnumNode node) {
+<span class="nc" id="L1065">        final long value = node.getValue();</span>
+
+<span class="nc bnc" id="L1067" title="All 2 branches missed.">        if (CoreLibrary.fitsIntoInteger(value)) {</span>
+<span class="nc" id="L1068">            return new FixnumLiteralNode.IntegerFixnumLiteralNode(context, translate(node.getPosition()), (int) value);</span>
+        } else {
+<span class="nc" id="L1070">            return new FixnumLiteralNode.LongFixnumLiteralNode(context, translate(node.getPosition()), value);</span>
+        }
+    }
+
+    @Override
+    public RubyNode visitFlipNode(org.jruby.ast.FlipNode node) {
+<span class="nc" id="L1076">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L1078">        final RubyNode begin = node.getBeginNode().accept(this);</span>
+<span class="nc" id="L1079">        final RubyNode end = node.getEndNode().accept(this);</span>
+
+<span class="nc" id="L1081">        final BooleanCastNode beginCast = BooleanCastNodeFactory.create(context, sourceSection, begin);</span>
+<span class="nc" id="L1082">        final BooleanCastNode endCast = BooleanCastNodeFactory.create(context, sourceSection, end);</span>
+<span class="nc" id="L1083">        final FlipFlopStateNode stateNode = createFlipFlopState(sourceSection, 0);</span>
+
+<span class="nc" id="L1085">        return new FlipFlopNode(context, sourceSection, beginCast, endCast, stateNode, node.isExclusive());</span>
+    }
+
+    protected FlipFlopStateNode createFlipFlopState(SourceSection sourceSection, int depth) {
+<span class="nc" id="L1089">        final FrameSlot frameSlot = environment.declareVar(environment.allocateLocalTemp(&quot;flipflop&quot;));</span>
+<span class="nc" id="L1090">        environment.getFlipFlopStates().add(frameSlot);</span>
+
+<span class="nc bnc" id="L1092" title="All 2 branches missed.">        if (depth == 0) {</span>
+<span class="nc" id="L1093">            return new LocalFlipFlopStateNode(sourceSection, frameSlot);</span>
+        } else {
+<span class="nc" id="L1095">            return new LevelFlipFlopStateNode(sourceSection, depth, frameSlot);</span>
+        }
+    }
+
+    @Override
+    public RubyNode visitFloatNode(org.jruby.ast.FloatNode node) {
+<span class="nc" id="L1101">        return new FloatLiteralNode(context, translate(node.getPosition()), node.getValue());</span>
+    }
+
+    @Override
+    public RubyNode visitForNode(org.jruby.ast.ForNode node) {
+        /**
+         * A Ruby for-loop, such as:
+         * 
+         * &lt;pre&gt;
+         * for x in y
+         *     z = x
+         *     puts z
+         * end
+         * &lt;/pre&gt;
+         * 
+         * naively desugars to:
+         * 
+         * &lt;pre&gt;
+         * y.each do |x|
+         *     z = x
+         *     puts z
+         * end
+         * &lt;/pre&gt;
+         * 
+         * The main difference is that z is always going to be local to the scope outside the block,
+         * so it's a bit more like:
+         * 
+         * &lt;pre&gt;
+         * z = nil unless z is already defined
+         * y.each do |x|
+         *    z = x
+         *    puts x
+         * end
+         * &lt;/pre&gt;
+         * 
+         * Which forces z to be defined in the correct scope. The parser already correctly calls z a
+         * local, but then that causes us a problem as if we're going to translate to a block we
+         * need a formal parameter - not a local variable. My solution to this is to add a
+         * temporary:
+         * 
+         * &lt;pre&gt;
+         * z = nil unless z is already defined
+         * y.each do |temp|
+         *    x = temp
+         *    z = x
+         *    puts x
+         * end
+         * &lt;/pre&gt;
+         * 
+         * We also need that temp because the expression assigned in the for could be index
+         * assignment, multiple assignment, or whatever:
+         * 
+         * &lt;pre&gt;
+         * for x[0] in y
+         *     z = x[0]
+         *     puts z
+         * end
+         * &lt;/pre&gt;
+         * 
+         * http://blog.grayproductions.net/articles/the_evils_of_the_for_loop
+         * http://stackoverflow.com/questions/3294509/for-vs-each-in-ruby
+         * 
+         * The other complication is that normal locals should be defined in the enclosing scope,
+         * unlike a normal block. We do that by setting a flag on this translator object when we
+         * visit the new iter, translatingForStatement, which we recognise when visiting an iter
+         * node.
+         * 
+         * Finally, note that JRuby's terminology is strange here. Normally 'iter' is a different
+         * term for a block. Here, JRuby calls the object being iterated over the 'iter'.
+         */
+
+<span class="nc" id="L1172">        final String temp = environment.allocateLocalTemp(&quot;for&quot;);</span>
+
+<span class="nc" id="L1174">        final org.jruby.ast.Node receiver = node.getIterNode();</span>
+
+        /*
+         * The x in for x in ... is like the nodes in multiple assignment - it has a dummy RHS which
+         * we need to replace with our temp. Just like in multiple assignment this is really awkward
+         * with the JRuby AST.
+         */
+
+<span class="nc" id="L1182">        final org.jruby.ast.LocalVarNode readTemp = new org.jruby.ast.LocalVarNode(node.getPosition(), 0, temp);</span>
+<span class="nc" id="L1183">        final org.jruby.ast.Node forVar = node.getVarNode();</span>
+<span class="nc" id="L1184">        final org.jruby.ast.Node assignTemp = setRHS(forVar, readTemp);</span>
+
+<span class="nc" id="L1186">        final org.jruby.ast.BlockNode bodyWithTempAssign = new org.jruby.ast.BlockNode(node.getPosition());</span>
+<span class="nc" id="L1187">        bodyWithTempAssign.add(assignTemp);</span>
+<span class="nc" id="L1188">        bodyWithTempAssign.add(node.getBodyNode());</span>
+
+<span class="nc" id="L1190">        final org.jruby.ast.ArgumentNode blockVar = new org.jruby.ast.ArgumentNode(node.getPosition(), temp);</span>
+<span class="nc" id="L1191">        final org.jruby.ast.ListNode blockArgsPre = new org.jruby.ast.ListNode(node.getPosition(), blockVar);</span>
+<span class="nc" id="L1192">        final org.jruby.ast.ArgsNode blockArgs = new org.jruby.ast.ArgsNode(node.getPosition(), blockArgsPre, null, null, null, null, null, null);</span>
+<span class="nc" id="L1193">        final org.jruby.ast.IterNode block = new org.jruby.ast.IterNode(node.getPosition(), blockArgs, node.getScope(), bodyWithTempAssign);</span>
+
+<span class="nc" id="L1195">        final CallNode callNode = new CallNode(node.getPosition(), receiver, &quot;each&quot;, null, block);</span>
+
+<span class="nc" id="L1197">        translatingForStatement = true;</span>
+<span class="nc" id="L1198">        final RubyCallNode translated = (RubyCallNode) callNode.accept(this);</span>
+<span class="nc" id="L1199">        translatingForStatement = false;</span>
+
+<span class="nc" id="L1201">        return new ForNode(context, translated.getSourceSection(), translated);</span>
+    }
+
+    private static org.jruby.ast.Node setRHS(org.jruby.ast.Node node, org.jruby.ast.Node rhs) {
+<span class="nc bnc" id="L1205" title="All 2 branches missed.">        if (node instanceof org.jruby.ast.LocalAsgnNode) {</span>
+<span class="nc" id="L1206">            final org.jruby.ast.LocalAsgnNode localAsgnNode = (org.jruby.ast.LocalAsgnNode) node;</span>
+<span class="nc" id="L1207">            return new org.jruby.ast.LocalAsgnNode(node.getPosition(), localAsgnNode.getName(), 0, rhs);</span>
+<span class="nc bnc" id="L1208" title="All 2 branches missed.">        } else if (node instanceof org.jruby.ast.DAsgnNode) {</span>
+<span class="nc" id="L1209">            final org.jruby.ast.DAsgnNode dAsgnNode = (org.jruby.ast.DAsgnNode) node;</span>
+<span class="nc" id="L1210">            return new org.jruby.ast.DAsgnNode(node.getPosition(), dAsgnNode.getName(), 0, rhs);</span>
+<span class="nc bnc" id="L1211" title="All 2 branches missed.">        } else if (node instanceof org.jruby.ast.MultipleAsgn19Node) {</span>
+<span class="nc" id="L1212">            final org.jruby.ast.MultipleAsgn19Node multAsgnNode = (org.jruby.ast.MultipleAsgn19Node) node;</span>
+<span class="nc" id="L1213">            final org.jruby.ast.MultipleAsgn19Node newNode = new org.jruby.ast.MultipleAsgn19Node(node.getPosition(), multAsgnNode.getPre(), multAsgnNode.getRest(), multAsgnNode.getPost());</span>
+<span class="nc" id="L1214">            newNode.setValueNode(rhs);</span>
+<span class="nc" id="L1215">            return newNode;</span>
+<span class="nc bnc" id="L1216" title="All 2 branches missed.">        } else if (node instanceof org.jruby.ast.InstAsgnNode) {</span>
+<span class="nc" id="L1217">            final org.jruby.ast.InstAsgnNode instAsgnNode = (org.jruby.ast.InstAsgnNode) node;</span>
+<span class="nc" id="L1218">            return new org.jruby.ast.InstAsgnNode(node.getPosition(), instAsgnNode.getName(), rhs);</span>
+<span class="nc bnc" id="L1219" title="All 2 branches missed.">        } else if (node instanceof org.jruby.ast.ClassVarAsgnNode) {</span>
+<span class="nc" id="L1220">            final org.jruby.ast.ClassVarAsgnNode instAsgnNode = (org.jruby.ast.ClassVarAsgnNode) node;</span>
+<span class="nc" id="L1221">            return new org.jruby.ast.ClassVarAsgnNode(node.getPosition(), instAsgnNode.getName(), rhs);</span>
+<span class="nc bnc" id="L1222" title="All 2 branches missed.">        } else if (node instanceof org.jruby.ast.ConstDeclNode) {</span>
+<span class="nc" id="L1223">            final org.jruby.ast.ConstDeclNode constDeclNode = (org.jruby.ast.ConstDeclNode) node;</span>
+<span class="nc" id="L1224">            return new org.jruby.ast.ConstDeclNode(node.getPosition(), constDeclNode.getName(), (org.jruby.ast.types.INameNode) constDeclNode.getConstNode(), rhs);</span>
+        } else {
+<span class="nc" id="L1226">            throw new UnsupportedOperationException(&quot;Don't know how to set the RHS of a &quot; + node.getClass().getName());</span>
+        }
+    }
+
+<span class="nc" id="L1230">    private final Set&lt;String&gt; readOnlyGlobalVariables = new HashSet&lt;String&gt;();</span>
+<span class="nc" id="L1231">    private final Map&lt;String, String&gt; globalVariableAliases = new HashMap&lt;String, String&gt;();</span>
+    
+    private void initReadOnlyGlobalVariables() {
+<span class="nc" id="L1234">        Set&lt;String&gt; s = readOnlyGlobalVariables;</span>
+<span class="nc" id="L1235">        s.add(&quot;$:&quot;);</span>
+<span class="nc" id="L1236">        s.add(&quot;$LOAD_PATH&quot;);</span>
+<span class="nc" id="L1237">        s.add(&quot;$-I&quot;);</span>
+<span class="nc" id="L1238">        s.add(&quot;$\&quot;&quot;);</span>
+<span class="nc" id="L1239">        s.add(&quot;$LOADED_FEATURES&quot;);</span>
+<span class="nc" id="L1240">        s.add(&quot;$&lt;&quot;);</span>
+<span class="nc" id="L1241">        s.add(&quot;$FILENAME&quot;);</span>
+<span class="nc" id="L1242">        s.add(&quot;$?&quot;);</span>
+<span class="nc" id="L1243">        s.add(&quot;$-a&quot;);</span>
+<span class="nc" id="L1244">        s.add(&quot;$-l&quot;);</span>
+<span class="nc" id="L1245">        s.add(&quot;$-p&quot;);</span>
+<span class="nc" id="L1246">    }</span>
+    
+    private void initGlobalVariableAliases() {
+<span class="nc" id="L1249">        Map&lt;String, String&gt; m = globalVariableAliases;</span>
+<span class="nc" id="L1250">        m.put(&quot;$-I&quot;, &quot;$LOAD_PATH&quot;);</span>
+<span class="nc" id="L1251">        m.put(&quot;$:&quot;, &quot;$LOAD_PATH&quot;);</span>
+<span class="nc" id="L1252">        m.put(&quot;$-d&quot;, &quot;$DEBUG&quot;);</span>
+<span class="nc" id="L1253">        m.put(&quot;$-v&quot;, &quot;$VERBOSE&quot;);</span>
+<span class="nc" id="L1254">        m.put(&quot;$-w&quot;, &quot;$VERBOSE&quot;);</span>
+<span class="nc" id="L1255">        m.put(&quot;$-0&quot;, &quot;$/&quot;);</span>
+<span class="nc" id="L1256">    }</span>
+
+    @Override
+    public RubyNode visitGlobalAsgnNode(org.jruby.ast.GlobalAsgnNode node) {
+<span class="nc" id="L1260">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L1262">        String name = node.getName();</span>
+
+<span class="nc bnc" id="L1264" title="All 2 branches missed.">        if (globalVariableAliases.containsKey(name)) {</span>
+<span class="nc" id="L1265">            name = globalVariableAliases.get(name);</span>
+        }
+
+<span class="nc" id="L1268">        RubyNode rhs = node.getValueNode().accept(this);</span>
+
+<span class="nc bnc" id="L1270" title="All 2 branches missed.">        if (name.equals(&quot;$~&quot;)) {</span>
+<span class="nc" id="L1271">            rhs = new CheckMatchVariableTypeNode(context, sourceSection, rhs);</span>
+<span class="nc bnc" id="L1272" title="All 2 branches missed.">        } else if (name.equals(&quot;$0&quot;)) {</span>
+<span class="nc" id="L1273">            rhs = new CheckProgramNameVariableTypeNode(context, sourceSection, rhs);</span>
+<span class="nc bnc" id="L1274" title="All 2 branches missed.">        } else if (name.equals(&quot;$/&quot;)) {</span>
+<span class="nc" id="L1275">            rhs = new CheckRecordSeparatorVariableTypeNode(context, sourceSection, rhs);</span>
+<span class="nc bnc" id="L1276" title="All 2 branches missed.">        } else if (name.equals(&quot;$,&quot;)) {</span>
+<span class="nc" id="L1277">            rhs = new CheckOutputSeparatorVariableTypeNode(context, sourceSection, rhs);</span>
+<span class="nc bnc" id="L1278" title="All 2 branches missed.">        } else if (name.equals(&quot;$_&quot;)) {</span>
+<span class="nc" id="L1279">            rhs = WrapInThreadLocalNodeFactory.create(context, sourceSection, rhs);</span>
+        }
+
+<span class="nc bnc" id="L1282" title="All 2 branches missed.">        if (readOnlyGlobalVariables.contains(name)) {</span>
+<span class="nc" id="L1283">            return new WriteReadOnlyGlobalNode(context, sourceSection, name, rhs);</span>
+<span class="nc bnc" id="L1284" title="All 2 branches missed.">        } else if (THREAD_LOCAL_GLOBAL_VARIABLES.contains(name)) {</span>
+<span class="nc" id="L1285">            final ThreadLocalObjectNode threadLocalVariablesObjectNode = new ThreadLocalObjectNode(context, sourceSection);</span>
+<span class="nc" id="L1286">            return new WriteInstanceVariableNode(context, sourceSection, name, threadLocalVariablesObjectNode, rhs, true);</span>
+<span class="nc bnc" id="L1287" title="All 2 branches missed.">        } else if (FRAME_LOCAL_GLOBAL_VARIABLES.contains(name)) {</span>
+<span class="nc bnc" id="L1288" title="All 2 branches missed.">            if (environment.getNeverAssignInParentScope()) {</span>
+<span class="nc" id="L1289">                environment.declareVar(name);</span>
+            }
+
+<span class="nc" id="L1292">            RubyNode localVarNode = environment.findLocalVarNode(node.getName(), sourceSection);</span>
+
+<span class="nc bnc" id="L1294" title="All 2 branches missed.">            if (localVarNode == null) {</span>
+<span class="nc bnc" id="L1295" title="All 2 branches missed.">                if (environment.hasOwnScopeForAssignments()) {</span>
+<span class="nc" id="L1296">                    environment.declareVar(node.getName());</span>
+                }
+
+<span class="nc" id="L1299">                TranslatorEnvironment environmentToDeclareIn = environment;</span>
+
+<span class="nc bnc" id="L1301" title="All 2 branches missed.">                while (!environmentToDeclareIn.hasOwnScopeForAssignments()) {</span>
+<span class="nc" id="L1302">                    environmentToDeclareIn = environmentToDeclareIn.getParent();</span>
+                }
+
+<span class="nc" id="L1305">                environmentToDeclareIn.declareVar(node.getName());</span>
+<span class="nc" id="L1306">                localVarNode = environment.findLocalVarNode(node.getName(), sourceSection);</span>
+
+<span class="nc bnc" id="L1308" title="All 2 branches missed.">                if (localVarNode == null) {</span>
+<span class="nc" id="L1309">                    throw new RuntimeException(&quot;shoudln't be here&quot;);</span>
+                }
+            }
+
+<span class="nc" id="L1313">            return ((ReadNode) localVarNode).makeWriteNode(rhs);</span>
+        } else {
+<span class="nc bnc" id="L1315" title="All 2 branches missed.">            if (name.equals(&quot;$stdout&quot;)) {</span>
+<span class="nc" id="L1316">                rhs = new CheckStdoutVariableTypeNode(context, sourceSection, rhs);</span>
+            }
+<span class="nc" id="L1318">            final ObjectLiteralNode globalVariablesObjectNode = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getGlobalVariablesObject());</span>
+<span class="nc" id="L1319">            return new WriteInstanceVariableNode(context, sourceSection, name, globalVariablesObjectNode, rhs, true);</span>
+
+        }
+    }
+
+    @Override
+    public RubyNode visitGlobalVarNode(org.jruby.ast.GlobalVarNode node) {
+<span class="nc" id="L1326">        String name = node.getName();</span>
+
+<span class="nc bnc" id="L1328" title="All 2 branches missed.">        if (globalVariableAliases.containsKey(name)) {</span>
+<span class="nc" id="L1329">            name = globalVariableAliases.get(name);</span>
+        }
+
+<span class="nc" id="L1332">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc bnc" id="L1334" title="All 2 branches missed.">        if (FRAME_LOCAL_GLOBAL_VARIABLES.contains(name)) {</span>
+            // Assignment is implicit for many of these, so we need to declare when we use
+
+<span class="nc" id="L1337">            environment.declareVarWhereAllowed(name);</span>
+
+<span class="nc" id="L1339">            RubyNode readNode = environment.findLocalVarNode(name, sourceSection);</span>
+
+<span class="nc bnc" id="L1341" title="All 2 branches missed.">            if (name.equals(&quot;$_&quot;)) {</span>
+<span class="nc" id="L1342">                readNode = GetFromThreadLocalNodeFactory.create(context, sourceSection, readNode);</span>
+            }
+
+<span class="nc" id="L1345">            return readNode;</span>
+<span class="nc bnc" id="L1346" title="All 2 branches missed.">        } else if (THREAD_LOCAL_GLOBAL_VARIABLES.contains(name)) {</span>
+<span class="nc" id="L1347">            final ThreadLocalObjectNode threadLocalVariablesObjectNode = new ThreadLocalObjectNode(context, sourceSection);</span>
+<span class="nc" id="L1348">            return new ReadInstanceVariableNode(context, sourceSection, name, threadLocalVariablesObjectNode, true);</span>
+        } else {
+<span class="nc" id="L1350">            final ObjectLiteralNode globalVariablesObjectNode = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getGlobalVariablesObject());</span>
+<span class="nc" id="L1351">            return new ReadInstanceVariableNode(context, sourceSection, name, globalVariablesObjectNode, true);</span>
+        }
+    }
+
+    @Override
+    public RubyNode visitHashNode(org.jruby.ast.HashNode node) {
+<span class="nc" id="L1357">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L1359">        final List&lt;RubyNode&gt; hashConcats = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L1361">        final List&lt;RubyNode&gt; keyValues = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L1363" title="All 2 branches missed.">        for (KeyValuePair&lt;Node, Node&gt; pair: node.getPairs()) {</span>
+<span class="nc bnc" id="L1364" title="All 2 branches missed.">            if (pair.getKey() == null) {</span>
+<span class="nc" id="L1365">                final RubyNode hashLiteralSoFar = HashLiteralNode.create(context, translate(node.getPosition()), keyValues.toArray(new RubyNode[keyValues.size()]));</span>
+<span class="nc" id="L1366">                hashConcats.add(hashLiteralSoFar);</span>
+<span class="nc" id="L1367">                hashConcats.add(HashCastNodeFactory.create(context, sourceSection, pair.getValue().accept(this)));</span>
+<span class="nc" id="L1368">                keyValues.clear();</span>
+<span class="nc" id="L1369">            } else {</span>
+<span class="nc" id="L1370">                keyValues.add(pair.getKey().accept(this));</span>
+
+<span class="nc bnc" id="L1372" title="All 2 branches missed.">                if (pair.getValue() == null) {</span>
+<span class="nc" id="L1373">                    keyValues.add(new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject()));</span>
+                } else {
+<span class="nc" id="L1375">                    keyValues.add(pair.getValue().accept(this));</span>
+                }
+            }
+<span class="nc" id="L1378">        }</span>
+
+<span class="nc" id="L1380">        final RubyNode hashLiteralSoFar = HashLiteralNode.create(context, translate(node.getPosition()), keyValues.toArray(new RubyNode[keyValues.size()]));</span>
+<span class="nc" id="L1381">        hashConcats.add(hashLiteralSoFar);</span>
+
+<span class="nc bnc" id="L1383" title="All 2 branches missed.">        if (hashConcats.size() == 1) {</span>
+<span class="nc" id="L1384">            return hashConcats.get(0);</span>
+        }
+
+<span class="nc" id="L1387">        return new ConcatHashLiteralNode(context, sourceSection, hashConcats.toArray(new RubyNode[hashConcats.size()]));</span>
+    }
+
+    @Override
+    public RubyNode visitIfNode(org.jruby.ast.IfNode node) {
+<span class="nc" id="L1392">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L1394">        org.jruby.ast.Node thenBody = node.getThenBody();</span>
+
+<span class="nc bnc" id="L1396" title="All 2 branches missed.">        if (thenBody == null) {</span>
+<span class="nc" id="L1397">            thenBody = new org.jruby.ast.NilNode(node.getPosition());</span>
+        }
+
+<span class="nc" id="L1400">        org.jruby.ast.Node elseBody = node.getElseBody();</span>
+
+<span class="nc bnc" id="L1402" title="All 2 branches missed.">        if (elseBody == null) {</span>
+<span class="nc" id="L1403">            elseBody = new org.jruby.ast.NilNode(node.getPosition());</span>
+        }
+
+        RubyNode condition;
+
+<span class="nc bnc" id="L1408" title="All 2 branches missed.">        if (node.getCondition() == null) {</span>
+<span class="nc" id="L1409">            condition = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+        } else {
+<span class="nc" id="L1411">            condition = node.getCondition().accept(this);</span>
+        }
+
+<span class="nc" id="L1414">        final BooleanCastNode conditionCast = BooleanCastNodeFactory.create(context, sourceSection, condition);</span>
+
+<span class="nc" id="L1416">        final RubyNode thenBodyTranslated = thenBody.accept(this);</span>
+<span class="nc" id="L1417">        final RubyNode elseBodyTranslated = elseBody.accept(this);</span>
+
+<span class="nc" id="L1419">        return new IfNode(context, sourceSection, conditionCast, thenBodyTranslated, elseBodyTranslated);</span>
+    }
+
+    @Override
+    public RubyNode visitInstAsgnNode(org.jruby.ast.InstAsgnNode node) {
+<span class="nc" id="L1424">        final SourceSection sourceSection = translate(node.getPosition());</span>
+<span class="nc" id="L1425">        final String nameWithoutSigil = node.getName();</span>
+
+<span class="nc" id="L1427">        final RubyNode receiver = new SelfNode(context, sourceSection);</span>
+
+        RubyNode rhs;
+
+<span class="nc bnc" id="L1431" title="All 2 branches missed.">        if (node.getValueNode() == null) {</span>
+<span class="nc" id="L1432">            rhs = new DeadNode(context, sourceSection);</span>
+        } else {
+<span class="nc" id="L1434">            rhs = node.getValueNode().accept(this);</span>
+        }
+
+<span class="nc" id="L1437">        return new WriteInstanceVariableNode(context, sourceSection, nameWithoutSigil, receiver, rhs, false);</span>
+    }
+
+    @Override
+    public RubyNode visitInstVarNode(org.jruby.ast.InstVarNode node) {
+<span class="nc" id="L1442">        final SourceSection sourceSection = translate(node.getPosition());</span>
+<span class="nc" id="L1443">        final String nameWithoutSigil = node.getName();</span>
+
+<span class="nc" id="L1445">        final RubyNode receiver = new SelfNode(context, sourceSection);</span>
+
+<span class="nc" id="L1447">        return new ReadInstanceVariableNode(context, sourceSection, nameWithoutSigil, receiver, false);</span>
+    }
+
+    @Override
+    public RubyNode visitIterNode(org.jruby.ast.IterNode node) {
+<span class="nc" id="L1452">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        /*
+         * In a block we do NOT allocate a new return ID - returns will return from the method, not
+         * the block (in the general case, see Proc and the difference between Proc and Lambda for
+         * specifics).
+         */
+
+<span class="nc bnc" id="L1460" title="All 2 branches missed.">        final boolean hasOwnScope = !translatingForStatement;</span>
+
+        // Unset this flag for any for any blocks within the for statement's body
+
+<span class="nc" id="L1464">        final SharedMethodInfo sharedMethodInfo = new SharedMethodInfo(sourceSection, environment.getSharedMethodInfo().getLexicalScope(), currentCallMethodName, true, node, false);</span>
+
+<span class="nc" id="L1466">        final TranslatorEnvironment newEnvironment = new TranslatorEnvironment(</span>
+<span class="nc" id="L1467">                context, environment, environment.getParser(), environment.getReturnID(), hasOwnScope, false, sharedMethodInfo, environment.getNamedMethodName(), true);</span>
+<span class="nc bnc" id="L1468" title="All 2 branches missed.">        final MethodTranslator methodCompiler = new MethodTranslator(currentNode, context, this, newEnvironment, true, parent == null, source);</span>
+<span class="nc" id="L1469">        methodCompiler.translatingForStatement = translatingForStatement;</span>
+
+        org.jruby.ast.ArgsNode argsNode;
+
+<span class="nc bnc" id="L1473" title="All 2 branches missed.">        if (node.getVarNode() instanceof org.jruby.ast.ArgsNode) {</span>
+<span class="nc" id="L1474">            argsNode = (org.jruby.ast.ArgsNode) node.getVarNode();</span>
+<span class="nc bnc" id="L1475" title="All 2 branches missed.">        } else if (node.getVarNode() instanceof org.jruby.ast.DAsgnNode) {</span>
+<span class="nc" id="L1476">            final org.jruby.ast.ArgumentNode arg = new org.jruby.ast.ArgumentNode(node.getPosition(), ((org.jruby.ast.DAsgnNode) node.getVarNode()).getName());</span>
+<span class="nc" id="L1477">            final org.jruby.ast.ListNode preArgs = new org.jruby.ast.ArrayNode(node.getPosition(), arg);</span>
+<span class="nc" id="L1478">            argsNode = new org.jruby.ast.ArgsNode(node.getPosition(), preArgs, null, null, null, null, null, null);</span>
+<span class="nc bnc" id="L1479" title="All 2 branches missed.">        } else if (node.getVarNode() == null) {</span>
+<span class="nc" id="L1480">            argsNode = null;</span>
+        } else {
+<span class="nc" id="L1482">            throw new UnsupportedOperationException();</span>
+        }
+
+<span class="nc bnc" id="L1485" title="All 4 branches missed.">        if (translatingForStatement &amp;&amp; useClassVariablesAsIfInClass) {</span>
+<span class="nc" id="L1486">            methodCompiler.useClassVariablesAsIfInClass = true;</span>
+        }
+
+<span class="nc" id="L1489">        return methodCompiler.compileFunctionNode(translate(node.getPosition()), sharedMethodInfo.getName(), argsNode, node.getBodyNode(), false, sharedMethodInfo);</span>
+    }
+
+    @Override
+    public RubyNode visitLocalAsgnNode(org.jruby.ast.LocalAsgnNode node) {
+<span class="nc" id="L1494">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc bnc" id="L1496" title="All 2 branches missed.">        if (environment.getNeverAssignInParentScope()) {</span>
+<span class="nc" id="L1497">            environment.declareVar(node.getName());</span>
+        }
+
+<span class="nc" id="L1500">        RubyNode lhs = environment.findLocalVarNode(node.getName(), sourceSection);</span>
+
+<span class="nc bnc" id="L1502" title="All 2 branches missed.">        if (lhs == null) {</span>
+<span class="nc bnc" id="L1503" title="All 2 branches missed.">            if (environment.hasOwnScopeForAssignments()) {</span>
+<span class="nc" id="L1504">                environment.declareVar(node.getName());</span>
+            } else {
+<span class="nc" id="L1506">                TranslatorEnvironment environmentToDeclareIn = environment;</span>
+
+<span class="nc bnc" id="L1508" title="All 2 branches missed.">                while (!environmentToDeclareIn.hasOwnScopeForAssignments()) {</span>
+<span class="nc" id="L1509">                    environmentToDeclareIn = environmentToDeclareIn.getParent();</span>
+                }
+
+<span class="nc" id="L1512">                environmentToDeclareIn.declareVar(node.getName());</span>
+            }
+
+<span class="nc" id="L1515">            lhs = environment.findLocalVarNode(node.getName(), sourceSection);</span>
+
+<span class="nc bnc" id="L1517" title="All 2 branches missed.">            if (lhs == null) {</span>
+<span class="nc" id="L1518">                throw new RuntimeException(&quot;shouldn't be here&quot;);</span>
+            }
+        }
+
+        RubyNode rhs;
+
+<span class="nc bnc" id="L1524" title="All 2 branches missed.">        if (node.getValueNode() == null) {</span>
+<span class="nc" id="L1525">            rhs = new DeadNode(context, sourceSection);</span>
+        } else {
+<span class="nc bnc" id="L1527" title="All 2 branches missed.">            if (node.getValueNode().getPosition() == InvalidSourcePosition.INSTANCE) {</span>
+<span class="nc" id="L1528">                parentSourceSection = sourceSection;</span>
+            }
+
+            try {
+<span class="nc" id="L1532">                rhs = node.getValueNode().accept(this);</span>
+            } finally {
+<span class="nc bnc" id="L1534" title="All 4 branches missed.">                if (node.getValueNode().getPosition() == InvalidSourcePosition.INSTANCE) {</span>
+<span class="nc" id="L1535">                    parentSourceSection = null;</span>
+                }
+            }
+        }
+
+<span class="nc" id="L1540">        return ((ReadNode) lhs).makeWriteNode(rhs);</span>
+    }
+
+    @Override
+    public RubyNode visitLocalVarNode(org.jruby.ast.LocalVarNode node) {
+<span class="nc" id="L1545">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L1547">        final String name = node.getName();</span>
+
+<span class="nc" id="L1549">        RubyNode readNode = environment.findLocalVarNode(name, sourceSection);</span>
+
+<span class="nc bnc" id="L1551" title="All 2 branches missed.">        if (readNode == null) {</span>
+            /*
+
+              This happens for code such as:
+
+                def destructure4r((*c,d))
+                    [c,d]
+                end
+
+               We're going to just assume that it should be there and add it...
+             */
+
+<span class="nc" id="L1563">            environment.declareVar(node.getName());</span>
+<span class="nc" id="L1564">            readNode = environment.findLocalVarNode(name, sourceSection);</span>
+        }
+
+<span class="nc" id="L1567">        return readNode;</span>
+    }
+
+    @Override
+    public RubyNode visitMatchNode(org.jruby.ast.MatchNode node) {
+<span class="nc" id="L1572">        final org.jruby.ast.Node argsNode = buildArrayNode(node.getPosition(), new org.jruby.ast.GlobalVarNode(node.getPosition(), &quot;$_&quot;));</span>
+<span class="nc" id="L1573">        final org.jruby.ast.Node callNode = new CallNode(node.getPosition(), node.getRegexpNode(), &quot;=~&quot;, argsNode, null);</span>
+<span class="nc" id="L1574">        return callNode.accept(this);</span>
+    }
+
+    @Override
+    public RubyNode visitMatch2Node(org.jruby.ast.Match2Node node) {
+<span class="nc bnc" id="L1579" title="All 2 branches missed.">        if (node.getReceiverNode() instanceof org.jruby.ast.RegexpNode) {</span>
+<span class="nc" id="L1580">            final org.jruby.ast.RegexpNode regexpNode = (org.jruby.ast.RegexpNode) node.getReceiverNode();</span>
+<span class="nc" id="L1581">            final Regex regex = new Regex(regexpNode.getValue().bytes(), 0, regexpNode.getValue().length(), regexpNode.getOptions().toOptions(), regexpNode.getEncoding(), Syntax.RUBY);</span>
+
+<span class="nc bnc" id="L1583" title="All 2 branches missed.">            if (regex.numberOfNames() &gt; 0) {</span>
+<span class="nc bnc" id="L1584" title="All 2 branches missed.">                for (Iterator&lt;NameEntry&gt; i = regex.namedBackrefIterator(); i.hasNext(); ) {</span>
+<span class="nc" id="L1585">                    final NameEntry e = i.next();</span>
+<span class="nc" id="L1586">                    final String name = new String(e.name, e.nameP, e.nameEnd - e.nameP).intern();</span>
+
+<span class="nc bnc" id="L1588" title="All 2 branches missed.">                    if (environment.hasOwnScopeForAssignments()) {</span>
+<span class="nc" id="L1589">                        environment.declareVar(name);</span>
+                    } else {
+<span class="nc" id="L1591">                        TranslatorEnvironment environmentToDeclareIn = environment;</span>
+
+<span class="nc bnc" id="L1593" title="All 2 branches missed.">                        while (!environmentToDeclareIn.hasOwnScopeForAssignments()) {</span>
+<span class="nc" id="L1594">                            environmentToDeclareIn = environmentToDeclareIn.getParent();</span>
+                        }
+
+<span class="nc" id="L1597">                        environmentToDeclareIn.declareVar(name);</span>
+                    }
+<span class="nc" id="L1599">                }</span>
+            }
+        }
+
+<span class="nc" id="L1603">        final org.jruby.ast.Node argsNode = buildArrayNode(node.getPosition(), node.getValueNode());</span>
+<span class="nc" id="L1604">        final org.jruby.ast.Node callNode = new CallNode(node.getPosition(), node.getReceiverNode(), &quot;=~&quot;, argsNode, null);</span>
+<span class="nc" id="L1605">        return callNode.accept(this);</span>
+    }
+
+    @Override
+    public RubyNode visitMatch3Node(org.jruby.ast.Match3Node node) {
+<span class="nc" id="L1610">        final org.jruby.ast.Node argsNode = buildArrayNode(node.getPosition(), node.getValueNode());</span>
+<span class="nc" id="L1611">        final org.jruby.ast.Node callNode = new CallNode(node.getPosition(), node.getReceiverNode(), &quot;=~&quot;, argsNode, null);</span>
+<span class="nc" id="L1612">        return callNode.accept(this);</span>
+    }
+
+    @Override
+    public RubyNode visitModuleNode(org.jruby.ast.ModuleNode node) {
+<span class="nc" id="L1617">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L1619">        final String name = node.getCPath().getName();</span>
+
+<span class="nc" id="L1621">        RubyNode lexicalParent = translateCPath(sourceSection, node.getCPath());</span>
+
+<span class="nc" id="L1623">        final DefineOrGetModuleNode defineModuleNode = new DefineOrGetModuleNode(context, sourceSection, name, lexicalParent);</span>
+
+<span class="nc" id="L1625">        return openModule(sourceSection, defineModuleNode, name, node.getBodyNode());</span>
+    }
+
+    @Override
+    public RubyNode visitMultipleAsgnNode(org.jruby.ast.MultipleAsgnNode node) {
+<span class="nc" id="L1630">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public RubyNode visitMultipleAsgnNode(org.jruby.ast.MultipleAsgn19Node node) {
+<span class="nc" id="L1635">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L1637">        final org.jruby.ast.ArrayNode preArray = (org.jruby.ast.ArrayNode) node.getPre();</span>
+<span class="nc" id="L1638">        final org.jruby.ast.ArrayNode postArray = (org.jruby.ast.ArrayNode) node.getPost();</span>
+<span class="nc" id="L1639">        final org.jruby.ast.Node rhs = node.getValueNode();</span>
+
+        RubyNode rhsTranslated;
+
+<span class="nc bnc" id="L1643" title="All 2 branches missed.">        if (rhs == null) {</span>
+<span class="nc" id="L1644">            context.getRuntime().getWarnings().warn(IRubyWarnings.ID.TRUFFLE, node.getPosition().getFile(), node.getPosition().getLine(), &quot;no RHS for multiple assignment - using nil&quot;);</span>
+<span class="nc" id="L1645">            rhsTranslated = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+        } else {
+<span class="nc" id="L1647">            rhsTranslated = rhs.accept(this);</span>
+        }
+
+        final RubyNode result;
+
+<span class="nc bnc" id="L1652" title="All 2 branches missed.">        if (preArray != null</span>
+<span class="nc bnc" id="L1653" title="All 2 branches missed.">                &amp;&amp; node.getPost() == null</span>
+<span class="nc bnc" id="L1654" title="All 4 branches missed.">                &amp;&amp; node.getRest() == null</span>
+                &amp;&amp; rhsTranslated instanceof ArrayLiteralNode.UninitialisedArrayLiteralNode
+<span class="nc bnc" id="L1656" title="All 2 branches missed.">                &amp;&amp; ((ArrayLiteralNode.UninitialisedArrayLiteralNode) rhsTranslated).getValues().length == preArray.size()) {</span>
+            /*
+             * We can deal with this common case be rewriting as
+             *
+             * temp1 = c; temp2 = d; a = temp1; b = temp2
+             *
+             * We can't just do
+             *
+             * a = c; b = d
+             *
+             * As we don't know if d depends on the original value of a.
+             *
+             * We also need to return an array [c, d], but we make that result elidable so it isn't
+             * executed if it isn't actually demanded.
+             */
+
+<span class="nc" id="L1672">            final RubyNode[] rhsValues = ((ArrayLiteralNode.UninitialisedArrayLiteralNode) rhsTranslated).getValues();</span>
+<span class="nc" id="L1673">            final int assignedValuesCount = preArray.size();</span>
+
+<span class="nc" id="L1675">            final RubyNode[] sequence = new RubyNode[assignedValuesCount * 2];</span>
+
+<span class="nc" id="L1677">            final RubyNode[] tempValues = new RubyNode[assignedValuesCount];</span>
+
+<span class="nc bnc" id="L1679" title="All 2 branches missed.">            for (int n = 0; n &lt; assignedValuesCount; n++) {</span>
+<span class="nc" id="L1680">                final String tempName = environment.allocateLocalTemp(&quot;multi&quot;);</span>
+<span class="nc" id="L1681">                final RubyNode readTemp = environment.findLocalVarNode(tempName, sourceSection);</span>
+<span class="nc" id="L1682">                final RubyNode assignTemp = ((ReadNode) NodeUtil.cloneNode(readTemp)).makeWriteNode(rhsValues[n]);</span>
+<span class="nc" id="L1683">                final RubyNode assignFinalValue = translateDummyAssignment(preArray.get(n), NodeUtil.cloneNode(readTemp));</span>
+
+<span class="nc" id="L1685">                sequence[n] = assignTemp;</span>
+<span class="nc" id="L1686">                sequence[assignedValuesCount + n] = assignFinalValue;</span>
+
+<span class="nc" id="L1688">                tempValues[n] = NodeUtil.cloneNode(readTemp);</span>
+            }
+
+<span class="nc" id="L1691">            final RubyNode blockNode = SequenceNode.sequence(context, sourceSection, sequence);</span>
+
+<span class="nc" id="L1693">            final ArrayLiteralNode.UninitialisedArrayLiteralNode arrayNode = new ArrayLiteralNode.UninitialisedArrayLiteralNode(context, sourceSection, tempValues);</span>
+
+<span class="nc" id="L1695">            final ElidableResultNode elidableResult = new ElidableResultNode(context, sourceSection, blockNode, arrayNode);</span>
+
+<span class="nc" id="L1697">            result = elidableResult;</span>
+<span class="nc bnc" id="L1698" title="All 2 branches missed.">        } else if (preArray != null) {</span>
+            /*
+             * The other simple case is
+             *
+             * a, b, c = x
+             *
+             * If x is an array, then it's
+             *
+             * a[0] = x[0] etc
+             *
+             * If x isn't an array then it's
+             *
+             * a, b, c = [x, nil, nil]
+             *
+             * Which I believe is the same effect as
+             *
+             * a, b, c, = *x
+             *
+             * So we insert the splat cast node, even though it isn't there.
+             *
+             * In either case, we return the RHS
+             */
+
+<span class="nc" id="L1721">            final List&lt;RubyNode&gt; sequence = new ArrayList&lt;&gt;();</span>
+
+            /*
+             * Store the RHS in a temp.
+             */
+
+<span class="nc" id="L1727">            final String tempRHSName = environment.allocateLocalTemp(&quot;rhs&quot;);</span>
+<span class="nc" id="L1728">            final RubyNode writeTempRHS = ((ReadNode) environment.findLocalVarNode(tempRHSName, sourceSection)).makeWriteNode(rhsTranslated);</span>
+<span class="nc" id="L1729">            sequence.add(writeTempRHS);</span>
+
+            /*
+             * Create a temp for the array.
+             */
+
+<span class="nc" id="L1735">            final String tempName = environment.allocateLocalTemp(&quot;array&quot;);</span>
+
+            /*
+             * Create a sequence of instructions, with the first being the literal array assigned to
+             * the temp.
+             */
+
+<span class="nc bnc" id="L1742" title="All 2 branches missed.">            final RubyNode splatCastNode = SplatCastNodeFactory.create(context, sourceSection, translatingNextExpression ? SplatCastNode.NilBehavior.EMPTY_ARRAY : SplatCastNode.NilBehavior.ARRAY_WITH_NIL, false, environment.findLocalVarNode(tempRHSName, sourceSection));</span>
+
+<span class="nc" id="L1744">            final RubyNode writeTemp = ((ReadNode) environment.findLocalVarNode(tempName, sourceSection)).makeWriteNode(splatCastNode);</span>
+
+<span class="nc" id="L1746">            sequence.add(writeTemp);</span>
+
+            /*
+             * Then index the temp array for each assignment on the LHS.
+             */
+
+<span class="nc bnc" id="L1752" title="All 2 branches missed.">            for (int n = 0; n &lt; preArray.size(); n++) {</span>
+<span class="nc" id="L1753">                final ArrayIndexNode assignedValue = ArrayIndexNodeFactory.create(context, sourceSection, n, environment.findLocalVarNode(tempName, sourceSection));</span>
+
+<span class="nc" id="L1755">                sequence.add(translateDummyAssignment(preArray.get(n), assignedValue));</span>
+            }
+
+<span class="nc bnc" id="L1758" title="All 2 branches missed.">            if (node.getRest() != null) {</span>
+<span class="nc" id="L1759">                final ArrayGetTailNode assignedValue = ArrayGetTailNodeFactory.create(context, sourceSection, preArray.size(), environment.findLocalVarNode(tempName, sourceSection));</span>
+
+<span class="nc" id="L1761">                sequence.add(translateDummyAssignment(node.getRest(), assignedValue));</span>
+            }
+
+<span class="nc" id="L1764">            result = new ElidableResultNode(context, sourceSection, SequenceNode.sequence(context, sourceSection, sequence), environment.findLocalVarNode(tempRHSName, sourceSection));</span>
+<span class="nc bnc" id="L1765" title="All 2 branches missed.">        } else if (node.getPre() == null</span>
+<span class="nc bnc" id="L1766" title="All 2 branches missed.">                &amp;&amp; node.getPost() == null</span>
+<span class="nc bnc" id="L1767" title="All 2 branches missed.">                &amp;&amp; node.getRest() instanceof org.jruby.ast.StarNode) {</span>
+<span class="nc" id="L1768">            result = rhsTranslated;</span>
+<span class="nc bnc" id="L1769" title="All 2 branches missed.">        } else if (node.getPre() == null</span>
+<span class="nc bnc" id="L1770" title="All 2 branches missed.">                &amp;&amp; node.getPost() == null</span>
+<span class="nc bnc" id="L1771" title="All 6 branches missed.">                &amp;&amp; node.getRest() != null</span>
+                &amp;&amp; rhs != null
+                &amp;&amp; !(rhs instanceof org.jruby.ast.ArrayNode)) {
+            /*
+             * *a = b
+             *
+             * &gt;= 1.8, this seems to be the same as:
+             *
+             * a = *b
+             */
+
+<span class="nc" id="L1782">            final RubyNode restTranslated = (node.getRest().accept(this)).getNonProxyNode();</span>
+
+            /*
+             * Sometimes rest is a corrupt write with no RHS, like in other multiple assignments,
+             * and sometimes it is already a read.
+             */
+
+            ReadNode restRead;
+
+<span class="nc bnc" id="L1791" title="All 2 branches missed.">            if (restTranslated instanceof ReadNode) {</span>
+<span class="nc" id="L1792">                restRead = (ReadNode) restTranslated;</span>
+<span class="nc bnc" id="L1793" title="All 2 branches missed.">            } else if (restTranslated instanceof WriteNode) {</span>
+<span class="nc" id="L1794">                restRead = (ReadNode) ((WriteNode) restTranslated).makeReadNode();</span>
+            } else {
+<span class="nc" id="L1796">                throw new RuntimeException(&quot;Unknown form of multiple assignment &quot; + node + &quot; at &quot; + node.getPosition());</span>
+            }
+
+<span class="nc bnc" id="L1799" title="All 2 branches missed.">            final SplatCastNode rhsSplatCast = SplatCastNodeFactory.create(context, sourceSection, translatingNextExpression ? SplatCastNode.NilBehavior.EMPTY_ARRAY : SplatCastNode.NilBehavior.ARRAY_WITH_NIL, false, rhsTranslated);</span>
+
+<span class="nc" id="L1801">            result = restRead.makeWriteNode(rhsSplatCast);</span>
+<span class="nc bnc" id="L1802" title="All 2 branches missed.">        } else if (node.getPre() == null</span>
+<span class="nc bnc" id="L1803" title="All 2 branches missed.">                &amp;&amp; node.getPost() == null</span>
+<span class="nc bnc" id="L1804" title="All 6 branches missed.">                &amp;&amp; node.getRest() != null</span>
+                &amp;&amp; rhs != null
+                &amp;&amp; rhs instanceof org.jruby.ast.ArrayNode) {
+            /*
+             * *a = [b, c]
+             *
+             * This seems to be the same as:
+             *
+             * a = [b, c]
+             */
+
+<span class="nc" id="L1815">            final RubyNode restTranslated = (node.getRest().accept(this)).getNonProxyNode();</span>
+
+            /*
+             * Sometimes rest is a corrupt write with no RHS, like in other multiple assignments,
+             * and sometimes it is already a read.
+             */
+
+            ReadNode restRead;
+
+<span class="nc bnc" id="L1824" title="All 2 branches missed.">            if (restTranslated instanceof ReadNode) {</span>
+<span class="nc" id="L1825">                restRead = (ReadNode) restTranslated;</span>
+<span class="nc bnc" id="L1826" title="All 2 branches missed.">            } else if (restTranslated instanceof WriteNode) {</span>
+<span class="nc" id="L1827">                restRead = (ReadNode) ((WriteNode) restTranslated).makeReadNode();</span>
+            } else {
+<span class="nc" id="L1829">                throw new RuntimeException(&quot;Unknown form of multiple assignment &quot; + node + &quot; at &quot; + node.getPosition());</span>
+            }
+
+<span class="nc" id="L1832">            result = restRead.makeWriteNode(rhsTranslated);</span>
+<span class="nc bnc" id="L1833" title="All 6 branches missed.">        } else if (node.getPre() == null &amp;&amp; node.getRest() != null &amp;&amp; node.getPost() != null) {</span>
+            /*
+             * Something like
+             *
+             *     *a,b = [1, 2, 3, 4]
+             */
+
+            // This is very similar to the case with pre and rest, so unify with that
+
+            /*
+             * Create a temp for the array.
+             */
+
+<span class="nc" id="L1846">            final String tempName = environment.allocateLocalTemp(&quot;array&quot;);</span>
+
+            /*
+             * Create a sequence of instructions, with the first being the literal array assigned to
+             * the temp.
+             */
+
+<span class="nc" id="L1853">            final List&lt;RubyNode&gt; sequence = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L1855" title="All 2 branches missed.">            final RubyNode splatCastNode = SplatCastNodeFactory.create(context, sourceSection, translatingNextExpression ? SplatCastNode.NilBehavior.EMPTY_ARRAY : SplatCastNode.NilBehavior.ARRAY_WITH_NIL, false, rhsTranslated);</span>
+
+<span class="nc" id="L1857">            final RubyNode writeTemp = ((ReadNode) environment.findLocalVarNode(tempName, sourceSection)).makeWriteNode(splatCastNode);</span>
+
+<span class="nc" id="L1859">            sequence.add(writeTemp);</span>
+
+            /*
+             * Then index the temp array for each assignment on the LHS.
+             */
+
+<span class="nc bnc" id="L1865" title="All 2 branches missed.">            if (node.getRest() != null) {</span>
+<span class="nc" id="L1866">                final ArrayDropTailNode assignedValue = ArrayDropTailNodeFactory.create(context, sourceSection, postArray.size(), environment.findLocalVarNode(tempName, sourceSection));</span>
+
+<span class="nc" id="L1868">                sequence.add(translateDummyAssignment(node.getRest(), assignedValue));</span>
+            }
+
+<span class="nc bnc" id="L1871" title="All 2 branches missed.">            for (int n = 0; n &lt; postArray.size(); n++) {</span>
+<span class="nc" id="L1872">                final ArrayIndexNode assignedValue = ArrayIndexNodeFactory.create(context, sourceSection, -(postArray.size() - n), environment.findLocalVarNode(tempName, sourceSection));</span>
+
+<span class="nc" id="L1874">                sequence.add(translateDummyAssignment(postArray.get(n), assignedValue));</span>
+            }
+
+<span class="nc" id="L1877">            result = SequenceNode.sequence(context, sourceSection, sequence);</span>
+<span class="nc" id="L1878">        } else {</span>
+<span class="nc" id="L1879">            context.getRuntime().getWarnings().warn(IRubyWarnings.ID.TRUFFLE, node.getPosition().getFile(), node.getPosition().getLine(), node + &quot; unknown form of multiple assignment&quot;);</span>
+<span class="nc" id="L1880">            result = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+        }
+
+<span class="nc" id="L1883">        return new AssignmentWrapperNode(context, sourceSection, result);</span>
+    }
+
+    private RubyNode translateDummyAssignment(org.jruby.ast.Node dummyAssignment, RubyNode rhs) {
+<span class="nc" id="L1887">        final SourceSection sourceSection = translate(dummyAssignment.getPosition());</span>
+
+        /*
+         * This is tricky. To represent the RHS of a multiple assignment they use corrupt assignment
+         * values, in some cases with no value to be assigned, and in other cases with a dummy
+         * value. We can't visit them normally, as they're corrupt. We can't just modify them to
+         * have our RHS, as that's a node in our AST, not theirs. We can't use a dummy value in
+         * their AST because I can't add new visitors to this interface.
+         */
+
+        RubyNode translated;
+
+<span class="nc bnc" id="L1899" title="All 2 branches missed.">        if (dummyAssignment instanceof org.jruby.ast.LocalAsgnNode) {</span>
+            /*
+             * They have a dummy NilImplicitNode as the RHS. Translate, convert to read, convert to
+             * write which allows us to set the RHS.
+             */
+
+<span class="nc" id="L1905">            final WriteNode dummyTranslated = (WriteNode) (dummyAssignment.accept(this)).getNonProxyNode();</span>
+<span class="nc" id="L1906">            translated = ((ReadNode) dummyTranslated.makeReadNode()).makeWriteNode(rhs);</span>
+<span class="nc bnc" id="L1907" title="All 2 branches missed.">        } else if (dummyAssignment instanceof org.jruby.ast.InstAsgnNode) {</span>
+            /*
+             * Same as before, just a different type of assignment.
+             */
+
+<span class="nc" id="L1912">            final WriteInstanceVariableNode dummyTranslated = (WriteInstanceVariableNode) dummyAssignment.accept(this);</span>
+<span class="nc" id="L1913">            translated = ((ReadNode) dummyTranslated.makeReadNode()).makeWriteNode(rhs);</span>
+<span class="nc bnc" id="L1914" title="All 2 branches missed.">        } else if (dummyAssignment instanceof org.jruby.ast.AttrAssignNode) {</span>
+            /*
+             * They've given us an AttrAssignNode with the final argument, the assigned value,
+             * missing. If we translate that we'll get foo.[]=(index), so missing the value. To
+             * solve we have a special version of the visitCallNode that allows us to pass another
+             * already translated argument, visitCallNodeExtraArgument. However, we initially have
+             * an AttrAssignNode, so we also need a special version of that.
+             */
+
+<span class="nc" id="L1923">            final org.jruby.ast.AttrAssignNode dummyAttrAssignment = (org.jruby.ast.AttrAssignNode) dummyAssignment;</span>
+<span class="nc" id="L1924">            translated = visitAttrAssignNodeExtraArgument(dummyAttrAssignment, rhs);</span>
+<span class="nc bnc" id="L1925" title="All 2 branches missed.">        } else if (dummyAssignment instanceof org.jruby.ast.DAsgnNode) {</span>
+<span class="nc" id="L1926">            final RubyNode dummyTranslated = dummyAssignment.accept(this);</span>
+
+<span class="nc bnc" id="L1928" title="All 2 branches missed.">            if (dummyTranslated.getNonProxyNode() instanceof WriteLevelVariableNode) {</span>
+<span class="nc" id="L1929">                translated = ((ReadNode) ((WriteLevelVariableNode) dummyTranslated.getNonProxyNode()).makeReadNode()).makeWriteNode(rhs);</span>
+            } else {
+<span class="nc" id="L1931">                translated = ((ReadNode) ((WriteLocalVariableNode) dummyTranslated.getNonProxyNode()).makeReadNode()).makeWriteNode(rhs);</span>
+            }
+<span class="nc" id="L1933">        } else {</span>
+<span class="nc" id="L1934">            translated = ((ReadNode) environment.findLocalVarNode(environment.allocateLocalTemp(&quot;dummy&quot;), sourceSection)).makeWriteNode(rhs);</span>
+        }
+
+<span class="nc" id="L1937">        return translated;</span>
+    }
+
+    @Override
+    public RubyNode visitNewlineNode(org.jruby.ast.NewlineNode node) {
+<span class="nc" id="L1942">        final RubyNode child = node.getNextNode().accept(this);</span>
+<span class="nc" id="L1943">        return new TraceNode(context, child.getSourceSection(), child);</span>
+    }
+
+    @Override
+    public RubyNode visitNextNode(org.jruby.ast.NextNode node) {
+<span class="nc" id="L1948">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        RubyNode resultNode;
+
+<span class="nc bnc" id="L1952" title="All 2 branches missed.">        if (node.getValueNode() == null) {</span>
+<span class="nc" id="L1953">            parentSourceSection = sourceSection;</span>
+
+            try {
+<span class="nc" id="L1956">                resultNode = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+            } finally {
+<span class="nc" id="L1958">                parentSourceSection = null;</span>
+<span class="nc" id="L1959">            }</span>
+        } else {
+<span class="nc" id="L1961">            final boolean t = translatingNextExpression;</span>
+<span class="nc" id="L1962">            translatingNextExpression = true;</span>
+
+<span class="nc bnc" id="L1964" title="All 2 branches missed.">            if (node.getValueNode().getPosition() == InvalidSourcePosition.INSTANCE) {</span>
+<span class="nc" id="L1965">                parentSourceSection = sourceSection;</span>
+            }
+
+            try {
+<span class="nc" id="L1969">                resultNode = node.getValueNode().accept(this);</span>
+            } finally {
+<span class="nc bnc" id="L1971" title="All 4 branches missed.">                if (node.getValueNode().getPosition() == InvalidSourcePosition.INSTANCE) {</span>
+<span class="nc" id="L1972">                    parentSourceSection = null;</span>
+                }
+
+<span class="nc" id="L1975">                translatingNextExpression = t;</span>
+<span class="nc" id="L1976">            }</span>
+        }
+
+<span class="nc" id="L1979">        return new NextNode(context, sourceSection, resultNode);</span>
+    }
+
+    @Override
+    public RubyNode visitNilNode(org.jruby.ast.NilNode node) {
+<span class="nc bnc" id="L1984" title="All 4 branches missed.">        if (node.getPosition() == InvalidSourcePosition.INSTANCE &amp;&amp; parentSourceSection == null) {</span>
+<span class="nc" id="L1985">            return new DeadNode(context, null);</span>
+        }
+
+<span class="nc" id="L1988">        return new NilLiteralNode(context, translate(node.getPosition()));</span>
+    }
+
+    @Override
+    public RubyNode visitNthRefNode(org.jruby.ast.NthRefNode node) {
+<span class="nc" id="L1993">        return new ReadMatchReferenceNode(context, translate(node.getPosition()), node.getMatchNumber());</span>
+    }
+
+    @Override
+    public RubyNode visitOpAsgnAndNode(org.jruby.ast.OpAsgnAndNode node) {
+        /*
+         * This doesn't translate as you might expect!
+         *
+         * http://www.rubyinside.com/what-rubys-double-pipe-or-equals-really-does-5488.html
+         */
+
+<span class="nc" id="L2004">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L2006">        final org.jruby.ast.Node lhs = node.getFirstNode();</span>
+<span class="nc" id="L2007">        final org.jruby.ast.Node rhs = node.getSecondNode();</span>
+
+<span class="nc" id="L2009">        return new AssignmentWrapperNode(context, sourceSection, new AndNode(context, sourceSection, lhs.accept(this), rhs.accept(this)));</span>
+    }
+
+    @Override
+    public RubyNode visitOpAsgnNode(org.jruby.ast.OpAsgnNode node) {
+<span class="nc bnc" id="L2014" title="All 2 branches missed.">        if (node.getOperatorName().equals(&quot;||&quot;)) {</span>
+            // Why does this ||= come through as a visitOpAsgnNode and not a visitOpAsgnOrNode?
+
+<span class="nc" id="L2017">            final String temp = environment.allocateLocalTemp(&quot;opassign&quot;);</span>
+<span class="nc" id="L2018">            final org.jruby.ast.Node writeReceiverToTemp = new org.jruby.ast.LocalAsgnNode(node.getPosition(), temp, 0, node.getReceiverNode());</span>
+<span class="nc" id="L2019">            final org.jruby.ast.Node readReceiverFromTemp = new org.jruby.ast.LocalVarNode(node.getPosition(), 0, temp);</span>
+
+<span class="nc" id="L2021">            final org.jruby.ast.Node readMethod = new CallNode(node.getPosition(), readReceiverFromTemp, node.getVariableName(), null, null);</span>
+<span class="nc" id="L2022">            final org.jruby.ast.Node writeMethod = new CallNode(node.getPosition(), readReceiverFromTemp, node.getVariableName() + &quot;=&quot;, buildArrayNode(node.getPosition(),</span>
+<span class="nc" id="L2023">                    node.getValueNode()), null);</span>
+
+<span class="nc" id="L2025">            final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L2027">            RubyNode lhs = readMethod.accept(this);</span>
+<span class="nc" id="L2028">            RubyNode rhs = writeMethod.accept(this);</span>
+
+<span class="nc" id="L2030">            return new AssignmentWrapperNode(context, sourceSection, SequenceNode.sequence(context, sourceSection, writeReceiverToTemp.accept(this), new OrNode(context, sourceSection, lhs, rhs)));</span>
+        }
+
+        /*
+         * We're going to de-sugar a.foo += c into a.foo = a.foo + c. Note that we can't evaluate a
+         * more than once, so we put it into a temporary, and we're doing something more like:
+         * 
+         * temp = a; temp.foo = temp.foo + c
+         */
+
+<span class="nc" id="L2040">        final String temp = environment.allocateLocalTemp(&quot;opassign&quot;);</span>
+<span class="nc" id="L2041">        final org.jruby.ast.Node writeReceiverToTemp = new org.jruby.ast.LocalAsgnNode(node.getPosition(), temp, 0, node.getReceiverNode());</span>
+<span class="nc" id="L2042">        final org.jruby.ast.Node readReceiverFromTemp = new org.jruby.ast.LocalVarNode(node.getPosition(), 0, temp);</span>
+
+<span class="nc" id="L2044">        final org.jruby.ast.Node readMethod = new CallNode(node.getPosition(), readReceiverFromTemp, node.getVariableName(), null, null);</span>
+<span class="nc" id="L2045">        final org.jruby.ast.Node operation = new CallNode(node.getPosition(), readMethod, node.getOperatorName(), buildArrayNode(node.getPosition(), node.getValueNode()), null);</span>
+<span class="nc" id="L2046">        final org.jruby.ast.Node writeMethod = new CallNode(node.getPosition(), readReceiverFromTemp, node.getVariableName() + &quot;=&quot;, buildArrayNode(node.getPosition(),</span>
+                        operation), null);
+
+<span class="nc" id="L2049">        final org.jruby.ast.BlockNode block = new org.jruby.ast.BlockNode(node.getPosition());</span>
+<span class="nc" id="L2050">        block.add(writeReceiverToTemp);</span>
+<span class="nc" id="L2051">        block.add(writeMethod);</span>
+
+<span class="nc" id="L2053">        return block.accept(this);</span>
+    }
+
+    @Override
+    public RubyNode visitOpAsgnOrNode(org.jruby.ast.OpAsgnOrNode node) {
+        /*
+         * This doesn't translate as you might expect!
+         *
+         * http://www.rubyinside.com/what-rubys-double-pipe-or-equals-really-does-5488.html
+         */
+
+<span class="nc" id="L2064">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L2066">        RubyNode lhs = node.getFirstNode().accept(this);</span>
+<span class="nc" id="L2067">        RubyNode rhs = node.getSecondNode().accept(this);</span>
+
+<span class="nc bnc" id="L2069" title="All 2 branches missed.">        if (node.getFirstNode().needsDefinitionCheck()) {</span>
+<span class="nc" id="L2070">            RubyNode defined = new DefinedNode(context, lhs.getSourceSection(), lhs);</span>
+<span class="nc" id="L2071">            lhs = new AndNode(context, lhs.getSourceSection(), defined, lhs);</span>
+        }
+
+<span class="nc" id="L2074">        return new AssignmentWrapperNode(context, sourceSection, new OrNode(context, sourceSection, lhs, rhs));</span>
+    }
+
+    @Override
+    public RubyNode visitOpElementAsgnNode(org.jruby.ast.OpElementAsgnNode node) {
+        /*
+         * We're going to de-sugar a[b] += c into a[b] = a[b] + c. See discussion in
+         * visitOpAsgnNode.
+         */
+
+        org.jruby.ast.Node index;
+
+<span class="nc bnc" id="L2086" title="All 2 branches missed.">        if (node.getArgsNode() == null) {</span>
+<span class="nc" id="L2087">            index = null;</span>
+        } else {
+<span class="nc" id="L2089">            index = node.getArgsNode().childNodes().get(0);</span>
+        }
+
+<span class="nc" id="L2092">        final org.jruby.ast.Node operand = node.getValueNode();</span>
+
+<span class="nc" id="L2094">        final String temp = environment.allocateLocalTemp(&quot;opelementassign&quot;);</span>
+<span class="nc" id="L2095">        final org.jruby.ast.Node writeArrayToTemp = new org.jruby.ast.LocalAsgnNode(node.getPosition(), temp, 0, node.getReceiverNode());</span>
+<span class="nc" id="L2096">        final org.jruby.ast.Node readArrayFromTemp = new org.jruby.ast.LocalVarNode(node.getPosition(), 0, temp);</span>
+
+<span class="nc" id="L2098">        final org.jruby.ast.Node arrayRead = new CallNode(node.getPosition(), readArrayFromTemp, &quot;[]&quot;, buildArrayNode(node.getPosition(), index), null);</span>
+
+<span class="nc" id="L2100">        final String op = node.getOperatorName();</span>
+
+<span class="nc" id="L2102">        org.jruby.ast.Node operation = null;</span>
+
+<span class="nc bnc" id="L2104" title="All 2 branches missed.">        if (op.equals(&quot;||&quot;)) {</span>
+<span class="nc" id="L2105">            operation = new org.jruby.ast.OrNode(node.getPosition(), arrayRead, operand);</span>
+<span class="nc bnc" id="L2106" title="All 2 branches missed.">        } else if (op.equals(&quot;&amp;&amp;&quot;)) {</span>
+<span class="nc" id="L2107">            operation = new org.jruby.ast.AndNode(node.getPosition(), arrayRead, operand);</span>
+        } else {
+<span class="nc" id="L2109">            operation = new CallNode(node.getPosition(), arrayRead, node.getOperatorName(), buildArrayNode(node.getPosition(), operand), null);</span>
+        }
+
+<span class="nc" id="L2112">        final org.jruby.ast.Node arrayWrite = new CallNode(node.getPosition(), readArrayFromTemp, &quot;[]=&quot;, buildArrayNode(node.getPosition(), index, operation), null);</span>
+
+<span class="nc" id="L2114">        final org.jruby.ast.BlockNode block = new org.jruby.ast.BlockNode(node.getPosition());</span>
+<span class="nc" id="L2115">        block.add(writeArrayToTemp);</span>
+<span class="nc" id="L2116">        block.add(arrayWrite);</span>
+
+<span class="nc" id="L2118">        return block.accept(this);</span>
+    }
+
+    private static org.jruby.ast.ArrayNode buildArrayNode(org.jruby.lexer.yacc.ISourcePosition sourcePosition, org.jruby.ast.Node first, org.jruby.ast.Node... rest) {
+<span class="nc bnc" id="L2122" title="All 2 branches missed.">        if (first == null) {</span>
+<span class="nc" id="L2123">            return new org.jruby.ast.ArrayNode(sourcePosition);</span>
+        }
+
+<span class="nc" id="L2126">        final org.jruby.ast.ArrayNode array = new org.jruby.ast.ArrayNode(sourcePosition, first);</span>
+
+<span class="nc bnc" id="L2128" title="All 2 branches missed.">        for (org.jruby.ast.Node node : rest) {</span>
+<span class="nc" id="L2129">            array.add(node);</span>
+        }
+
+<span class="nc" id="L2132">        return array;</span>
+    }
+
+    @Override
+    public RubyNode visitOrNode(org.jruby.ast.OrNode node) {
+<span class="nc" id="L2137">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        RubyNode x;
+
+<span class="nc bnc" id="L2141" title="All 2 branches missed.">        if (node.getFirstNode() == null) {</span>
+<span class="nc" id="L2142">            x = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+        } else {
+<span class="nc" id="L2144">            x = node.getFirstNode().accept(this);</span>
+        }
+
+        RubyNode y;
+
+<span class="nc bnc" id="L2149" title="All 2 branches missed.">        if (node.getSecondNode() == null) {</span>
+<span class="nc" id="L2150">            y = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+        } else {
+<span class="nc" id="L2152">            y = node.getSecondNode().accept(this);</span>
+        }
+
+<span class="nc" id="L2155">        return new OrNode(context, sourceSection, x, y);</span>
+    }
+
+    @Override
+    public RubyNode visitPreExeNode(PreExeNode node) {
+<span class="nc" id="L2160">        return node.getBodyNode().accept(this);</span>
+    }
+
+    @Override
+    public RubyNode visitPostExeNode(PostExeNode node) {
+<span class="nc" id="L2165">        return node.getBodyNode().accept(this);</span>
+    }
+
+    @Override
+    public RubyNode visitRationalNode(RationalNode node) {
+<span class="nc" id="L2170">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        // Translate as Rubinius.privately { Rubinius.convert(a, b) }
+
+        // TODO(CS): use IntFixnumLiteralNode where possible
+
+<span class="nc" id="L2176">        final LexicalScope lexicalScope = environment.getLexicalScope();</span>
+<span class="nc" id="L2177">        final RubyNode moduleNode = new LexicalScopeNode(context, sourceSection, lexicalScope);</span>
+<span class="nc" id="L2178">        return new RubyCallNode(</span>
+                context, sourceSection, &quot;convert&quot;,
+                new ReadConstantNode(context, sourceSection, &quot;Rational&quot;, moduleNode, lexicalScope),
+                null, false, true, false,
+                new RubyNode[]{
+<span class="nc" id="L2183">                        new FixnumLiteralNode.LongFixnumLiteralNode(context, sourceSection, node.getNumerator()),</span>
+<span class="nc" id="L2184">                        new FixnumLiteralNode.LongFixnumLiteralNode(context, sourceSection, node.getDenominator())});</span>
+    }
+
+    @Override
+    public RubyNode visitRedoNode(org.jruby.ast.RedoNode node) {
+<span class="nc" id="L2189">        return new RedoNode(context, translate(node.getPosition()));</span>
+    }
+
+    @Override
+    public RubyNode visitRegexpNode(org.jruby.ast.RegexpNode node) {
+<span class="nc" id="L2194">        Regex regex = RubyRegexp.compile(currentNode, context, node.getValue().bytes(), node.getEncoding(), node.getOptions().toOptions());</span>
+
+<span class="nc" id="L2196">        final RubyRegexp regexp = new RubyRegexp(context.getCoreLibrary().getRegexpClass(), regex, node.getValue());</span>
+
+<span class="nc bnc" id="L2198" title="All 2 branches missed.">        if (node.getOptions().isEncodingNone()) {</span>
+            // This isn't quite right - we shouldn't be looking up by name, we need a real reference to this constants
+
+<span class="nc bnc" id="L2201" title="All 2 branches missed.">            if (!all7Bit(node.getValue().bytes())) {</span>
+<span class="nc" id="L2202">                regexp.forceEncoding((RubyEncoding) context.getCoreLibrary().getEncodingClass().getConstants().get(&quot;ASCII_8BIT&quot;).getValue());</span>
+            } else {
+<span class="nc" id="L2204">                regexp.forceEncoding((RubyEncoding) context.getCoreLibrary().getEncodingClass().getConstants().get(&quot;US_ASCII&quot;).getValue());</span>
+            }
+<span class="nc bnc" id="L2206" title="All 2 branches missed.">        } else if (node.getOptions().getKCode().getKCode().equals(&quot;SJIS&quot;)) {</span>
+<span class="nc" id="L2207">            regexp.forceEncoding((RubyEncoding) context.getCoreLibrary().getEncodingClass().getConstants().get(&quot;Windows_31J&quot;).getValue());</span>
+<span class="nc bnc" id="L2208" title="All 2 branches missed.">        } else if (node.getOptions().getKCode().getKCode().equals(&quot;UTF8&quot;)) {</span>
+<span class="nc" id="L2209">            regexp.forceEncoding((RubyEncoding) context.getCoreLibrary().getEncodingClass().getConstants().get(&quot;UTF_8&quot;).getValue());</span>
+        } else {
+<span class="nc" id="L2211">            regexp.forceEncoding(RubyEncoding.getEncoding(context, node.getEncoding()));</span>
+        }
+
+<span class="nc" id="L2214">        final ObjectLiteralNode literalNode = new ObjectLiteralNode(context, translate(node.getPosition()), regexp);</span>
+
+<span class="nc bnc" id="L2216" title="All 2 branches missed.">        if (node.getOptions().isOnce()) {</span>
+<span class="nc" id="L2217">            return new OnceNode(context, literalNode.getEncapsulatingSourceSection(), literalNode);</span>
+        }
+
+<span class="nc" id="L2220">        return literalNode;</span>
+    }
+
+    public static boolean all7Bit(byte[] bytes) {
+<span class="nc bnc" id="L2224" title="All 2 branches missed.">        for (int n = 0; n &lt; bytes.length; n++) {</span>
+<span class="nc bnc" id="L2225" title="All 2 branches missed.">            if (bytes[n] &lt; 0) {</span>
+<span class="nc" id="L2226">                return false;</span>
+            }
+
+<span class="nc bnc" id="L2229" title="All 6 branches missed.">            if (bytes[n] == '\\' &amp;&amp; n + 1 &lt; bytes.length &amp;&amp; bytes[n + 1] == 'x') {</span>
+<span class="nc" id="L2230">                int b = Integer.parseInt(new String(Arrays.copyOfRange(bytes, n + 2, n + 4)), 16);</span>
+
+<span class="nc bnc" id="L2232" title="All 2 branches missed.">                if (b &gt; 0x7F) {</span>
+<span class="nc" id="L2233">                    return false;</span>
+                }
+
+<span class="nc" id="L2236">                n += 3;</span>
+            }
+        }
+
+<span class="nc" id="L2240">        return true;</span>
+    }
+
+    @Override
+    public RubyNode visitRescueNode(org.jruby.ast.RescueNode node) {
+<span class="nc" id="L2245">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        RubyNode tryPart;
+
+<span class="nc bnc" id="L2249" title="All 2 branches missed.">        if (node.getBodyNode() != null) {</span>
+<span class="nc" id="L2250">            tryPart = node.getBodyNode().accept(this);</span>
+        } else {
+<span class="nc" id="L2252">            tryPart = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+        }
+
+<span class="nc" id="L2255">        final List&lt;RescueNode&gt; rescueNodes = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L2257">        org.jruby.ast.RescueBodyNode rescueBody = node.getRescueNode();</span>
+
+<span class="nc bnc" id="L2259" title="All 2 branches missed.">        while (rescueBody != null) {</span>
+<span class="nc bnc" id="L2260" title="All 2 branches missed.">            if (rescueBody.getExceptionNodes() != null) {</span>
+<span class="nc bnc" id="L2261" title="All 2 branches missed.">                if (rescueBody.getExceptionNodes() instanceof org.jruby.ast.ArrayNode) {</span>
+<span class="nc" id="L2262">                    final List&lt;org.jruby.ast.Node&gt; exceptionNodes = ((org.jruby.ast.ArrayNode) rescueBody.getExceptionNodes()).childNodes();</span>
+
+<span class="nc" id="L2264">                    final RubyNode[] handlingClasses = new RubyNode[exceptionNodes.size()];</span>
+
+<span class="nc bnc" id="L2266" title="All 2 branches missed.">                    for (int n = 0; n &lt; handlingClasses.length; n++) {</span>
+<span class="nc" id="L2267">                        handlingClasses[n] = exceptionNodes.get(n).accept(this);</span>
+                    }
+
+                    RubyNode translatedBody;
+
+<span class="nc bnc" id="L2272" title="All 2 branches missed.">                    if (rescueBody.getBodyNode() == null) {</span>
+<span class="nc" id="L2273">                        translatedBody = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+                    } else {
+<span class="nc" id="L2275">                        translatedBody = rescueBody.getBodyNode().accept(this);</span>
+                    }
+
+<span class="nc" id="L2278">                    final RescueClassesNode rescueNode = new RescueClassesNode(context, sourceSection, handlingClasses, translatedBody);</span>
+<span class="nc" id="L2279">                    rescueNodes.add(rescueNode);</span>
+<span class="nc bnc" id="L2280" title="All 2 branches missed.">                } else if (rescueBody.getExceptionNodes() instanceof org.jruby.ast.SplatNode) {</span>
+<span class="nc" id="L2281">                    final org.jruby.ast.SplatNode splat = (org.jruby.ast.SplatNode) rescueBody.getExceptionNodes();</span>
+
+                    RubyNode splatTranslated;
+
+<span class="nc bnc" id="L2285" title="All 2 branches missed.">                    if (splat.getValue() == null) {</span>
+<span class="nc" id="L2286">                        splatTranslated = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+                    } else {
+<span class="nc" id="L2288">                        splatTranslated = splat.getValue().accept(this);</span>
+                    }
+
+                    RubyNode bodyTranslated;
+
+<span class="nc bnc" id="L2293" title="All 2 branches missed.">                    if (rescueBody.getBodyNode() == null) {</span>
+<span class="nc" id="L2294">                        bodyTranslated = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+                    } else {
+<span class="nc" id="L2296">                        bodyTranslated = rescueBody.getBodyNode().accept(this);</span>
+                    }
+
+<span class="nc" id="L2299">                    final RescueSplatNode rescueNode = new RescueSplatNode(context, sourceSection, splatTranslated, bodyTranslated);</span>
+<span class="nc" id="L2300">                    rescueNodes.add(rescueNode);</span>
+<span class="nc" id="L2301">                } else {</span>
+<span class="nc" id="L2302">                    unimplemented(node);</span>
+                }
+            } else {
+                RubyNode bodyNode;
+
+<span class="nc bnc" id="L2307" title="All 2 branches missed.">                if (rescueBody.getBodyNode() == null) {</span>
+<span class="nc" id="L2308">                    bodyNode = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+                } else {
+<span class="nc" id="L2310">                    bodyNode = rescueBody.getBodyNode().accept(this);</span>
+                }
+
+<span class="nc" id="L2313">                final RescueAnyNode rescueNode = new RescueAnyNode(context, sourceSection, bodyNode);</span>
+<span class="nc" id="L2314">                rescueNodes.add(rescueNode);</span>
+            }
+
+<span class="nc" id="L2317">            rescueBody = rescueBody.getOptRescueNode();</span>
+        }
+
+        RubyNode elsePart;
+
+<span class="nc bnc" id="L2322" title="All 2 branches missed.">        if (node.getElseNode() != null) {</span>
+<span class="nc" id="L2323">            elsePart = node.getElseNode().accept(this);</span>
+        } else {
+<span class="nc" id="L2325">            elsePart = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+        }
+
+<span class="nc" id="L2328">        return new TryNode(context, sourceSection,</span>
+                new ExceptionTranslatingNode(context, sourceSection, tryPart),
+<span class="nc" id="L2330">                rescueNodes.toArray(new RescueNode[rescueNodes.size()]), elsePart);</span>
+    }
+
+    @Override
+    public RubyNode visitRetryNode(org.jruby.ast.RetryNode node) {
+<span class="nc" id="L2335">        return new RetryNode(context, translate(node.getPosition()));</span>
+    }
+
+    @Override
+    public RubyNode visitReturnNode(org.jruby.ast.ReturnNode node) {
+<span class="nc" id="L2340">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        RubyNode translatedChild;
+
+<span class="nc bnc" id="L2344" title="All 2 branches missed.">        if (node.getValueNode() == null) {</span>
+<span class="nc" id="L2345">            translatedChild = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+        } else {
+<span class="nc" id="L2347">            translatedChild = node.getValueNode().accept(this);</span>
+        }
+
+<span class="nc" id="L2350">        return new ReturnNode(context, sourceSection, environment.getReturnID(), translatedChild);</span>
+    }
+
+    @Override
+    public RubyNode visitSClassNode(org.jruby.ast.SClassNode node) {
+<span class="nc" id="L2355">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L2357">        final RubyNode receiverNode = node.getReceiverNode().accept(this);</span>
+
+<span class="nc" id="L2359">        final SingletonClassNode singletonClassNode = SingletonClassNodeFactory.create(context, sourceSection, receiverNode);</span>
+
+<span class="nc" id="L2361">        return openModule(sourceSection, singletonClassNode, &quot;(singleton-def)&quot;, node.getBodyNode());</span>
+    }
+
+    @Override
+    public RubyNode visitSValueNode(org.jruby.ast.SValueNode node) {
+<span class="nc" id="L2366">        return node.getValue().accept(this);</span>
+    }
+
+    @Override
+    public RubyNode visitSelfNode(org.jruby.ast.SelfNode node) {
+<span class="nc" id="L2371">        return new SelfNode(context, translate(node.getPosition()));</span>
+    }
+
+    @Override
+    public RubyNode visitSplatNode(org.jruby.ast.SplatNode node) {
+<span class="nc" id="L2376">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        RubyNode value;
+
+<span class="nc bnc" id="L2380" title="All 2 branches missed.">        if (node.getValue() == null) {</span>
+<span class="nc" id="L2381">            value = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+        } else {
+<span class="nc" id="L2383">            value = node.getValue().accept(this);</span>
+        }
+
+<span class="nc" id="L2386">        return SplatCastNodeFactory.create(context, sourceSection, SplatCastNode.NilBehavior.EMPTY_ARRAY, false, value);</span>
+    }
+
+    @Override
+    public RubyNode visitStrNode(org.jruby.ast.StrNode node) {
+<span class="nc" id="L2391">        return new StringLiteralNode(context, translate(node.getPosition()), node.getValue());</span>
+    }
+
+    @Override
+    public RubyNode visitSymbolNode(org.jruby.ast.SymbolNode node) {
+<span class="nc" id="L2396">        return new ObjectLiteralNode(context, translate(node.getPosition()), context.newSymbol(node.getName()));</span>
+    }
+
+    @Override
+    public RubyNode visitTrueNode(org.jruby.ast.TrueNode node) {
+<span class="nc" id="L2401">        return new BooleanLiteralNode(context, translate(node.getPosition()), true);</span>
+    }
+
+    @Override
+    public RubyNode visitUndefNode(org.jruby.ast.UndefNode node) {
+<span class="nc" id="L2406">        final SourceSection sourceSection = translate(node.getPosition());</span>
+<span class="nc" id="L2407">        final SelfNode classNode = new SelfNode(context, sourceSection);</span>
+<span class="nc" id="L2408">        return new UndefNode(context, sourceSection, classNode, ((org.jruby.ast.LiteralNode) node.getName()).getName());</span>
+    }
+
+    @Override
+    public RubyNode visitUntilNode(org.jruby.ast.UntilNode node) {
+<span class="nc" id="L2413">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        RubyNode condition;
+
+<span class="nc bnc" id="L2417" title="All 2 branches missed.">        if (node.getConditionNode() == null) {</span>
+<span class="nc" id="L2418">            condition = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+        } else {
+<span class="nc" id="L2420">            condition = node.getConditionNode().accept(this);</span>
+        }
+
+<span class="nc" id="L2423">        final BooleanCastNode conditionCast = BooleanCastNodeFactory.create(context, sourceSection, condition);</span>
+<span class="nc" id="L2424">        final NotNode conditionCastNot = new NotNode(context, sourceSection, conditionCast);</span>
+<span class="nc" id="L2425">        final BooleanCastNode conditionCastNotCast = BooleanCastNodeFactory.create(context, sourceSection, conditionCastNot);</span>
+
+<span class="nc" id="L2427">        RubyNode body = node.getBodyNode().accept(this);</span>
+
+<span class="nc bnc" id="L2429" title="All 2 branches missed.">        if (node.evaluateAtStart()) {</span>
+<span class="nc" id="L2430">            return new WhileNode(context, sourceSection, conditionCastNotCast, body);</span>
+        } else {
+<span class="nc" id="L2432">            return new DoWhileNode(context, sourceSection, conditionCastNotCast, body);</span>
+        }
+    }
+
+    @Override
+    public RubyNode visitVCallNode(org.jruby.ast.VCallNode node) {
+<span class="nc" id="L2438">        final org.jruby.ast.Node receiver = new org.jruby.ast.SelfNode(node.getPosition());</span>
+<span class="nc" id="L2439">        final org.jruby.ast.Node args = null;</span>
+<span class="nc" id="L2440">        final CallNode callNode = new CallNode(node.getPosition(), receiver, node.getName(), args, null);</span>
+
+<span class="nc" id="L2442">        return visitCallNodeExtraArgument(callNode, null, true, true);</span>
+    }
+
+    @Override
+    public RubyNode visitWhileNode(org.jruby.ast.WhileNode node) {
+<span class="nc" id="L2447">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        RubyNode condition;
+
+<span class="nc bnc" id="L2451" title="All 2 branches missed.">        if (node.getConditionNode() == null) {</span>
+<span class="nc" id="L2452">            condition = new ObjectLiteralNode(context, sourceSection, context.getCoreLibrary().getNilObject());</span>
+        } else {
+<span class="nc" id="L2454">            condition = node.getConditionNode().accept(this);</span>
+        }
+
+<span class="nc" id="L2457">        final BooleanCastNode conditionCast = BooleanCastNodeFactory.create(context, sourceSection, condition);</span>
+
+<span class="nc" id="L2459">        RubyNode body = node.getBodyNode().accept(this);</span>
+
+<span class="nc bnc" id="L2461" title="All 2 branches missed.">        if (node.evaluateAtStart()) {</span>
+<span class="nc" id="L2462">            return new WhileNode(context, sourceSection, conditionCast, body);</span>
+        } else {
+<span class="nc" id="L2464">            return new DoWhileNode(context, sourceSection, conditionCast, body);</span>
+        }
+    }
+
+    @Override
+    public RubyNode visitXStrNode(org.jruby.ast.XStrNode node) {
+<span class="nc" id="L2470">        SourceSection sourceSection = translate(node.getPosition());</span>
+
+<span class="nc" id="L2472">        final StringLiteralNode literal = new StringLiteralNode(context, sourceSection, node.getValue());</span>
+
+<span class="nc" id="L2474">        return new SystemNode(context, sourceSection, literal);</span>
+    }
+
+    @Override
+    public RubyNode visitYieldNode(org.jruby.ast.YieldNode node) {
+<span class="nc" id="L2479">        final List&lt;org.jruby.ast.Node&gt; arguments = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L2481">        org.jruby.ast.Node argsNode = node.getArgsNode();</span>
+
+<span class="nc" id="L2483">        final boolean unsplat = argsNode instanceof org.jruby.ast.SplatNode;</span>
+
+<span class="nc bnc" id="L2485" title="All 2 branches missed.">        if (unsplat) {</span>
+<span class="nc" id="L2486">            argsNode = ((org.jruby.ast.SplatNode) argsNode).getValue();</span>
+        }
+
+<span class="nc bnc" id="L2489" title="All 2 branches missed.">        if (argsNode != null) {</span>
+<span class="nc bnc" id="L2490" title="All 2 branches missed.">            if (argsNode instanceof org.jruby.ast.ListNode) {</span>
+<span class="nc" id="L2491">                arguments.addAll((node.getArgsNode()).childNodes());</span>
+            } else {
+<span class="nc" id="L2493">                arguments.add(node.getArgsNode());</span>
+            }
+        }
+
+<span class="nc" id="L2497">        final List&lt;RubyNode&gt; argumentsTranslated = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L2499" title="All 2 branches missed.">        for (org.jruby.ast.Node argument : arguments) {</span>
+<span class="nc" id="L2500">            argumentsTranslated.add(argument.accept(this));</span>
+<span class="nc" id="L2501">        }</span>
+
+<span class="nc" id="L2503">        final RubyNode[] argumentsTranslatedArray = argumentsTranslated.toArray(new RubyNode[argumentsTranslated.size()]);</span>
+
+<span class="nc" id="L2505">        return new YieldNode(context, translate(node.getPosition()), argumentsTranslatedArray, unsplat);</span>
+    }
+
+    @Override
+    public RubyNode visitZArrayNode(org.jruby.ast.ZArrayNode node) {
+<span class="nc" id="L2510">        final RubyNode[] values = new RubyNode[0];</span>
+
+<span class="nc" id="L2512">        return new ArrayLiteralNode.UninitialisedArrayLiteralNode(context, translate(node.getPosition()), values);</span>
+    }
+
+    @Override
+    public RubyNode visitBackRefNode(org.jruby.ast.BackRefNode node) {
+<span class="nc" id="L2517">        int index = 0;</span>
+
+<span class="nc bnc" id="L2519" title="All 5 branches missed.">        switch (node.getType()) {</span>
+            case '`':
+<span class="nc" id="L2521">                index = ReadMatchReferenceNode.PRE;</span>
+<span class="nc" id="L2522">                break;</span>
+            case '\'':
+<span class="nc" id="L2524">                index = ReadMatchReferenceNode.POST;</span>
+<span class="nc" id="L2525">                break;</span>
+            case '&amp;':
+<span class="nc" id="L2527">                index = ReadMatchReferenceNode.GLOBAL;</span>
+<span class="nc" id="L2528">                break;</span>
+            case '+':
+<span class="nc" id="L2530">                index = ReadMatchReferenceNode.HIGHEST;</span>
+<span class="nc" id="L2531">                break;</span>
+            default:
+<span class="nc" id="L2533">                throw new UnsupportedOperationException(Character.toString(node.getType()));</span>
+        }
+
+<span class="nc" id="L2536">        return new ReadMatchReferenceNode(context, translate(node.getPosition()), index);</span>
+    }
+
+    public RubyNode visitLambdaNode(org.jruby.ast.LambdaNode node) {
+<span class="nc" id="L2540">        final SourceSection sourceSection = translate(node.getPosition());</span>
+
+        // TODO(cs): code copied and modified from visitIterNode - extract common
+
+<span class="nc" id="L2544">        final SharedMethodInfo sharedMethodInfo = new SharedMethodInfo(sourceSection, environment.getSharedMethodInfo().getLexicalScope(), &quot;(lambda)&quot;, true, node, false);</span>
+
+<span class="nc" id="L2546">        final TranslatorEnvironment newEnvironment = new TranslatorEnvironment(</span>
+<span class="nc" id="L2547">                context, environment, environment.getParser(), environment.getReturnID(), false, false, sharedMethodInfo, sharedMethodInfo.getName(), true);</span>
+<span class="nc bnc" id="L2548" title="All 2 branches missed.">        final MethodTranslator methodCompiler = new MethodTranslator(currentNode, context, this, newEnvironment, false, parent == null, source);</span>
+
+        org.jruby.ast.ArgsNode argsNode;
+
+<span class="nc bnc" id="L2552" title="All 2 branches missed.">        if (node.getVarNode() instanceof org.jruby.ast.ArgsNode) {</span>
+<span class="nc" id="L2553">            argsNode = (org.jruby.ast.ArgsNode) node.getVarNode();</span>
+<span class="nc bnc" id="L2554" title="All 2 branches missed.">        } else if (node.getVarNode() instanceof org.jruby.ast.DAsgnNode) {</span>
+<span class="nc" id="L2555">            final org.jruby.ast.ArgumentNode arg = new org.jruby.ast.ArgumentNode(node.getPosition(), ((org.jruby.ast.DAsgnNode) node.getVarNode()).getName());</span>
+<span class="nc" id="L2556">            final org.jruby.ast.ListNode preArgs = new org.jruby.ast.ArrayNode(node.getPosition(), arg);</span>
+<span class="nc" id="L2557">            argsNode = new org.jruby.ast.ArgsNode(node.getPosition(), preArgs, null, null, null, null, null, null);</span>
+<span class="nc bnc" id="L2558" title="All 2 branches missed.">        } else if (node.getVarNode() == null) {</span>
+<span class="nc" id="L2559">            argsNode = null;</span>
+        } else {
+<span class="nc" id="L2561">            throw new UnsupportedOperationException();</span>
+        }
+
+<span class="nc" id="L2564">        final RubyNode definitionNode = methodCompiler.compileFunctionNode(translate(node.getPosition()), sharedMethodInfo.getName(), argsNode, node.getBodyNode(), false, sharedMethodInfo);</span>
+
+<span class="nc" id="L2566">        return new LambdaNode(context, translate(node.getPosition()), definitionNode);</span>
+    }
+
+    protected RubyNode initFlipFlopStates(SourceSection sourceSection) {
+<span class="nc" id="L2570">        final RubyNode[] initNodes = new RubyNode[environment.getFlipFlopStates().size()];</span>
+
+<span class="nc bnc" id="L2572" title="All 2 branches missed.">        for (int n = 0; n &lt; initNodes.length; n++) {</span>
+<span class="nc" id="L2573">            initNodes[n] = new InitFlipFlopSlotNode(context, sourceSection, environment.getFlipFlopStates().get(n));</span>
+        }
+
+<span class="nc" id="L2576">        return SequenceNode.sequence(context, sourceSection, initNodes);</span>
+    }
+
+    @Override
+    protected RubyNode defaultVisit(Node node) {
+<span class="nc" id="L2581">        return unimplemented(node);</span>
+    }
+
+    protected RubyNode unimplemented(Node node) {
+<span class="nc" id="L2585">        context.getRuntime().getWarnings().warn(IRubyWarnings.ID.TRUFFLE, node.getPosition().getFile(), node.getPosition().getLine(), node + &quot; does nothing - translating as nil&quot;);</span>
+<span class="nc" id="L2586">        return new ObjectLiteralNode(context, translate(node.getPosition()), context.getCoreLibrary().getNilObject());</span>
+    }
+
+    public TranslatorEnvironment getEnvironment() {
+<span class="nc" id="L2590">        return environment;</span>
+    }
+
+    @Override
+    protected String getIdentifier() {
+<span class="nc bnc" id="L2595" title="All 2 branches missed.">        if (environment.isBlock()) {</span>
+<span class="nc" id="L2596">            TranslatorEnvironment methodParent = environment.getParent();</span>
+
+<span class="nc bnc" id="L2598" title="All 2 branches missed.">            while (methodParent.isBlock()) {</span>
+<span class="nc" id="L2599">                methodParent = methodParent.getParent();</span>
+            }
+
+<span class="nc" id="L2602">            return methodParent.getNamedMethodName();</span>
+        } else {
+<span class="nc" id="L2604">            return environment.getNamedMethodName();</span>
+        }
+    }
+
+    @Override
+    public RubyNode visitOther(Node node) {
+<span class="nc bnc" id="L2610" title="All 2 branches missed.">        if (node instanceof ReadLocalDummyNode) {</span>
+<span class="nc" id="L2611">            final ReadLocalDummyNode readLocal = (ReadLocalDummyNode) node;</span>
+<span class="nc" id="L2612">            return ReadLocalVariableNodeFactory.create(context, readLocal.getSourceSection(), readLocal.getFrameSlot());</span>
+        } else {
+<span class="nc" id="L2614">            throw new UnsupportedOperationException();</span>
+        }
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

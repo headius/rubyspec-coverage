@@ -1,0 +1,2216 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>KernelNodes.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.nodes.core</a> &gt; <span class="el_source">KernelNodes.java</span></div><h1>KernelNodes.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2013, 2015 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.nodes.core;
+
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.Truffle;
+import com.oracle.truffle.api.dsl.Specialization;
+import com.oracle.truffle.api.frame.*;
+import com.oracle.truffle.api.nodes.UnexpectedResultException;
+import com.oracle.truffle.api.source.SourceSection;
+import org.jruby.common.IRubyWarnings;
+import org.jruby.runtime.Visibility;
+import org.jruby.truffle.nodes.RubyNode;
+import org.jruby.truffle.nodes.cast.BooleanCastNode;
+import org.jruby.truffle.nodes.cast.BooleanCastNodeFactory;
+import org.jruby.truffle.nodes.control.WhileNode;
+import org.jruby.truffle.nodes.dispatch.Dispatch;
+import org.jruby.truffle.nodes.dispatch.DispatchHeadNode;
+import org.jruby.truffle.nodes.dispatch.PredicateDispatchHeadNode;
+import org.jruby.truffle.nodes.globals.WrapInThreadLocalNode;
+import org.jruby.truffle.nodes.literal.BooleanLiteralNode;
+import org.jruby.truffle.nodes.objects.SingletonClassNode;
+import org.jruby.truffle.nodes.objects.SingletonClassNodeFactory;
+import org.jruby.truffle.nodes.objectstorage.ReadHeadObjectFieldNode;
+import org.jruby.truffle.nodes.objectstorage.WriteHeadObjectFieldNode;
+import org.jruby.truffle.nodes.yield.YieldNode;
+import org.jruby.truffle.runtime.*;
+import org.jruby.truffle.runtime.backtrace.Activation;
+import org.jruby.truffle.runtime.backtrace.Backtrace;
+import org.jruby.truffle.runtime.backtrace.MRIBacktraceFormatter;
+import org.jruby.truffle.runtime.control.RaiseException;
+import org.jruby.truffle.runtime.control.ThrowException;
+import org.jruby.truffle.runtime.core.*;
+import org.jruby.truffle.runtime.hash.HashOperations;
+import org.jruby.truffle.runtime.hash.KeyValue;
+import org.jruby.truffle.runtime.methods.RubyMethod;
+import org.jruby.util.ByteList;
+import org.jruby.util.cli.Options;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.math.BigInteger;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+
+@CoreClass(name = &quot;Kernel&quot;)
+<span class="nc" id="L59">public abstract class KernelNodes {</span>
+
+    /**
+     * Check if operands are the same object or call #==.
+     * Known as rb_equal() in MRI. The fact Kernel#=== uses this is pure coincidence.
+     */
+    @CoreMethod(names = &quot;===&quot;, required = 1)
+    public abstract static class SameOrEqualNode extends CoreMethodNode {
+
+        @Child protected BasicObjectNodes.ReferenceEqualNode referenceEqualNode;
+        @Child protected PredicateDispatchHeadNode equalNode;
+
+        public SameOrEqualNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L72">            super(context, sourceSection);</span>
+<span class="nc" id="L73">        }</span>
+
+        public SameOrEqualNode(SameOrEqualNode prev) {
+<span class="nc" id="L76">            super(prev);</span>
+<span class="nc" id="L77">        }</span>
+
+        protected boolean areSame(VirtualFrame frame, Object left, Object right) {
+<span class="nc bnc" id="L80" title="All 2 branches missed.">            if (referenceEqualNode == null) {</span>
+<span class="nc" id="L81">                CompilerDirectives.transferToInterpreterAndInvalidate();</span>
+<span class="nc" id="L82">                referenceEqualNode = insert(BasicObjectNodesFactory.ReferenceEqualNodeFactory.create(getContext(), getSourceSection(), null, null));</span>
+            }
+<span class="nc" id="L84">            return referenceEqualNode.executeReferenceEqual(frame, left, right);</span>
+        }
+
+        protected boolean areEqual(VirtualFrame frame, Object left, Object right) {
+<span class="nc bnc" id="L88" title="All 2 branches missed.">            if (equalNode == null) {</span>
+<span class="nc" id="L89">                CompilerDirectives.transferToInterpreterAndInvalidate();</span>
+<span class="nc" id="L90">                equalNode = insert(new PredicateDispatchHeadNode(getContext()));</span>
+            }
+<span class="nc" id="L92">            return equalNode.call(frame, left, &quot;==&quot;, null, right);</span>
+        }
+
+        public abstract boolean executeSameOrEqual(VirtualFrame frame, Object a, Object b);
+
+        @Specialization
+        public boolean sameOrEqual(VirtualFrame frame, Object a, Object b) {
+<span class="nc bnc" id="L99" title="All 2 branches missed.">            if (areSame(frame, a, b))</span>
+<span class="nc" id="L100">                return true;</span>
+<span class="nc" id="L101">            return areEqual(frame, a, b);</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;=~&quot;, required = 1, needsSelf = false)
+    public abstract static class MatchNode extends CoreMethodNode {
+
+        public MatchNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L110">            super(context, sourceSection);</span>
+<span class="nc" id="L111">        }</span>
+
+        public MatchNode(MatchNode prev) {
+<span class="nc" id="L114">            super(prev);</span>
+<span class="nc" id="L115">        }</span>
+
+        @Specialization
+        public RubyNilClass equal(Object other) {
+<span class="nc" id="L119">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;!~&quot;, required = 1)
+    public abstract static class NotMatchNode extends CoreMethodNode {
+
+        @Child protected PredicateDispatchHeadNode matchNode;
+
+        public NotMatchNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L130">            super(context, sourceSection);</span>
+<span class="nc" id="L131">            matchNode = new PredicateDispatchHeadNode(context);</span>
+<span class="nc" id="L132">        }</span>
+
+        public NotMatchNode(NotMatchNode prev) {
+<span class="nc" id="L135">            super(prev);</span>
+<span class="nc" id="L136">            matchNode = prev.matchNode;</span>
+<span class="nc" id="L137">        }</span>
+
+        @Specialization
+        public boolean notMatch(VirtualFrame frame, Object self, Object other) {
+<span class="nc bnc" id="L141" title="All 2 branches missed.">            return !matchNode.call(frame, self, &quot;=~&quot;, null, other);</span>
+        }
+
+    }
+
+    @CoreMethod(names = {&quot;&lt;=&gt;&quot;}, required = 1)
+    public abstract static class CompareNode extends CoreMethodNode {
+
+        @Child protected DispatchHeadNode equalNode;
+        @Child protected BooleanCastNode booleanCast;
+
+        public CompareNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L153">            super(context, sourceSection);</span>
+<span class="nc" id="L154">            equalNode = new DispatchHeadNode(context);</span>
+<span class="nc" id="L155">            booleanCast = BooleanCastNodeFactory.create(context, sourceSection, null);</span>
+<span class="nc" id="L156">        }</span>
+
+        public CompareNode(CompareNode prev) {
+<span class="nc" id="L159">            super(prev);</span>
+<span class="nc" id="L160">            equalNode = prev.equalNode;</span>
+<span class="nc" id="L161">            booleanCast = prev.booleanCast;</span>
+<span class="nc" id="L162">        }</span>
+
+        @Specialization
+        public Object compare(VirtualFrame frame, RubyBasicObject self, RubyBasicObject other) {
+<span class="nc" id="L166">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L168" title="All 4 branches missed.">            if ((self == other) || booleanCast.executeBoolean(frame, equalNode.call(frame, self, &quot;==&quot;, null, other))) {</span>
+<span class="nc" id="L169">                return 0;</span>
+            }
+
+<span class="nc" id="L172">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;abort&quot;, isModuleFunction = true)
+    public abstract static class AbortNode extends CoreMethodNode {
+
+        public AbortNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L181">            super(context, sourceSection);</span>
+<span class="nc" id="L182">        }</span>
+
+        public AbortNode(AbortNode prev) {
+<span class="nc" id="L185">            super(prev);</span>
+<span class="nc" id="L186">        }</span>
+
+        @Specialization
+        public RubyNilClass abort() {
+<span class="nc" id="L190">            CompilerDirectives.transferToInterpreter();</span>
+<span class="nc" id="L191">            System.exit(1);</span>
+<span class="nc" id="L192">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;Array&quot;, isModuleFunction = true, argumentsAsArray = true)
+    public abstract static class ArrayNode extends CoreMethodNode {
+
+        @Child ArrayBuilderNode arrayBuilderNode;
+
+        public ArrayNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L202">            super(context, sourceSection);</span>
+<span class="nc" id="L203">            arrayBuilderNode = new ArrayBuilderNode.UninitializedArrayBuilderNode(context);</span>
+<span class="nc" id="L204">        }</span>
+
+        public ArrayNode(ArrayNode prev) {
+<span class="nc" id="L207">            super(prev);</span>
+<span class="nc" id="L208">            arrayBuilderNode = prev.arrayBuilderNode;</span>
+<span class="nc" id="L209">        }</span>
+
+        @Specialization(guards = &quot;isOneArrayElement&quot;)
+        public RubyArray arrayOneArrayElement(Object[] args) {
+<span class="nc" id="L213">            return (RubyArray) args[0];</span>
+        }
+
+        @Specialization(guards = &quot;!isOneArrayElement&quot;)
+        public RubyArray array(Object[] args) {
+<span class="nc" id="L218">            final int length = args.length;</span>
+<span class="nc" id="L219">            Object store = arrayBuilderNode.start(length);</span>
+
+<span class="nc bnc" id="L221" title="All 2 branches missed.">            for (int n = 0; n &lt; length; n++) {</span>
+<span class="nc" id="L222">                store = arrayBuilderNode.append(store, n, args[n]);</span>
+            }
+
+<span class="nc" id="L225">            return new RubyArray(getContext().getCoreLibrary().getArrayClass(), arrayBuilderNode.finish(store, length), length);</span>
+        }
+
+        protected boolean isOneArrayElement(Object[] args) {
+<span class="nc bnc" id="L229" title="All 4 branches missed.">            return args.length == 1 &amp;&amp; args[0] instanceof RubyArray;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;at_exit&quot;, isModuleFunction = true, needsBlock = true)
+    public abstract static class AtExitNode extends CoreMethodNode {
+
+        public AtExitNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L238">            super(context, sourceSection);</span>
+<span class="nc" id="L239">        }</span>
+
+        public AtExitNode(AtExitNode prev) {
+<span class="nc" id="L242">            super(prev);</span>
+<span class="nc" id="L243">        }</span>
+
+        @Specialization
+        public Object atExit(RubyProc block) {
+<span class="nc" id="L247">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L249">            getContext().getAtExitManager().add(block);</span>
+<span class="nc" id="L250">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;binding&quot;, isModuleFunction = true)
+    public abstract static class BindingNode extends CoreMethodNode {
+
+        public BindingNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L258">            super(context, sourceSection);</span>
+<span class="nc" id="L259">        }</span>
+
+        public abstract RubyBinding executeBinding(VirtualFrame frame);
+
+        @Specialization
+        public RubyBinding binding() {
+            // Materialize the caller's frame - false means don't use a slow path to get it - we want to optimize it
+
+<span class="nc" id="L267">            final MaterializedFrame callerFrame = Truffle.getRuntime().getCallerFrame()</span>
+<span class="nc" id="L268">                    .getFrame(FrameInstance.FrameAccess.MATERIALIZE, false).materialize();</span>
+
+<span class="nc" id="L270">            return new RubyBinding(</span>
+<span class="nc" id="L271">                    getContext().getCoreLibrary().getBindingClass(),</span>
+<span class="nc" id="L272">                    RubyArguments.getSelf(callerFrame.getArguments()),</span>
+                    callerFrame);
+        }
+    }
+
+    @CoreMethod(names = &quot;block_given?&quot;, isModuleFunction = true)
+    public abstract static class BlockGivenNode extends CoreMethodNode {
+
+        public BlockGivenNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L281">            super(context, sourceSection);</span>
+<span class="nc" id="L282">        }</span>
+
+        public BlockGivenNode(BlockGivenNode prev) {
+<span class="nc" id="L285">            super(prev);</span>
+<span class="nc" id="L286">        }</span>
+
+        @Specialization
+        public boolean blockGiven() {
+<span class="nc" id="L290">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L292" title="All 2 branches missed.">            return RubyArguments.getBlock(Truffle.getRuntime().getCallerFrame().getFrame(FrameInstance.FrameAccess.READ_ONLY, false).getArguments()) != null;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;caller&quot;, isModuleFunction = true, optional = 1)
+    public abstract static class CallerNode extends CoreMethodNode {
+
+        public CallerNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L300">            super(context, sourceSection);</span>
+<span class="nc" id="L301">        }</span>
+
+        public CallerNode(CallerNode prev) {
+<span class="nc" id="L304">            super(prev);</span>
+<span class="nc" id="L305">        }</span>
+
+        @Specialization
+        public Object caller(UndefinedPlaceholder omit) {
+<span class="nc" id="L309">            return caller(1);</span>
+        }
+
+        @Specialization
+        public Object caller(int omit) {
+<span class="nc" id="L314">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L316">            omit += 1; // Always ignore this node</span>
+
+<span class="nc" id="L318">            Backtrace backtrace = RubyCallStack.getBacktrace(this);</span>
+<span class="nc" id="L319">            List&lt;Activation&gt; activations = backtrace.getActivations();</span>
+<span class="nc" id="L320">            int size = activations.size() - omit;</span>
+
+<span class="nc bnc" id="L322" title="All 2 branches missed.">            if (size &lt; 0) {</span>
+<span class="nc" id="L323">                return getContext().getCoreLibrary().getNilObject();</span>
+            }
+
+<span class="nc" id="L326">            Object[] callers = new Object[size];</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">            for (int n = 0; n &lt; size; n++) {</span>
+<span class="nc" id="L328">                callers[n] = getContext().makeString(MRIBacktraceFormatter.formatCallerLine(activations, n + omit));</span>
+            }
+<span class="nc" id="L330">            return new RubyArray(getContext().getCoreLibrary().getArrayClass(), callers, callers.length);</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;catch&quot;, isModuleFunction = true, needsBlock = true, required = 1)
+    public abstract static class CatchNode extends YieldingCoreMethodNode {
+
+        public CatchNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L338">            super(context, sourceSection);</span>
+<span class="nc" id="L339">        }</span>
+
+        public CatchNode(CatchNode prev) {
+<span class="nc" id="L342">            super(prev);</span>
+<span class="nc" id="L343">        }</span>
+
+        @Specialization
+        public Object doCatch(VirtualFrame frame, Object tag, RubyProc block) {
+<span class="nc" id="L347">            notDesignedForCompilation();</span>
+
+            try {
+<span class="nc" id="L350">                getContext().getThrowTags().add(tag);</span>
+
+<span class="nc" id="L352">                return yield(frame, block);</span>
+<span class="nc" id="L353">            } catch (ThrowException e) {</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">                if (e.getTag().equals(tag)) {</span>
+                    // TODO(cs): unset rather than set to Nil?
+<span class="nc" id="L356">                    notDesignedForCompilation();</span>
+<span class="nc" id="L357">                    getContext().getCoreLibrary().getGlobalVariablesObject().getOperations().setInstanceVariable(getContext().getCoreLibrary().getGlobalVariablesObject(), &quot;$!&quot;, getContext().getCoreLibrary().getNilObject());</span>
+<span class="nc" id="L358">                    return e.getValue();</span>
+                } else {
+<span class="nc" id="L360">                    throw e;</span>
+                }
+            } finally {
+<span class="nc" id="L363">                getContext().getThrowTags().remove();</span>
+            }
+        }
+    }
+
+    @CoreMethod(names = &quot;class&quot;)
+    public abstract static class ClassNode extends CoreMethodNode {
+
+        public ClassNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L372">            super(context, sourceSection);</span>
+<span class="nc" id="L373">        }</span>
+
+        public ClassNode(ClassNode prev) {
+<span class="nc" id="L376">            super(prev);</span>
+<span class="nc" id="L377">        }</span>
+
+        public abstract RubyClass executeGetClass(Object value);
+
+        @Specialization
+        public RubyClass getClass(boolean value) {
+<span class="nc" id="L383">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L385" title="All 2 branches missed.">            if (value) {</span>
+<span class="nc" id="L386">                return getContext().getCoreLibrary().getTrueClass();</span>
+            } else {
+<span class="nc" id="L388">                return getContext().getCoreLibrary().getFalseClass();</span>
+            }
+        }
+
+        @Specialization
+        public RubyClass getClass(int value) {
+<span class="nc" id="L394">            return getContext().getCoreLibrary().getFixnumClass();</span>
+        }
+
+        @Specialization
+        public RubyClass getClass(long value) {
+<span class="nc" id="L399">            return getContext().getCoreLibrary().getFixnumClass();</span>
+        }
+
+        @Specialization
+        public RubyClass getClass(double value) {
+<span class="nc" id="L404">            return getContext().getCoreLibrary().getFloatClass();</span>
+        }
+
+        @Specialization
+        public RubyClass getClass(RubyBasicObject self) {
+<span class="nc" id="L409">            return self.getLogicalClass();</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;clone&quot;)
+    public abstract static class CloneNode extends CoreMethodNode {
+
+        @Child protected DispatchHeadNode initializeCloneNode;
+
+        public CloneNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L420">            super(context, sourceSection);</span>
+            // Calls private initialize_clone on the new copy.
+<span class="nc" id="L422">            initializeCloneNode = new DispatchHeadNode(context, true, Dispatch.MissingBehavior.CALL_METHOD_MISSING);</span>
+<span class="nc" id="L423">        }</span>
+
+        public CloneNode(CloneNode prev) {
+<span class="nc" id="L426">            super(prev);</span>
+<span class="nc" id="L427">            initializeCloneNode = prev.initializeCloneNode;</span>
+<span class="nc" id="L428">        }</span>
+
+        @Specialization
+        public Object clone(VirtualFrame frame, RubyBasicObject self) {
+<span class="nc" id="L432">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L434">            final RubyBasicObject newObject = self.getLogicalClass().allocate(this);</span>
+
+            // Copy the singleton class if any.
+<span class="nc bnc" id="L437" title="All 2 branches missed.">            if (self.getMetaClass().isSingleton()) {</span>
+<span class="nc" id="L438">                newObject.getSingletonClass(this).initCopy(self.getMetaClass());</span>
+            }
+
+<span class="nc" id="L441">            newObject.getOperations().setInstanceVariables(newObject, self.getOperations().getInstanceVariables(self));</span>
+<span class="nc" id="L442">            initializeCloneNode.call(frame, newObject, &quot;initialize_clone&quot;, null, self);</span>
+
+<span class="nc" id="L444">            return newObject;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;dup&quot;)
+    public abstract static class DupNode extends CoreMethodNode {
+
+        @Child protected DispatchHeadNode initializeDupNode;
+
+        public DupNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L455">            super(context, sourceSection);</span>
+            // Calls private initialize_dup on the new copy.
+<span class="nc" id="L457">            initializeDupNode = new DispatchHeadNode(context, true, Dispatch.MissingBehavior.CALL_METHOD_MISSING);</span>
+<span class="nc" id="L458">        }</span>
+
+        public DupNode(DupNode prev) {
+<span class="nc" id="L461">            super(prev);</span>
+<span class="nc" id="L462">            initializeDupNode = prev.initializeDupNode;</span>
+<span class="nc" id="L463">        }</span>
+
+        @Specialization
+        public Object dup(VirtualFrame frame, RubyBasicObject self) {
+            // This method is pretty crappy for compilation - it should improve with the OM
+
+<span class="nc" id="L469">            final RubyBasicObject newObject = self.getLogicalClass().allocate(this);</span>
+<span class="nc" id="L470">            newObject.getOperations().setInstanceVariables(newObject, self.getOperations().getInstanceVariables(self));</span>
+<span class="nc" id="L471">            initializeDupNode.call(frame, newObject, &quot;initialize_dup&quot;, null, self);</span>
+
+<span class="nc" id="L473">            return newObject;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;eql?&quot;, required = 1)
+    public abstract static class EqlNode extends BasicObjectNodes.ReferenceEqualNode {
+        public EqlNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L481">            super(context, sourceSection);</span>
+<span class="nc" id="L482">        }</span>
+
+        public EqlNode(EqlNode prev) {
+<span class="nc" id="L485">            super(prev);</span>
+<span class="nc" id="L486">        }</span>
+    }
+
+    @CoreMethod(names = &quot;eval&quot;, isModuleFunction = true, required = 1, optional = 3)
+    public abstract static class EvalNode extends CoreMethodNode {
+
+        @Child protected DispatchHeadNode toStr;
+        @Child protected BindingNode bindingNode;
+
+        public EvalNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L496">            super(context, sourceSection);</span>
+<span class="nc" id="L497">            toStr = new DispatchHeadNode(context);</span>
+<span class="nc" id="L498">        }</span>
+
+        public EvalNode(EvalNode prev) {
+<span class="nc" id="L501">            super(prev);</span>
+<span class="nc" id="L502">            toStr = prev.toStr;</span>
+<span class="nc" id="L503">        }</span>
+
+        protected RubyBinding getCallerBinding(VirtualFrame frame) {
+<span class="nc bnc" id="L506" title="All 2 branches missed.">            if (bindingNode == null) {</span>
+<span class="nc" id="L507">                CompilerDirectives.transferToInterpreterAndInvalidate();</span>
+<span class="nc" id="L508">                bindingNode = insert(KernelNodesFactory.BindingNodeFactory.create(getContext(), getSourceSection(), new RubyNode[]{}));</span>
+            }
+<span class="nc" id="L510">            return bindingNode.executeBinding(frame);</span>
+        }
+
+        @Specialization
+        public Object eval(VirtualFrame frame, RubyString source, UndefinedPlaceholder binding, UndefinedPlaceholder filename, UndefinedPlaceholder lineNumber) {
+<span class="nc" id="L515">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L517">            return eval(source, getCallerBinding(frame), filename, lineNumber);</span>
+        }
+
+        @Specialization
+        public Object eval(RubyString source, RubyBinding binding, UndefinedPlaceholder filename, UndefinedPlaceholder lineNumber) {
+<span class="nc" id="L522">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L524">            return getContext().eval(source.getBytes(), binding, this);</span>
+        }
+
+        @Specialization
+        public Object eval(RubyString source, RubyBinding binding, RubyString filename, UndefinedPlaceholder lineNumber) {
+<span class="nc" id="L529">            notDesignedForCompilation();</span>
+
+            // TODO (nirvdrum Dec. 29, 2014) Do something with the supplied filename.
+<span class="nc" id="L532">            return getContext().eval(source.getBytes(), binding, this);</span>
+        }
+
+        @Specialization
+        public Object eval(RubyString source, RubyBinding binding, RubyString filename, int lineNumber) {
+<span class="nc" id="L537">            notDesignedForCompilation();</span>
+
+            // TODO (nirvdrum Dec. 29, 2014) Do something with the supplied filename and lineNumber.
+<span class="nc" id="L540">            return getContext().eval(source.getBytes(), binding, this);</span>
+        }
+
+        @Specialization(guards = &quot;!isRubyString(arguments[0])&quot;)
+        public Object eval(VirtualFrame frame, RubyBasicObject object, UndefinedPlaceholder binding, UndefinedPlaceholder filename, UndefinedPlaceholder lineNumber) {
+<span class="nc" id="L545">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L547">            return eval(frame, object, getCallerBinding(frame), filename, lineNumber);</span>
+        }
+
+        @Specialization(guards = &quot;!isRubyString(arguments[0])&quot;)
+        public Object eval(VirtualFrame frame, RubyBasicObject object, RubyBinding binding, UndefinedPlaceholder filename, UndefinedPlaceholder lineNumber) {
+<span class="nc" id="L552">            notDesignedForCompilation();</span>
+
+            Object coerced;
+
+            try {
+<span class="nc" id="L557">                coerced = toStr.call(frame, object, &quot;to_str&quot;, null);</span>
+<span class="nc" id="L558">            } catch (RaiseException e) {</span>
+<span class="nc bnc" id="L559" title="All 2 branches missed.">                if (e.getRubyException().getLogicalClass() == getContext().getCoreLibrary().getNoMethodErrorClass()) {</span>
+<span class="nc" id="L560">                    throw new RaiseException(</span>
+<span class="nc" id="L561">                            getContext().getCoreLibrary().typeError(</span>
+<span class="nc" id="L562">                                    String.format(&quot;no implicit conversion of %s into String&quot;, object.getLogicalClass().getName()),</span>
+                                    this));
+                } else {
+<span class="nc" id="L565">                    throw e;</span>
+                }
+<span class="nc" id="L567">            }</span>
+
+<span class="nc bnc" id="L569" title="All 2 branches missed.">            if (coerced instanceof RubyString) {</span>
+<span class="nc" id="L570">                return getContext().eval(((RubyString) coerced).getBytes(), binding, this);</span>
+            } else {
+<span class="nc" id="L572">                throw new RaiseException(</span>
+<span class="nc" id="L573">                        getContext().getCoreLibrary().typeError(</span>
+<span class="nc" id="L574">                                String.format(&quot;can't convert %s to String (%s#to_str gives %s)&quot;,</span>
+<span class="nc" id="L575">                                        object.getLogicalClass().getName(),</span>
+<span class="nc" id="L576">                                        object.getLogicalClass().getName(),</span>
+<span class="nc" id="L577">                                        getContext().getCoreLibrary().getLogicalClass(coerced).getName()),</span>
+                                this));
+            }
+        }
+
+        @Specialization(guards = &quot;!isRubyBinding(arguments[1])&quot;)
+        public Object eval(RubyBasicObject source, RubyBasicObject badBinding, UndefinedPlaceholder filename, UndefinedPlaceholder lineNumber) {
+<span class="nc" id="L584">            throw new RaiseException(</span>
+<span class="nc" id="L585">                    getContext().getCoreLibrary().typeError(</span>
+<span class="nc" id="L586">                            String.format(&quot;wrong argument type %s (expected binding)&quot;,</span>
+<span class="nc" id="L587">                                    badBinding.getLogicalClass().getName()),</span>
+                            this));
+        }
+    }
+
+    @CoreMethod(names = &quot;exec&quot;, isModuleFunction = true, required = 1, argumentsAsArray = true)
+    public abstract static class ExecNode extends CoreMethodNode {
+
+        public ExecNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L596">            super(context, sourceSection);</span>
+<span class="nc" id="L597">        }</span>
+
+        public ExecNode(ExecNode prev) {
+<span class="nc" id="L600">            super(prev);</span>
+<span class="nc" id="L601">        }</span>
+
+        @Specialization
+        public Object require(Object[] args) {
+<span class="nc" id="L605">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L607">            final String[] commandLine = new String[args.length];</span>
+
+<span class="nc bnc" id="L609" title="All 2 branches missed.">            for (int n = 0; n &lt; args.length; n++) {</span>
+<span class="nc" id="L610">                commandLine[n] = args[n].toString();</span>
+            }
+
+<span class="nc" id="L613">            exec(getContext(), commandLine);</span>
+
+<span class="nc" id="L615">            return null;</span>
+        }
+
+        @TruffleBoundary
+        private static void exec(RubyContext context, String[] commandLine) {
+<span class="nc" id="L620">            final ProcessBuilder builder = new ProcessBuilder(commandLine);</span>
+<span class="nc" id="L621">            builder.inheritIO();</span>
+
+<span class="nc" id="L623">            final RubyHash env = context.getCoreLibrary().getENV();</span>
+
+<span class="nc bnc" id="L625" title="All 2 branches missed.">            for (KeyValue keyValue : HashOperations.verySlowToKeyValues(env)) {</span>
+<span class="nc" id="L626">                builder.environment().put(keyValue.getKey().toString(), keyValue.getValue().toString());</span>
+<span class="nc" id="L627">            }</span>
+
+            Process process;
+
+            try {
+<span class="nc" id="L632">                process = builder.start();</span>
+<span class="nc" id="L633">            } catch (IOException e) {</span>
+                // TODO(cs): proper Ruby exception
+<span class="nc" id="L635">                throw new RuntimeException(e);</span>
+<span class="nc" id="L636">            }</span>
+
+            int exitCode;
+
+            while (true) {
+                try {
+<span class="nc" id="L642">                    exitCode = process.waitFor();</span>
+<span class="nc" id="L643">                    break;</span>
+<span class="nc" id="L644">                } catch (InterruptedException e) {</span>
+<span class="nc" id="L645">                    continue;</span>
+                }
+            }
+
+<span class="nc" id="L649">            System.exit(exitCode);</span>
+<span class="nc" id="L650">        }</span>
+
+    }
+
+    @CoreMethod(names = &quot;exit&quot;, isModuleFunction = true, optional = 1, lowerFixnumParameters = 0)
+    public abstract static class ExitNode extends CoreMethodNode {
+
+        public ExitNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L658">            super(context, sourceSection);</span>
+<span class="nc" id="L659">        }</span>
+
+        public ExitNode(ExitNode prev) {
+<span class="nc" id="L662">            super(prev);</span>
+<span class="nc" id="L663">        }</span>
+
+        @Specialization
+        public Object exit(UndefinedPlaceholder exitCode) {
+<span class="nc" id="L667">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L669">            getContext().shutdown();</span>
+<span class="nc" id="L670">            System.exit(0);</span>
+<span class="nc" id="L671">            return null;</span>
+        }
+
+        @Specialization
+        public Object exit(int exitCode) {
+<span class="nc" id="L676">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L678">            getContext().shutdown();</span>
+<span class="nc" id="L679">            System.exit(exitCode);</span>
+<span class="nc" id="L680">            return null;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;exit!&quot;, isModuleFunction = true)
+    public abstract static class ExitBangNode extends CoreMethodNode {
+
+        public ExitBangNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L689">            super(context, sourceSection);</span>
+<span class="nc" id="L690">        }</span>
+
+        public ExitBangNode(ExitBangNode prev) {
+<span class="nc" id="L693">            super(prev);</span>
+<span class="nc" id="L694">        }</span>
+
+        @Specialization
+        public RubyNilClass exit() {
+<span class="nc" id="L698">            CompilerDirectives.transferToInterpreter();</span>
+<span class="nc" id="L699">            System.exit(1);</span>
+<span class="nc" id="L700">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;extend&quot;, argumentsAsArray = true, required = 1)
+    public abstract static class ExtendNode extends CoreMethodNode {
+
+        public ExtendNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L708">            super(context, sourceSection);</span>
+<span class="nc" id="L709">        }</span>
+
+        public ExtendNode(ExtendNode prev) {
+<span class="nc" id="L712">            super(prev);</span>
+<span class="nc" id="L713">        }</span>
+
+        @Specialization
+        public RubyBasicObject extend(RubyBasicObject self, Object[] args) {
+<span class="nc" id="L717">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L719" title="All 2 branches missed.">            for (int n = 0; n &lt; args.length; n++) {</span>
+<span class="nc" id="L720">                self.extend((RubyModule) args[n], this);</span>
+            }
+
+<span class="nc" id="L723">            return self;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;fork&quot;, isModuleFunction = true, argumentsAsArray = true)
+    public abstract static class ForkNode extends CoreMethodNode {
+
+        public ForkNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L732">            super(context, sourceSection);</span>
+<span class="nc" id="L733">        }</span>
+
+        public ForkNode(ForkNode prev) {
+<span class="nc" id="L736">            super(prev);</span>
+<span class="nc" id="L737">        }</span>
+
+        @Specialization
+        public Object fork(Object[] args) {
+<span class="nc" id="L741">            notDesignedForCompilation();</span>
+<span class="nc" id="L742">            getContext().getWarnings().warn(&quot;Kernel#fork not implemented - defined to satisfy some metaprogramming in RubySpec&quot;);</span>
+<span class="nc" id="L743">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;freeze&quot;)
+    public abstract static class FreezeNode extends CoreMethodNode {
+
+        public FreezeNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L752">            super(context, sourceSection);</span>
+<span class="nc" id="L753">        }</span>
+
+        public FreezeNode(FreezeNode prev) {
+<span class="nc" id="L756">            super(prev);</span>
+<span class="nc" id="L757">        }</span>
+
+        @Specialization
+        public RubyBasicObject freeze(RubyBasicObject self) {
+<span class="nc" id="L761">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L763">            self.freeze();</span>
+<span class="nc" id="L764">            return self;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;frozen?&quot;)
+    public abstract static class FrozenNode extends CoreMethodNode {
+
+        public FrozenNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L773">            super(context, sourceSection);</span>
+<span class="nc" id="L774">        }</span>
+
+        public FrozenNode(FrozenNode prev) {
+<span class="nc" id="L777">            super(prev);</span>
+<span class="nc" id="L778">        }</span>
+
+        @Specialization
+        public boolean isFrozen(RubyBasicObject self) {
+<span class="nc" id="L782">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L784">            return self.isFrozen();</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;gets&quot;, isModuleFunction = true)
+    public abstract static class GetsNode extends CoreMethodNode {
+
+        public GetsNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L793">            super(context, sourceSection);</span>
+<span class="nc" id="L794">        }</span>
+
+        public GetsNode(GetsNode prev) {
+<span class="nc" id="L797">            super(prev);</span>
+<span class="nc" id="L798">        }</span>
+
+        @Specialization
+        public RubyString gets(VirtualFrame frame) {
+<span class="nc" id="L802">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L804">            final RubyContext context = getContext();</span>
+
+<span class="nc" id="L806">            final Frame caller = Truffle.getRuntime().getCallerFrame().getFrame(FrameInstance.FrameAccess.READ_WRITE, false);</span>
+
+            final String line;
+
+<span class="nc" id="L810">            final RubyThread runningThread = getContext().getThreadManager().leaveGlobalLock();</span>
+
+            try {
+<span class="nc" id="L813">                line = gets(context);</span>
+<span class="nc" id="L814">            } catch (IOException e) {</span>
+<span class="nc" id="L815">                throw new RuntimeException(e);</span>
+            } finally {
+<span class="nc" id="L817">                getContext().getThreadManager().enterGlobalLock(runningThread);</span>
+<span class="nc" id="L818">            }</span>
+
+<span class="nc" id="L820">            final RubyString rubyLine = context.makeString(line);</span>
+
+            // Set the local variable $_ in the caller
+
+<span class="nc" id="L824">            final FrameSlot slot = caller.getFrameDescriptor().findFrameSlot(&quot;$_&quot;);</span>
+
+<span class="nc bnc" id="L826" title="All 2 branches missed.">            if (slot != null) {</span>
+<span class="nc" id="L827">                caller.setObject(slot, WrapInThreadLocalNode.wrap(getContext(), rubyLine));</span>
+            }
+
+<span class="nc" id="L830">            return rubyLine;</span>
+        }
+
+        @TruffleBoundary
+        private static String gets(RubyContext context) throws IOException {
+            // TODO(CS): having some trouble interacting with JRuby stdin - so using this hack
+
+<span class="nc" id="L837">            final StringBuilder builder = new StringBuilder();</span>
+
+            while (true) {
+<span class="nc" id="L840">                final int c = context.getRuntime().getInstanceConfig().getInput().read();</span>
+
+<span class="nc bnc" id="L842" title="All 6 branches missed.">                if (c == -1 || c == '\r' || c == '\n') {</span>
+<span class="nc" id="L843">                    break;</span>
+                }
+
+<span class="nc" id="L846">                builder.append((char) c);</span>
+<span class="nc" id="L847">            }</span>
+
+<span class="nc" id="L849">            return builder.toString();</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;hash&quot;)
+    public abstract static class HashNode extends CoreMethodNode {
+
+        public HashNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L858">            super(context, sourceSection);</span>
+<span class="nc" id="L859">        }</span>
+
+        public HashNode(HashNode prev) {
+<span class="nc" id="L862">            super(prev);</span>
+<span class="nc" id="L863">        }</span>
+
+        @Specialization
+        public int hash(int value) {
+            // TODO(CS): should check this matches MRI
+<span class="nc" id="L868">            return value;</span>
+        }
+
+        @Specialization
+        public int hash(long value) {
+            // TODO(CS): should check this matches MRI
+<span class="nc" id="L874">            return Long.valueOf(value).hashCode();</span>
+        }
+
+        @Specialization
+        public int hash(double value) {
+            // TODO(CS): should check this matches MRI
+<span class="nc" id="L880">            return Double.valueOf(value).hashCode();</span>
+        }
+
+        @Specialization
+        public int hash(RubyBasicObject self) {
+<span class="nc" id="L885">            return self.hashCode();</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;initialize_copy&quot;, visibility = Visibility.PRIVATE, required = 1)
+    public abstract static class InitializeCopyNode extends CoreMethodNode {
+
+        public InitializeCopyNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L894">            super(context, sourceSection);</span>
+<span class="nc" id="L895">        }</span>
+
+        public InitializeCopyNode(InitializeCopyNode prev) {
+<span class="nc" id="L898">            super(prev);</span>
+<span class="nc" id="L899">        }</span>
+
+        @Specialization
+        public Object initializeCopy(RubyBasicObject self, RubyBasicObject from) {
+<span class="nc" id="L903">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L905" title="All 2 branches missed.">            if (self.getLogicalClass() != from.getLogicalClass()) {</span>
+<span class="nc" id="L906">                CompilerDirectives.transferToInterpreter();</span>
+<span class="nc" id="L907">                throw new RaiseException(getContext().getCoreLibrary().typeError(&quot;initialize_copy should take same class object&quot;, this));</span>
+            }
+
+<span class="nc" id="L910">            return self;</span>
+        }
+
+    }
+
+    @CoreMethod(names = {&quot;initialize_dup&quot;, &quot;initialize_clone&quot;}, visibility = Visibility.PRIVATE, required = 1)
+    public abstract static class InitializeDupCloneNode extends CoreMethodNode {
+
+        @Child protected DispatchHeadNode initializeCopyNode;
+
+        public InitializeDupCloneNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L921">            super(context, sourceSection);</span>
+<span class="nc" id="L922">            initializeCopyNode = DispatchHeadNode.onSelf(context);</span>
+<span class="nc" id="L923">        }</span>
+
+        public InitializeDupCloneNode(InitializeDupCloneNode prev) {
+<span class="nc" id="L926">            super(prev);</span>
+<span class="nc" id="L927">            initializeCopyNode = prev.initializeCopyNode;</span>
+<span class="nc" id="L928">        }</span>
+
+        @Specialization
+        public Object initializeDup(VirtualFrame frame, RubyBasicObject self, RubyBasicObject from) {
+<span class="nc" id="L932">            return initializeCopyNode.call(frame, self, &quot;initialize_copy&quot;, null, from);</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;instance_of?&quot;, required = 1)
+    public abstract static class InstanceOfNode extends CoreMethodNode {
+
+        public InstanceOfNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L941">            super(context, sourceSection);</span>
+<span class="nc" id="L942">        }</span>
+
+        public InstanceOfNode(InstanceOfNode prev) {
+<span class="nc" id="L945">            super(prev);</span>
+<span class="nc" id="L946">        }</span>
+
+        @TruffleBoundary
+        @Specialization
+        public boolean instanceOf(Object self, RubyClass rubyClass) {
+            // TODO(CS): fast path
+<span class="nc bnc" id="L952" title="All 2 branches missed.">            return getContext().getCoreLibrary().getLogicalClass(self) == rubyClass;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;instance_variable_defined?&quot;, required = 1)
+    public abstract static class InstanceVariableDefinedNode extends CoreMethodNode {
+
+        public InstanceVariableDefinedNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L961">            super(context, sourceSection);</span>
+<span class="nc" id="L962">        }</span>
+
+        public InstanceVariableDefinedNode(InstanceVariableDefinedNode prev) {
+<span class="nc" id="L965">            super(prev);</span>
+<span class="nc" id="L966">        }</span>
+
+        @Specialization
+        public boolean isInstanceVariableDefined(RubyBasicObject object, RubyString name) {
+<span class="nc" id="L970">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L972">            return object.isFieldDefined(RubyContext.checkInstanceVariableName(getContext(), name.toString(), this));</span>
+        }
+
+        @Specialization
+        public boolean isInstanceVariableDefined(RubyBasicObject object, RubySymbol name) {
+<span class="nc" id="L977">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L979">            return object.isFieldDefined(RubyContext.checkInstanceVariableName(getContext(), name.toString(), this));</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;instance_variable_get&quot;, required = 1)
+    public abstract static class InstanceVariableGetNode extends CoreMethodNode {
+
+        public InstanceVariableGetNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L988">            super(context, sourceSection);</span>
+<span class="nc" id="L989">        }</span>
+
+        public InstanceVariableGetNode(InstanceVariableGetNode prev) {
+<span class="nc" id="L992">            super(prev);</span>
+<span class="nc" id="L993">        }</span>
+
+        @Specialization
+        public Object isInstanceVariableGet(RubyBasicObject object, RubyString name) {
+<span class="nc" id="L997">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L999">            return object.getInstanceVariable(RubyContext.checkInstanceVariableName(getContext(), name.toString(), this));</span>
+        }
+
+        @Specialization
+        public Object isInstanceVariableGet(RubyBasicObject object, RubySymbol name) {
+<span class="nc" id="L1004">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1006">            return object.getInstanceVariable(RubyContext.checkInstanceVariableName(getContext(), name.toString(), this));</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;instance_variable_set&quot;, required = 2)
+    public abstract static class InstanceVariableSetNode extends CoreMethodNode {
+
+        public InstanceVariableSetNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1015">            super(context, sourceSection);</span>
+<span class="nc" id="L1016">        }</span>
+
+        public InstanceVariableSetNode(InstanceVariableSetNode prev) {
+<span class="nc" id="L1019">            super(prev);</span>
+<span class="nc" id="L1020">        }</span>
+
+        @Specialization
+        public Object isInstanceVariableSet(RubyBasicObject object, RubyString name, Object value) {
+<span class="nc" id="L1024">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1026">            notDesignedForCompilation();</span>
+<span class="nc" id="L1027">            object.getOperations().setInstanceVariable(object, RubyContext.checkInstanceVariableName(getContext(), name.toString(), this), value);</span>
+<span class="nc" id="L1028">            return value;</span>
+        }
+
+        @Specialization
+        public Object isInstanceVariableSet(RubyBasicObject object, RubySymbol name, Object value) {
+<span class="nc" id="L1033">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1035">            notDesignedForCompilation();</span>
+<span class="nc" id="L1036">            object.getOperations().setInstanceVariable(object, RubyContext.checkInstanceVariableName(getContext(), name.toString(), this), value);</span>
+<span class="nc" id="L1037">            return value;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;instance_variables&quot;)
+    public abstract static class InstanceVariablesNode extends CoreMethodNode {
+
+        public InstanceVariablesNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1046">            super(context, sourceSection);</span>
+<span class="nc" id="L1047">        }</span>
+
+        public InstanceVariablesNode(InstanceVariablesNode prev) {
+<span class="nc" id="L1050">            super(prev);</span>
+<span class="nc" id="L1051">        }</span>
+
+        @Specialization
+        public RubyArray instanceVariables(RubyBasicObject self) {
+<span class="nc" id="L1055">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1057">            final Object[] instanceVariableNames = self.getOperations().getFieldNames(self);</span>
+
+<span class="nc" id="L1059">            Arrays.sort(instanceVariableNames);</span>
+
+<span class="nc" id="L1061">            final RubyArray array = new RubyArray(getContext().getCoreLibrary().getArrayClass());</span>
+
+<span class="nc bnc" id="L1063" title="All 2 branches missed.">            for (Object name : instanceVariableNames) {</span>
+<span class="nc bnc" id="L1064" title="All 2 branches missed.">                if (name instanceof String) {</span>
+<span class="nc" id="L1065">                    array.slowPush(getContext().getSymbolTable().getSymbol((String) name));</span>
+                }
+            }
+
+<span class="nc" id="L1069">            return array;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;Integer&quot;, isModuleFunction = true, required = 1)
+    public abstract static class IntegerNode extends CoreMethodNode {
+
+        @Child protected DispatchHeadNode toInt;
+
+        public IntegerNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1080">            super(context, sourceSection);</span>
+<span class="nc" id="L1081">            toInt = new DispatchHeadNode(context);</span>
+<span class="nc" id="L1082">        }</span>
+
+        public IntegerNode(IntegerNode prev) {
+<span class="nc" id="L1085">            super(prev);</span>
+<span class="nc" id="L1086">            toInt = prev.toInt;</span>
+<span class="nc" id="L1087">        }</span>
+
+        @Specialization
+        public int integer(int value) {
+<span class="nc" id="L1091">            return value;</span>
+        }
+
+        @Specialization
+        public long integer(long value) {
+<span class="nc" id="L1096">            return value;</span>
+        }
+
+        @Specialization
+        public RubyBignum integer(RubyBignum value) {
+<span class="nc" id="L1101">            return value;</span>
+        }
+
+        @Specialization
+        public int integer(double value) {
+<span class="nc" id="L1106">            return (int) value;</span>
+        }
+
+        @Specialization
+        public Object integer(RubyString value) {
+<span class="nc" id="L1111">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L1113" title="All 2 branches missed.">            if (value.toString().length() == 0) {</span>
+<span class="nc" id="L1114">                return 0;</span>
+            }
+
+            try {
+<span class="nc" id="L1118">                return Integer.parseInt(value.toString());</span>
+<span class="nc" id="L1119">            } catch (NumberFormatException e) {</span>
+<span class="nc" id="L1120">                return bignum(new BigInteger(value.toString()));</span>
+            }
+        }
+
+        @Specialization
+        public Object integer(VirtualFrame frame, Object value) {
+<span class="nc bnc" id="L1126" title="All 2 branches missed.">            if (toInt.doesRespondTo(frame, &quot;to_int&quot;, value)) {</span>
+<span class="nc" id="L1127">                return toInt.call(frame, value, &quot;to_int&quot;, null);</span>
+            } else {
+<span class="nc" id="L1129">                CompilerDirectives.transferToInterpreter();</span>
+<span class="nc" id="L1130">                throw new RaiseException(getContext().getCoreLibrary().typeErrorCantConvertInto(value, getContext().getCoreLibrary().getIntegerClass(), this));</span>
+            }
+        }
+
+    }
+
+    @CoreMethod(names = {&quot;is_a?&quot;, &quot;kind_of?&quot;}, required = 1)
+    public abstract static class IsANode extends CoreMethodNode {
+
+        public IsANode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1140">            super(context, sourceSection);</span>
+<span class="nc" id="L1141">        }</span>
+
+        public IsANode(IsANode prev) {
+<span class="nc" id="L1144">            super(prev);</span>
+<span class="nc" id="L1145">        }</span>
+
+        public abstract boolean executeBoolean(Object self, RubyClass rubyClass);
+
+        @Specialization
+        public boolean isA(RubyBasicObject self, RubyNilClass nil) {
+<span class="nc" id="L1151">            return false;</span>
+        }
+
+        @TruffleBoundary
+        @Specialization
+        public boolean isA(Object self, RubyClass rubyClass) {
+            // TODO(CS): fast path
+<span class="nc" id="L1158">            notDesignedForCompilation();</span>
+<span class="nc" id="L1159">            return ModuleOperations.assignableTo(getContext().getCoreLibrary().getMetaClass(self), rubyClass);</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;lambda&quot;, isModuleFunction = true, needsBlock = true)
+    public abstract static class LambdaNode extends CoreMethodNode {
+
+        public LambdaNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1168">            super(context, sourceSection);</span>
+<span class="nc" id="L1169">        }</span>
+
+        public LambdaNode(LambdaNode prev) {
+<span class="nc" id="L1172">            super(prev);</span>
+<span class="nc" id="L1173">        }</span>
+
+        @Specialization
+        public RubyProc proc(RubyProc block) {
+<span class="nc" id="L1177">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1179">            return new RubyProc(getContext().getCoreLibrary().getProcClass(), RubyProc.Type.LAMBDA,</span>
+<span class="nc" id="L1180">                    block.getSharedMethodInfo(), block.getCallTargetForMethods(), block.getCallTargetForMethods(),</span>
+<span class="nc" id="L1181">                    block.getDeclarationFrame(), block.getDeclaringModule(), block.getMethod(), block.getSelfCapturedInScope(), block.getBlockCapturedInScope());</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;load&quot;, isModuleFunction = true, required = 1)
+    public abstract static class LoadNode extends CoreMethodNode {
+
+        public LoadNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1189">            super(context, sourceSection);</span>
+<span class="nc" id="L1190">        }</span>
+
+        public LoadNode(LoadNode prev) {
+<span class="nc" id="L1193">            super(prev);</span>
+<span class="nc" id="L1194">        }</span>
+
+        @Specialization
+        public boolean load(RubyString file) {
+<span class="nc" id="L1198">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1200">            getContext().loadFile(file.toString(), this);</span>
+<span class="nc" id="L1201">            return true;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;local_variables&quot;, needsSelf = false)
+    public abstract static class LocalVariablesNode extends CoreMethodNode {
+
+        public LocalVariablesNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1209">            super(context, sourceSection);</span>
+<span class="nc" id="L1210">        }</span>
+
+        public LocalVariablesNode(LocalVariablesNode prev) {
+<span class="nc" id="L1213">            super(prev);</span>
+<span class="nc" id="L1214">        }</span>
+
+        @Specialization
+        public RubyArray localVariables() {
+<span class="nc" id="L1218">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1220">            final RubyArray array = new RubyArray(getContext().getCoreLibrary().getArrayClass());</span>
+
+<span class="nc bnc" id="L1222" title="All 2 branches missed.">            for (Object name : Truffle.getRuntime().getCallerFrame().getFrame(FrameInstance.FrameAccess.READ_ONLY, false).getFrameDescriptor().getIdentifiers()) {</span>
+<span class="nc bnc" id="L1223" title="All 2 branches missed.">                if (name instanceof String) {</span>
+<span class="nc" id="L1224">                    array.slowPush(getContext().newSymbol((String) name));</span>
+                }
+<span class="nc" id="L1226">            }</span>
+
+<span class="nc" id="L1228">            return array;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;loop&quot;, isModuleFunction = true)
+    public abstract static class LoopNode extends CoreMethodNode {
+
+        @Child protected WhileNode whileNode;
+
+        public LoopNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1239">            super(context, sourceSection);</span>
+<span class="nc" id="L1240">            whileNode = new WhileNode(context, sourceSection, BooleanCastNodeFactory.create(context, sourceSection,</span>
+                    new BooleanLiteralNode(context, sourceSection, true)),
+<span class="nc" id="L1242">                    new YieldNode(context, getSourceSection(), new RubyNode[]{}, false)</span>
+            );
+<span class="nc" id="L1244">        }</span>
+
+        public LoopNode(LoopNode prev) {
+<span class="nc" id="L1247">            super(prev);</span>
+<span class="nc" id="L1248">            whileNode = prev.whileNode;</span>
+<span class="nc" id="L1249">        }</span>
+
+        @Specialization
+        public Object loop(VirtualFrame frame) {
+<span class="nc" id="L1253">            return whileNode.execute(frame);</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;methods&quot;, optional = 1)
+    public abstract static class MethodsNode extends CoreMethodNode {
+
+        public MethodsNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1261">            super(context, sourceSection);</span>
+<span class="nc" id="L1262">        }</span>
+
+        public MethodsNode(MethodsNode prev) {
+<span class="nc" id="L1265">            super(prev);</span>
+<span class="nc" id="L1266">        }</span>
+
+        @Specialization
+        public RubyArray methods(RubyBasicObject self, UndefinedPlaceholder unused) {
+<span class="nc" id="L1270">            return methods(self, true);</span>
+        }
+
+        @Specialization
+        public RubyArray methods(RubyBasicObject self, boolean includeInherited) {
+<span class="nc" id="L1275">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1277">            final RubyArray array = new RubyArray(self.getContext().getCoreLibrary().getArrayClass());</span>
+
+            Map&lt;String, RubyMethod&gt; methods;
+
+<span class="nc bnc" id="L1281" title="All 2 branches missed.">            if (includeInherited) {</span>
+<span class="nc" id="L1282">                methods = ModuleOperations.getAllMethods(self.getMetaClass());</span>
+            } else {
+<span class="nc" id="L1284">                methods = self.getMetaClass().getMethods();</span>
+            }
+
+<span class="nc bnc" id="L1287" title="All 2 branches missed.">            for (RubyMethod method : methods.values()) {</span>
+<span class="nc bnc" id="L1288" title="All 4 branches missed.">                if (method.getVisibility() == Visibility.PUBLIC || method.getVisibility() == Visibility.PROTECTED) {</span>
+<span class="nc" id="L1289">                    array.slowPush(self.getContext().newSymbol(method.getName()));</span>
+                }
+<span class="nc" id="L1291">            }</span>
+
+<span class="nc" id="L1293">            return array;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;nil?&quot;, needsSelf = false)
+    public abstract static class NilNode extends CoreMethodNode {
+
+        public NilNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1302">            super(context, sourceSection);</span>
+<span class="nc" id="L1303">        }</span>
+
+        public NilNode(NilNode prev) {
+<span class="nc" id="L1306">            super(prev);</span>
+<span class="nc" id="L1307">        }</span>
+
+        @Specialization
+        public boolean nil() {
+<span class="nc" id="L1311">            return false;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;object_id&quot;)
+    public abstract static class ObjectIDNode extends BasicObjectNodes.IDNode {
+
+        public ObjectIDNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1319">            super(context, sourceSection);</span>
+<span class="nc" id="L1320">        }</span>
+
+        public ObjectIDNode(ObjectIDNode prev) {
+<span class="nc" id="L1323">            super(prev);</span>
+<span class="nc" id="L1324">        }</span>
+
+    }
+
+    /*
+     * Kernel#pretty_inspect is normally part of stdlib, in pp.rb, but we aren't able to execute
+     * that file yet. Instead we implement a very simple version here, which is the solution
+     * suggested by RubySpec.
+     */
+
+    @CoreMethod(names = &quot;pretty_inspect&quot;)
+    public abstract static class PrettyInspectNode extends CoreMethodNode {
+
+        @Child protected DispatchHeadNode inspectNode;
+
+        public PrettyInspectNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1340">            super(context, sourceSection);</span>
+<span class="nc" id="L1341">            inspectNode = DispatchHeadNode.onSelf(context);</span>
+<span class="nc" id="L1342">        }</span>
+
+        public PrettyInspectNode(PrettyInspectNode prev) {
+<span class="nc" id="L1345">            super(prev);</span>
+<span class="nc" id="L1346">            inspectNode = prev.inspectNode;</span>
+<span class="nc" id="L1347">        }</span>
+
+        @Specialization
+        public Object prettyInspect(VirtualFrame frame, Object self) {
+<span class="nc" id="L1351">            return inspectNode.call(frame, self, &quot;inspect&quot;, null);</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;print&quot;, isModuleFunction = true, argumentsAsArray = true)
+    public abstract static class PrintNode extends CoreMethodNode {
+
+        @Child protected DispatchHeadNode toS;
+
+        public PrintNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1361">            super(context, sourceSection);</span>
+<span class="nc" id="L1362">            toS = new DispatchHeadNode(context);</span>
+<span class="nc" id="L1363">        }</span>
+
+        public PrintNode(PrintNode prev) {
+<span class="nc" id="L1366">            super(prev);</span>
+<span class="nc" id="L1367">            toS = prev.toS;</span>
+<span class="nc" id="L1368">        }</span>
+
+        @Specialization
+        public RubyNilClass print(final VirtualFrame frame, final Object[] args) {
+<span class="nc" id="L1372">            final RubyThread runningThread = getContext().getThreadManager().leaveGlobalLock();</span>
+
+            try {
+<span class="nc bnc" id="L1375" title="All 2 branches missed.">                for (Object arg : args) {</span>
+<span class="nc" id="L1376">                    write(((RubyString) toS.call(frame, arg, &quot;to_s&quot;, null)).getBytes().bytes());</span>
+                }
+            } finally {
+<span class="nc" id="L1379">                getContext().getThreadManager().enterGlobalLock(runningThread);</span>
+<span class="nc" id="L1380">            }</span>
+
+<span class="nc" id="L1382">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+
+        @TruffleBoundary
+        private void write(byte[] bytes) {
+            try{
+<span class="nc" id="L1388">                getContext().getRuntime().getInstanceConfig().getOutput().write(bytes);</span>
+<span class="nc" id="L1389">            } catch (IOException e) {</span>
+<span class="nc" id="L1390">                throw new RuntimeException(e);</span>
+<span class="nc" id="L1391">            }</span>
+<span class="nc" id="L1392">        }</span>
+
+    }
+
+    @CoreMethod(names = &quot;private_methods&quot;, optional = 1)
+    public abstract static class PrivateMethodsNode extends CoreMethodNode {
+
+        public PrivateMethodsNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1400">            super(context, sourceSection);</span>
+<span class="nc" id="L1401">        }</span>
+
+        public PrivateMethodsNode(PrivateMethodsNode prev) {
+<span class="nc" id="L1404">            super(prev);</span>
+<span class="nc" id="L1405">        }</span>
+
+        @Specialization
+        public RubyArray private_methods(RubyBasicObject self, UndefinedPlaceholder unused) {
+<span class="nc" id="L1409">            return private_methods(self, true);</span>
+        }
+
+        @Specialization
+        public RubyArray private_methods(RubyBasicObject self, boolean includeInherited) {
+<span class="nc" id="L1414">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1416">            final RubyArray array = new RubyArray(self.getContext().getCoreLibrary().getArrayClass());</span>
+
+            Map&lt;String, RubyMethod&gt; methods;
+
+<span class="nc bnc" id="L1420" title="All 2 branches missed.">            if (includeInherited) {</span>
+<span class="nc" id="L1421">                methods = ModuleOperations.getAllMethods(self.getMetaClass());</span>
+            } else {
+<span class="nc" id="L1423">                methods = self.getMetaClass().getMethods();</span>
+            }
+
+<span class="nc bnc" id="L1426" title="All 2 branches missed.">            for (RubyMethod method : methods.values()) {</span>
+<span class="nc bnc" id="L1427" title="All 2 branches missed.">                if (method.getVisibility() == Visibility.PRIVATE) {</span>
+<span class="nc" id="L1428">                    array.slowPush(self.getContext().newSymbol(method.getName()));</span>
+                }
+<span class="nc" id="L1430">            }</span>
+
+<span class="nc" id="L1432">            return array;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;proc&quot;, isModuleFunction = true, needsBlock = true)
+    public abstract static class ProcNode extends CoreMethodNode {
+
+        public ProcNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1441">            super(context, sourceSection);</span>
+<span class="nc" id="L1442">        }</span>
+
+        public ProcNode(ProcNode prev) {
+<span class="nc" id="L1445">            super(prev);</span>
+<span class="nc" id="L1446">        }</span>
+
+        @Specialization
+        public RubyProc proc(RubyProc block) {
+<span class="nc" id="L1450">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1452">            return new RubyProc(getContext().getCoreLibrary().getProcClass(), RubyProc.Type.PROC,</span>
+<span class="nc" id="L1453">                    block.getSharedMethodInfo(), block.getCallTarget(), block.getCallTargetForMethods(), block.getDeclarationFrame(),</span>
+<span class="nc" id="L1454">                    block.getDeclaringModule(), block.getMethod(), block.getSelfCapturedInScope(), block.getBlockCapturedInScope());</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;public_methods&quot;, optional = 1)
+    public abstract static class PublicMethodsNode extends CoreMethodNode {
+
+        public PublicMethodsNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1462">            super(context, sourceSection);</span>
+<span class="nc" id="L1463">        }</span>
+
+        public PublicMethodsNode(PublicMethodsNode prev) {
+<span class="nc" id="L1466">            super(prev);</span>
+<span class="nc" id="L1467">        }</span>
+
+        @Specialization
+        public RubyArray methods(RubyBasicObject self, boolean includeInherited) {
+<span class="nc" id="L1471">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L1473" title="All 2 branches missed.">            if (!includeInherited) {</span>
+<span class="nc" id="L1474">                getContext().getRuntime().getWarnings().warn(IRubyWarnings.ID.TRUFFLE, Truffle.getRuntime().getCallerFrame().getCallNode().getEncapsulatingSourceSection().getSource().getName(), Truffle.getRuntime().getCallerFrame().getCallNode().getEncapsulatingSourceSection().getStartLine(), &quot;Object#methods always returns inherited methods at the moment&quot;);</span>
+            }
+
+<span class="nc" id="L1477">            return methods(self, UndefinedPlaceholder.INSTANCE);</span>
+        }
+
+        @Specialization
+        public RubyArray methods(RubyBasicObject self, UndefinedPlaceholder includeInherited) {
+<span class="nc" id="L1482">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1484">            final RubyArray array = new RubyArray(self.getContext().getCoreLibrary().getArrayClass());</span>
+
+<span class="nc" id="L1486">            final Map&lt;String, RubyMethod&gt; methods = self.getMetaClass().getMethods();</span>
+
+<span class="nc bnc" id="L1488" title="All 2 branches missed.">            for (RubyMethod method : methods.values()) {</span>
+<span class="nc bnc" id="L1489" title="All 2 branches missed.">                if (method.getVisibility() == Visibility.PUBLIC) {</span>
+<span class="nc" id="L1490">                    array.slowPush(self.getContext().newSymbol(method.getName()));</span>
+                }
+<span class="nc" id="L1492">            }</span>
+
+<span class="nc" id="L1494">            return array;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;raise&quot;, isModuleFunction = true, optional = 3)
+    public abstract static class RaiseNode extends CoreMethodNode {
+
+        @Child protected DispatchHeadNode initialize;
+
+        public RaiseNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1505">            super(context, sourceSection);</span>
+<span class="nc" id="L1506">            initialize = new DispatchHeadNode(context);</span>
+<span class="nc" id="L1507">        }</span>
+
+        public RaiseNode(RaiseNode prev) {
+<span class="nc" id="L1510">            super(prev);</span>
+<span class="nc" id="L1511">            initialize = prev.initialize;</span>
+<span class="nc" id="L1512">        }</span>
+
+        @Specialization
+        public Object raise(VirtualFrame frame, UndefinedPlaceholder undefined1, UndefinedPlaceholder undefined2, Object undefined3) {
+<span class="nc" id="L1516">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1518">            return raise(frame, getContext().getCoreLibrary().getRuntimeErrorClass(), getContext().makeString(&quot;re-raised - don't have the current exception yet!&quot;), undefined1);</span>
+        }
+
+        @Specialization
+        public Object raise(VirtualFrame frame, RubyString message, UndefinedPlaceholder undefined1, Object undefined2) {
+<span class="nc" id="L1523">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1525">            return raise(frame, getContext().getCoreLibrary().getRuntimeErrorClass(), message, undefined1);</span>
+        }
+
+        @Specialization
+        public Object raise(VirtualFrame frame, RubyClass exceptionClass, UndefinedPlaceholder undefined1, Object undefined2) {
+<span class="nc" id="L1530">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1532">            return raise(frame, exceptionClass, getContext().makeString(&quot;&quot;), undefined1);</span>
+        }
+
+        @Specialization
+        public Object raise(VirtualFrame frame, RubyClass exceptionClass, RubyString message, Object undefined1) {
+<span class="nc" id="L1537">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1539">            final Object exception = exceptionClass.allocate(this);</span>
+<span class="nc" id="L1540">            initialize.call(frame, exception, &quot;initialize&quot;, null, message);</span>
+
+<span class="nc bnc" id="L1542" title="All 2 branches missed.">            if (!(exception instanceof RubyException)) {</span>
+<span class="nc" id="L1543">                CompilerDirectives.transferToInterpreter();</span>
+<span class="nc" id="L1544">                throw new RaiseException(getContext().getCoreLibrary().typeError(&quot;exception class/object expected&quot;, this));</span>
+            }
+
+<span class="nc" id="L1547">            throw new RaiseException((RubyException) exception);</span>
+        }
+
+        @Specialization
+        public Object raise(RubyException exception, UndefinedPlaceholder undefined1, Object undefined2) {
+<span class="nc" id="L1552">            throw new RaiseException(exception);</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;rand&quot;, isModuleFunction = true, optional = 1)
+    public abstract static class RandNode extends CoreMethodNode {
+
+        public RandNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1561">            super(context, sourceSection);</span>
+<span class="nc" id="L1562">        }</span>
+
+        public RandNode(RandNode prev) {
+<span class="nc" id="L1565">            super(prev);</span>
+<span class="nc" id="L1566">        }</span>
+
+        @Specialization
+        public double rand(UndefinedPlaceholder undefined) {
+<span class="nc" id="L1570">            return getContext().getRandom().nextDouble();</span>
+        }
+
+        @Specialization(guards = &quot;isZero&quot;)
+        public double randZero(int max) {
+<span class="nc" id="L1575">            return getContext().getRandom().nextDouble();</span>
+        }
+
+        @Specialization(guards = &quot;isNonZero&quot;)
+        public int randNonZero(int max) {
+<span class="nc" id="L1580">            return getContext().getRandom().nextInt(max);</span>
+        }
+
+        protected boolean isZero(int max) {
+<span class="nc bnc" id="L1584" title="All 2 branches missed.">            return max == 0;</span>
+        }
+
+        protected boolean isNonZero(int max) {
+<span class="nc bnc" id="L1588" title="All 2 branches missed.">            return max != 0;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;require&quot;, isModuleFunction = true, required = 1)
+    public abstract static class RequireNode extends CoreMethodNode {
+
+        public RequireNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1597">            super(context, sourceSection);</span>
+<span class="nc" id="L1598">        }</span>
+
+        public RequireNode(RequireNode prev) {
+<span class="nc" id="L1601">            super(prev);</span>
+<span class="nc" id="L1602">        }</span>
+
+        @Specialization
+        public boolean require(RubyString feature) {
+<span class="nc" id="L1606">            notDesignedForCompilation();</span>
+
+            try {
+<span class="nc" id="L1609">                getContext().getFeatureManager().require(feature.toString(), this);</span>
+<span class="nc" id="L1610">            } catch (IOException e) {</span>
+<span class="nc" id="L1611">                throw new RuntimeException(e);</span>
+<span class="nc" id="L1612">            }</span>
+
+<span class="nc" id="L1614">            return true;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;require_relative&quot;, isModuleFunction = true, required = 1)
+    public abstract static class RequireRelativeNode extends CoreMethodNode {
+
+        public RequireRelativeNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1622">            super(context, sourceSection);</span>
+<span class="nc" id="L1623">        }</span>
+
+        public RequireRelativeNode(RequireRelativeNode prev) {
+<span class="nc" id="L1626">            super(prev);</span>
+<span class="nc" id="L1627">        }</span>
+
+        @Specialization
+        public boolean require(VirtualFrame frame, RubyString feature) {
+<span class="nc" id="L1631">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1633">            final String sourcePath = Truffle.getRuntime().getCallerFrame().getCallNode().getEncapsulatingSourceSection().getSource().getPath();</span>
+<span class="nc" id="L1634">            final String directoryPath = new File(sourcePath).getParent();</span>
+
+            try {
+<span class="nc" id="L1637">                getContext().getFeatureManager().requireInPath(directoryPath, feature.toString(), this);</span>
+<span class="nc" id="L1638">            } catch (IOException e) {</span>
+<span class="nc" id="L1639">                throw new RuntimeException(e);</span>
+<span class="nc" id="L1640">            }</span>
+
+<span class="nc" id="L1642">            return true;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;respond_to?&quot;, required = 1, optional = 1)
+    public abstract static class RespondToNode extends CoreMethodNode {
+
+        @Child protected DispatchHeadNode dispatch;
+        @Child protected DispatchHeadNode dispatchIgnoreVisibility;
+
+        public RespondToNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1653">            super(context, sourceSection);</span>
+
+<span class="nc" id="L1655">            dispatch = new DispatchHeadNode(context, false, Dispatch.MissingBehavior.RETURN_MISSING);</span>
+<span class="nc" id="L1656">            dispatchIgnoreVisibility = new DispatchHeadNode(context, true, Dispatch.MissingBehavior.RETURN_MISSING);</span>
+
+<span class="nc bnc" id="L1658" title="All 2 branches missed.">            if (Options.TRUFFLE_DISPATCH_METAPROGRAMMING_ALWAYS_UNCACHED.load()) {</span>
+<span class="nc" id="L1659">                dispatch.forceUncached();</span>
+<span class="nc" id="L1660">                dispatchIgnoreVisibility.forceUncached();</span>
+            }
+<span class="nc" id="L1662">        }</span>
+
+        public RespondToNode(RespondToNode prev) {
+<span class="nc" id="L1665">            super(prev);</span>
+<span class="nc" id="L1666">            dispatch = prev.dispatch;</span>
+<span class="nc" id="L1667">            dispatchIgnoreVisibility = prev.dispatchIgnoreVisibility;</span>
+<span class="nc" id="L1668">        }</span>
+
+        public abstract boolean executeDoesRespondTo(VirtualFrame frame, Object object, Object name, boolean includePrivate);
+
+        @Specialization
+        public boolean doesRespondTo(VirtualFrame frame, Object object, RubyString name, UndefinedPlaceholder checkVisibility) {
+<span class="nc" id="L1674">            return dispatch.doesRespondTo(frame, name, object);</span>
+        }
+
+        @Specialization
+        public boolean doesRespondTo(VirtualFrame frame, Object object, RubyString name, boolean ignoreVisibility) {
+<span class="nc bnc" id="L1679" title="All 2 branches missed.">            if (ignoreVisibility) {</span>
+<span class="nc" id="L1680">                return dispatchIgnoreVisibility.doesRespondTo(frame, name, object);</span>
+            } else {
+<span class="nc" id="L1682">                return dispatch.doesRespondTo(frame, name, object);</span>
+            }
+        }
+
+        @Specialization
+        public boolean doesRespondTo(VirtualFrame frame, Object object, RubySymbol name, UndefinedPlaceholder checkVisibility) {
+<span class="nc" id="L1688">            return dispatch.doesRespondTo(frame, name, object);</span>
+        }
+
+        @Specialization
+        public boolean doesRespondTo(VirtualFrame frame, Object object, RubySymbol name, boolean ignoreVisibility) {
+<span class="nc bnc" id="L1693" title="All 2 branches missed.">            if (ignoreVisibility) {</span>
+<span class="nc" id="L1694">                return dispatchIgnoreVisibility.doesRespondTo(frame, name, object);</span>
+            } else {
+<span class="nc" id="L1696">                return dispatch.doesRespondTo(frame, name, object);</span>
+            }
+        }
+    }
+
+    @CoreMethod(names = &quot;respond_to_missing?&quot;, required = 1, optional = 1, visibility = Visibility.PRIVATE)
+    public abstract static class RespondToMissingNode extends CoreMethodNode {
+
+        public RespondToMissingNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1705">            super(context, sourceSection);</span>
+<span class="nc" id="L1706">        }</span>
+
+        public RespondToMissingNode(RespondToMissingNode prev) {
+<span class="nc" id="L1709">            super(prev);</span>
+<span class="nc" id="L1710">        }</span>
+
+        @Specialization
+        public boolean doesRespondToMissing(Object object, RubyString name, UndefinedPlaceholder includeAll) {
+<span class="nc" id="L1714">            return false;</span>
+        }
+
+        @Specialization
+        public boolean doesRespondToMissing(Object object, RubySymbol name, UndefinedPlaceholder includeAll) {
+<span class="nc" id="L1719">            return false;</span>
+        }
+
+        @Specialization
+        public boolean doesRespondToMissing(Object object, RubySymbol name, boolean includeAll) {
+<span class="nc" id="L1724">            return false;</span>
+        }
+
+        @Specialization
+        public boolean doesRespondToMissing(Object object, RubyString name, boolean includeAll) {
+<span class="nc" id="L1729">            return false;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;send&quot;, needsBlock = true, required = 1, argumentsAsArray = true)
+    public abstract static class SendNode extends BasicObjectNodes.SendNode {
+
+        public SendNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1738">            super(context, sourceSection);</span>
+<span class="nc" id="L1739">        }</span>
+
+        public SendNode(SendNode prev) {
+<span class="nc" id="L1742">            super(prev);</span>
+<span class="nc" id="L1743">        }</span>
+
+    }
+
+    @CoreMethod(names = &quot;set_trace_func&quot;, isModuleFunction = true, required = 1)
+    public abstract static class SetTraceFuncNode extends CoreMethodNode {
+
+        public SetTraceFuncNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1751">            super(context, sourceSection);</span>
+<span class="nc" id="L1752">        }</span>
+
+        public SetTraceFuncNode(SetTraceFuncNode prev) {
+<span class="nc" id="L1755">            super(prev);</span>
+<span class="nc" id="L1756">        }</span>
+
+        @Specialization
+        public RubyNilClass setTraceFunc(RubyNilClass nil) {
+<span class="nc" id="L1760">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1762">            getContext().getTraceManager().setTraceFunc(null);</span>
+<span class="nc" id="L1763">            return nil;</span>
+        }
+
+        @Specialization
+        public RubyProc setTraceFunc(RubyProc traceFunc) {
+<span class="nc" id="L1768">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1770">            getContext().getTraceManager().setTraceFunc(traceFunc);</span>
+<span class="nc" id="L1771">            return traceFunc;</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;singleton_class&quot;)
+    public abstract static class SingletonClassMethodNode extends CoreMethodNode {
+
+        @Child protected SingletonClassNode singletonClassNode;
+
+        public SingletonClassMethodNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1781">            super(context, sourceSection);</span>
+<span class="nc" id="L1782">            singletonClassNode = SingletonClassNodeFactory.create(context, sourceSection, null);</span>
+<span class="nc" id="L1783">        }</span>
+
+        public SingletonClassMethodNode(SingletonClassMethodNode prev) {
+<span class="nc" id="L1786">            super(prev);</span>
+<span class="nc" id="L1787">            singletonClassNode = prev.singletonClassNode;</span>
+<span class="nc" id="L1788">        }</span>
+
+        @Specialization
+        public RubyClass singletonClass(Object self) {
+<span class="nc" id="L1792">            return singletonClassNode.executeSingletonClass(self);</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;singleton_methods&quot;, optional = 1)
+    public abstract static class SingletonMethodsNode extends CoreMethodNode {
+
+        public SingletonMethodsNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1801">            super(context, sourceSection);</span>
+<span class="nc" id="L1802">        }</span>
+
+        public SingletonMethodsNode(SingletonMethodsNode prev) {
+<span class="nc" id="L1805">            super(prev);</span>
+<span class="nc" id="L1806">        }</span>
+
+        @Specialization
+        public RubyArray singletonMethods(RubyBasicObject self, boolean includeInherited) {
+<span class="nc" id="L1810">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1812">            final RubyArray array = new RubyArray(self.getContext().getCoreLibrary().getArrayClass());</span>
+
+            final Collection&lt;RubyMethod&gt; methods;
+
+<span class="nc bnc" id="L1816" title="All 2 branches missed.">            if (includeInherited) {</span>
+<span class="nc" id="L1817">                methods = ModuleOperations.getAllMethods(self.getSingletonClass(this)).values();</span>
+            } else {
+<span class="nc" id="L1819">                methods = self.getSingletonClass(this).getMethods().values();</span>
+            }
+
+<span class="nc bnc" id="L1822" title="All 2 branches missed.">            for (RubyMethod method : methods) {</span>
+<span class="nc" id="L1823">                array.slowPush(RubySymbol.newSymbol(self.getContext(), method.getName()));</span>
+<span class="nc" id="L1824">            }</span>
+
+<span class="nc" id="L1826">            return array;</span>
+        }
+
+        @Specialization
+        public RubyArray singletonMethods(RubyBasicObject self, UndefinedPlaceholder includeInherited) {
+<span class="nc" id="L1831">            return singletonMethods(self, false);</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;String&quot;, isModuleFunction = true, required = 1)
+    public abstract static class StringNode extends CoreMethodNode {
+
+        @Child protected DispatchHeadNode toS;
+
+        public StringNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1842">            super(context, sourceSection);</span>
+<span class="nc" id="L1843">            toS = new DispatchHeadNode(context);</span>
+<span class="nc" id="L1844">        }</span>
+
+        public StringNode(StringNode prev) {
+<span class="nc" id="L1847">            super(prev);</span>
+<span class="nc" id="L1848">            toS = prev.toS;</span>
+<span class="nc" id="L1849">        }</span>
+
+        @Specialization
+        public RubyString string(RubyString value) {
+<span class="nc" id="L1853">            return value;</span>
+        }
+
+        @Specialization(guards = &quot;!isRubyString&quot;)
+        public Object string(VirtualFrame frame, Object value) {
+<span class="nc" id="L1858">            return toS.call(frame, value, &quot;to_s&quot;, null);</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;sleep&quot;, isModuleFunction = true, optional = 1)
+    public abstract static class SleepNode extends CoreMethodNode {
+
+        public SleepNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1867">            super(context, sourceSection);</span>
+<span class="nc" id="L1868">        }</span>
+
+        public SleepNode(SleepNode prev) {
+<span class="nc" id="L1871">            super(prev);</span>
+<span class="nc" id="L1872">        }</span>
+
+        @Specialization
+        public double sleep(UndefinedPlaceholder duration) {
+<span class="nc" id="L1876">            return doSleep(0);</span>
+        }
+
+        @Specialization
+        public double sleep(int duration) {
+<span class="nc" id="L1881">            return doSleep(duration);</span>
+        }
+
+        @Specialization
+        public double sleep(long duration) {
+<span class="nc" id="L1886">            return doSleep(duration);</span>
+        }
+
+        @Specialization
+        public double sleep(double duration) {
+<span class="nc" id="L1891">            return doSleep(duration);</span>
+        }
+
+        @TruffleBoundary
+        private double doSleep(final double duration) {
+<span class="nc" id="L1896">            final RubyThread runningThread = getContext().getThreadManager().leaveGlobalLock();</span>
+
+            try {
+<span class="nc" id="L1899">                final long start = System.nanoTime();</span>
+
+                try {
+<span class="nc" id="L1902">                    Thread.sleep((long) (duration * 1000));</span>
+<span class="nc" id="L1903">                } catch (InterruptedException e) {</span>
+                    // Ignore interruption
+<span class="nc" id="L1905">                }</span>
+
+<span class="nc" id="L1907">                final long end = System.nanoTime();</span>
+
+<span class="nc" id="L1909">                return (end - start) / 1e9;</span>
+            } finally {
+<span class="nc" id="L1911">                getContext().getThreadManager().enterGlobalLock(runningThread);</span>
+            }
+        }
+
+    }
+
+    @CoreMethod(names = &quot;sprintf&quot;, isModuleFunction = true, argumentsAsArray = true)
+    public abstract static class SPrintfNode extends CoreMethodNode {
+
+        public SPrintfNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1921">            super(context, sourceSection);</span>
+<span class="nc" id="L1922">        }</span>
+
+        public SPrintfNode(SPrintfNode prev) {
+<span class="nc" id="L1925">            super(prev);</span>
+<span class="nc" id="L1926">        }</span>
+
+        @Specialization
+        public RubyString sprintf(Object[] args) {
+<span class="nc" id="L1930">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L1932">            final ByteArrayOutputStream outputStream = new ByteArrayOutputStream();</span>
+<span class="nc" id="L1933">            final PrintStream printStream = new PrintStream(outputStream);</span>
+
+<span class="nc bnc" id="L1935" title="All 2 branches missed.">            if (args.length &gt; 0) {</span>
+<span class="nc" id="L1936">                final String format = args[0].toString();</span>
+<span class="nc" id="L1937">                final List&lt;Object&gt; values = Arrays.asList(args).subList(1, args.length);</span>
+
+<span class="nc" id="L1939">                final RubyThread runningThread = getContext().getThreadManager().leaveGlobalLock();</span>
+
+                try {
+<span class="nc" id="L1942">                    StringFormatter.format(getContext(), printStream, format, values);</span>
+                } finally {
+<span class="nc" id="L1944">                    getContext().getThreadManager().enterGlobalLock(runningThread);</span>
+<span class="nc" id="L1945">                }</span>
+            }
+
+<span class="nc" id="L1948">            return getContext().makeString(new ByteList(outputStream.toByteArray()));</span>
+        }
+    }
+
+    @CoreMethod(names = &quot;system&quot;, isModuleFunction = true, argumentsAsArray = true)
+    public abstract static class SystemNode extends CoreMethodNode {
+
+        public SystemNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1956">            super(context, sourceSection);</span>
+<span class="nc" id="L1957">        }</span>
+
+        public SystemNode(SystemNode prev) {
+<span class="nc" id="L1960">            super(prev);</span>
+<span class="nc" id="L1961">        }</span>
+
+        @Specialization
+        public Object fork(Object[] args) {
+<span class="nc" id="L1965">            notDesignedForCompilation();</span>
+<span class="nc" id="L1966">            getContext().getWarnings().warn(&quot;Kernel#system not implemented - defined to satisfy some metaprogramming in RubySpec&quot;);</span>
+<span class="nc" id="L1967">            return getContext().getCoreLibrary().getNilObject();</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;taint&quot;)
+    public abstract static class TaintNode extends CoreMethodNode {
+
+        @Child protected WriteHeadObjectFieldNode writeTaintNode;
+
+        public TaintNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L1978">            super(context, sourceSection);</span>
+<span class="nc" id="L1979">            writeTaintNode = new WriteHeadObjectFieldNode(RubyBasicObject.TAINTED_IDENTIFIER);</span>
+<span class="nc" id="L1980">        }</span>
+
+        public TaintNode(TaintNode prev) {
+<span class="nc" id="L1983">            super(prev);</span>
+<span class="nc" id="L1984">            writeTaintNode = prev.writeTaintNode;</span>
+<span class="nc" id="L1985">        }</span>
+
+        @Specialization
+        public Object taint(boolean object) {
+<span class="nc" id="L1989">            return frozen(object);</span>
+        }
+
+        @Specialization
+        public Object taint(int object) {
+<span class="nc" id="L1994">            return frozen(object);</span>
+        }
+
+        @Specialization
+        public Object taint(long object) {
+<span class="nc" id="L1999">            return frozen(object);</span>
+        }
+
+        @Specialization
+        public Object taint(double object) {
+<span class="nc" id="L2004">            return frozen(object);</span>
+        }
+
+        private Object frozen(Object object) {
+<span class="nc" id="L2008">            CompilerDirectives.transferToInterpreter();</span>
+<span class="nc" id="L2009">            throw new RaiseException(getContext().getCoreLibrary().frozenError(getContext().getCoreLibrary().getLogicalClass(object).getName(), this));</span>
+        }
+
+
+        @Specialization
+        public Object taint(RubyBasicObject object) {
+<span class="nc" id="L2015">            writeTaintNode.execute(object, true);</span>
+<span class="nc" id="L2016">            return object;</span>
+        }
+
+    }
+
+    @CoreMethod(names = &quot;tainted?&quot;)
+    public abstract static class TaintedNode extends CoreMethodNode {
+
+        @Child protected ReadHeadObjectFieldNode readTaintNode;
+
+        public TaintedNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L2027">            super(context, sourceSection);</span>
+<span class="nc" id="L2028">            readTaintNode = new ReadHeadObjectFieldNode(RubyBasicObject.TAINTED_IDENTIFIER);</span>
+<span class="nc" id="L2029">        }</span>
+
+        public TaintedNode(TaintedNode prev) {
+<span class="nc" id="L2032">            super(prev);</span>
+<span class="nc" id="L2033">            readTaintNode = prev.readTaintNode;</span>
+<span class="nc" id="L2034">        }</span>
+
+        @Specialization
+        public boolean tainted(boolean object) {
+<span class="nc" id="L2038">            return false;</span>
+        }
+
+        @Specialization
+        public boolean tainted(int object) {
+<span class="nc" id="L2043">            return false;</span>
+        }
+
+        @Specialization
+        public boolean tainted(long object) {
+<span class="nc" id="L2048">            return false;</span>
+        }
+
+        @Specialization
+        public boolean tainted(double object) {
+<span class="nc" id="L2053">            return false;</span>
+        }
+
+        @Specialization
+        public boolean tainted(RubyBasicObject object) {
+            try {
+<span class="nc bnc" id="L2059" title="All 4 branches missed.">                return readTaintNode.isSet(object) &amp;&amp; readTaintNode.executeBoolean(object);</span>
+<span class="nc" id="L2060">            } catch (UnexpectedResultException e) {</span>
+<span class="nc" id="L2061">                throw new UnsupportedOperationException();</span>
+            }
+        }
+
+    }
+
+    @CoreMethod(names = &quot;throw&quot;, isModuleFunction = true, required = 1, optional = 1)
+    public abstract static class ThrowNode extends CoreMethodNode {
+
+        public ThrowNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L2071">            super(context, sourceSection);</span>
+<span class="nc" id="L2072">        }</span>
+
+        public ThrowNode(ThrowNode prev) {
+<span class="nc" id="L2075">            super(prev);</span>
+<span class="nc" id="L2076">        }</span>
+
+        @Specialization
+        public Object doThrow(Object tag, UndefinedPlaceholder value) {
+<span class="nc" id="L2080">            return doThrow(tag, (Object) value);</span>
+        }
+
+        @Specialization
+        public Object doThrow(Object tag, Object value) {
+<span class="nc" id="L2085">            notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L2087" title="All 2 branches missed.">            if (!getContext().getThrowTags().contains(tag)) {</span>
+<span class="nc" id="L2088">                throw new RaiseException(new RubyException(</span>
+<span class="nc" id="L2089">                        getContext().getCoreLibrary().getArgumentErrorClass(),</span>
+<span class="nc" id="L2090">                        getContext().makeString(String.format(&quot;uncaught throw \&quot;%s\&quot;&quot;, tag)),</span>
+<span class="nc" id="L2091">                        RubyCallStack.getBacktrace(this)));</span>
+            }
+
+<span class="nc bnc" id="L2094" title="All 2 branches missed.">            if (value instanceof UndefinedPlaceholder) {</span>
+<span class="nc" id="L2095">                throw new ThrowException(tag, getContext().getCoreLibrary().getNilObject());</span>
+            } else {
+<span class="nc" id="L2097">                throw new ThrowException(tag, value);</span>
+            }
+        }
+
+    }
+
+    public abstract static class ToHexStringNode extends CoreMethodNode {
+
+        public ToHexStringNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L2106">            super(context, sourceSection);</span>
+<span class="nc" id="L2107">        }</span>
+
+        public ToHexStringNode(ToHexStringNode prev) {
+<span class="nc" id="L2110">            super(prev);</span>
+<span class="nc" id="L2111">        }</span>
+
+        public abstract String executeToHexString(Object value);
+
+        @Specialization
+        public String toHexString(int value) {
+<span class="nc" id="L2117">            return toHexString((long) value);</span>
+        }
+
+        @Specialization
+        public String toHexString(long value) {
+<span class="nc" id="L2122">            return Long.toHexString(value);</span>
+        }
+
+        @Specialization
+        public String toHexString(RubyBignum value) {
+<span class="nc" id="L2127">            return value.toHexString();</span>
+        }
+
+    }
+
+    @CoreMethod(names = {&quot;to_s&quot;, &quot;inspect&quot;})
+    public abstract static class ToSNode extends CoreMethodNode {
+
+        @Child protected ClassNode classNode;
+        @Child protected BasicObjectNodes.IDNode idNode;
+        @Child protected ToHexStringNode toHexStringNode;
+
+        public ToSNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L2140">            super(context, sourceSection);</span>
+<span class="nc" id="L2141">            classNode = KernelNodesFactory.ClassNodeFactory.create(context, sourceSection, new RubyNode[]{null});</span>
+<span class="nc" id="L2142">            idNode = BasicObjectNodesFactory.IDNodeFactory.create(context, sourceSection, new RubyNode[]{null});</span>
+<span class="nc" id="L2143">            toHexStringNode = KernelNodesFactory.ToHexStringNodeFactory.create(context, sourceSection, new RubyNode[]{null});</span>
+<span class="nc" id="L2144">        }</span>
+
+        public abstract RubyString executeToS(VirtualFrame frame, Object self);
+
+        @Specialization
+        public RubyString toS(VirtualFrame frame, Object self) {
+<span class="nc" id="L2150">            notDesignedForCompilation();</span>
+
+<span class="nc" id="L2152">            String className = classNode.executeGetClass(self).getName();</span>
+
+<span class="nc bnc" id="L2154" title="All 2 branches missed.">            if (className == null) {</span>
+<span class="nc" id="L2155">                className = &quot;Class&quot;;</span>
+            }
+
+<span class="nc" id="L2158">            Object id = idNode.executeObjectID(frame, self);</span>
+<span class="nc" id="L2159">            String hexID = toHexStringNode.executeToHexString(id);</span>
+
+<span class="nc" id="L2161">            return getContext().makeString(&quot;#&lt;&quot; + className + &quot;:0x&quot; + hexID + &quot;&gt;&quot;);</span>
+        }
+
+    }
+
+<span class="nc" id="L2166">    @CoreMethod(names = &quot;untaint&quot;)</span>
+    public abstract static class UntaintNode extends CoreMethodNode {
+
+        @Child protected WriteHeadObjectFieldNode writeTaintNode;
+
+        public UntaintNode(RubyContext context, SourceSection sourceSection) {
+<span class="nc" id="L2172">            super(context, sourceSection);</span>
+<span class="nc" id="L2173">            writeTaintNode = new WriteHeadObjectFieldNode(RubyBasicObject.TAINTED_IDENTIFIER);</span>
+<span class="nc" id="L2174">        }</span>
+
+        public UntaintNode(UntaintNode prev) {
+<span class="nc" id="L2177">            super(prev);</span>
+<span class="nc" id="L2178">            writeTaintNode = prev.writeTaintNode;</span>
+<span class="nc" id="L2179">        }</span>
+
+        @Specialization
+        public Object taint(boolean object) {
+<span class="nc" id="L2183">            return frozen(object);</span>
+        }
+
+        @Specialization
+        public Object taint(int object) {
+<span class="nc" id="L2188">            return frozen(object);</span>
+        }
+
+        @Specialization
+        public Object taint(long object) {
+<span class="nc" id="L2193">            return frozen(object);</span>
+        }
+
+        @Specialization
+        public Object taint(double object) {
+<span class="nc" id="L2198">            return frozen(object);</span>
+        }
+
+        private Object frozen(Object object) {
+<span class="nc" id="L2202">            CompilerDirectives.transferToInterpreter();</span>
+<span class="nc" id="L2203">            throw new RaiseException(getContext().getCoreLibrary().frozenError(getContext().getCoreLibrary().getLogicalClass(object).getName(), this));</span>
+        }
+
+
+        @Specialization
+        public Object taint(RubyBasicObject object) {
+<span class="nc" id="L2209">            writeTaintNode.execute(object, false);</span>
+<span class="nc" id="L2210">            return object;</span>
+        }
+
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

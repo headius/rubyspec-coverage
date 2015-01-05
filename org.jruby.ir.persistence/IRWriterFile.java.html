@@ -1,0 +1,230 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IRWriterFile.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.persistence</a> &gt; <span class="el_source">IRWriterFile.java</span></div><h1>IRWriterFile.java</h1><pre class="source lang-java linenums">/*
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+
+package org.jruby.ir.persistence;
+
+import org.jruby.ir.IRScope;
+import org.jruby.ir.IRScopeType;
+import org.jruby.ir.Operation;
+import org.jruby.ir.instructions.Instr;
+import org.jruby.ir.operands.Operand;
+import org.jruby.ir.operands.OperandType;
+import org.jruby.parser.StaticScope;
+
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.HashMap;
+import java.util.Map;
+
+// FIXME: Make into a base class at some point to play with different formats
+
+/**
+ * Represents a file which is persisted to storage.
+ */
+public class IRWriterFile implements IRWriterEncoder, IRPersistenceValues {
+    private static final int VERSION = 0;
+
+<span class="nc" id="L33">    private final Map&lt;IRScope, Integer&gt; scopeInstructionOffsets = new HashMap&lt;IRScope, Integer&gt;();</span>
+    // FIXME: Allocate direct and use one per thread?
+<span class="nc" id="L35">    private final ByteBuffer buf = ByteBuffer.allocate(TWO_MEGS);</span>
+    private final File file;
+    private final OperandEncoderMap operandEncoder;
+    private final InstrEncoderMap instrEncoder;
+    private final IRWriterAnalzer analyzer;
+
+<span class="nc" id="L41">    int headersOffset = -1;</span>
+<span class="nc" id="L42">    int poolOffset = -1;</span>
+
+<span class="nc" id="L44">    public IRWriterFile(File file) throws FileNotFoundException {</span>
+<span class="nc" id="L45">        this.file = file;</span>
+<span class="nc" id="L46">        this.operandEncoder = new OperandEncoderMap(this);</span>
+<span class="nc" id="L47">        this.instrEncoder = new InstrEncoderMap(this);</span>
+<span class="nc" id="L48">        this.analyzer = new IRWriterAnalzer();</span>
+<span class="nc" id="L49">    }</span>
+
+    /**
+     * Record current offset as the beginning of specified scopes list of instructions.
+     */
+    public void addScopeInstructionOffset(IRScope scope) {
+<span class="nc" id="L55">        scopeInstructionOffsets.put(scope, offset());</span>
+<span class="nc" id="L56">    }</span>
+
+    private int offset() {
+<span class="nc" id="L59">        return buf.position() + PROLOGUE_LENGTH;</span>
+    }
+
+    /**
+     * Get recorded offset for this scropes instruction list.
+     */
+    public int getScopeInstructionOffset(IRScope scope) {
+<span class="nc" id="L66">        return scopeInstructionOffsets.get(scope);</span>
+    }
+
+    @Override
+    public void encode(boolean value) {
+<span class="nc bnc" id="L71" title="All 2 branches missed.">        buf.put((byte) (value ? TRUE : FALSE));</span>
+<span class="nc" id="L72">    }</span>
+
+    @Override
+    public void encode(byte value) {
+<span class="nc" id="L76">        buf.put(value);</span>
+<span class="nc" id="L77">    }</span>
+
+    @Override
+    public void encode(char value) {
+<span class="nc" id="L81">        buf.putChar(value);</span>
+<span class="nc" id="L82">    }</span>
+
+    @Override
+    public void encode(int value) {
+        //FIXME: Use bit math
+        // We can write 7 bits of ints as a single byte and if 8th is set we end
+        // using first byte to indicate full precision int.
+<span class="nc bnc" id="L89" title="All 4 branches missed.">        if (value &gt;= 0 &amp;&amp; value &lt;= 127) {</span>
+<span class="nc" id="L90">            buf.put((byte) value);</span>
+        } else {
+<span class="nc" id="L92">            buf.put(FULL);</span>
+<span class="nc" id="L93">            buf.putInt(value);</span>
+        }
+<span class="nc" id="L95">    }</span>
+
+    @Override
+    public void encode(long value) {
+<span class="nc bnc" id="L99" title="All 4 branches missed.">        if (value &gt;= 0 &amp;&amp; value &lt;= 127) {</span>
+<span class="nc" id="L100">            encode((byte) value);</span>
+        } else {
+<span class="nc" id="L102">            buf.put(FULL);</span>
+<span class="nc" id="L103">            buf.putLong(value);</span>
+        }
+<span class="nc" id="L105">    }</span>
+
+    @Override
+    public void encode(float value) {
+//        buf.put(FLOAT);
+<span class="nc" id="L110">        buf.putFloat(value);</span>
+<span class="nc" id="L111">    }</span>
+
+    @Override
+    public void encode(double value) {
+//        buf.put(DOUBLE);
+<span class="nc" id="L116">        buf.putDouble(value);</span>
+<span class="nc" id="L117">    }</span>
+
+    @Override
+    public void encode(String value) {
+<span class="nc" id="L121">        encode(value.length());</span>
+<span class="nc" id="L122">        buf.put(value.getBytes());</span>
+<span class="nc" id="L123">    }</span>
+
+    // This cannot tell difference between null and [] which is ok.  Possibly we should even allow
+    // encoding null.
+    @Override
+    public void encode(String[] values) {
+<span class="nc bnc" id="L129" title="All 2 branches missed.">        if (values == null) {</span>
+<span class="nc" id="L130">            encode((int) 0);</span>
+<span class="nc" id="L131">            return;</span>
+        }
+
+<span class="nc" id="L134">        encode(values.length);</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        for (String value : values) {</span>
+<span class="nc" id="L136">            encode(value.length());</span>
+<span class="nc" id="L137">            buf.put(value.getBytes());</span>
+        }
+<span class="nc" id="L139">    }</span>
+
+    @Override
+    public void encode(Operand operand) {
+<span class="nc" id="L143">        operandEncoder.encode(operand);</span>
+<span class="nc" id="L144">    }</span>
+
+    @Override
+    public void encode(Instr instr) {
+<span class="nc" id="L148">        instrEncoder.encode(instr);</span>
+<span class="nc" id="L149">    }</span>
+
+    @Override
+    public void encode(IRScope value) {
+<span class="nc" id="L153">        encode((int) analyzer.getScopeID(value));</span>
+<span class="nc" id="L154">    }</span>
+
+    @Override
+    public void encode(IRScopeType value) {
+<span class="nc" id="L158">        encode((byte) value.ordinal());</span>
+<span class="nc" id="L159">    }</span>
+
+    @Override
+    public void encode(StaticScope.Type value) {
+<span class="nc" id="L163">        encode((byte) value.ordinal());</span>
+<span class="nc" id="L164">    }</span>
+
+    @Override
+    public void encode(Operation value) {
+<span class="nc" id="L168">        encode((byte) value.ordinal());</span>
+<span class="nc" id="L169">    }</span>
+
+    @Override
+    public void encode(OperandType value) {
+<span class="nc" id="L173">        encode((byte) value.ordinal());</span>
+<span class="nc" id="L174">    }</span>
+
+    @Override
+    public void startEncodingScopeHeader(IRScope scope) {
+<span class="nc" id="L178">    }</span>
+
+    @Override
+    public void endEncodingScopeHeader(IRScope scope) {
+<span class="nc" id="L182">        encode(getScopeInstructionOffset(scope)); // Write out offset to where this scopes instrs are</span>
+<span class="nc" id="L183">    }</span>
+
+    @Override
+    public void startEncodingScopeInstrs(IRScope scope) {
+<span class="nc" id="L187">        addScopeInstructionOffset(scope); // Record offset so we add this value to scope headers entry</span>
+<span class="nc" id="L188">        encode(scope.getInstrs().size()); // Allows us to right-size when reconstructing instr list.</span>
+<span class="nc" id="L189">    }</span>
+
+    @Override
+    public void endEncodingScopeInstrs(IRScope scope) {
+<span class="nc" id="L193">    }</span>
+
+    @Override
+    public void startEncodingScopeHeaders(IRScope script) {
+<span class="nc" id="L197">        headersOffset = offset();</span>
+<span class="nc" id="L198">        encode(analyzer.getScopeCount());</span>
+<span class="nc" id="L199">    }</span>
+
+    @Override
+    public void endEncodingScopeHeaders(IRScope script) {
+<span class="nc" id="L203">    }</span>
+
+    @Override
+    public void startEncoding(IRScope script) {
+        try {
+<span class="nc" id="L208">            IRWriter.persist(analyzer, script);</span>
+<span class="nc" id="L209">        } catch (IOException ex) {</span>
+            // No IO so no exception possible for analyzer.
+<span class="nc" id="L211">        }</span>
+<span class="nc" id="L212">    }</span>
+
+    @Override
+    public void endEncoding(IRScope script) {
+<span class="nc" id="L216">        FileOutputStream fos = null;</span>
+
+        try {
+<span class="nc" id="L219">            fos = new FileOutputStream(file);</span>
+<span class="nc" id="L220">            fos.write(ByteBuffer.allocate(4).putInt(headersOffset).array());</span>
+<span class="nc" id="L221">            fos.write(ByteBuffer.allocate(4).putInt(poolOffset).array());</span>
+<span class="nc" id="L222">            buf.flip();</span>
+<span class="nc" id="L223">            fos.getChannel().write(buf);</span>
+<span class="nc" id="L224">            fos.close();</span>
+<span class="nc" id="L225">        } catch (IOException e) {</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">            try { if (fos != null) fos.close(); } catch (IOException e1) {}</span>
+<span class="nc" id="L227">        }</span>
+<span class="nc" id="L228">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

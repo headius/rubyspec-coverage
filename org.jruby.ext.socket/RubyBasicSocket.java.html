@@ -1,0 +1,749 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyBasicSocket.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.socket</a> &gt; <span class="el_source">RubyBasicSocket.java</span></div><h1>RubyBasicSocket.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2007 Ola Bini &lt;ola@ologix.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+
+package org.jruby.ext.socket;
+
+import static jnr.constants.platform.IPProto.IPPROTO_TCP;
+import static jnr.constants.platform.IPProto.IPPROTO_IP;
+import static jnr.constants.platform.TCP.TCP_NODELAY;
+
+import java.io.IOException;
+import java.net.Inet6Address;
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.Channel;
+import java.nio.channels.DatagramChannel;
+import java.nio.channels.SelectableChannel;
+
+import jnr.constants.platform.Fcntl;
+import jnr.constants.platform.ProtocolFamily;
+import jnr.constants.platform.Sock;
+import org.jruby.Ruby;
+import org.jruby.RubyBoolean;
+import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyIO;
+import org.jruby.RubyNumeric;
+import org.jruby.RubyString;
+import org.jruby.RubySymbol;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.ext.fcntl.FcntlLibrary;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
+import org.jruby.util.Pack;
+import org.jruby.util.io.BadDescriptorException;
+import org.jruby.util.io.ChannelFD;
+import org.jruby.util.io.FilenoUtil;
+import org.jruby.util.io.OpenFile;
+
+import jnr.constants.platform.SocketLevel;
+import jnr.constants.platform.SocketOption;
+import org.jruby.util.io.Sockaddr;
+
+
+/**
+ * Implementation of the BasicSocket class from Ruby.
+ */
+@JRubyClass(name=&quot;BasicSocket&quot;, parent=&quot;IO&quot;)
+public class RubyBasicSocket extends RubyIO {
+    static void createBasicSocket(Ruby runtime) {
+<span class="fc" id="L80">        RubyClass rb_cBasicSocket = runtime.defineClass(&quot;BasicSocket&quot;, runtime.getIO(), BASICSOCKET_ALLOCATOR);</span>
+
+<span class="fc" id="L82">        rb_cBasicSocket.defineAnnotatedMethods(RubyBasicSocket.class);</span>
+<span class="fc" id="L83">    }</span>
+
+<span class="fc" id="L85">    private static ObjectAllocator BASICSOCKET_ALLOCATOR = new ObjectAllocator() {</span>
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L87">            return new RubyBasicSocket(runtime, klass);</span>
+        }
+    };
+
+    public RubyBasicSocket(Ruby runtime, RubyClass type) {
+<span class="fc" id="L92">        super(runtime, type);</span>
+<span class="fc" id="L93">        doNotReverseLookup = true;</span>
+<span class="fc" id="L94">    }</span>
+
+    @JRubyMethod(meta = true)
+    public static IRubyObject for_fd(ThreadContext context, IRubyObject _klass, IRubyObject _fileno) {
+<span class="nc" id="L98">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L99">        int fileno = (int)_fileno.convertToInteger().getLongValue();</span>
+<span class="nc" id="L100">        RubyClass klass = (RubyClass)_klass;</span>
+
+<span class="nc" id="L102">        ChannelFD fd = runtime.getFilenoUtil().getWrapperFromFileno(fileno);</span>
+
+<span class="nc" id="L104">        RubyBasicSocket basicSocket = (RubyBasicSocket)klass.getAllocator().allocate(runtime, klass);</span>
+<span class="nc" id="L105">        basicSocket.initSocket(fd);</span>
+
+<span class="nc" id="L107">        return basicSocket;</span>
+    }
+
+    @JRubyMethod(name = &quot;do_not_reverse_lookup&quot;)
+    public IRubyObject do_not_reverse_lookup19(ThreadContext context) {
+<span class="nc" id="L112">        return context.runtime.newBoolean(doNotReverseLookup);</span>
+    }
+
+    @JRubyMethod(name = &quot;do_not_reverse_lookup=&quot;)
+    public IRubyObject set_do_not_reverse_lookup19(ThreadContext context, IRubyObject flag) {
+<span class="nc" id="L117">        doNotReverseLookup = flag.isTrue();</span>
+<span class="nc" id="L118">        return do_not_reverse_lookup19(context);</span>
+    }
+
+    @JRubyMethod(meta = true)
+    public static IRubyObject do_not_reverse_lookup(ThreadContext context, IRubyObject recv) {
+<span class="nc" id="L123">        return context.runtime.newBoolean(context.runtime.isDoNotReverseLookupEnabled());</span>
+    }
+
+    @JRubyMethod(name = &quot;do_not_reverse_lookup=&quot;, meta = true)
+    public static IRubyObject set_do_not_reverse_lookup(ThreadContext context, IRubyObject recv, IRubyObject flag) {
+<span class="nc" id="L128">        context.runtime.setDoNotReverseLookupEnabled(flag.isTrue());</span>
+
+<span class="nc" id="L130">        return flag;</span>
+    }
+
+    @JRubyMethod(name = &quot;send&quot;)
+    public IRubyObject send(ThreadContext context, IRubyObject _mesg, IRubyObject _flags) {
+        // TODO: implement flags
+<span class="nc" id="L136">        return syswrite(context, _mesg);</span>
+    }
+
+    @JRubyMethod(name = &quot;send&quot;)
+    public IRubyObject send(ThreadContext context, IRubyObject _mesg, IRubyObject _flags, IRubyObject _to) {
+        // TODO: implement flags and to
+<span class="nc" id="L142">        return send(context, _mesg, _flags);</span>
+    }
+
+    @Deprecated
+    public IRubyObject recv(ThreadContext context, IRubyObject[] args) {
+<span class="nc bnc" id="L147" title="All 3 branches missed.">        switch (args.length) {</span>
+            case 1:
+<span class="nc" id="L149">                return recv(context, args[0]);</span>
+            case 2:
+<span class="nc" id="L151">                return recv(context, args[0], args[1]);</span>
+            default:
+<span class="nc" id="L153">                Arity.raiseArgumentError(context.runtime, args, 1, 2);</span>
+<span class="nc" id="L154">                return null; // not reached</span>
+        }
+    }
+
+    @JRubyMethod
+    public IRubyObject recv(ThreadContext context, IRubyObject _length) {
+<span class="nc" id="L160">        Ruby runtime = context.runtime;</span>
+
+<span class="nc" id="L162">        ByteList bytes = doReceive(context, RubyNumeric.fix2int(_length));</span>
+
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        if (bytes == null) return context.nil;</span>
+
+<span class="nc" id="L166">        return RubyString.newString(runtime, bytes);</span>
+    }
+    
+    @JRubyMethod
+    public IRubyObject recv(ThreadContext context, IRubyObject _length, IRubyObject _flags) {
+        // TODO: implement flags
+<span class="nc" id="L172">        return recv(context, _length);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject recv_nonblock(ThreadContext context, IRubyObject _length) {
+<span class="nc" id="L177">        Ruby runtime = context.runtime;</span>
+
+<span class="nc" id="L179">        ByteList bytes = doReceiveNonblock(context, RubyNumeric.fix2int(_length));</span>
+
+<span class="nc bnc" id="L181" title="All 2 branches missed.">        if (bytes == null) {</span>
+<span class="nc" id="L182">            throw runtime.newErrnoEAGAINReadableError(&quot;recvfrom(2)&quot;);</span>
+        }
+
+<span class="nc" id="L185">        return RubyString.newString(runtime, bytes);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject recv_nonblock(ThreadContext context, IRubyObject _length, IRubyObject _flags) {
+        // TODO: implement flags
+<span class="nc" id="L191">        return recv_nonblock(context, _length);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject getsockopt(ThreadContext context, IRubyObject _level, IRubyObject _opt) {
+<span class="nc" id="L196">        Ruby runtime = context.runtime;</span>
+
+<span class="nc" id="L198">        SocketLevel level = levelFromArg(_level);</span>
+<span class="nc" id="L199">        SocketOption opt = optionFromArg(_opt);</span>
+
+<span class="nc" id="L201">        int value = 0;</span>
+
+        try {
+<span class="nc" id="L204">            Channel channel = getOpenChannel();</span>
+
+<span class="nc bnc" id="L206" title="All 2 branches missed.">            switch(level) {</span>
+
+            case SOL_SOCKET:
+            case SOL_IP:
+            case SOL_TCP:
+            case SOL_UDP:
+
+<span class="nc bnc" id="L213" title="All 2 branches missed.">                if (opt == SocketOption.__UNKNOWN_CONSTANT__) {</span>
+<span class="nc" id="L214">                    throw runtime.newErrnoENOPROTOOPTError();</span>
+                }
+
+<span class="nc" id="L217">                value = SocketType.forChannel(channel).getSocketOption(channel, opt);</span>
+                
+<span class="nc" id="L219">                return new Option(runtime, ProtocolFamily.PF_INET, level, opt, value);</span>
+
+            default:
+<span class="nc" id="L222">                throw runtime.newErrnoENOPROTOOPTError();</span>
+            }
+
+<span class="nc" id="L225">        } catch(IOException e) {</span>
+<span class="nc" id="L226">            throw runtime.newErrnoENOPROTOOPTError();</span>
+        }
+    }
+
+    @JRubyMethod
+    public IRubyObject setsockopt(ThreadContext context, IRubyObject _level, IRubyObject _opt, IRubyObject val) {
+<span class="nc" id="L232">        Ruby runtime = context.runtime;</span>
+
+<span class="nc" id="L234">        SocketLevel level = levelFromArg(_level);</span>
+<span class="nc" id="L235">        SocketOption opt = optionFromArg(_opt);</span>
+
+        try {
+<span class="nc" id="L238">            Channel channel = getOpenChannel();</span>
+<span class="nc" id="L239">            SocketType socketType = SocketType.forChannel(channel);</span>
+
+<span class="nc bnc" id="L241" title="All 2 branches missed.">            switch(level) {</span>
+
+            case SOL_IP:
+            case SOL_SOCKET:
+            case SOL_TCP:
+            case SOL_UDP:
+
+<span class="nc bnc" id="L248" title="All 2 branches missed.">                if (opt == SocketOption.SO_LINGER) {</span>
+<span class="nc bnc" id="L249" title="All 4 branches missed.">                    if(val instanceof RubyBoolean &amp;&amp; !val.isTrue()) {</span>
+<span class="nc" id="L250">                        socketType.setSoLinger(channel, false, 0);</span>
+                    } else {
+<span class="nc" id="L252">                        int num = asNumber(val);</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">                        if(num == -1) {</span>
+<span class="nc" id="L254">                            socketType.setSoLinger(channel, false, 0);</span>
+                        } else {
+<span class="nc" id="L256">                            socketType.setSoLinger(channel, true, num);</span>
+                        }
+<span class="nc" id="L258">                    }</span>
+
+                } else {
+<span class="nc" id="L261">                    socketType.setSocketOption(channel, opt, asNumber(val));</span>
+                }
+
+<span class="nc" id="L264">                break;</span>
+
+            default:
+<span class="nc" id="L267">                int intLevel = (int)_level.convertToInteger().getLongValue();</span>
+<span class="nc" id="L268">                int intOpt = (int)_opt.convertToInteger().getLongValue();</span>
+<span class="nc bnc" id="L269" title="All 4 branches missed.">                if (IPPROTO_TCP.intValue() == intLevel &amp;&amp; TCP_NODELAY.intValue() == intOpt) {</span>
+<span class="nc" id="L270">                    socketType.setTcpNoDelay(channel, asBoolean(val));</span>
+
+<span class="nc bnc" id="L272" title="All 2 branches missed.">                } else if (IPPROTO_IP.intValue() == intLevel) {</span>
+<span class="nc bnc" id="L273" title="All 2 branches missed.">                    if (MulticastStateManager.IP_ADD_MEMBERSHIP == intOpt) {</span>
+<span class="nc" id="L274">                        joinMulticastGroup(val);</span>
+                    }
+
+                } else {
+<span class="nc" id="L278">                    throw runtime.newErrnoENOPROTOOPTError();</span>
+                }
+            }
+
+<span class="nc" id="L282">        } catch (BadDescriptorException e) {</span>
+<span class="nc" id="L283">            throw runtime.newErrnoEBADFError();</span>
+
+<span class="nc" id="L285">        } catch(IOException e) {</span>
+<span class="nc" id="L286">            throw runtime.newErrnoENOPROTOOPTError();</span>
+<span class="nc" id="L287">        }</span>
+<span class="nc" id="L288">        return runtime.newFixnum(0);</span>
+    }
+
+    @JRubyMethod(name = &quot;getsockname&quot;)
+    public IRubyObject getsockname(ThreadContext context) {
+<span class="nc" id="L293">        return getSocknameCommon(context, &quot;getsockname&quot;);</span>
+    }
+
+    @JRubyMethod(name = &quot;getpeername&quot;)
+    public IRubyObject getpeername(ThreadContext context) {
+<span class="nc" id="L298">        Ruby runtime = context.runtime;</span>
+
+        try {
+<span class="nc" id="L301">            SocketAddress sock = getRemoteSocket();</span>
+
+<span class="nc bnc" id="L303" title="All 2 branches missed.">            if(null == sock) {</span>
+<span class="nc" id="L304">                throw runtime.newIOError(&quot;Not Supported&quot;);</span>
+            }
+
+<span class="nc" id="L307">            return runtime.newString(sock.toString());</span>
+
+<span class="nc" id="L309">        } catch (BadDescriptorException e) {</span>
+<span class="nc" id="L310">            throw runtime.newErrnoEBADFError();</span>
+        }
+    }
+
+    @JRubyMethod(name = &quot;getpeereid&quot;, notImplemented = true)
+    public IRubyObject getpeereid(ThreadContext context) {
+<span class="nc" id="L316">        throw context.runtime.newNotImplementedError(&quot;getpeereid not implemented&quot;);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject local_address(ThreadContext context) {
+        try {
+<span class="nc" id="L322">            InetSocketAddress address = getSocketAddress();</span>
+
+<span class="nc bnc" id="L324" title="All 2 branches missed.">            if (address == null) {</span>
+<span class="nc" id="L325">                return context.nil;</span>
+
+            } else {
+<span class="nc" id="L328">                return new Addrinfo(context.runtime, context.runtime.getClass(&quot;Addrinfo&quot;), address.getAddress(), address.getPort(), SocketType.forChannel(getChannel()));</span>
+            }
+<span class="nc" id="L330">        } catch (BadDescriptorException bde) {</span>
+<span class="nc" id="L331">            throw context.runtime.newErrnoEBADFError(&quot;address unavailable&quot;);</span>
+        }
+    }
+
+    @JRubyMethod
+    public IRubyObject remote_address(ThreadContext context) {
+        try {
+<span class="nc" id="L338">            InetSocketAddress address = getRemoteSocket();</span>
+
+<span class="nc bnc" id="L340" title="All 2 branches missed.">            if (address == null) {</span>
+<span class="nc" id="L341">                return context.nil;</span>
+
+            } else {
+<span class="nc" id="L344">                return new Addrinfo(context.runtime, context.runtime.getClass(&quot;Addrinfo&quot;), address.getAddress(), address.getPort(), SocketType.forChannel(getChannel()));</span>
+            }
+<span class="nc" id="L346">        } catch (BadDescriptorException bde) {</span>
+<span class="nc" id="L347">            throw context.runtime.newErrnoEBADFError(&quot;address unavailable&quot;);</span>
+        }
+    }
+
+    @JRubyMethod(optional = 1)
+    public IRubyObject shutdown(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L353">        int how = 2;</span>
+
+<span class="nc bnc" id="L355" title="All 2 branches missed.">        if (args.length &gt; 0) {</span>
+<span class="nc" id="L356">            String howString = null;</span>
+<span class="nc bnc" id="L357" title="All 2 branches missed.">            if (args[0] instanceof RubyString) {</span>
+<span class="nc" id="L358">                howString = ((RubyString) args[0]).asJavaString();</span>
+<span class="nc bnc" id="L359" title="All 2 branches missed.">            } else if (args[0] instanceof RubySymbol) {</span>
+<span class="nc" id="L360">                howString = ((RubySymbol) args[0]).asJavaString();</span>
+            }
+
+<span class="nc bnc" id="L363" title="All 2 branches missed.">            if (howString != null) {</span>
+<span class="nc bnc" id="L364" title="All 4 branches missed.">                if (howString.equals(&quot;RD&quot;) || howString.equals(&quot;SHUT_RD&quot;)) {</span>
+<span class="nc" id="L365">                    how = 0;</span>
+<span class="nc bnc" id="L366" title="All 4 branches missed.">                } else if (howString.equals(&quot;WR&quot;) || howString.equals(&quot;SHUT_WR&quot;)) {</span>
+<span class="nc" id="L367">                    how = 1;</span>
+<span class="nc bnc" id="L368" title="All 4 branches missed.">                } else if (howString.equals(&quot;RDWR&quot;) || howString.equals(&quot;SHUT_RDWR&quot;)) {</span>
+<span class="nc" id="L369">                    how = 2;</span>
+                }
+            } else {
+<span class="nc" id="L372">                how = RubyNumeric.fix2int(args[0]);</span>
+            }
+        }
+
+        try {
+<span class="nc" id="L377">            return shutdownInternal(context, how);</span>
+
+<span class="nc" id="L379">        } catch (BadDescriptorException e) {</span>
+<span class="nc" id="L380">            throw context.runtime.newErrnoEBADFError();</span>
+        }
+    }
+
+    @Override
+    @JRubyMethod
+    public IRubyObject close_write(ThreadContext context) {
+<span class="nc" id="L387">        Ruby runtime = context.runtime;</span>
+        OpenFile fptr;
+
+//        if (rb_safe_level() &gt;= 4 &amp;&amp; !OBJ_TAINTED(sock)) {
+//            rb_raise(rb_eSecurityError, &quot;Insecure: can't close socket&quot;);
+//        }
+<span class="nc" id="L393">        fptr = getOpenFileChecked();</span>
+<span class="nc bnc" id="L394" title="All 2 branches missed.">        if ((fptr.getMode() &amp; OpenFile.READABLE) == 0) {</span>
+<span class="nc" id="L395">            return rbIoClose(runtime);</span>
+        }
+        // shutdown write
+        try {
+<span class="nc" id="L399">            shutdownInternal(context, 1);</span>
+
+<span class="nc" id="L401">        } catch (BadDescriptorException e) {</span>
+<span class="nc" id="L402">            throw runtime.newErrnoEBADFError();</span>
+<span class="nc" id="L403">        }</span>
+
+<span class="nc" id="L405">        return context.nil;</span>
+    }
+
+    @Override
+    @JRubyMethod
+    public IRubyObject close_read(ThreadContext context) {
+<span class="nc" id="L411">        Ruby runtime = context.runtime;</span>
+
+<span class="nc bnc" id="L413" title="All 2 branches missed.">        if (!openFile.isOpen()) {</span>
+<span class="nc" id="L414">            throw context.runtime.newIOError(&quot;not opened for reading&quot;);</span>
+        }
+
+<span class="nc bnc" id="L417" title="All 2 branches missed.">        if (!openFile.isWritable()) {</span>
+<span class="nc" id="L418">            close();</span>
+
+        } else {
+            // shutdown read
+            try {
+<span class="nc" id="L423">                shutdownInternal(context, 0);</span>
+
+<span class="nc" id="L425">            } catch (BadDescriptorException e) {</span>
+<span class="nc" id="L426">                throw runtime.newErrnoEBADFError();</span>
+<span class="nc" id="L427">            }</span>
+        }
+
+<span class="nc" id="L430">        return context.nil;</span>
+    }
+
+    @JRubyMethod(rest = true, notImplemented = true)
+    public IRubyObject sendmsg(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L435">        throw context.runtime.newNotImplementedError(&quot;sendmsg is not implemented&quot;);</span>
+    }
+
+    @JRubyMethod(rest = true, notImplemented = true)
+    public IRubyObject sendmsg_nonblock(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L440">        throw context.runtime.newNotImplementedError(&quot;sendmsg_nonblock is not implemented&quot;);</span>
+    }
+
+    @JRubyMethod(rest = true, notImplemented = true)
+    public IRubyObject readmsg(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L445">        throw context.runtime.newNotImplementedError(&quot;readmsg is not implemented&quot;);</span>
+    }
+
+    @JRubyMethod(rest = true, notImplemented = true)
+    public IRubyObject readmsg_nonblock(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L450">        throw context.runtime.newNotImplementedError(&quot;readmsg_nonblock is not implemented&quot;);</span>
+    }
+
+    private ByteList doReceive(ThreadContext context, int length) {
+<span class="nc" id="L454">        Ruby runtime = context.runtime;</span>
+        OpenFile fptr;
+
+<span class="nc" id="L457">        fptr = getOpenFileChecked();</span>
+<span class="nc" id="L458">        fptr.checkReadable(context);</span>
+
+<span class="nc" id="L460">        ByteBuffer buf = ByteBuffer.allocate(length);</span>
+
+        try {
+<span class="nc" id="L463">            context.getThread().beforeBlockingCall();</span>
+
+<span class="nc" id="L465">            int read = openFile.readChannel().read(buf);</span>
+
+<span class="nc bnc" id="L467" title="All 2 branches missed.">            if (read == 0) return null;</span>
+
+<span class="nc" id="L469">            return new ByteList(buf.array(), 0, buf.position());</span>
+
+<span class="nc" id="L471">        } catch (IOException e) {</span>
+            // All errors to sysread should be SystemCallErrors, but on a closed stream
+            // Ruby returns an IOError.  Java throws same exception for all errors so
+            // we resort to this hack...
+<span class="nc bnc" id="L475" title="All 2 branches missed.">            if (&quot;Socket not open&quot;.equals(e.getMessage())) {</span>
+<span class="nc" id="L476">                throw runtime.newIOError(e.getMessage());</span>
+            }
+
+<span class="nc" id="L479">            throw runtime.newSystemCallError(e.getMessage());</span>
+
+        } finally {
+<span class="nc" id="L482">            context.getThread().afterBlockingCall();</span>
+        }
+    }
+
+    public ByteList doReceiveNonblock(ThreadContext context, int length) {
+<span class="nc" id="L487">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L488">        Channel channel = getChannel();</span>
+
+<span class="nc bnc" id="L490" title="All 2 branches missed.">        if (!(channel instanceof SelectableChannel)) {</span>
+<span class="nc" id="L491">            throw runtime.newErrnoEAGAINReadableError(channel.getClass().getName() + &quot; does not support nonblocking&quot;);</span>
+        }
+
+<span class="nc" id="L494">        SelectableChannel selectable = (SelectableChannel)channel;</span>
+
+<span class="nc" id="L496">        synchronized (selectable.blockingLock()) {</span>
+<span class="nc" id="L497">            boolean oldBlocking = selectable.isBlocking();</span>
+
+            try {
+<span class="nc" id="L500">                selectable.configureBlocking(false);</span>
+
+                try {
+<span class="nc" id="L503">                    return doReceive(context, length);</span>
+                } finally {
+<span class="nc" id="L505">                    selectable.configureBlocking(oldBlocking);</span>
+                }
+
+<span class="nc" id="L508">            } catch(IOException e) {</span>
+<span class="nc" id="L509">                throw runtime.newIOErrorFromException(e);</span>
+            }
+<span class="nc" id="L511">        }</span>
+    }
+
+    private void joinMulticastGroup(IRubyObject val) throws IOException, BadDescriptorException {
+<span class="nc" id="L515">        Channel socketChannel = getOpenChannel();</span>
+
+<span class="nc bnc" id="L517" title="All 2 branches missed.">        if(socketChannel instanceof DatagramChannel) {</span>
+<span class="nc bnc" id="L518" title="All 2 branches missed.">            if (multicastStateManager == null) {</span>
+<span class="nc" id="L519">                multicastStateManager = new MulticastStateManager();</span>
+            }
+
+<span class="nc bnc" id="L522" title="All 2 branches missed.">            if (val instanceof RubyString) {</span>
+<span class="nc" id="L523">                byte [] ipaddr_buf = val.convertToString().getBytes();</span>
+
+<span class="nc" id="L525">                multicastStateManager.addMembership(ipaddr_buf);</span>
+            }
+        }
+<span class="nc" id="L528">    }</span>
+
+    protected InetSocketAddress getSocketAddress() throws BadDescriptorException {
+<span class="nc" id="L531">        Channel channel = getOpenChannel();</span>
+
+<span class="nc" id="L533">        return (InetSocketAddress)SocketType.forChannel(channel).getLocalSocketAddress(channel);</span>
+    }
+
+    protected InetSocketAddress getRemoteSocket() throws BadDescriptorException {
+<span class="nc" id="L537">        Channel channel = getOpenChannel();</span>
+
+<span class="nc" id="L539">        return (InetSocketAddress)SocketType.forChannel(channel).getRemoteSocketAddress(channel);</span>
+    }
+
+    protected Sock getDefaultSocketType() {
+<span class="nc" id="L543">        return Sock.SOCK_STREAM;</span>
+    }
+
+    protected IRubyObject getSocknameCommon(ThreadContext context, String caller) {
+        try {
+<span class="nc" id="L548">            InetSocketAddress sock = getSocketAddress();</span>
+
+<span class="nc bnc" id="L550" title="All 2 branches missed.">            if(null == sock) {</span>
+<span class="nc" id="L551">                return Sockaddr.pack_sockaddr_in(context, 0, &quot;0.0.0.0&quot;);</span>
+
+            } else {
+<span class="nc" id="L554">               return Sockaddr.pack_sockaddr_in(context, sock);</span>
+            }
+
+<span class="nc" id="L557">        } catch (BadDescriptorException e) {</span>
+<span class="nc" id="L558">            throw context.runtime.newErrnoEBADFError();</span>
+        }
+    }
+
+    private IRubyObject shutdownInternal(ThreadContext context, int how) throws BadDescriptorException {
+<span class="nc" id="L563">        Ruby runtime = context.runtime;</span>
+        Channel channel;
+
+<span class="nc bnc" id="L566" title="All 4 branches missed.">        switch (how) {</span>
+        case 0:
+<span class="nc" id="L568">            channel = getOpenChannel();</span>
+            try {
+<span class="nc" id="L570">                SocketType.forChannel(channel).shutdownInput(channel);</span>
+
+<span class="nc" id="L572">            } catch (IOException e) {</span>
+<span class="nc" id="L573">                throw runtime.newIOError(e.getMessage());</span>
+<span class="nc" id="L574">            }</span>
+
+<span class="nc" id="L576">            openFile.setMode(openFile.getMode() &amp; ~OpenFile.READABLE);</span>
+
+<span class="nc" id="L578">            return RubyFixnum.zero(runtime);</span>
+
+        case 1:
+<span class="nc" id="L581">            channel = getOpenChannel();</span>
+            try {
+<span class="nc" id="L583">                SocketType.forChannel(channel).shutdownOutput(channel);</span>
+
+<span class="nc" id="L585">            } catch (IOException e) {</span>
+<span class="nc" id="L586">                throw runtime.newIOError(e.getMessage());</span>
+<span class="nc" id="L587">            }</span>
+
+<span class="nc" id="L589">            openFile.setMode(openFile.getMode() &amp; ~OpenFile.WRITABLE);</span>
+
+<span class="nc" id="L591">            return RubyFixnum.zero(runtime);</span>
+
+        case 2:
+<span class="nc" id="L594">            shutdownInternal(context, 0);</span>
+<span class="nc" id="L595">            shutdownInternal(context, 1);</span>
+
+<span class="nc" id="L597">            return RubyFixnum.zero(runtime);</span>
+
+        default:
+<span class="nc" id="L600">            throw runtime.newArgumentError(&quot;`how' should be either :SHUT_RD, :SHUT_WR, :SHUT_RDWR&quot;);</span>
+        }
+    }
+
+    public boolean doNotReverseLookup(ThreadContext context) {
+<span class="nc bnc" id="L605" title="All 4 branches missed.">        return context.runtime.isDoNotReverseLookupEnabled() || doNotReverseLookup;</span>
+    }
+
+    protected static ChannelFD newChannelFD(Ruby runtime, Channel channel) {
+<span class="fc" id="L609">        ChannelFD fd = new ChannelFD(channel, runtime.getPosix(), runtime.getFilenoUtil());</span>
+
+<span class="pc bpc" id="L611" title="2 of 4 branches missed.">        if (runtime.getPosix().isNative() &amp;&amp; fd.realFileno &gt;= 0) {</span>
+<span class="fc" id="L612">            runtime.getPosix().fcntlInt(fd.realFileno, Fcntl.F_SETFD, FcntlLibrary.FD_CLOEXEC);</span>
+        }
+
+<span class="fc" id="L615">        return fd;</span>
+    }
+
+    protected void initSocket(ChannelFD fd) {
+        // continue with normal initialization
+<span class="nc" id="L620">        MakeOpenFile();</span>
+
+<span class="nc" id="L622">        openFile.setFD(fd);</span>
+<span class="nc" id="L623">        openFile.setMode(OpenFile.READWRITE | OpenFile.SYNC);</span>
+
+        // see rsock_init_sock in MRI; sockets are initialized to binary
+<span class="nc" id="L626">        setAscii8bitBinmode();</span>
+<span class="nc" id="L627">    }</span>
+    
+    private Channel getOpenChannel() {
+<span class="nc" id="L630">        return getOpenFileChecked().channel();</span>
+    }
+
+    private int asNumber(IRubyObject val) {
+<span class="nc bnc" id="L634" title="All 2 branches missed.">        if (val instanceof RubyNumeric) {</span>
+<span class="nc" id="L635">            return RubyNumeric.fix2int(val);</span>
+<span class="nc bnc" id="L636" title="All 2 branches missed.">        } else if (val instanceof RubyBoolean) {</span>
+<span class="nc bnc" id="L637" title="All 2 branches missed.">            return val.isTrue() ? 1 : 0;</span>
+        }
+        else {
+<span class="nc" id="L640">            return stringAsNumber(val);</span>
+        }
+    }
+
+    private int stringAsNumber(IRubyObject val) {
+<span class="nc" id="L645">        ByteList str = val.convertToString().getByteList();</span>
+<span class="nc" id="L646">        IRubyObject res = Pack.unpack(getRuntime(), str, FORMAT_SMALL_I).entry(0);</span>
+
+<span class="nc bnc" id="L648" title="All 2 branches missed.">        if (res.isNil()) {</span>
+<span class="nc" id="L649">            throw getRuntime().newErrnoEINVALError();</span>
+        }
+
+<span class="nc" id="L652">        return RubyNumeric.fix2int(res);</span>
+    }
+
+    protected boolean asBoolean(IRubyObject val) {
+<span class="nc bnc" id="L656" title="All 2 branches missed.">        if (val instanceof RubyString) {</span>
+<span class="nc bnc" id="L657" title="All 2 branches missed.">            return stringAsNumber(val) != 0;</span>
+<span class="nc bnc" id="L658" title="All 2 branches missed.">        } else if(val instanceof RubyNumeric) {</span>
+<span class="nc bnc" id="L659" title="All 2 branches missed.">            return RubyNumeric.fix2int(val) != 0;</span>
+        } else {
+<span class="nc" id="L661">            return val.isTrue();</span>
+        }
+    }
+
+    private static IRubyObject number(Ruby runtime, int s) {
+<span class="nc" id="L666">        return RubyString.newString(runtime, Pack.packInt_i(new ByteList(4), s));</span>
+    }
+
+    protected static SocketOption optionFromArg(IRubyObject _opt) {
+        SocketOption opt;
+<span class="nc bnc" id="L671" title="All 4 branches missed.">        if (_opt instanceof RubyString || _opt instanceof RubySymbol) {</span>
+<span class="nc" id="L672">            opt = SocketOption.valueOf(&quot;SO_&quot; + _opt.toString());</span>
+        } else {
+<span class="nc" id="L674">            opt = SocketOption.valueOf(RubyNumeric.fix2int(_opt));</span>
+        }
+<span class="nc" id="L676">        return opt;</span>
+    }
+
+    protected static SocketLevel levelFromArg(IRubyObject _level) {
+        SocketLevel level;
+<span class="nc bnc" id="L681" title="All 4 branches missed.">        if (_level instanceof RubyString || _level instanceof RubySymbol) {</span>
+<span class="nc" id="L682">            level = SocketLevel.valueOf(&quot;SOL_&quot; + _level.toString());</span>
+        } else {
+<span class="nc" id="L684">            level = SocketLevel.valueOf(RubyNumeric.fix2int(_level));</span>
+        }
+<span class="nc" id="L686">        return level;</span>
+    }
+
+    protected IRubyObject addrFor(ThreadContext context, InetSocketAddress addr, boolean reverse) {
+<span class="nc" id="L690">        Ruby r = context.runtime;</span>
+<span class="nc" id="L691">        IRubyObject[] ret = new IRubyObject[4];</span>
+<span class="nc bnc" id="L692" title="All 2 branches missed.">        if (addr.getAddress() instanceof Inet6Address) {</span>
+<span class="nc" id="L693">            ret[0] = r.newString(&quot;AF_INET6&quot;);</span>
+        } else {
+<span class="nc" id="L695">            ret[0] = r.newString(&quot;AF_INET&quot;);</span>
+        }
+<span class="nc" id="L697">        ret[1] = r.newFixnum(addr.getPort());</span>
+<span class="nc" id="L698">        String hostAddress = addr.getAddress().getHostAddress();</span>
+<span class="nc bnc" id="L699" title="All 4 branches missed.">        if (!reverse || doNotReverseLookup(context)) {</span>
+<span class="nc" id="L700">            ret[2] = r.newString(hostAddress);</span>
+        } else {
+<span class="nc" id="L702">            ret[2] = r.newString(addr.getHostName());</span>
+        }
+<span class="nc" id="L704">        ret[3] = r.newString(hostAddress);</span>
+<span class="nc" id="L705">        return r.newArrayNoCopy(ret);</span>
+    }
+
+    @Deprecated
+    public IRubyObject recv(IRubyObject[] args) {
+<span class="nc" id="L710">        return recv(getRuntime().getCurrentContext(), args);</span>
+    }
+
+    @Deprecated
+    public IRubyObject getsockopt(IRubyObject lev, IRubyObject optname) {
+<span class="nc" id="L715">        return getsockopt(getRuntime().getCurrentContext(), lev, optname);</span>
+    }
+
+    @Deprecated
+    public IRubyObject setsockopt(IRubyObject lev, IRubyObject optname, IRubyObject val) {
+<span class="nc" id="L720">        return setsockopt(getRuntime().getCurrentContext(), lev, optname, val);</span>
+    }
+
+    @Deprecated
+    public IRubyObject getsockname() {
+<span class="nc" id="L725">        return getsockname(getRuntime().getCurrentContext());</span>
+    }
+
+    @Deprecated
+    public IRubyObject getpeername() {
+<span class="nc" id="L730">        return getpeername(getRuntime().getCurrentContext());</span>
+    }
+
+    @Deprecated
+    public static IRubyObject do_not_reverse_lookup(IRubyObject recv) {
+<span class="nc" id="L735">        return do_not_reverse_lookup(recv.getRuntime().getCurrentContext(), recv);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject set_do_not_reverse_lookup(IRubyObject recv, IRubyObject flag) {
+<span class="nc" id="L740">        return set_do_not_reverse_lookup(recv.getRuntime().getCurrentContext(), recv, flag);</span>
+    }
+
+<span class="fc" id="L743">    private static final ByteList FORMAT_SMALL_I = new ByteList(ByteList.plain(&quot;i&quot;));</span>
+<span class="fc" id="L744">    protected MulticastStateManager multicastStateManager = null;</span>
+
+    // By default we always reverse lookup unless do_not_reverse_lookup set.
+<span class="fc" id="L747">    private boolean doNotReverseLookup = false;</span>
+}// RubyBasicSocket
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

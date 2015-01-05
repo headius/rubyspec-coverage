@@ -1,0 +1,2055 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>InvocationLinker.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime.invokedynamic</a> &gt; <span class="el_source">InvocationLinker.java</span></div><h1>InvocationLinker.java</h1><pre class="source lang-java linenums">/*
+ **** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2001-2011 The JRuby Community (and contribs)
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.runtime.invokedynamic;
+
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.ivars.VariableAccessor;
+import java.lang.invoke.*;
+
+import static java.lang.invoke.MethodHandles.*;
+
+import java.math.BigInteger;
+import java.util.Arrays;
+
+import com.headius.invokebinder.Binder;
+import com.headius.invokebinder.Signature;
+import com.headius.invokebinder.SmartBinder;
+import com.headius.invokebinder.SmartHandle;
+import org.jruby.*;
+import org.jruby.exceptions.JumpException;
+import org.jruby.internal.runtime.methods.*;
+import org.jruby.java.invokers.SingletonMethodInvoker;
+import org.jruby.javasupport.JavaUtil;
+import org.jruby.javasupport.proxy.InternalJavaProxy;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.CallType;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.callsite.CacheEntry;
+import org.jruby.util.ByteList;
+import org.jruby.util.CodegenUtils;
+import org.jruby.util.JavaNameMangler;
+import org.jruby.util.cli.Options;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+
+import static java.lang.invoke.MethodType.methodType;
+import java.lang.reflect.Method;
+import java.util.List;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.internal.runtime.methods.DynamicMethod.NativeCall;
+import org.jruby.runtime.Arity;
+
+import static org.jruby.runtime.Helpers.arrayOf;
+import static org.jruby.runtime.invokedynamic.InvokeDynamicSupport.*;
+import org.jruby.runtime.ivars.FieldVariableAccessor;
+
+/**
+ * Bootstrapping logic for invokedynamic-based invocation.
+ */
+<span class="nc bnc" id="L77" title="All 2 branches missed.">public class InvocationLinker {</span>
+<span class="nc" id="L78">    private static final Logger LOG = LoggerFactory.getLogger(&quot;InvocationLinker&quot;);</span>
+    
+    public static CallSite invocationBootstrap(Lookup lookup, String name, MethodType type, String file, int line) throws NoSuchMethodException, IllegalAccessException {
+<span class="nc" id="L81">        String[] names = name.split(&quot;:&quot;);</span>
+<span class="nc" id="L82">        String operation = names[0];</span>
+
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        if (name.equals(&quot;yieldSpecific&quot;)) {</span>
+<span class="nc" id="L85">            MethodHandle target = lookup.findStatic(InvocationLinker.class, &quot;yieldSpecificFallback&quot;, type);</span>
+<span class="nc" id="L86">            return new ConstantCallSite(target);</span>
+        }
+
+<span class="nc" id="L89">        JRubyCallSite site = null;</span>
+<span class="nc" id="L90">        String method = JavaNameMangler.demangleMethodName(names[1]);</span>
+//        if (operation.equals(&quot;call&quot;)) {
+//            site = new JRubyCallSite(lookup, type, CallType.NORMAL, file, line, method, false, false, true);
+//        } else if (operation.equals(&quot;fcall&quot;)) {
+//            site = new JRubyCallSite(lookup, type, CallType.FUNCTIONAL, file, line, method, false, false, true);
+//        } else if (operation.equals(&quot;vcall&quot;)) {
+//            site = new JRubyCallSite(lookup, type, CallType.VARIABLE, file, line, method, false, false, true);
+//        } else if (operation.equals(&quot;callIter&quot;)) {
+//            site = new JRubyCallSite(lookup, type, CallType.NORMAL, file, line, method, false, true, true);
+//        } else if (operation.equals(&quot;fcallIter&quot;)) {
+//            site = new JRubyCallSite(lookup, type, CallType.FUNCTIONAL, file, line, method, false, true, true);
+//        } else if (operation.equals(&quot;vcallIter&quot;)) {
+//            site = new JRubyCallSite(lookup, type, CallType.VARIABLE, file, line, method, false, true, true);
+//        } else if (operation.equals(&quot;attrAssign&quot;)) {
+//            site = new JRubyCallSite(lookup, type, CallType.NORMAL, file, line, method, true, false, false);
+//        } else if (operation.equals(&quot;attrAssignSelf&quot;)) {
+//            site = new JRubyCallSite(lookup, type, CallType.VARIABLE, file, line, method, true, false, false);
+//        } else if (operation.equals(&quot;attrAssignExpr&quot;)) {
+//            site = new JRubyCallSite(lookup, type, CallType.NORMAL, file, line, method, true, false, true);
+//        } else if (operation.equals(&quot;attrAssignSelfExpr&quot;)) {
+//            site = new JRubyCallSite(lookup, type, CallType.VARIABLE, file, line, method, true, false, true);
+//        } else {
+//            throw new RuntimeException(&quot;wrong invokedynamic target: &quot; + name);
+//        }
+        
+<span class="nc" id="L115">        MethodType fallbackType = type.insertParameterTypes(0, JRubyCallSite.class);</span>
+<span class="nc" id="L116">        MethodHandle myFallback = insertArguments(</span>
+<span class="nc" id="L117">                lookup.findStatic(InvocationLinker.class, &quot;invocationFallback&quot;,</span>
+                fallbackType),
+                0,
+                site);
+
+<span class="nc" id="L122">        site.setInitialTarget(myFallback);</span>
+<span class="nc" id="L123">        return site;</span>
+    }
+    
+    public static IRubyObject invocationFallback(JRubyCallSite site, 
+            ThreadContext context,
+            IRubyObject caller,
+            IRubyObject self) throws Throwable {
+<span class="nc" id="L130">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L131">        String method = site.name();</span>
+<span class="nc" id="L132">        SwitchPoint switchPoint = (SwitchPoint)selfClass.getInvalidator().getData();</span>
+<span class="nc" id="L133">        CacheEntry entry = selfClass.searchWithCache(method);</span>
+        
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        if (methodMissing(entry, site.callType(), method, caller)) {</span>
+<span class="nc" id="L136">            return callMethodMissing(entry, site.callType(), context, self, method);</span>
+        }
+        
+<span class="nc" id="L139">        MethodHandle target = getTarget(site, selfClass, entry, 0);</span>
+<span class="nc" id="L140">        target = updateInvocationTarget(target, site, self, selfClass, method, entry, switchPoint, false, 0);</span>
+
+<span class="nc" id="L142">        return (IRubyObject)target.invokeWithArguments(context, caller, self);</span>
+    }
+
+    public static IRubyObject invocationFallback(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0) throws Throwable {
+<span class="nc" id="L146">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L147">        String method = site.name();</span>
+<span class="nc" id="L148">        SwitchPoint switchPoint = (SwitchPoint)selfClass.getInvalidator().getData();</span>
+<span class="nc" id="L149">        CacheEntry entry = selfClass.searchWithCache(method);</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">        if (methodMissing(entry, site.callType(), method, caller)) {</span>
+<span class="nc" id="L151">            IRubyObject mmResult = callMethodMissing(entry, site.callType(), context, self, method, arg0);</span>
+            // TODO: replace with handle logic
+<span class="nc bnc" id="L153" title="All 2 branches missed.">            return site.isAttrAssign() ? arg0 : mmResult;</span>
+        }
+        
+<span class="nc" id="L156">        MethodHandle target = getTarget(site, selfClass, entry, 1);</span>
+<span class="nc" id="L157">        target = updateInvocationTarget(target, site, self, selfClass, method, entry, switchPoint, false, 1);</span>
+
+<span class="nc" id="L159">        return (IRubyObject)target.invokeWithArguments(context, caller, self, arg0);</span>
+    }
+
+    public static IRubyObject invocationFallback(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0, IRubyObject arg1) throws Throwable {
+<span class="nc" id="L163">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L164">        String method = site.name();</span>
+<span class="nc" id="L165">        SwitchPoint switchPoint = (SwitchPoint)selfClass.getInvalidator().getData();</span>
+<span class="nc" id="L166">        CacheEntry entry = selfClass.searchWithCache(method);</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        if (methodMissing(entry, site.callType(), method, caller)) {</span>
+<span class="nc" id="L168">            IRubyObject mmResult = callMethodMissing(entry, site.callType(), context, self, method, arg0, arg1);</span>
+            // TODO: replace with handle logic
+<span class="nc bnc" id="L170" title="All 2 branches missed.">            return site.isAttrAssign() ? arg1 : mmResult;</span>
+        }
+        
+<span class="nc" id="L173">        MethodHandle target = getTarget(site, selfClass, entry, 2);</span>
+<span class="nc" id="L174">        target = updateInvocationTarget(target, site, self, selfClass, method, entry, switchPoint, false, 2);</span>
+
+<span class="nc" id="L176">        return (IRubyObject)target.invokeWithArguments(context, caller, self, arg0, arg1);</span>
+    }
+
+    public static IRubyObject invocationFallback(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2) throws Throwable {
+<span class="nc" id="L180">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L181">        String method = site.name();</span>
+<span class="nc" id="L182">        SwitchPoint switchPoint = (SwitchPoint)selfClass.getInvalidator().getData();</span>
+<span class="nc" id="L183">        CacheEntry entry = selfClass.searchWithCache(method);</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        if (methodMissing(entry, site.callType(), method, caller)) {</span>
+<span class="nc" id="L185">            IRubyObject mmResult = callMethodMissing(entry, site.callType(), context, self, method, arg0, arg1, arg2);</span>
+            // TODO: replace with handle logic
+<span class="nc bnc" id="L187" title="All 2 branches missed.">            return site.isAttrAssign() ? arg2 : mmResult;</span>
+        }
+        
+<span class="nc" id="L190">        MethodHandle target = getTarget(site, selfClass, entry, 3);</span>
+<span class="nc" id="L191">        target = updateInvocationTarget(target, site, self, selfClass, method, entry, switchPoint, false, 3);</span>
+
+<span class="nc" id="L193">        return (IRubyObject)target.invokeWithArguments(context, caller, self, arg0, arg1, arg2);</span>
+    }
+    
+    public static IRubyObject invocationFallback(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject[] args) throws Throwable {
+<span class="nc" id="L197">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L198">        String method = site.name();</span>
+<span class="nc" id="L199">        SwitchPoint switchPoint = (SwitchPoint)selfClass.getInvalidator().getData();</span>
+<span class="nc" id="L200">        CacheEntry entry = selfClass.searchWithCache(method);</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">        if (methodMissing(entry, site.callType(), method, caller)) {</span>
+<span class="nc" id="L202">            IRubyObject mmResult = callMethodMissing(entry, site.callType(), context, self, method, args);</span>
+            // TODO: replace with handle logic
+<span class="nc bnc" id="L204" title="All 2 branches missed.">            return site.isAttrAssign() ? args[args.length - 1] : mmResult;</span>
+        }
+        
+<span class="nc" id="L207">        MethodHandle target = getTarget(site, selfClass, entry, -1);</span>
+<span class="nc" id="L208">        target = updateInvocationTarget(target, site, self, selfClass, method, entry, switchPoint, false, 4);</span>
+
+<span class="nc" id="L210">        return (IRubyObject)target.invokeWithArguments(context, caller, self, args);</span>
+    }
+
+    public static IRubyObject invocationFallback(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, Block block) throws Throwable {
+<span class="nc" id="L214">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L215">        String method = site.name();</span>
+<span class="nc" id="L216">        SwitchPoint switchPoint = (SwitchPoint)selfClass.getInvalidator().getData();</span>
+<span class="nc" id="L217">        CacheEntry entry = selfClass.searchWithCache(method);</span>
+
+<span class="nc bnc" id="L219" title="All 2 branches missed.">        if (methodMissing(entry, site.callType(), method, caller)) {</span>
+            try {
+<span class="nc" id="L221">                return callMethodMissing(entry, site.callType(), context, self, method, block);</span>
+            } finally {
+<span class="nc bnc" id="L223" title="All 4 branches missed.">                if (site.isIterator()) block.escape();</span>
+            }
+        }
+
+<span class="nc" id="L227">        MethodHandle target = getTarget(site, selfClass, entry, 0);</span>
+<span class="nc" id="L228">        target = updateInvocationTarget(target, site, self, selfClass, method, entry, switchPoint, true, 0);</span>
+
+<span class="nc" id="L230">        return (IRubyObject) target.invokeWithArguments(context, caller, self, block);</span>
+    }
+
+    public static IRubyObject invocationFallback(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0, Block block) throws Throwable {
+<span class="nc" id="L234">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L235">        String method = site.name();</span>
+<span class="nc" id="L236">        SwitchPoint switchPoint = (SwitchPoint)selfClass.getInvalidator().getData();</span>
+<span class="nc" id="L237">        CacheEntry entry = selfClass.searchWithCache(method);</span>
+
+<span class="nc bnc" id="L239" title="All 2 branches missed.">        if (methodMissing(entry, site.callType(), method, caller)) {</span>
+            try {
+<span class="nc" id="L241">                return callMethodMissing(entry, site.callType(), context, self, method, arg0, block);</span>
+            } finally {
+<span class="nc bnc" id="L243" title="All 4 branches missed.">                if (site.isIterator()) block.escape();</span>
+            }
+        }
+
+<span class="nc" id="L247">        MethodHandle target = getTarget(site, selfClass, entry, 1);</span>
+<span class="nc" id="L248">        target = updateInvocationTarget(target, site, self, selfClass, method, entry, switchPoint, true, 1);</span>
+
+<span class="nc" id="L250">        return (IRubyObject) target.invokeWithArguments(context, caller, self, arg0, block);</span>
+    }
+
+    public static IRubyObject invocationFallback(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0, IRubyObject arg1, Block block) throws Throwable {
+<span class="nc" id="L254">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L255">        String method = site.name();</span>
+<span class="nc" id="L256">        SwitchPoint switchPoint = (SwitchPoint)selfClass.getInvalidator().getData();</span>
+<span class="nc" id="L257">        CacheEntry entry = selfClass.searchWithCache(method);</span>
+
+<span class="nc bnc" id="L259" title="All 2 branches missed.">        if (methodMissing(entry, site.callType(), method, caller)) {</span>
+            try {
+<span class="nc" id="L261">                return callMethodMissing(entry, site.callType(), context, self, method, arg0, arg1, block);</span>
+            } finally {
+<span class="nc bnc" id="L263" title="All 4 branches missed.">                if (site.isIterator()) block.escape();</span>
+            }
+        }
+
+<span class="nc" id="L267">        MethodHandle target = getTarget(site, selfClass, entry, 2);</span>
+<span class="nc" id="L268">        target = updateInvocationTarget(target, site, self, selfClass, method, entry, switchPoint, true, 2);</span>
+
+<span class="nc" id="L270">        return (IRubyObject) target.invokeWithArguments(context, caller, self, arg0, arg1, block);</span>
+    }
+
+    public static IRubyObject invocationFallback(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) throws Throwable {
+<span class="nc" id="L274">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L275">        String method = site.name();</span>
+<span class="nc" id="L276">        SwitchPoint switchPoint = (SwitchPoint)selfClass.getInvalidator().getData();</span>
+<span class="nc" id="L277">        CacheEntry entry = selfClass.searchWithCache(method);</span>
+
+<span class="nc bnc" id="L279" title="All 2 branches missed.">        if (methodMissing(entry, site.callType(), method, caller)) {</span>
+            try {
+<span class="nc" id="L281">                return callMethodMissing(entry, site.callType(), context, self, method, arg0, arg1, arg2, block);</span>
+            } finally {
+<span class="nc bnc" id="L283" title="All 4 branches missed.">                if (site.isIterator()) block.escape();</span>
+            }
+        }
+
+<span class="nc" id="L287">        MethodHandle target = getTarget(site, selfClass, entry, 3);</span>
+<span class="nc" id="L288">        target = updateInvocationTarget(target, site, self, selfClass, method, entry, switchPoint, true, 3);</span>
+
+<span class="nc" id="L290">        return (IRubyObject) target.invokeWithArguments(context, caller, self, arg0, arg1, arg2, block);</span>
+    }
+
+    public static IRubyObject invocationFallback(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject[] args, Block block) throws Throwable {
+<span class="nc" id="L294">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L295">        String method = site.name();</span>
+<span class="nc" id="L296">        SwitchPoint switchPoint = (SwitchPoint)selfClass.getInvalidator().getData();</span>
+<span class="nc" id="L297">        CacheEntry entry = selfClass.searchWithCache(method);</span>
+
+<span class="nc bnc" id="L299" title="All 2 branches missed.">        if (methodMissing(entry, site.callType(), method, caller)) {</span>
+            try {
+<span class="nc" id="L301">                return callMethodMissing(entry, site.callType(), context, self, method, args, block);</span>
+            } finally {
+<span class="nc bnc" id="L303" title="All 4 branches missed.">                if (site.isIterator()) block.escape();</span>
+            }
+        }
+
+<span class="nc" id="L307">        MethodHandle target = getTarget(site, selfClass, entry, -1);</span>
+<span class="nc" id="L308">        target = updateInvocationTarget(target, site, self, selfClass, method, entry, switchPoint, true, 4);</span>
+
+<span class="nc" id="L310">        return (IRubyObject) target.invokeWithArguments(context, caller, self, args, block);</span>
+    }
+
+    /**
+     * Update the given call site using the new target, wrapping with appropriate
+     * guard and argument-juggling logic. Return a handle suitable for invoking
+     * with the site's original method type.
+     */
+    private static MethodHandle updateInvocationTarget(MethodHandle target, JRubyCallSite site, IRubyObject self, RubyModule selfClass, String name, CacheEntry entry, SwitchPoint switchPoint, boolean block, int arity) {
+<span class="nc bnc" id="L319" title="All 2 branches missed.">        if (target == null ||</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">                site.clearCount() &gt; Options.INVOKEDYNAMIC_MAXFAIL.load() ||</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">                (!site.hasSeenType(selfClass.id)</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">                &amp;&amp; site.seenTypesCount() + 1 &gt; Options.INVOKEDYNAMIC_MAXPOLY.load())) {</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">            site.setTarget(target = createFail((block?FAILS_B:FAILS)[arity], site, name, entry.method));</span>
+        } else {
+<span class="nc" id="L325">            target = postProcess(site, target);</span>
+            
+            boolean curry;
+            MethodHandle fallback;
+            MethodHandle gwt;
+
+            // if we've cached no types, and the site is bound and we haven't seen this new type...
+<span class="nc bnc" id="L332" title="All 6 branches missed.">            if (site.seenTypesCount() &gt; 0 &amp;&amp; site.getTarget() != null &amp;&amp; !site.hasSeenType(selfClass.id)) {</span>
+                // stack it up into a PIC
+<span class="nc bnc" id="L334" title="All 2 branches missed.">                if (Options.INVOKEDYNAMIC_LOG_BINDING.load()) LOG.info(name + &quot;\tadded to PIC &quot; + logMethod(entry.method));</span>
+<span class="nc" id="L335">                fallback = site.getTarget();</span>
+<span class="nc" id="L336">                curry = false;</span>
+            } else {
+                // wipe out site with this new type and method
+<span class="nc bnc" id="L339" title="All 2 branches missed.">                String bind = site.boundOnce() ? &quot;rebind&quot; : &quot;bind&quot;;</span>
+<span class="nc bnc" id="L340" title="All 2 branches missed.">                if (Options.INVOKEDYNAMIC_LOG_BINDING.load()) LOG.info(name + &quot;\ttriggered site #&quot; + site.siteID() + &quot; &quot; + bind + &quot; (&quot; + site.file() + &quot;:&quot; + site.line() + &quot;)&quot;);</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">                fallback = (block?FALLBACKS_B:FALLBACKS)[arity];</span>
+<span class="nc" id="L342">                site.clearTypes();</span>
+<span class="nc" id="L343">                curry = true;</span>
+            }
+
+<span class="nc" id="L346">            site.addType(selfClass.id);</span>
+            
+            SmartHandle test;
+<span class="nc" id="L349">            SmartBinder selfTest = SmartBinder</span>
+<span class="nc" id="L350">                                          .from(site.signature().asFold(boolean.class))</span>
+<span class="nc" id="L351">                                          .permute(&quot;self&quot;);</span>
+            
+<span class="nc bnc" id="L353" title="All 12 branches missed.">            if (self instanceof RubySymbol ||</span>
+                    self instanceof RubyFixnum ||
+                    self instanceof RubyFloat ||
+                    self instanceof RubyNil ||
+                    self instanceof RubyBoolean.True ||
+                    self instanceof RubyBoolean.False) {
+                
+<span class="nc" id="L360">                test = selfTest</span>
+<span class="nc" id="L361">                        .insert(1, &quot;selfJavaType&quot;, self.getClass())</span>
+<span class="nc" id="L362">                        .cast(boolean.class, Object.class, Class.class)</span>
+<span class="nc" id="L363">                        .invoke(TEST_CLASS);</span>
+                
+            } else {
+
+<span class="nc" id="L367">                selfTest = selfTest.insert(0, &quot;selfClass&quot;, selfClass);</span>
+                
+<span class="nc" id="L369">                test = selfTest</span>
+<span class="nc" id="L370">                        .cast(boolean.class, RubyClass.class, IRubyObject.class)</span>
+<span class="nc" id="L371">                        .invoke(TEST);</span>
+            }
+            
+<span class="nc" id="L374">            gwt = createGWT(test, target, fallback, entry, site, curry);</span>
+            
+            // wrap in switchpoint for mutation invalidation
+<span class="nc bnc" id="L377" title="All 2 branches missed.">            gwt = switchPoint.guardWithTest(gwt, curry ? insertArguments(fallback, 0, site) : fallback);</span>
+
+<span class="nc" id="L379">            site.setTarget(gwt);</span>
+        }
+        
+<span class="nc" id="L382">        return target;</span>
+    }
+    
+    public static IRubyObject yieldSpecificFallback(
+            Block block,
+            ThreadContext context) throws Throwable {
+<span class="nc" id="L388">        return block.yieldSpecific(context);</span>
+    }
+    
+    public static IRubyObject yieldSpecificFallback(
+            Block block,
+            ThreadContext context,
+            IRubyObject arg0) throws Throwable {
+<span class="nc" id="L395">        return block.yieldSpecific(context, arg0);</span>
+    }
+    
+    public static IRubyObject yieldSpecificFallback(
+            Block block,
+            ThreadContext context,
+            IRubyObject arg0,
+            IRubyObject arg1) throws Throwable {
+<span class="nc" id="L403">        return block.yieldSpecific(context, arg0, arg1);</span>
+    }
+    
+    public static IRubyObject yieldSpecificFallback(
+            Block block,
+            ThreadContext context,
+            IRubyObject arg0,
+            IRubyObject arg1,
+            IRubyObject arg2) throws Throwable {
+<span class="nc" id="L412">        return block.yieldSpecific(context, arg0, arg1, arg2);</span>
+    }
+
+    private static MethodHandle createFail(MethodHandle fail, JRubyCallSite site, String name, DynamicMethod method) {
+<span class="nc bnc" id="L416" title="All 2 branches missed.">        if (Options.INVOKEDYNAMIC_LOG_BINDING.load()) LOG.info(name + &quot;\tbound to inline cache failed &quot; + logMethod(method));</span>
+        
+<span class="nc" id="L418">        MethodHandle myFail = insertArguments(fail, 0, site);</span>
+<span class="nc" id="L419">        myFail = postProcess(site, myFail);</span>
+<span class="nc" id="L420">        return myFail;</span>
+    }
+
+    private static MethodHandle createGWT(SmartHandle test, MethodHandle target, MethodHandle fallback, CacheEntry entry, JRubyCallSite site, boolean curryFallback) {
+<span class="nc bnc" id="L424" title="All 2 branches missed.">        MethodHandle myFallback = curryFallback ? insertArguments(fallback, 0, site) : fallback;</span>
+<span class="nc" id="L425">        MethodHandle guardWithTest = test.guard(target, myFallback);</span>
+        
+<span class="nc" id="L427">        return guardWithTest;</span>
+    }
+
+    public static int getNativeArgCount(DynamicMethod method, NativeCall nativeCall) {
+        // if non-Java, must:
+        // * exactly match arities or both are [] boxed
+        // * 3 or fewer arguments
+<span class="nc" id="L434">        return getArgCount(nativeCall.getNativeSignature(), nativeCall.isStatic());</span>
+    }
+
+    public static DynamicMethod unwrapMethod(DynamicMethod method, String[] realName) throws IndirectBindingException {
+        // get the &quot;real&quot; method in a few ways
+<span class="nc bnc" id="L439" title="All 2 branches missed.">        while (method instanceof AliasMethod) {</span>
+<span class="nc" id="L440">            realName[0] = ((AliasMethod)method).getOldName(); // need to use original name, not aliased name</span>
+<span class="nc" id="L441">            method = method.getRealMethod();</span>
+        }
+<span class="nc bnc" id="L443" title="All 2 branches missed.">        while (method instanceof WrapperMethod) method = method.getRealMethod();</span>
+        // ProfilingDynamicMethod wraps any number of other types of methods but
+        // we do not handle it in indy binding right now. Disable direct binding
+        // and bind through DynamicMethod.
+<span class="nc bnc" id="L447" title="All 2 branches missed.">        if (method instanceof ProfilingDynamicMethod) {</span>
+<span class="nc" id="L448">            throw new IndirectBindingException(&quot;profiling active&quot;);</span>
+        }
+//        if (method instanceof DefaultMethod) {
+//            DefaultMethod defaultMethod = (DefaultMethod) method;
+//            if (defaultMethod.getMethodForCaching() instanceof JittedMethod) {
+//                method = defaultMethod.getMethodForCaching();
+//            }
+//        }
+<span class="nc" id="L456">        return method;</span>
+    }
+    
+    private static class IndirectBindingException extends RuntimeException {
+        public IndirectBindingException(String reason) {
+<span class="nc" id="L461">            super(reason);</span>
+<span class="nc" id="L462">        }</span>
+    }
+    
+    public interface HandleGenerator {
+        public boolean canGenerate(JRubyCallSite site, RubyClass cls, DynamicMethod method);
+        public MethodHandle generate(JRubyCallSite site, RubyClass cls, DynamicMethod method, String realName);
+    }
+    
+<span class="nc" id="L470">    public static class HandleMethodGenerator implements HandleGenerator {</span>
+        
+        @Override
+        public boolean canGenerate(JRubyCallSite site, RubyClass cls, DynamicMethod method) {
+<span class="nc" id="L474">            return method instanceof HandleMethod;</span>
+        }
+        
+        @Override
+        public MethodHandle generate(JRubyCallSite site, RubyClass cls, DynamicMethod method, String realName) {
+<span class="nc" id="L479">            MethodHandle handle = ((HandleMethod)method).getHandle(site.arity());</span>
+            
+<span class="nc bnc" id="L481" title="All 2 branches missed.">            if (handle == null) {</span>
+<span class="nc" id="L482">                throw new IndirectBindingException(&quot;MH dynamic method does not have needed arity&quot;);</span>
+            }
+            
+<span class="nc bnc" id="L485" title="All 2 branches missed.">            if (Options.INVOKEDYNAMIC_LOG_BINDING.load()) LOG.info(site.name() + &quot;\tbound from MHDynMethod &quot; + logMethod(method) + &quot;:&quot; + handle);</span>
+            
+<span class="nc" id="L487">            Signature fullSig = site.fullSignature();</span>
+<span class="nc" id="L488">            MethodHandle nativeTarget =  Binder</span>
+<span class="nc" id="L489">                    .from(fullSig.type())</span>
+<span class="nc" id="L490">                    .permute(fullSig.to(&quot;context&quot;, &quot;self&quot;, &quot;arg*&quot;, &quot;block&quot;))</span>
+<span class="nc" id="L491">                    .invoke(handle);</span>
+<span class="nc" id="L492">            nativeTarget = addOrRemoveBlock(site, nativeTarget);</span>
+            
+<span class="nc" id="L494">            return nativeTarget;            </span>
+        }
+    }
+    
+<span class="nc" id="L498">    public static class AttrReaderGenerator implements HandleGenerator {</span>
+
+        @Override
+        public boolean canGenerate(JRubyCallSite site, RubyClass cls, DynamicMethod method) {
+<span class="nc bnc" id="L502" title="All 2 branches missed.">            if (method instanceof AttrReaderMethod) {</span>
+                // attr reader
+<span class="nc bnc" id="L504" title="All 2 branches missed.">                if (!Options.INVOKEDYNAMIC_INVOCATION_ATTR.load()) {</span>
+<span class="nc" id="L505">                    throw new IndirectBindingException(&quot;direct attribute dispatch not enabled&quot;);</span>
+                }
+<span class="nc bnc" id="L507" title="All 2 branches missed.">                if (site.arity() != 0) {</span>
+<span class="nc" id="L508">                    throw new IndirectBindingException(&quot;attr reader with &gt; 0 args&quot;);</span>
+                }
+                
+<span class="nc" id="L511">                return true;</span>
+            }
+            
+<span class="nc" id="L514">            return false;</span>
+        }
+
+        @Override
+        public MethodHandle generate(JRubyCallSite site, RubyClass cls, DynamicMethod method, String realName) {
+<span class="nc" id="L519">            AttrReaderMethod attrReader = (AttrReaderMethod)method;</span>
+<span class="nc" id="L520">            String varName = attrReader.getVariableName();</span>
+
+            // we getVariableAccessorForWrite here so it is eagerly created and we don't cache the DUMMY
+<span class="nc" id="L523">            VariableAccessor accessor = cls.getRealClass().getVariableAccessorForWrite(varName);</span>
+            
+            // Ruby to attr reader
+<span class="nc bnc" id="L526" title="All 2 branches missed.">            if (Options.INVOKEDYNAMIC_LOG_BINDING.load()) {</span>
+<span class="nc bnc" id="L527" title="All 2 branches missed.">                if (accessor instanceof FieldVariableAccessor) {</span>
+<span class="nc" id="L528">                    LOG.info(site.name() + &quot;\tbound as field attr reader &quot; + logMethod(method) + &quot;:&quot; + ((AttrReaderMethod)method).getVariableName());</span>
+                } else {
+<span class="nc" id="L530">                    LOG.info(site.name() + &quot;\tbound as attr reader &quot; + logMethod(method) + &quot;:&quot; + ((AttrReaderMethod)method).getVariableName());</span>
+                }
+            }
+            
+<span class="nc" id="L534">            return createAttrReaderHandle(site, cls, accessor);</span>
+        }
+    }
+
+<span class="nc" id="L538">    public static class AttrWriterGenerator implements HandleGenerator {</span>
+
+        @Override
+        public boolean canGenerate(JRubyCallSite site, RubyClass cls, DynamicMethod method) {
+<span class="nc bnc" id="L542" title="All 2 branches missed.">            if (method instanceof AttrWriterMethod) {</span>
+                // attr writer
+<span class="nc bnc" id="L544" title="All 2 branches missed.">                if (!Options.INVOKEDYNAMIC_INVOCATION_ATTR.load()) {</span>
+<span class="nc" id="L545">                    throw new IndirectBindingException(&quot;direct attribute dispatch not enabled&quot;);</span>
+                }
+<span class="nc bnc" id="L547" title="All 2 branches missed.">                if (site.arity() != 1) {</span>
+<span class="nc" id="L548">                    throw new IndirectBindingException(&quot;attr writer with &gt; 1 args&quot;);</span>
+                }
+                
+<span class="nc" id="L551">                return true;</span>
+            }
+            
+<span class="nc" id="L554">            return false;</span>
+        }
+
+        @Override
+        public MethodHandle generate(JRubyCallSite site, RubyClass cls, DynamicMethod method, String realName) {
+<span class="nc" id="L559">            AttrWriterMethod attrReader = (AttrWriterMethod)method;</span>
+<span class="nc" id="L560">            String varName = attrReader.getVariableName();</span>
+
+            // we getVariableAccessorForWrite here so it is eagerly created and we don't cache the DUMMY
+<span class="nc" id="L563">            VariableAccessor accessor = cls.getRealClass().getVariableAccessorForWrite(varName);</span>
+            
+            // Ruby to attr reader
+<span class="nc bnc" id="L566" title="All 2 branches missed.">            if (Options.INVOKEDYNAMIC_LOG_BINDING.load()) {</span>
+<span class="nc bnc" id="L567" title="All 2 branches missed.">                if (accessor instanceof FieldVariableAccessor) {</span>
+<span class="nc" id="L568">                    LOG.info(site.name() + &quot;\tbound as field attr writer &quot; + logMethod(method) + &quot;:&quot; + ((AttrWriterMethod) method).getVariableName());</span>
+                } else {
+<span class="nc" id="L570">                    LOG.info(site.name() + &quot;\tbound as attr writer &quot; + logMethod(method) + &quot;:&quot; + ((AttrWriterMethod) method).getVariableName());</span>
+                }
+            }
+<span class="nc" id="L573">            return createAttrWriterHandle(site, cls, accessor);</span>
+        }
+    }
+    
+<span class="nc" id="L577">    public static class FFIGenerator implements HandleGenerator {</span>
+
+        @Override
+        public boolean canGenerate(JRubyCallSite site, RubyClass cls, DynamicMethod method) {
+<span class="nc bnc" id="L581" title="All 2 branches missed.">            if (!Options.INVOKEDYNAMIC_INVOCATION_FFI.load()) {</span>
+<span class="nc" id="L582">                throw new IndirectBindingException(&quot;direct FFI dispatch not enabled&quot;);</span>
+            }
+
+<span class="nc bnc" id="L585" title="All 4 branches missed.">            if (method instanceof org.jruby.ext.ffi.jffi.DefaultMethod || method instanceof org.jruby.ext.ffi.jffi.JITNativeInvoker) {</span>
+                // if frame/scope required, can't dispatch direct
+<span class="nc bnc" id="L587" title="All 2 branches missed.">                if (method.getCallConfig() != CallConfiguration.FrameNoneScopeNone) {</span>
+<span class="nc" id="L588">                    throw new IndirectBindingException(&quot;frame or scope required: &quot; + method.getCallConfig());</span>
+                }
+
+<span class="nc bnc" id="L591" title="All 2 branches missed.">                if (!method.getArity().isFixed()) {</span>
+<span class="nc" id="L592">                    throw new IndirectBindingException(&quot;fixed arity required: &quot; + method.getArity());</span>
+                }
+
+                // Arity must match, otherwise let the indirect method process errors
+<span class="nc bnc" id="L596" title="All 2 branches missed.">                if (method.getArity().getValue() != site.arity()) {</span>
+<span class="nc" id="L597">                    throw new IndirectBindingException(&quot;arity mismatch&quot;);</span>
+                }
+
+                // Only support 0..6 parameters
+<span class="nc bnc" id="L601" title="All 2 branches missed.">                if (method.getArity().getValue() &gt; 6) {</span>
+<span class="nc" id="L602">                    throw new IndirectBindingException(&quot;target args &gt; 6&quot;);</span>
+                }
+
+<span class="nc bnc" id="L605" title="All 2 branches missed.">                if (site.type().parameterType(site.type().parameterCount() - 1) == Block.class) {</span>
+                    // Called with a block to substitute for a callback param - cannot bind directly
+<span class="nc" id="L607">                    throw new IndirectBindingException(&quot;callback block supplied&quot;);</span>
+                }
+                
+<span class="nc" id="L610">                return true;</span>
+            }
+            
+<span class="nc" id="L613">            return false;</span>
+        }
+
+        @Override
+        public MethodHandle generate(JRubyCallSite site, RubyClass cls, DynamicMethod method, String realName) {
+            // Ruby to FFI
+<span class="nc" id="L619">            return createFFIHandle(site, method);</span>
+        }
+        
+    }
+    
+<span class="nc" id="L624">    public static class JavaCallGenerator implements HandleGenerator {</span>
+
+        @Override
+        public boolean canGenerate(JRubyCallSite site, RubyClass cls, DynamicMethod method) {
+<span class="nc" id="L628">            NativeCall nativeCall = method.getNativeCall();</span>
+            
+<span class="nc bnc" id="L630" title="All 2 branches missed.">            if (nativeCall != null) {</span>
+                // has an explicit native call path
+
+<span class="nc bnc" id="L633" title="All 2 branches missed.">                if (nativeCall.isJava()) {</span>
+<span class="nc bnc" id="L634" title="All 2 branches missed.">                    if (!Options.INVOKEDYNAMIC_INVOCATION_JAVA.load()) {</span>
+<span class="nc" id="L635">                        throw new IndirectBindingException(&quot;direct Java dispatch not enabled&quot;);</span>
+                    }
+
+                    // if Java, must:
+                    // * match arity &lt;= 3
+                    // * not be passed a block (no coercion yet)
+                    // * be a normal wrapper around a class or module (not a Ruby subclass)
+<span class="nc bnc" id="L642" title="All 2 branches missed.">                    if (nativeCall.getNativeSignature().length != site.arity()</span>
+<span class="nc bnc" id="L643" title="All 2 branches missed.">                            || site.arity() &gt; 3</span>
+<span class="nc bnc" id="L644" title="All 2 branches missed.">                            || site.isIterator()</span>
+<span class="nc bnc" id="L645" title="All 2 branches missed.">                            || !cls.getJavaProxy()) {</span>
+<span class="nc" id="L646">                        throw new IndirectBindingException(&quot;Java call arity mismatch or &gt; 3 args&quot;);</span>
+                    }
+                    
+<span class="nc" id="L649">                    return true;</span>
+                }
+            }
+            
+<span class="nc" id="L653">            return false;</span>
+        }
+
+        @Override
+        public MethodHandle generate(JRubyCallSite site, RubyClass cls, DynamicMethod method, String realName) {
+            // Ruby to Java
+<span class="nc bnc" id="L659" title="All 2 branches missed.">            if (Options.INVOKEDYNAMIC_LOG_BINDING.load()) LOG.info(site.name() + &quot;\tbound to Java method &quot; + logMethod(method) + &quot;: &quot; + method.getNativeCall());</span>
+            
+<span class="nc" id="L661">            return postProcessNativeHandle(createJavaHandle(site, method), site, method, false, Options.REWRITE_JAVA_TRACE.load());</span>
+        }
+        
+    }
+    
+//    public static class RubyCallGenerator implements HandleGenerator {
+//
+//        @Override
+//        public boolean canGenerate(JRubyCallSite site, RubyClass cls, DynamicMethod method) {
+//            NativeCall nativeCall = method.getNativeCall();
+//
+//            if (method instanceof CompiledMethod || method instanceof JittedMethod) {
+//                if (nativeCall != null) {
+//                    int nativeArgCount = getNativeArgCount(method, method.getNativeCall());
+//
+//                    // arity must match or both be [] args
+//                    if (nativeArgCount != site.arity()) {
+//                        throw new IndirectBindingException(&quot;arity mismatch or varargs at call site: &quot; + nativeArgCount + &quot; != &quot; + site.arity());
+//                    }
+//
+//                    return true;
+//                }
+//            }
+//
+//            return false;
+//        }
+//
+//        @Override
+//        public MethodHandle generate(JRubyCallSite site, RubyClass cls, DynamicMethod method, String realName) {
+//            // Ruby to Ruby
+//            if (Options.INVOKEDYNAMIC_LOG_BINDING.load()) LOG.info(site.name() + &quot;\tbound to Ruby method &quot; + logMethod(method) + &quot;: &quot; + method.getNativeCall());
+//            return postProcessNativeHandle(createRubyHandle(site, method, realName), site, method, true, false);
+//        }
+//
+//    }
+    
+<span class="nc" id="L697">    public static class CoreCallGenerator implements HandleGenerator {</span>
+
+        @Override
+        public boolean canGenerate(JRubyCallSite site, RubyClass cls, DynamicMethod method) {
+<span class="nc" id="L701">            NativeCall nativeCall = method.getNativeCall();</span>
+            
+<span class="nc bnc" id="L703" title="All 2 branches missed.">            if (nativeCall != null) {</span>
+<span class="nc" id="L704">                int nativeArgCount = getNativeArgCount(method, method.getNativeCall());</span>
+
+                // arity must match or both be [] args
+<span class="nc bnc" id="L707" title="All 2 branches missed.">                if (nativeArgCount != site.arity()) {</span>
+<span class="nc" id="L708">                    throw new IndirectBindingException(&quot;arity mismatch or varargs at call site: &quot; + nativeArgCount + &quot; != &quot; + site.arity());</span>
+                }
+
+<span class="nc" id="L711">                return true;</span>
+            }
+            
+<span class="nc" id="L714">            return false;</span>
+        }
+
+        @Override
+        public MethodHandle generate(JRubyCallSite site, RubyClass cls, DynamicMethod method, String realName) {
+            // Ruby to Core
+<span class="nc bnc" id="L720" title="All 2 branches missed.">            if (Options.INVOKEDYNAMIC_LOG_BINDING.load()) LOG.info(site.name() + &quot;\tbound to native method &quot; + logMethod(method) + &quot;: &quot; + method.getNativeCall());</span>
+<span class="nc" id="L721">            return postProcessNativeHandle(createNativeHandle(cls.getClassRuntime(), site, method, realName), site, method, true, false);</span>
+        }
+        
+    }
+    
+<span class="nc" id="L726">    private static final List&lt;HandleGenerator&gt; HANDLE_GENERATORS =  Arrays.&lt;HandleGenerator&gt;asList(</span>
+            new HandleMethodGenerator(),
+            new AttrReaderGenerator(),
+            new AttrWriterGenerator(),
+            new FFIGenerator(),
+            new JavaCallGenerator(),
+//            new RubyCallGenerator(),
+            new CoreCallGenerator()
+            );
+
+    private static MethodHandle tryDispatchDirect(JRubyCallSite site, RubyClass cls, DynamicMethod method) {
+<span class="nc" id="L737">        String[] realName = {site.name()};</span>
+<span class="nc" id="L738">        method = unwrapMethod(method, realName);</span>
+        
+<span class="nc bnc" id="L740" title="All 2 branches missed.">        for (HandleGenerator generator : HANDLE_GENERATORS) {</span>
+<span class="nc bnc" id="L741" title="All 2 branches missed.">            if (generator.canGenerate(site, cls, method)) {</span>
+<span class="nc" id="L742">                return generator.generate(site, cls, method, realName[0]);</span>
+            }
+<span class="nc" id="L744">        }</span>
+        
+<span class="nc" id="L746">        throw new IndirectBindingException(&quot;no direct path available for &quot; + method.getClass().getName());</span>
+    }
+
+    private static MethodHandle getTarget(JRubyCallSite site, RubyClass cls, CacheEntry entry, int arity) {
+        IndirectBindingException ibe;
+        try {
+<span class="nc" id="L752">            return tryDispatchDirect(site, cls, entry.method);</span>
+<span class="nc" id="L753">        } catch (IndirectBindingException _ibe) {</span>
+<span class="nc" id="L754">            ibe = _ibe;</span>
+            // proceed with indirect, if enabled
+        }
+
+        // if indirect indy-bound methods (via DynamicMethod.call) are disabled, bail out
+<span class="nc bnc" id="L759" title="All 2 branches missed.">        if (!Options.INVOKEDYNAMIC_INVOCATION_INDIRECT.load()) {</span>
+<span class="nc bnc" id="L760" title="All 2 branches missed.">            if (Options.INVOKEDYNAMIC_LOG_BINDING.load())</span>
+<span class="nc" id="L761">                LOG.info(site.name() + &quot;\tfailed to bind to &quot; + logMethod(entry.method) + &quot;: &quot; + ibe.getMessage());</span>
+<span class="nc" id="L762">            return null;</span>
+        }
+
+        // no direct native path, use DynamicMethod.call
+<span class="nc bnc" id="L766" title="All 2 branches missed.">        if (Options.INVOKEDYNAMIC_LOG_BINDING.load())</span>
+<span class="nc" id="L767">            LOG.info(site.name() + &quot;\tbound indirectly to &quot; + logMethod(entry.method) + &quot;: &quot; + ibe.getMessage());</span>
+
+<span class="nc" id="L769">        MethodHandle dynMethodTarget = getDynamicMethodTarget(site.type(), arity, entry.method);</span>
+<span class="nc" id="L770">        dynMethodTarget = insertArguments(dynMethodTarget, 4, site.name());</span>
+<span class="nc" id="L771">        dynMethodTarget = insertArguments(dynMethodTarget, 0, entry.method);</span>
+
+<span class="nc" id="L773">        return dynMethodTarget;</span>
+    }
+    
+    private static MethodHandle postProcessNativeHandle(MethodHandle nativeTarget, JRubyCallSite site, DynamicMethod method, boolean checkArity, boolean rewriteStackTrace) {
+<span class="nc bnc" id="L777" title="All 2 branches missed.">        if (nativeTarget != null) {</span>
+<span class="nc" id="L778">            nativeTarget = addOrRemoveBlock(site, nativeTarget);</span>
+            
+            // add arity check if needed
+<span class="nc bnc" id="L781" title="All 2 branches missed.">            if (checkArity) {</span>
+<span class="nc" id="L782">                int nativeArgCount = getNativeArgCount(method, method.getNativeCall());</span>
+                
+<span class="nc bnc" id="L784" title="All 4 branches missed.">                if (nativeArgCount == 4 &amp;&amp; site.arity() == 4) {</span>
+                    // Arity does not give us enough information about min/max
+                    // so we must go to the annotation
+<span class="nc" id="L787">                    Method reflected = method.getNativeCall().getMethod();</span>
+<span class="nc" id="L788">                    JRubyMethod annotation = reflected.getAnnotation(JRubyMethod.class);</span>
+                    
+<span class="nc" id="L790">                    int required = annotation.required();</span>
+<span class="nc" id="L791">                    int optional = annotation.optional();</span>
+<span class="nc" id="L792">                    boolean rest = annotation.rest();</span>
+                    
+<span class="nc bnc" id="L794" title="All 4 branches missed.">                    if (required &gt; 0 || !rest) {</span>
+<span class="nc" id="L795">                        MethodHandle arityCheck = Binder</span>
+<span class="nc" id="L796">                                .from(site.type().changeReturnType(void.class))</span>
+<span class="nc" id="L797">                                .insert(0, new Class[]{int.class, int.class, boolean.class}, required, optional, rest)</span>
+<span class="nc" id="L798">                                .invokeStaticQuiet(site.lookup(), InvocationLinker.class, &quot;checkArity&quot;);</span>
+<span class="nc" id="L799">                        nativeTarget = foldArguments(nativeTarget, arityCheck);</span>
+                    }
+                }
+            }
+
+<span class="nc bnc" id="L804" title="All 2 branches missed.">            if (rewriteStackTrace) {</span>
+<span class="nc" id="L805">                SmartHandle rewriteHandle = SmartBinder.from(lookup(), site.signature().insertArg(0, &quot;throwable&quot;, Throwable.class))</span>
+<span class="nc" id="L806">                        .permute(&quot;throwable&quot;)</span>
+<span class="nc" id="L807">                        .append(&quot;runtime&quot;, method.getImplementationClass().getRuntime())</span>
+<span class="nc" id="L808">                        .invokeStaticQuiet(lookup(), Helpers.class, &quot;rewriteStackTraceAndThrow&quot;);</span>
+
+<span class="nc" id="L810">                nativeTarget = catchException(nativeTarget, Throwable.class, rewriteHandle.handle());</span>
+            }
+        }
+        
+<span class="nc" id="L814">        return nativeTarget;</span>
+    }
+
+    private static MethodHandle addOrRemoveBlock(JRubyCallSite site, MethodHandle nativeTarget) {
+        // add NULL_BLOCK if needed
+<span class="nc" id="L819">        if (</span>
+<span class="nc bnc" id="L820" title="All 2 branches missed.">                site.type().parameterCount() &gt; 0</span>
+<span class="nc bnc" id="L821" title="All 2 branches missed.">                &amp;&amp; site.type().parameterArray()[site.type().parameterCount() - 1] != Block.class</span>
+<span class="nc bnc" id="L822" title="All 2 branches missed.">                &amp;&amp; nativeTarget.type().parameterCount() &gt; 0</span>
+<span class="nc bnc" id="L823" title="All 2 branches missed.">                &amp;&amp; nativeTarget.type().parameterType(nativeTarget.type().parameterCount() - 1) == Block.class) {</span>
+<span class="nc" id="L824">            nativeTarget = insertArguments(nativeTarget, nativeTarget.type().parameterCount() - 1, Block.NULL_BLOCK);</span>
+<span class="nc" id="L825">        } else if (</span>
+<span class="nc bnc" id="L826" title="All 2 branches missed.">                site.type().parameterCount() &gt; 0</span>
+<span class="nc bnc" id="L827" title="All 2 branches missed.">                &amp;&amp; site.type().parameterArray()[site.type().parameterCount() - 1] == Block.class</span>
+<span class="nc bnc" id="L828" title="All 2 branches missed.">                &amp;&amp; nativeTarget.type().parameterCount() &gt; 0</span>
+<span class="nc bnc" id="L829" title="All 2 branches missed.">                &amp;&amp; nativeTarget.type().parameterType(nativeTarget.type().parameterCount() - 1) != Block.class) {</span>
+            // drop block if not used
+<span class="nc" id="L831">            nativeTarget = dropArguments(nativeTarget, nativeTarget.type().parameterCount(), Block.class);</span>
+        }
+<span class="nc" id="L833">        return nativeTarget;</span>
+    }
+    
+    public static void checkArity(int required, int optional, boolean rest, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject[] args) {
+<span class="nc bnc" id="L837" title="All 2 branches missed.">        Arity.checkArgumentCount(context.runtime, args, required, rest ? -1 : required + optional);</span>
+<span class="nc" id="L838">    }</span>
+    
+    public static void checkArity(int required, int optional, boolean rest, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject[] args, Block block) {
+<span class="nc" id="L841">        checkArity(required, optional, rest, context, caller, self, args);</span>
+<span class="nc" id="L842">    }</span>
+
+    public static boolean testGeneration(int token, IRubyObject self) {
+<span class="nc bnc" id="L845" title="All 2 branches missed.">        return token == ((RubyBasicObject)self).getMetaClass().getGeneration();</span>
+    }
+
+    public static boolean testMetaclass(RubyClass metaclass, IRubyObject self) {
+<span class="nc bnc" id="L849" title="All 2 branches missed.">        return metaclass == ((RubyBasicObject)self).getMetaClass();</span>
+    }
+
+    public static boolean testRealClass(int id, IRubyObject self) {
+<span class="nc bnc" id="L853" title="All 2 branches missed.">        return id == ((RubyBasicObject)self).getMetaClass().getRealClass().id;</span>
+    }
+    
+    public static boolean testClass(Object object, Class clazz) {
+<span class="nc bnc" id="L857" title="All 2 branches missed.">        return object.getClass() == clazz;</span>
+    }
+    
+    public static IRubyObject getLast(IRubyObject[] args) {
+<span class="nc" id="L861">        return args[args.length - 1];</span>
+    }
+    
+<span class="nc" id="L864">    private static final MethodHandle BLOCK_ESCAPE = findStatic(InvocationLinker.class, &quot;blockEscape&quot;, methodType(void.class, Block.class));</span>
+    public static void blockEscape(Block block) {
+<span class="nc" id="L866">        block.escape();</span>
+<span class="nc" id="L867">    }</span>
+//
+//    private static IRubyObject handleRetryJump(JumpException.RetryJump bj, ThreadContext context) {
+//        block.escape();
+//        throw context.getRuntime().newLocalJumpError(RubyLocalJumpError.Reason.RETRY, context.getRuntime().getNil(), &quot;retry outside of rescue not supported&quot;);
+//    }
+//    private static final MethodHandle HANDLE_RETRY_JUMP = findStatic(InvokeDynamicSupport.class, &quot;handleRetryJump&quot;, methodType(IRubyObject.class, JumpException.BreakJump.class, ThreadContext.class));
+
+    private static MethodHandle postProcess(JRubyCallSite site, MethodHandle target) {
+//        if (site.isIterator()) {
+//            // wrap with iter logic for break, retry, and block escape
+//            MethodHandle breakHandler = permuteArguments(
+//                    HANDLE_BREAK_JUMP,
+//                    site.type().insertParameterTypes(0, JumpException.BreakJump.class),
+//                    new int[] {0, 1});
+//
+//            target = catchException(target, JumpException.BreakJump.class, breakHandler);
+//
+//            target = Binder
+//                    .from(target.type())
+//                    .tryFinally(permuteArguments(BLOCK_ESCAPE, site.type().changeReturnType(void.class), site.type().parameterCount() - 1))
+//                    .invoke(target);
+//        }
+
+        // if it's an attr assignment as an expression, need to return n-1th argument
+<span class="nc bnc" id="L892" title="All 4 branches missed.">        if (site.isAttrAssign() &amp;&amp; site.isExpression()) {</span>
+            // return given argument
+<span class="nc" id="L894">            MethodHandle newTarget = identity(IRubyObject.class);</span>
+
+            // if args are IRubyObject[].class, yank out n-1th
+<span class="nc bnc" id="L897" title="All 2 branches missed.">            if (site.type().parameterArray()[site.type().parameterCount() - 1] == IRubyObject[].class) {</span>
+<span class="nc" id="L898">                newTarget = filterArguments(newTarget, 0, findStatic(InvocationLinker.class, &quot;getLast&quot;, methodType(IRubyObject.class, IRubyObject[].class)));</span>
+            }
+
+            // drop standard preamble args plus extra args
+<span class="nc" id="L902">            newTarget = dropArguments(newTarget, 0, IRubyObject.class, ThreadContext.class, IRubyObject.class, IRubyObject.class);</span>
+
+            // drop extra arguments, if any
+<span class="nc" id="L905">            MethodType dropped = target.type().dropParameterTypes(0, 3);</span>
+<span class="nc bnc" id="L906" title="All 2 branches missed.">            if (dropped.parameterCount() &gt; 1) {</span>
+<span class="nc" id="L907">                Class[] drops = new Class[dropped.parameterCount() - 1];</span>
+<span class="nc" id="L908">                Arrays.fill(drops, IRubyObject.class);</span>
+<span class="nc" id="L909">                newTarget = dropArguments(newTarget, 4, drops);</span>
+            }
+
+            // fold using target
+<span class="nc" id="L913">            target = foldArguments(newTarget, target);</span>
+        }
+
+<span class="nc" id="L916">        return target;</span>
+    }
+    
+    ////////////////////////////////////////////////////////////////////////////
+    // Inline-caching failure paths, for megamorphic call sites
+    ////////////////////////////////////////////////////////////////////////////
+
+    public static IRubyObject fail(JRubyCallSite site, 
+            ThreadContext context,
+            IRubyObject caller,
+            IRubyObject self) throws Throwable {
+<span class="nc" id="L927">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L928">        String name = site.name();</span>
+<span class="nc" id="L929">        CacheEntry entry = site.entry;</span>
+        
+<span class="nc bnc" id="L931" title="All 2 branches missed.">        if (entry.typeOk(selfClass)) {</span>
+<span class="nc" id="L932">            return entry.method.call(context, self, selfClass, name);</span>
+        } else {
+<span class="nc" id="L934">            entry = selfClass.searchWithCache(name);</span>
+<span class="nc bnc" id="L935" title="All 2 branches missed.">            if (methodMissing(entry, site.callType(), name, caller)) {</span>
+<span class="nc" id="L936">                return callMethodMissing(entry, site.callType(), context, self, name);</span>
+            }
+<span class="nc" id="L938">            site.entry = entry;</span>
+<span class="nc" id="L939">            return entry.method.call(context, self, selfClass, name);</span>
+        }
+    }
+
+    public static IRubyObject fail(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0) throws Throwable {
+<span class="nc" id="L944">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L945">        String name = site.name();</span>
+<span class="nc" id="L946">        CacheEntry entry = site.entry;</span>
+        
+<span class="nc bnc" id="L948" title="All 2 branches missed.">        if (entry.typeOk(selfClass)) {</span>
+<span class="nc" id="L949">            return entry.method.call(context, self, selfClass, name, arg0);</span>
+        } else {
+<span class="nc" id="L951">            entry = selfClass.searchWithCache(name);</span>
+<span class="nc bnc" id="L952" title="All 2 branches missed.">            if (methodMissing(entry, site.callType(), name, caller)) {</span>
+<span class="nc" id="L953">                return callMethodMissing(entry, site.callType(), context, self, name, arg0);</span>
+            }
+<span class="nc" id="L955">            site.entry = entry;</span>
+<span class="nc" id="L956">            return entry.method.call(context, self, selfClass, name, arg0);</span>
+        }
+    }
+
+    public static IRubyObject fail(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0, IRubyObject arg1) throws Throwable {
+<span class="nc" id="L961">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L962">        String name = site.name();</span>
+<span class="nc" id="L963">        CacheEntry entry = site.entry;</span>
+        
+<span class="nc bnc" id="L965" title="All 2 branches missed.">        if (entry.typeOk(selfClass)) {</span>
+<span class="nc" id="L966">            return entry.method.call(context, self, selfClass, name, arg0, arg1);</span>
+        } else {
+<span class="nc" id="L968">            entry = selfClass.searchWithCache(name);</span>
+<span class="nc bnc" id="L969" title="All 2 branches missed.">            if (methodMissing(entry, site.callType(), name, caller)) {</span>
+<span class="nc" id="L970">                return callMethodMissing(entry, site.callType(), context, self, name, arg0, arg1);</span>
+            }
+<span class="nc" id="L972">            site.entry = entry;</span>
+<span class="nc" id="L973">            return entry.method.call(context, self, selfClass, name, arg0, arg1);</span>
+        }
+    }
+
+    public static IRubyObject fail(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2) throws Throwable {
+<span class="nc" id="L978">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L979">        String name = site.name();</span>
+<span class="nc" id="L980">        CacheEntry entry = site.entry;</span>
+        
+<span class="nc bnc" id="L982" title="All 2 branches missed.">        if (entry.typeOk(selfClass)) {</span>
+<span class="nc" id="L983">            return entry.method.call(context, self, selfClass, name, arg0, arg1, arg2);</span>
+        } else {
+<span class="nc" id="L985">            entry = selfClass.searchWithCache(name);</span>
+<span class="nc bnc" id="L986" title="All 2 branches missed.">            if (methodMissing(entry, site.callType(), name, caller)) {</span>
+<span class="nc" id="L987">                return callMethodMissing(entry, site.callType(), context, self, name, arg0, arg1, arg2);</span>
+            }
+<span class="nc" id="L989">            site.entry = entry;</span>
+<span class="nc" id="L990">            return entry.method.call(context, self, selfClass, name, arg0, arg1, arg2);</span>
+        }
+    }
+
+    public static IRubyObject fail(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject[] args) throws Throwable {
+<span class="nc" id="L995">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L996">        String name = site.name();</span>
+<span class="nc" id="L997">        CacheEntry entry = site.entry;</span>
+        
+<span class="nc bnc" id="L999" title="All 2 branches missed.">        if (entry.typeOk(selfClass)) {</span>
+<span class="nc" id="L1000">            return entry.method.call(context, self, selfClass, name, args);</span>
+        } else {
+<span class="nc" id="L1002">            entry = selfClass.searchWithCache(name);</span>
+<span class="nc bnc" id="L1003" title="All 2 branches missed.">            if (methodMissing(entry, site.callType(), name, caller)) {</span>
+<span class="nc" id="L1004">                return callMethodMissing(entry, site.callType(), context, self, name, args);</span>
+            }
+<span class="nc" id="L1006">            site.entry = entry;</span>
+<span class="nc" id="L1007">            return entry.method.call(context, self, selfClass, name, args);</span>
+        }
+    }
+
+    public static IRubyObject fail(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, Block block) throws Throwable {
+<span class="nc" id="L1012">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L1013">        String name = site.name();</span>
+<span class="nc" id="L1014">        CacheEntry entry = site.entry;</span>
+        
+<span class="nc bnc" id="L1016" title="All 2 branches missed.">        if (entry.typeOk(selfClass)) {</span>
+<span class="nc" id="L1017">            return entry.method.call(context, self, selfClass, name, block);</span>
+        } else {
+<span class="nc" id="L1019">            entry = selfClass.searchWithCache(name);</span>
+<span class="nc bnc" id="L1020" title="All 2 branches missed.">            if (methodMissing(entry, site.callType(), name, caller)) {</span>
+<span class="nc" id="L1021">                return callMethodMissing(entry, site.callType(), context, self, name, block);</span>
+            }
+<span class="nc" id="L1023">            site.entry = entry;</span>
+<span class="nc" id="L1024">            return entry.method.call(context, self, selfClass, name, block);</span>
+        }
+    }
+
+    public static IRubyObject fail(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0, Block block) throws Throwable {
+<span class="nc" id="L1029">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L1030">        String name = site.name();</span>
+<span class="nc" id="L1031">        CacheEntry entry = site.entry;</span>
+        
+<span class="nc bnc" id="L1033" title="All 2 branches missed.">        if (entry.typeOk(selfClass)) {</span>
+<span class="nc" id="L1034">            return entry.method.call(context, self, selfClass, name, arg0, block);</span>
+        } else {
+<span class="nc" id="L1036">            entry = selfClass.searchWithCache(name);</span>
+<span class="nc bnc" id="L1037" title="All 2 branches missed.">            if (methodMissing(entry, site.callType(), name, caller)) {</span>
+<span class="nc" id="L1038">                return callMethodMissing(entry, site.callType(), context, self, name, arg0, block);</span>
+            }
+<span class="nc" id="L1040">            site.entry = entry;</span>
+<span class="nc" id="L1041">            return entry.method.call(context, self, selfClass, name, arg0, block);</span>
+        }
+    }
+
+    public static IRubyObject fail(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0, IRubyObject arg1, Block block) throws Throwable {
+<span class="nc" id="L1046">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L1047">        String name = site.name();</span>
+<span class="nc" id="L1048">        CacheEntry entry = site.entry;</span>
+        
+<span class="nc bnc" id="L1050" title="All 2 branches missed.">        if (entry.typeOk(selfClass)) {</span>
+<span class="nc" id="L1051">            return entry.method.call(context, self, selfClass, name, arg0, arg1, block);</span>
+        } else {
+<span class="nc" id="L1053">            entry = selfClass.searchWithCache(name);</span>
+<span class="nc bnc" id="L1054" title="All 2 branches missed.">            if (methodMissing(entry, site.callType(), name, caller)) {</span>
+<span class="nc" id="L1055">                return callMethodMissing(entry, site.callType(), context, self, name, arg0, arg1, block);</span>
+            }
+<span class="nc" id="L1057">            site.entry = entry;</span>
+<span class="nc" id="L1058">            return entry.method.call(context, self, selfClass, name, arg0, arg1, block);</span>
+        }
+    }
+
+    public static IRubyObject fail(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) throws Throwable {
+<span class="nc" id="L1063">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L1064">        String name = site.name();</span>
+<span class="nc" id="L1065">        CacheEntry entry = site.entry;</span>
+        
+<span class="nc bnc" id="L1067" title="All 2 branches missed.">        if (entry.typeOk(selfClass)) {</span>
+<span class="nc" id="L1068">            return entry.method.call(context, self, selfClass, name, arg0, arg1, arg2, block);</span>
+        } else {
+<span class="nc" id="L1070">            entry = selfClass.searchWithCache(name);</span>
+<span class="nc bnc" id="L1071" title="All 2 branches missed.">            if (methodMissing(entry, site.callType(), name, caller)) {</span>
+<span class="nc" id="L1072">                return callMethodMissing(entry, site.callType(), context, self, name, arg0, arg1, arg2, block);</span>
+            }
+<span class="nc" id="L1074">            site.entry = entry;</span>
+<span class="nc" id="L1075">            return entry.method.call(context, self, selfClass, name, arg0, arg1, arg2, block);</span>
+        }
+    }
+
+    public static IRubyObject fail(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject[] args, Block block) throws Throwable {
+<span class="nc" id="L1080">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L1081">        String name = site.name();</span>
+<span class="nc" id="L1082">        CacheEntry entry = site.entry;</span>
+
+<span class="nc bnc" id="L1084" title="All 2 branches missed.">        if (entry.typeOk(selfClass)) {</span>
+<span class="nc" id="L1085">            return entry.method.call(context, self, selfClass, name, args, block);</span>
+        } else {
+<span class="nc" id="L1087">            entry = selfClass.searchWithCache(name);</span>
+<span class="nc bnc" id="L1088" title="All 2 branches missed.">            if (methodMissing(entry, site.callType(), name, caller)) {</span>
+<span class="nc" id="L1089">                return callMethodMissing(entry, site.callType(), context, self, name, args, block);</span>
+            }
+<span class="nc" id="L1091">            site.entry = entry;</span>
+<span class="nc" id="L1092">            return entry.method.call(context, self, selfClass, name, args, block);</span>
+        }
+    }
+
+    public static IRubyObject failIter(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, Block block) throws Throwable {
+<span class="nc" id="L1097">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L1098">        String name = site.name();</span>
+<span class="nc" id="L1099">        CacheEntry entry = site.entry;</span>
+        try {
+<span class="nc bnc" id="L1101" title="All 2 branches missed.">            if (entry.typeOk(selfClass)) {</span>
+<span class="nc" id="L1102">                return entry.method.call(context, self, selfClass, name, block);</span>
+            } else {
+<span class="nc" id="L1104">                entry = selfClass.searchWithCache(name);</span>
+<span class="nc bnc" id="L1105" title="All 2 branches missed.">                if (methodMissing(entry, site.callType(), name, caller)) {</span>
+<span class="nc" id="L1106">                    return callMethodMissing(entry, site.callType(), context, self, name, block);</span>
+                }
+<span class="nc" id="L1108">                site.entry = entry;</span>
+<span class="nc" id="L1109">                return entry.method.call(context, self, selfClass, name, block);</span>
+            }
+        } finally {
+<span class="nc" id="L1112">            block.escape();</span>
+        }
+    }
+
+    public static IRubyObject failIter(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0, Block block) throws Throwable {
+<span class="nc" id="L1117">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L1118">        String name = site.name();</span>
+<span class="nc" id="L1119">        CacheEntry entry = site.entry;</span>
+        try {
+<span class="nc bnc" id="L1121" title="All 2 branches missed.">            if (entry.typeOk(selfClass)) {</span>
+<span class="nc" id="L1122">                return entry.method.call(context, self, selfClass, name, arg0, block);</span>
+            } else {
+<span class="nc" id="L1124">                entry = selfClass.searchWithCache(name);</span>
+<span class="nc bnc" id="L1125" title="All 2 branches missed.">                if (methodMissing(entry, site.callType(), name, caller)) {</span>
+<span class="nc" id="L1126">                    return callMethodMissing(entry, site.callType(), context, self, name, arg0, block);</span>
+                }
+<span class="nc" id="L1128">                site.entry = entry;</span>
+<span class="nc" id="L1129">                return entry.method.call(context, self, selfClass, name, arg0, block);</span>
+            }
+        } finally {
+<span class="nc" id="L1132">            block.escape();</span>
+        }
+    }
+
+    public static IRubyObject failIter(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0, IRubyObject arg1, Block block) throws Throwable {
+<span class="nc" id="L1137">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L1138">        String name = site.name();</span>
+<span class="nc" id="L1139">        CacheEntry entry = site.entry;</span>
+        try {
+<span class="nc bnc" id="L1141" title="All 2 branches missed.">            if (entry.typeOk(selfClass)) {</span>
+<span class="nc" id="L1142">                return entry.method.call(context, self, selfClass, name, arg0, arg1, block);</span>
+            } else {
+<span class="nc" id="L1144">                entry = selfClass.searchWithCache(name);</span>
+<span class="nc bnc" id="L1145" title="All 2 branches missed.">                if (methodMissing(entry, site.callType(), name, caller)) {</span>
+<span class="nc" id="L1146">                    return callMethodMissing(entry, site.callType(), context, self, name, arg0, arg1, block);</span>
+                }
+<span class="nc" id="L1148">                site.entry = entry;</span>
+<span class="nc" id="L1149">                return entry.method.call(context, self, selfClass, name, arg0, arg1, block);</span>
+            }
+        } finally {
+<span class="nc" id="L1152">            block.escape();</span>
+        }
+    }
+
+    public static IRubyObject failIter(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) throws Throwable {
+<span class="nc" id="L1157">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L1158">        String name = site.name();</span>
+<span class="nc" id="L1159">        CacheEntry entry = site.entry;</span>
+        try {
+<span class="nc bnc" id="L1161" title="All 2 branches missed.">            if (entry.typeOk(selfClass)) {</span>
+<span class="nc" id="L1162">                return entry.method.call(context, self, selfClass, name, arg0, arg1, arg2, block);</span>
+            } else {
+<span class="nc" id="L1164">                entry = selfClass.searchWithCache(name);</span>
+<span class="nc bnc" id="L1165" title="All 2 branches missed.">                if (methodMissing(entry, site.callType(), name, caller)) {</span>
+<span class="nc" id="L1166">                    return callMethodMissing(entry, site.callType(), context, self, name, arg0, arg1, arg2, block);</span>
+                }
+<span class="nc" id="L1168">                site.entry = entry;</span>
+<span class="nc" id="L1169">                return entry.method.call(context, self, selfClass, name, arg0, arg1, arg2, block);</span>
+            }
+        } finally {
+<span class="nc" id="L1172">            block.escape();</span>
+        }
+    }
+
+    public static IRubyObject failIter(JRubyCallSite site, ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject[] args, Block block) throws Throwable {
+<span class="nc" id="L1177">        RubyClass selfClass = pollAndGetClass(context, self);</span>
+<span class="nc" id="L1178">        String name = site.name();</span>
+<span class="nc" id="L1179">        CacheEntry entry = site.entry;</span>
+        try {
+<span class="nc bnc" id="L1181" title="All 2 branches missed.">            if (entry.typeOk(selfClass)) {</span>
+<span class="nc" id="L1182">                return entry.method.call(context, self, selfClass, name, args, block);</span>
+            } else {
+<span class="nc" id="L1184">                entry = selfClass.searchWithCache(name);</span>
+<span class="nc bnc" id="L1185" title="All 2 branches missed.">                if (methodMissing(entry, site.callType(), name, caller)) {</span>
+<span class="nc" id="L1186">                    return callMethodMissing(entry, site.callType(), context, self, name, args, block);</span>
+                }
+<span class="nc" id="L1188">                site.entry = entry;</span>
+<span class="nc" id="L1189">                return entry.method.call(context, self, selfClass, name, args, block);</span>
+            }
+        } finally {
+<span class="nc" id="L1192">            block.escape();</span>
+        }
+    }
+    
+    ////////////////////////////////////////////////////////////////////////////
+    // Dispatch via DynamicMethod#call
+    ////////////////////////////////////////////////////////////////////////////
+    
+    private static MethodHandle getDynamicMethodTarget(MethodType callType, int arity, DynamicMethod method) {
+<span class="nc" id="L1201">        MethodHandle target = null;</span>
+        
+<span class="nc" id="L1203">        Class lastParam = callType.parameterType(callType.parameterCount() - 1);</span>
+<span class="nc bnc" id="L1204" title="All 2 branches missed.">        boolean block = lastParam == Block.class;</span>
+<span class="nc bnc" id="L1205" title="All 5 branches missed.">        switch (arity) {</span>
+            case 0:
+<span class="nc bnc" id="L1207" title="All 2 branches missed.">                target = block ? TARGET_0_B : TARGET_0;</span>
+<span class="nc" id="L1208">                break;</span>
+            case 1:
+<span class="nc bnc" id="L1210" title="All 2 branches missed.">                target = block ? TARGET_1_B : TARGET_1;</span>
+<span class="nc" id="L1211">                break;</span>
+            case 2:
+<span class="nc bnc" id="L1213" title="All 2 branches missed.">                target = block ? TARGET_2_B : TARGET_2;</span>
+<span class="nc" id="L1214">                break;</span>
+            case 3:
+<span class="nc bnc" id="L1216" title="All 2 branches missed.">                target = block ? TARGET_3_B : TARGET_3;</span>
+<span class="nc" id="L1217">                break;</span>
+            default:
+<span class="nc bnc" id="L1219" title="All 2 branches missed.">                target = block ? TARGET_N_B : TARGET_N;</span>
+        }
+        
+<span class="nc" id="L1222">        return target;</span>
+    }
+    
+    ////////////////////////////////////////////////////////////////////////////
+    // Dispatch from Ruby to Java via Java integration
+    ////////////////////////////////////////////////////////////////////////////
+    
+    private static MethodHandle createJavaHandle(CallSite site, DynamicMethod method) {
+<span class="nc" id="L1230">        MethodHandle nativeTarget = (MethodHandle)method.getHandle();</span>
+<span class="nc bnc" id="L1231" title="All 2 branches missed.">        if (nativeTarget != null) return nativeTarget;</span>
+        
+<span class="nc" id="L1233">        MethodHandle returnFilter = null;</span>
+
+<span class="nc" id="L1235">        Ruby runtime = method.getImplementationClass().getRuntime();</span>
+<span class="nc" id="L1236">        DynamicMethod.NativeCall nativeCall = method.getNativeCall();</span>
+<span class="nc" id="L1237">        boolean isStatic = nativeCall.isStatic();</span>
+
+        // varargs broken, so ignore methods that take a trailing array
+<span class="nc" id="L1240">        Class[] signature = nativeCall.getNativeSignature();</span>
+<span class="nc bnc" id="L1241" title="All 4 branches missed.">        if (signature.length &gt; 0 &amp;&amp; signature[signature.length - 1].isArray()) {</span>
+<span class="nc" id="L1242">            return null;</span>
+        }
+
+        // Scala singletons have slightly different JI logic, so skip for now
+<span class="nc bnc" id="L1246" title="All 2 branches missed.">        if (method instanceof SingletonMethodInvoker) return null;</span>
+        
+        // the &quot;apparent&quot; type from the NativeCall, excluding receiver
+<span class="nc" id="L1249">        MethodType apparentType = methodType(nativeCall.getNativeReturn(), nativeCall.getNativeSignature());</span>
+
+<span class="nc bnc" id="L1251" title="All 2 branches missed.">        if (isStatic) {</span>
+<span class="nc" id="L1252">            nativeTarget = findStatic(nativeCall.getNativeTarget(), nativeCall.getNativeName(), apparentType);</span>
+        } else {
+<span class="nc" id="L1254">            nativeTarget = findVirtual(nativeCall.getNativeTarget(), nativeCall.getNativeName(), apparentType);</span>
+        }
+        
+        // the actual native type with receiver
+<span class="nc" id="L1258">        MethodType nativeType = nativeTarget.type();</span>
+<span class="nc" id="L1259">        Class[] nativeParams = nativeType.parameterArray();</span>
+<span class="nc" id="L1260">        Class nativeReturn = nativeType.returnType();</span>
+
+        // convert arguments
+<span class="nc" id="L1263">        MethodHandle[] argConverters = new MethodHandle[nativeType.parameterCount()];</span>
+<span class="nc bnc" id="L1264" title="All 2 branches missed.">        for (int i = 0; i &lt; argConverters.length; i++) {</span>
+            MethodHandle converter;
+<span class="nc bnc" id="L1266" title="All 4 branches missed.">            if (!isStatic &amp;&amp; i == 0) {</span>
+                // handle non-static receiver specially
+<span class="nc" id="L1268">                converter = Binder</span>
+<span class="nc" id="L1269">                        .from(nativeParams[0], IRubyObject.class)</span>
+<span class="nc" id="L1270">                        .cast(Object.class, IRubyObject.class)</span>
+<span class="nc" id="L1271">                        .invokeStaticQuiet(lookup(), JavaUtil.class, &quot;objectFromJavaProxy&quot;);</span>
+            } else {
+                // all other arguments use toJava
+<span class="nc" id="L1274">                converter = Binder</span>
+<span class="nc" id="L1275">                        .from(nativeParams[i], IRubyObject.class)</span>
+<span class="nc" id="L1276">                        .insert(1, nativeParams[i])</span>
+<span class="nc" id="L1277">                        .cast(Object.class, IRubyObject.class, Class.class)</span>
+<span class="nc" id="L1278">                        .invokeVirtualQuiet(lookup(), &quot;toJava&quot;);</span>
+            }
+<span class="nc" id="L1280">            argConverters[i] = converter;</span>
+        }
+<span class="nc" id="L1282">        nativeTarget = filterArguments(nativeTarget, 0, argConverters);</span>
+        
+<span class="nc" id="L1284">        Class[] convertedParams = CodegenUtils.params(IRubyObject.class, nativeTarget.type().parameterCount());</span>
+
+        // handle return value
+<span class="nc bnc" id="L1287" title="All 10 branches missed.">        if (nativeReturn == byte.class</span>
+                || nativeReturn == short.class
+                || nativeReturn == char.class
+                || nativeReturn == int.class
+                || nativeReturn == long.class) {
+            // native integral type, produce a Fixnum
+<span class="nc" id="L1293">            nativeTarget = explicitCastArguments(nativeTarget, methodType(long.class, convertedParams));</span>
+<span class="nc" id="L1294">            returnFilter = insertArguments(</span>
+<span class="nc" id="L1295">                    findStatic(RubyFixnum.class, &quot;newFixnum&quot;, methodType(RubyFixnum.class, Ruby.class, long.class)),</span>
+                    0,
+                    runtime);
+<span class="nc bnc" id="L1298" title="All 10 branches missed.">        } else if (nativeReturn == Byte.class</span>
+                || nativeReturn == Short.class
+                || nativeReturn == Character.class
+                || nativeReturn == Integer.class
+                || nativeReturn == Long.class) {
+            // boxed integral type, produce a Fixnum or nil
+<span class="nc" id="L1304">            returnFilter = insertArguments(</span>
+<span class="nc" id="L1305">                    findStatic(InvocationLinker.class, &quot;fixnumOrNil&quot;, methodType(IRubyObject.class, Ruby.class, nativeReturn)),</span>
+                    0,
+                    runtime);
+<span class="nc bnc" id="L1308" title="All 4 branches missed.">        } else if (nativeReturn == float.class</span>
+                || nativeReturn == double.class) {
+            // native decimal type, produce a Float
+<span class="nc" id="L1311">            nativeTarget = explicitCastArguments(nativeTarget, methodType(double.class, convertedParams));</span>
+<span class="nc" id="L1312">            returnFilter = insertArguments(</span>
+<span class="nc" id="L1313">                    findStatic(RubyFloat.class, &quot;newFloat&quot;, methodType(RubyFloat.class, Ruby.class, double.class)),</span>
+                    0,
+                    runtime);
+<span class="nc bnc" id="L1316" title="All 4 branches missed.">        } else if (nativeReturn == Float.class</span>
+                || nativeReturn == Double.class) {
+            // boxed decimal type, produce a Float or nil
+<span class="nc" id="L1319">            returnFilter = insertArguments(</span>
+<span class="nc" id="L1320">                    findStatic(InvocationLinker.class, &quot;floatOrNil&quot;, methodType(IRubyObject.class, Ruby.class, nativeReturn)),</span>
+                    0,
+                    runtime);
+<span class="nc bnc" id="L1323" title="All 2 branches missed.">        } else if (nativeReturn == boolean.class) {</span>
+            // native boolean type, produce a Boolean
+<span class="nc" id="L1325">            nativeTarget = explicitCastArguments(nativeTarget, methodType(boolean.class, convertedParams));</span>
+<span class="nc" id="L1326">            returnFilter = insertArguments(</span>
+<span class="nc" id="L1327">                    findStatic(RubyBoolean.class, &quot;newBoolean&quot;, methodType(RubyBoolean.class, Ruby.class, boolean.class)),</span>
+                    0,
+                    runtime);
+<span class="nc bnc" id="L1330" title="All 2 branches missed.">        } else if (nativeReturn == Boolean.class) {</span>
+            // boxed boolean type, produce a Boolean or nil
+<span class="nc" id="L1332">            returnFilter = insertArguments(</span>
+<span class="nc" id="L1333">                    findStatic(InvocationLinker.class, &quot;booleanOrNil&quot;, methodType(IRubyObject.class, Ruby.class, Boolean.class)),</span>
+                    0,
+                    runtime);
+<span class="nc bnc" id="L1336" title="All 2 branches missed.">        } else if (CharSequence.class.isAssignableFrom(nativeReturn)) {</span>
+            // character sequence, produce a String or nil
+<span class="nc" id="L1338">            nativeTarget = explicitCastArguments(nativeTarget, methodType(CharSequence.class, convertedParams));</span>
+<span class="nc" id="L1339">            returnFilter = insertArguments(</span>
+<span class="nc" id="L1340">                    findStatic(InvocationLinker.class, &quot;stringOrNil&quot;, methodType(IRubyObject.class, Ruby.class, CharSequence.class)),</span>
+                    0,
+                    runtime);
+<span class="nc bnc" id="L1343" title="All 2 branches missed.">        } else if (nativeReturn == void.class) {</span>
+            // void return, produce nil
+<span class="nc" id="L1345">            returnFilter = constant(IRubyObject.class, runtime.getNil());</span>
+<span class="nc bnc" id="L1346" title="All 2 branches missed.">        } else if (nativeReturn == ByteList.class) {</span>
+            // not handled yet
+<span class="nc bnc" id="L1348" title="All 2 branches missed.">        } else if (nativeReturn == BigInteger.class) {</span>
+            // not handled yet
+        } else {
+            // all other object types
+<span class="nc" id="L1352">            nativeTarget = explicitCastArguments(nativeTarget, methodType(Object.class, convertedParams));</span>
+<span class="nc" id="L1353">            returnFilter = insertArguments(</span>
+<span class="nc" id="L1354">                    findStatic(JavaUtil.class, &quot;convertJavaToUsableRubyObject&quot;, methodType(IRubyObject.class, Ruby.class, Object.class)),</span>
+                    0,
+                    runtime);
+        }
+
+        // we can handle this; do remaining transforms and return
+<span class="nc bnc" id="L1360" title="All 2 branches missed.">        if (returnFilter != null) {</span>
+<span class="nc" id="L1361">            Class[] newNativeParams = nativeTarget.type().parameterArray();</span>
+<span class="nc" id="L1362">            Class newNativeReturn = nativeTarget.type().returnType();</span>
+
+<span class="nc" id="L1364">            Binder exBinder = Binder</span>
+<span class="nc" id="L1365">                    .from(newNativeReturn, Throwable.class, newNativeParams)</span>
+<span class="nc" id="L1366">                    .drop(1, newNativeParams.length)</span>
+<span class="nc" id="L1367">                    .insert(0, runtime);</span>
+<span class="nc bnc" id="L1368" title="All 2 branches missed.">            if (nativeReturn != void.class) {</span>
+<span class="nc" id="L1369">                exBinder = exBinder</span>
+<span class="nc" id="L1370">                        .filterReturn(Binder</span>
+<span class="nc" id="L1371">                                .from(newNativeReturn)</span>
+<span class="nc" id="L1372">                                .constant(nullValue(newNativeReturn)));</span>
+            }
+
+<span class="nc" id="L1375">            nativeTarget = Binder</span>
+<span class="nc bnc" id="L1376" title="All 2 branches missed.">                    .from(site.type())</span>
+<span class="nc" id="L1377">                    .drop(0, isStatic ? 3 : 2)</span>
+<span class="nc" id="L1378">                    .filterReturn(returnFilter)</span>
+<span class="nc" id="L1379">                    .invoke(nativeTarget);</span>
+
+<span class="nc" id="L1381">            method.setHandle(nativeTarget);</span>
+<span class="nc" id="L1382">            return nativeTarget;</span>
+        }
+
+<span class="nc" id="L1385">        return null;</span>
+    }
+    
+    public static boolean subclassProxyTest(Object target) {
+<span class="nc" id="L1389">        return target instanceof InternalJavaProxy;</span>
+    }
+    
+<span class="nc" id="L1392">    private static final MethodHandle IS_JAVA_SUBCLASS = findStatic(InvocationLinker.class, &quot;subclassProxyTest&quot;, methodType(boolean.class, Object.class));</span>
+    
+    private static Object nullValue(Class type) {
+<span class="nc bnc" id="L1395" title="All 4 branches missed.">        if (type == boolean.class || type == Boolean.class) return false;</span>
+<span class="nc bnc" id="L1396" title="All 4 branches missed.">        if (type == byte.class || type == Byte.class) return (byte)0;</span>
+<span class="nc bnc" id="L1397" title="All 4 branches missed.">        if (type == short.class || type == Short.class) return (short)0;</span>
+<span class="nc bnc" id="L1398" title="All 4 branches missed.">        if (type == int.class || type == Integer.class) return 0;</span>
+<span class="nc bnc" id="L1399" title="All 4 branches missed.">        if (type == long.class || type == Long.class) return 0L;</span>
+<span class="nc bnc" id="L1400" title="All 4 branches missed.">        if (type == float.class || type == Float.class) return 0.0F;</span>
+<span class="nc bnc" id="L1401" title="All 4 branches missed.">        if (type == double.class || type == Double.class)return 0.0;</span>
+<span class="nc" id="L1402">        return null;</span>
+    }
+    
+    public static IRubyObject fixnumOrNil(Ruby runtime, Byte b) {
+<span class="nc bnc" id="L1406" title="All 2 branches missed.">        return b == null ? runtime.getNil() : RubyFixnum.newFixnum(runtime, b);</span>
+    }
+    
+    public static IRubyObject fixnumOrNil(Ruby runtime, Short s) {
+<span class="nc bnc" id="L1410" title="All 2 branches missed.">        return s == null ? runtime.getNil() : RubyFixnum.newFixnum(runtime, s);</span>
+    }
+    
+    public static IRubyObject fixnumOrNil(Ruby runtime, Character c) {
+<span class="nc bnc" id="L1414" title="All 2 branches missed.">        return c == null ? runtime.getNil() : RubyFixnum.newFixnum(runtime, c);</span>
+    }
+    
+    public static IRubyObject fixnumOrNil(Ruby runtime, Integer i) {
+<span class="nc bnc" id="L1418" title="All 2 branches missed.">        return i == null ? runtime.getNil() : RubyFixnum.newFixnum(runtime, i);</span>
+    }
+    
+    public static IRubyObject fixnumOrNil(Ruby runtime, Long l) {
+<span class="nc bnc" id="L1422" title="All 2 branches missed.">        return l == null ? runtime.getNil() : RubyFixnum.newFixnum(runtime, l);</span>
+    }
+    
+    public static IRubyObject floatOrNil(Ruby runtime, Float f) {
+<span class="nc bnc" id="L1426" title="All 2 branches missed.">        return f == null ? runtime.getNil() : RubyFloat.newFloat(runtime, f);</span>
+    }
+    
+    public static IRubyObject floatOrNil(Ruby runtime, Double d) {
+<span class="nc bnc" id="L1430" title="All 2 branches missed.">        return d == null ? runtime.getNil() : RubyFloat.newFloat(runtime, d);</span>
+    }
+    
+    public static IRubyObject booleanOrNil(Ruby runtime, Boolean b) {
+<span class="nc bnc" id="L1434" title="All 2 branches missed.">        return b == null ? runtime.getNil() : RubyBoolean.newBoolean(runtime, b);</span>
+    }
+    
+    public static IRubyObject stringOrNil(Ruby runtime, CharSequence cs) {
+<span class="nc bnc" id="L1438" title="All 2 branches missed.">        return cs == null ? runtime.getNil() : RubyString.newUnicodeString(runtime, cs);</span>
+    }
+    
+    ////////////////////////////////////////////////////////////////////////////
+    // Dispatch via direct handle to native core method
+    ////////////////////////////////////////////////////////////////////////////
+
+    private static MethodHandle createNativeHandle(Ruby runtime, JRubyCallSite site, DynamicMethod method, String name) {
+<span class="nc" id="L1446">        MethodHandle nativeTarget = (MethodHandle)method.getHandle();</span>
+<span class="nc bnc" id="L1447" title="All 2 branches missed.">        if (nativeTarget != null) return nativeTarget;</span>
+
+<span class="nc" id="L1449">        DynamicMethod.NativeCall nativeCall = method.getNativeCall();</span>
+<span class="nc" id="L1450">        Class[] nativeSig = nativeCall.getNativeSignature();</span>
+<span class="nc" id="L1451">        boolean isStatic = nativeCall.isStatic();</span>
+
+        try {
+<span class="nc bnc" id="L1454" title="All 2 branches missed.">            if (isStatic) {</span>
+<span class="nc" id="L1455">                nativeTarget = site.lookup().findStatic(</span>
+<span class="nc" id="L1456">                        nativeCall.getNativeTarget(),</span>
+<span class="nc" id="L1457">                        nativeCall.getNativeName(),</span>
+<span class="nc" id="L1458">                        methodType(nativeCall.getNativeReturn(),</span>
+<span class="nc" id="L1459">                        nativeCall.getNativeSignature()));</span>
+            } else {
+<span class="nc" id="L1461">                nativeTarget = site.lookup().findVirtual(</span>
+<span class="nc" id="L1462">                        nativeCall.getNativeTarget(),</span>
+<span class="nc" id="L1463">                        nativeCall.getNativeName(),</span>
+<span class="nc" id="L1464">                        methodType(nativeCall.getNativeReturn(),</span>
+<span class="nc" id="L1465">                        nativeCall.getNativeSignature()));</span>
+            }
+<span class="nc" id="L1467">        } catch (Exception e) {</span>
+<span class="nc" id="L1468">            throw new RuntimeException(e);</span>
+<span class="nc" id="L1469">        }</span>
+        
+        // if native method returns void, return nil instead
+<span class="nc bnc" id="L1472" title="All 2 branches missed.">        if (nativeCall.getNativeReturn() == void.class) {</span>
+<span class="nc" id="L1473">            nativeTarget = filterReturnValue(nativeTarget, constant(IRubyObject.class, runtime.getNil()));</span>
+        }
+
+<span class="nc" id="L1476">        Signature fullSig = site.fullSignature();</span>
+        Signature target;
+
+<span class="nc bnc" id="L1479" title="All 4 branches missed.">        if (nativeSig.length &gt; 0 &amp;&amp; nativeSig[0] == ThreadContext.class) {</span>
+<span class="nc bnc" id="L1480" title="All 2 branches missed.">            if (nativeSig[nativeSig.length - 1] == Block.class) {</span>
+<span class="nc bnc" id="L1481" title="All 2 branches missed.">                target = isStatic ?</span>
+<span class="nc" id="L1482">                        fullSig.permute(&quot;context&quot;, &quot;self&quot;, &quot;arg*&quot;, &quot;block&quot;) :</span>
+<span class="nc" id="L1483">                        fullSig.permute(&quot;self&quot;, &quot;context&quot;, &quot;arg*&quot;, &quot;block&quot;);</span>
+            } else {
+<span class="nc bnc" id="L1485" title="All 2 branches missed.">                target = isStatic ?</span>
+<span class="nc" id="L1486">                        fullSig.permute(&quot;context&quot;, &quot;self&quot;, &quot;arg*&quot;) :</span>
+<span class="nc" id="L1487">                        fullSig.permute(&quot;self&quot;, &quot;context&quot;, &quot;arg*&quot;);</span>
+            }
+        } else {
+<span class="nc bnc" id="L1490" title="All 4 branches missed.">            if (nativeSig.length &gt; 0 &amp;&amp; nativeSig[nativeSig.length - 1] == Block.class) {</span>
+<span class="nc" id="L1491">                target = fullSig.permute(&quot;self&quot;, &quot;arg*&quot;, &quot;block&quot;);</span>
+            } else {
+<span class="nc" id="L1493">                target = fullSig.permute(&quot;self&quot;, &quot;arg*&quot;);</span>
+            }
+        }
+
+<span class="nc" id="L1497">        nativeTarget = explicitCastArguments(nativeTarget, target.type());</span>
+<span class="nc" id="L1498">        nativeTarget = permuteArguments(nativeTarget, fullSig.type(), fullSig.to(target));</span>
+
+<span class="nc" id="L1500">        nativeTarget = wrapWithFraming(fullSig, method.getCallConfig(), method.getImplementationClass(), name, nativeTarget, null);</span>
+
+<span class="nc" id="L1502">        method.setHandle(nativeTarget);</span>
+
+<span class="nc" id="L1504">        return nativeTarget;</span>
+    }
+
+    ////////////////////////////////////////////////////////////////////////////
+    // Dispatch via direct handle to FFI native method
+    ////////////////////////////////////////////////////////////////////////////
+
+    private static MethodHandle createFFIHandle(JRubyCallSite site, DynamicMethod method) {
+<span class="nc bnc" id="L1512" title="All 2 branches missed.">        if (site.type().parameterType(site.type().parameterCount() - 1) == Block.class) {</span>
+            // Called with a block to substitute for a callback param - cannot cache or use a cached handle
+<span class="nc" id="L1514">            return null;</span>
+        }
+
+<span class="nc" id="L1517">        MethodHandle nativeTarget = (MethodHandle) method.getHandle();</span>
+<span class="nc bnc" id="L1518" title="All 2 branches missed.">        if (nativeTarget != null) return nativeTarget;</span>
+
+<span class="nc" id="L1520">        nativeTarget = org.jruby.ext.ffi.jffi.InvokeDynamic.getMethodHandle(site, method);</span>
+<span class="nc bnc" id="L1521" title="All 2 branches missed.">        if (nativeTarget != null) {</span>
+<span class="nc" id="L1522">            method.setHandle(nativeTarget);</span>
+<span class="nc" id="L1523">            return nativeTarget;</span>
+        }
+
+        // can't build native handle for it
+<span class="nc" id="L1527">        return null;</span>
+    }
+    
+    ////////////////////////////////////////////////////////////////////////////
+    // Dispatch to attribute accessors
+    ////////////////////////////////////////////////////////////////////////////
+
+    private static MethodHandle createAttrReaderHandle(JRubyCallSite site, RubyClass cls, VariableAccessor accessor) {
+        MethodHandle nativeTarget;
+        
+<span class="nc" id="L1537">        MethodHandle filter = Binder</span>
+<span class="nc" id="L1538">                .from(IRubyObject.class, IRubyObject.class)</span>
+<span class="nc" id="L1539">                .insert(1, cls.getRuntime().getNil())</span>
+<span class="nc" id="L1540">                .cast(IRubyObject.class, IRubyObject.class, IRubyObject.class)</span>
+<span class="nc" id="L1541">                .invokeStaticQuiet(lookup(), InvocationLinker.class, &quot;valueOrNil&quot;);</span>
+        
+<span class="nc bnc" id="L1543" title="All 2 branches missed.">        if (accessor instanceof FieldVariableAccessor) {</span>
+<span class="nc" id="L1544">            Binder b = Binder</span>
+<span class="nc" id="L1545">                    .from(site.type())</span>
+<span class="nc" id="L1546">                    .permute(2)</span>
+<span class="nc" id="L1547">                    .filterReturn(filter);</span>
+            
+<span class="nc" id="L1549">            int offset = ((FieldVariableAccessor)accessor).getOffset();</span>
+<span class="nc" id="L1550">            Class objCls = InvokeDynamicSupport.REIFIED_OBJECT_CLASSES[offset];</span>
+<span class="nc" id="L1551">            nativeTarget = b</span>
+<span class="nc" id="L1552">                    .cast(Object.class, objCls)</span>
+<span class="nc" id="L1553">                    .getFieldQuiet(lookup(), &quot;var&quot; + offset);</span>
+<span class="nc" id="L1554">        } else {</span>
+<span class="nc" id="L1555">            nativeTarget = Binder</span>
+<span class="nc" id="L1556">                    .from(site.type())</span>
+<span class="nc" id="L1557">                    .permute(2)</span>
+<span class="nc" id="L1558">                    .filterReturn(filter)</span>
+<span class="nc" id="L1559">                    .insert(1, accessor.getIndex())</span>
+<span class="nc" id="L1560">                    .cast(Object.class, RubyBasicObject.class, int.class)</span>
+<span class="nc" id="L1561">                    .invokeStaticQuiet(lookup(), VariableAccessor.class, &quot;getVariable&quot;);</span>
+        }
+
+        // NOTE: Must not cache the fully-bound handle in the method, since it's specific to this class
+
+<span class="nc" id="L1566">        return nativeTarget;</span>
+    }
+    
+    public static IRubyObject valueOrNil(IRubyObject value, IRubyObject nil) {
+<span class="nc bnc" id="L1570" title="All 2 branches missed.">        return value == null ? nil : value;</span>
+    }
+
+    private static MethodHandle createAttrWriterHandle(JRubyCallSite site, RubyClass cls, VariableAccessor accessor) {
+        MethodHandle nativeTarget;
+        
+<span class="nc" id="L1576">        MethodHandle filter = Binder</span>
+<span class="nc" id="L1577">                .from(IRubyObject.class, Object.class)</span>
+<span class="nc" id="L1578">                .drop(0)</span>
+<span class="nc" id="L1579">                .constant(cls.getRuntime().getNil());</span>
+        
+<span class="nc bnc" id="L1581" title="All 2 branches missed.">        if (accessor instanceof FieldVariableAccessor) {</span>
+<span class="nc" id="L1582">            Binder b = Binder</span>
+<span class="nc" id="L1583">                    .from(site.type())</span>
+<span class="nc" id="L1584">                    .permute(2, 3)</span>
+<span class="nc" id="L1585">                    .filterReturn(filter);</span>
+            
+<span class="nc" id="L1587">            int offset = ((FieldVariableAccessor)accessor).getOffset();</span>
+<span class="nc" id="L1588">            Class objCls = InvokeDynamicSupport.REIFIED_OBJECT_CLASSES[offset];</span>
+<span class="nc" id="L1589">            nativeTarget = b</span>
+<span class="nc" id="L1590">                    .cast(void.class, objCls, Object.class)</span>
+<span class="nc" id="L1591">                    .invokeStaticQuiet(lookup(), objCls, &quot;setVariableChecked&quot;);</span>
+<span class="nc" id="L1592">        } else {</span>
+<span class="nc" id="L1593">            nativeTarget = Binder</span>
+<span class="nc" id="L1594">                    .from(site.type())</span>
+<span class="nc" id="L1595">                    .permute(2, 3)</span>
+<span class="nc" id="L1596">                    .filterReturn(filter)</span>
+<span class="nc" id="L1597">                    .insert(1, cls.getRealClass(), accessor.getIndex())</span>
+<span class="nc" id="L1598">                    .cast(void.class, RubyBasicObject.class, RubyClass.class, int.class, Object.class)</span>
+<span class="nc" id="L1599">                    .invokeStaticQuiet(lookup(), accessor.getClass(), &quot;setVariableChecked&quot;);</span>
+        }
+
+        // NOTE: Must not cache the fully-bound handle in the method, since it's specific to this class
+
+<span class="nc" id="L1604">        return nativeTarget;</span>
+    }
+    
+    ////////////////////////////////////////////////////////////////////////////
+    // Dispatch via direct handle to Ruby method
+    ////////////////////////////////////////////////////////////////////////////
+
+//    private static MethodHandle createRubyHandle(JRubyCallSite site, DynamicMethod method, String name) {
+//        MethodHandle nativeTarget = (MethodHandle)method.getHandle();
+//        if (nativeTarget != null) return nativeTarget;
+//
+//        DynamicMethod.NativeCall nativeCall = method.getNativeCall();
+//
+//        try {
+//            Object scriptObject;
+//            StaticScope scope = null;
+//            if (method instanceof CompiledMethod) {
+//                scriptObject = ((CompiledMethod)method).getScriptObject();
+//                scope = ((CompiledMethod)method).getStaticScope();
+//            } else if (method instanceof JittedMethod) {
+//                scriptObject = ((JittedMethod)method).getScriptObject();
+//                scope = ((JittedMethod)method).getStaticScope();
+//            } else {
+//                throw new RuntimeException(&quot;invalid method for ruby handle: &quot; + method);
+//            }
+//
+//            int argCount = getRubyArgCount(nativeCall.getNativeSignature());
+//
+//            Signature fullSig = site.fullSignature();
+//            nativeTarget = Binder
+//                    .from(fullSig.type())
+//                    .permute(fullSig.to(&quot;context&quot;, &quot;self&quot;, &quot;arg*&quot;, &quot;block&quot;))
+//                    .insert(0, scriptObject)
+//                    .invokeStaticQuiet(site.lookup(), nativeCall.getNativeTarget(), nativeCall.getNativeName());
+//
+//            nativeTarget = wrapWithFraming(fullSig, method.getCallConfig(), method.getImplementationClass(), name, nativeTarget, scope);
+//
+//            method.setHandle(nativeTarget);
+//            return nativeTarget;
+//        } catch (Exception e) {
+//            throw new RuntimeException(e);
+//        }
+//    }
+
+    public static MethodHandle wrapWithFraming(Signature signature, CallConfiguration callConfig, RubyModule implClass, String name, MethodHandle nativeTarget, StaticScope scope) {
+<span class="nc" id="L1649">        MethodHandle framePre = getFramePre(signature, callConfig, implClass, name, scope);</span>
+
+<span class="nc bnc" id="L1651" title="All 2 branches missed.">        if (framePre != null) {</span>
+<span class="nc" id="L1652">            MethodHandle framePost = getFramePost(signature, callConfig);</span>
+
+            // break, return, redo handling
+<span class="nc bnc" id="L1655" title="All 2 branches missed.">            boolean heapScoped = callConfig.scoping() != Scoping.None;</span>
+<span class="nc bnc" id="L1656" title="All 2 branches missed.">            boolean framed = callConfig.framing() != Framing.None;</span>
+
+
+<span class="nc bnc" id="L1659" title="All 4 branches missed.">            if (framed || heapScoped) {</span>
+<span class="nc" id="L1660">                nativeTarget = catchException(</span>
+                        nativeTarget,
+                        JumpException.ReturnJump.class,
+                        Binder
+<span class="nc" id="L1664">                                .from(nativeTarget.type().insertParameterTypes(0, JumpException.ReturnJump.class))</span>
+<span class="nc" id="L1665">                            .permute(0, 1)</span>
+<span class="nc" id="L1666">                            .invokeStaticQuiet(lookup(), InvocationLinker.class, &quot;handleReturn&quot;));</span>
+            }
+<span class="nc bnc" id="L1668" title="All 2 branches missed.">            if (framed) {</span>
+<span class="nc" id="L1669">                nativeTarget = catchException(</span>
+                        nativeTarget,
+                        JumpException.RedoJump.class,
+                        Binder
+<span class="nc" id="L1673">                                .from(nativeTarget.type().insertParameterTypes(0, JumpException.RedoJump.class))</span>
+<span class="nc" id="L1674">                                .permute(0, 1)</span>
+<span class="nc" id="L1675">                                .invokeStaticQuiet(lookup(), InvocationLinker.class, &quot;handleRedo&quot;));</span>
+            }
+
+
+            // post logic for frame
+<span class="nc" id="L1680">            nativeTarget = Binder</span>
+<span class="nc" id="L1681">                    .from(nativeTarget.type())</span>
+<span class="nc" id="L1682">                    .tryFinally(framePost)</span>
+<span class="nc" id="L1683">                    .invoke(nativeTarget);</span>
+
+            // pre logic for frame
+<span class="nc" id="L1686">            nativeTarget = foldArguments(nativeTarget, framePre);</span>
+
+
+            // call polling and call number increment
+<span class="nc" id="L1690">            nativeTarget = Binder</span>
+<span class="nc" id="L1691">                    .from(nativeTarget.type())</span>
+<span class="nc" id="L1692">                    .fold(Binder</span>
+<span class="nc" id="L1693">                            .from(nativeTarget.type().changeReturnType(void.class))</span>
+<span class="nc" id="L1694">                            .permute(0)</span>
+<span class="nc" id="L1695">                            .invokeStaticQuiet(lookup(), ThreadContext.class, &quot;callThreadPoll&quot;))</span>
+<span class="nc" id="L1696">                    .invoke(nativeTarget);</span>
+        }
+
+<span class="nc" id="L1699">        return nativeTarget;</span>
+    }
+
+    public static IRubyObject handleRedo(JumpException.RedoJump rj, ThreadContext context) {
+<span class="nc" id="L1703">        throw context.runtime.newLocalJumpError(RubyLocalJumpError.Reason.REDO, context.runtime.getNil(), &quot;unexpected redo&quot;);</span>
+    }
+
+    public static MethodHandle getFramePre(Signature signature, CallConfiguration callConfig, RubyModule implClass, String name, StaticScope scope) {
+<span class="nc" id="L1707">        Signature inbound = signature.asFold(void.class);</span>
+<span class="nc" id="L1708">        SmartBinder binder = SmartBinder</span>
+<span class="nc" id="L1709">                           .from(inbound);</span>
+
+<span class="nc bnc" id="L1711" title="All 6 branches missed.">        switch (callConfig) {</span>
+            case FrameFullScopeFull:
+                // before logic
+<span class="nc" id="L1714">                return binder</span>
+<span class="nc" id="L1715">                        .permute(&quot;context&quot;, &quot;self&quot;, &quot;block&quot;)</span>
+<span class="nc" id="L1716">                        .insert(1, arrayOf(&quot;selfClass&quot;, &quot;name&quot;), arrayOf(RubyModule.class, String.class), implClass, name)</span>
+<span class="nc" id="L1717">                        .insert(5, arrayOf(&quot;scope&quot;), arrayOf(StaticScope.class), scope)</span>
+<span class="nc" id="L1718">                        .invokeVirtualQuiet(lookup(), &quot;preMethodFrameAndScope&quot;)</span>
+<span class="nc" id="L1719">                        .handle();</span>
+
+            case FrameFullScopeDummy:
+                // before logic
+<span class="nc" id="L1723">                return binder</span>
+<span class="nc" id="L1724">                        .permute(&quot;context&quot;, &quot;self&quot;, &quot;block&quot;)</span>
+<span class="nc" id="L1725">                        .insert(1, arrayOf(&quot;selfClass&quot;, &quot;name&quot;), arrayOf(RubyModule.class, String.class), implClass, name)</span>
+<span class="nc" id="L1726">                        .insert(5, arrayOf(&quot;scope&quot;), arrayOf(StaticScope.class), scope)</span>
+<span class="nc" id="L1727">                        .invokeVirtualQuiet(lookup(), &quot;preMethodFrameAndDummyScope&quot;)</span>
+<span class="nc" id="L1728">                        .handle();</span>
+
+            case FrameFullScopeNone:
+                // before logic
+<span class="nc" id="L1732">                return binder</span>
+<span class="nc" id="L1733">                        .permute(&quot;context&quot;, &quot;self&quot;, &quot;block&quot;)</span>
+<span class="nc" id="L1734">                        .insert(1, arrayOf(&quot;selfClass&quot;, &quot;name&quot;), arrayOf(RubyModule.class, String.class), implClass, name)</span>
+<span class="nc" id="L1735">                        .invokeVirtualQuiet(lookup(), &quot;preMethodFrameOnly&quot;)</span>
+<span class="nc" id="L1736">                        .handle();</span>
+
+            case FrameNoneScopeFull:
+                // before logic
+<span class="nc" id="L1740">                return binder</span>
+<span class="nc" id="L1741">                        .permute(&quot;context&quot;)</span>
+<span class="nc" id="L1742">                        .insert(1, arrayOf(&quot;selfClass&quot;, &quot;scope&quot;), arrayOf(RubyModule.class, StaticScope.class), implClass, scope)</span>
+<span class="nc" id="L1743">                        .invokeVirtualQuiet(lookup(), &quot;preMethodScopeOnly&quot;)</span>
+<span class="nc" id="L1744">                        .handle();</span>
+
+            case FrameNoneScopeDummy:
+                // before logic
+<span class="nc" id="L1748">                return binder</span>
+<span class="nc" id="L1749">                        .permute(&quot;context&quot;)</span>
+<span class="nc" id="L1750">                        .insert(1, arrayOf(&quot;selfClass&quot;, &quot;scope&quot;), arrayOf(RubyModule.class, StaticScope.class), implClass, scope)</span>
+<span class="nc" id="L1751">                        .invokeVirtualQuiet(lookup(), &quot;preMethodNoFrameAndDummyScope&quot;)</span>
+<span class="nc" id="L1752">                        .handle();</span>
+
+        }
+        
+<span class="nc" id="L1756">        return null;</span>
+    }
+
+    public static MethodHandle getFramePost(Signature signature, CallConfiguration callConfig) {
+<span class="nc" id="L1760">        Signature inbound = signature.asFold(void.class);</span>
+<span class="nc" id="L1761">        SmartBinder binder = SmartBinder</span>
+<span class="nc" id="L1762">                               .from(inbound)</span>
+<span class="nc" id="L1763">                               .permute(&quot;context&quot;);</span>
+        
+<span class="nc bnc" id="L1765" title="All 6 branches missed.">        switch (callConfig) {</span>
+            case FrameFullScopeFull:
+                // finally logic
+<span class="nc" id="L1768">                return binder</span>
+<span class="nc" id="L1769">                        .invokeVirtualQuiet(lookup(), &quot;postMethodFrameAndScope&quot;)</span>
+<span class="nc" id="L1770">                        .handle();</span>
+
+            case FrameFullScopeDummy:
+                // finally logic
+<span class="nc" id="L1774">                return binder</span>
+<span class="nc" id="L1775">                        .invokeVirtualQuiet(lookup(), &quot;postMethodFrameAndScope&quot;)</span>
+<span class="nc" id="L1776">                        .handle();</span>
+
+            case FrameFullScopeNone:
+                // finally logic
+<span class="nc" id="L1780">                return binder</span>
+<span class="nc" id="L1781">                        .invokeVirtualQuiet(lookup(), &quot;postMethodFrameOnly&quot;)</span>
+<span class="nc" id="L1782">                        .handle();</span>
+
+            case FrameNoneScopeFull:
+                // finally logic
+<span class="nc" id="L1786">                return binder</span>
+<span class="nc" id="L1787">                        .invokeVirtualQuiet(lookup(), &quot;postMethodScopeOnly&quot;)</span>
+<span class="nc" id="L1788">                        .handle();</span>
+
+            case FrameNoneScopeDummy:
+                // finally logic
+<span class="nc" id="L1792">                return binder</span>
+<span class="nc" id="L1793">                        .invokeVirtualQuiet(lookup(), &quot;postMethodScopeOnly&quot;)</span>
+<span class="nc" id="L1794">                        .handle();</span>
+
+        }
+
+<span class="nc" id="L1798">        return null;</span>
+    }
+
+    ////////////////////////////////////////////////////////////////////////////
+    // Additional support code
+    ////////////////////////////////////////////////////////////////////////////
+
+    private static int getArgCount(Class[] args, boolean isStatic) {
+<span class="nc" id="L1806">        int length = args.length;</span>
+<span class="nc" id="L1807">        boolean hasContext = false;</span>
+<span class="nc bnc" id="L1808" title="All 2 branches missed.">        if (isStatic) {</span>
+<span class="nc bnc" id="L1809" title="All 4 branches missed.">            if (args.length &gt; 1 &amp;&amp; args[0] == ThreadContext.class) {</span>
+<span class="nc" id="L1810">                length--;</span>
+<span class="nc" id="L1811">                hasContext = true;</span>
+            }
+            
+            // remove self object
+<span class="nc bnc" id="L1815" title="All 4 branches missed.">            assert args.length &gt;= 1;</span>
+<span class="nc" id="L1816">            length--;</span>
+
+<span class="nc bnc" id="L1818" title="All 4 branches missed.">            if (args.length &gt; 1 &amp;&amp; args[args.length - 1] == Block.class) {</span>
+<span class="nc" id="L1819">                length--;</span>
+            }
+            
+<span class="nc bnc" id="L1822" title="All 2 branches missed.">            if (length == 1) {</span>
+<span class="nc bnc" id="L1823" title="All 4 branches missed.">                if (hasContext &amp;&amp; args[2] == IRubyObject[].class) {</span>
+<span class="nc" id="L1824">                    length = 4;</span>
+<span class="nc bnc" id="L1825" title="All 2 branches missed.">                } else if (args[1] == IRubyObject[].class) {</span>
+<span class="nc" id="L1826">                    length = 4;</span>
+                }
+            }
+        } else {
+<span class="nc bnc" id="L1830" title="All 4 branches missed.">            if (args.length &gt; 0 &amp;&amp; args[0] == ThreadContext.class) {</span>
+<span class="nc" id="L1831">                length--;</span>
+<span class="nc" id="L1832">                hasContext = true;</span>
+            }
+
+<span class="nc bnc" id="L1835" title="All 4 branches missed.">            if (args.length &gt; 0 &amp;&amp; args[args.length - 1] == Block.class) {</span>
+<span class="nc" id="L1836">                length--;</span>
+            }
+
+<span class="nc bnc" id="L1839" title="All 2 branches missed.">            if (length == 1) {</span>
+<span class="nc bnc" id="L1840" title="All 4 branches missed.">                if (hasContext &amp;&amp; args[1] == IRubyObject[].class) {</span>
+<span class="nc" id="L1841">                    length = 4;</span>
+<span class="nc bnc" id="L1842" title="All 2 branches missed.">                } else if (args[0] == IRubyObject[].class) {</span>
+<span class="nc" id="L1843">                    length = 4;</span>
+                }
+            }
+        }
+<span class="nc" id="L1847">        return length;</span>
+    }
+
+    private static int getRubyArgCount(Class[] args) {
+<span class="nc" id="L1851">        int length = args.length;</span>
+<span class="nc" id="L1852">        boolean hasContext = false;</span>
+        
+        // remove script object
+<span class="nc" id="L1855">        length--;</span>
+        
+<span class="nc bnc" id="L1857" title="All 4 branches missed.">        if (args.length &gt; 2 &amp;&amp; args[1] == ThreadContext.class) {</span>
+<span class="nc" id="L1858">            length--;</span>
+<span class="nc" id="L1859">            hasContext = true;</span>
+        }
+
+        // remove self object
+<span class="nc bnc" id="L1863" title="All 4 branches missed.">        assert args.length &gt;= 2;</span>
+<span class="nc" id="L1864">        length--;</span>
+
+<span class="nc bnc" id="L1866" title="All 4 branches missed.">        if (args.length &gt; 2 &amp;&amp; args[args.length - 1] == Block.class) {</span>
+<span class="nc" id="L1867">            length--;</span>
+        }
+
+<span class="nc bnc" id="L1870" title="All 2 branches missed.">        if (length == 1) {</span>
+<span class="nc bnc" id="L1871" title="All 4 branches missed.">            if (hasContext &amp;&amp; args[3] == IRubyObject[].class) {</span>
+<span class="nc" id="L1872">                length = 4;</span>
+<span class="nc bnc" id="L1873" title="All 2 branches missed.">            } else if (args[2] == IRubyObject[].class) {</span>
+<span class="nc" id="L1874">                length = 4;</span>
+            }
+        }
+
+<span class="nc" id="L1878">        return length;</span>
+    }
+
+    private static int getSiteCount(Class[] args) {
+<span class="nc bnc" id="L1882" title="All 2 branches missed.">        if (args[args.length - 1] == Block.class) {</span>
+<span class="nc bnc" id="L1883" title="All 2 branches missed.">            if (args[args.length - 2] == IRubyObject[].class) {</span>
+<span class="nc" id="L1884">                return 4;</span>
+            } else {
+<span class="nc" id="L1886">                return args.length - 4; // TC, caller, self, block</span>
+            }
+        } else {
+<span class="nc bnc" id="L1889" title="All 2 branches missed.">            if (args[args.length - 1] == IRubyObject[].class) {</span>
+<span class="nc" id="L1890">                return 4;</span>
+            } else {
+<span class="nc" id="L1892">                return args.length - 3; // TC, caller, self</span>
+            }
+        }
+    }
+    
+    private static String logMethod(DynamicMethod method) {
+<span class="nc" id="L1898">        return &quot;[#&quot; + method.getSerialNumber() + &quot; &quot; + method.getImplementationClass() + &quot;]&quot;;</span>
+    }
+
+<span class="nc" id="L1901">    private static final MethodHandle PGC = Binder</span>
+<span class="nc" id="L1902">                    .from(RubyClass.class, ThreadContext.class, IRubyObject.class)</span>
+<span class="nc" id="L1903">                    .invokeStaticQuiet(lookup(), InvokeDynamicSupport.class, &quot;pollAndGetClass&quot;);</span>
+
+<span class="nc" id="L1905">    private static final MethodHandle TEST_GENERATION = Binder</span>
+<span class="nc" id="L1906">            .from(boolean.class, int.class, IRubyObject.class)</span>
+<span class="nc" id="L1907">            .invokeStaticQuiet(lookup(), InvocationLinker.class, &quot;testGeneration&quot;);</span>
+
+<span class="nc" id="L1909">    private static final MethodHandle TEST_METACLASS = Binder</span>
+<span class="nc" id="L1910">            .from(boolean.class, RubyClass.class, IRubyObject.class)</span>
+<span class="nc" id="L1911">            .invokeStaticQuiet(lookup(), InvocationLinker.class, &quot;testMetaclass&quot;);</span>
+    
+<span class="nc" id="L1913">    private static final MethodHandle TEST = TEST_METACLASS;</span>
+    
+<span class="nc" id="L1915">    private static final MethodHandle TEST_CLASS = Binder</span>
+<span class="nc" id="L1916">            .from(boolean.class, Object.class, Class.class)</span>
+<span class="nc" id="L1917">            .invokeStaticQuiet(lookup(), InvocationLinker.class, &quot;testClass&quot;);</span>
+    
+    ////////////////////////////////////////////////////////////////////////////
+    // Support handles for DynamicMethod.call paths
+    ////////////////////////////////////////////////////////////////////////////
+
+    // Signatures for DynamicMethod.call methods
+<span class="nc" id="L1924">    private static final Signature DYNAMIC_CALL_SIG = Signature</span>
+<span class="nc" id="L1925">            .returning(IRubyObject.class)</span>
+<span class="nc" id="L1926">            .appendArg(&quot;method&quot;, DynamicMethod.class)</span>
+<span class="nc" id="L1927">            .appendArg(&quot;context&quot;, ThreadContext.class)</span>
+<span class="nc" id="L1928">            .appendArg(&quot;caller&quot;, IRubyObject.class)</span>
+<span class="nc" id="L1929">            .appendArg(&quot;self&quot;, IRubyObject.class)</span>
+<span class="nc" id="L1930">            .appendArg(&quot;name&quot;, String.class);</span>
+<span class="nc" id="L1931">    private static final Signature DYNAMIC_CALL_SIG_1ARG = DYNAMIC_CALL_SIG.appendArg(&quot;arg0&quot;, IRubyObject.class);</span>
+<span class="nc" id="L1932">    private static final Signature DYNAMIC_CALL_SIG_2ARG = DYNAMIC_CALL_SIG_1ARG.appendArg(&quot;arg1&quot;, IRubyObject.class);</span>
+<span class="nc" id="L1933">    private static final Signature DYNAMIC_CALL_SIG_3ARG = DYNAMIC_CALL_SIG_2ARG.appendArg(&quot;arg2&quot;, IRubyObject.class);</span>
+<span class="nc" id="L1934">    private static final Signature DYNAMIC_CALL_SIG_NARG = DYNAMIC_CALL_SIG.appendArg(&quot;args&quot;, IRubyObject[].class);</span>
+    
+<span class="nc" id="L1936">    private static final Signature DYNAMIC_CALL_SIG_BLOCK = DYNAMIC_CALL_SIG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L1937">    private static final Signature DYNAMIC_CALL_SIG_1ARG_BLOCK = DYNAMIC_CALL_SIG_1ARG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L1938">    private static final Signature DYNAMIC_CALL_SIG_2ARG_BLOCK = DYNAMIC_CALL_SIG_2ARG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L1939">    private static final Signature DYNAMIC_CALL_SIG_3ARG_BLOCK = DYNAMIC_CALL_SIG_3ARG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L1940">    private static final Signature DYNAMIC_CALL_SIG_NARG_BLOCK = DYNAMIC_CALL_SIG_NARG.appendArg(&quot;block&quot;, Block.class);</span>
+
+    // Incoming args for DynamicMethod.call
+<span class="nc" id="L1943">    private static final Signature DYNAMIC_METHOD_SIG = Signature</span>
+<span class="nc" id="L1944">            .returning(IRubyObject.class)</span>
+<span class="nc" id="L1945">            .appendArg(&quot;method&quot;, DynamicMethod.class)</span>
+<span class="nc" id="L1946">            .appendArg(&quot;context&quot;, ThreadContext.class)</span>
+<span class="nc" id="L1947">            .appendArg(&quot;self&quot;, IRubyObject.class)</span>
+<span class="nc" id="L1948">            .appendArg(&quot;selfClass&quot;, RubyModule.class)</span>
+<span class="nc" id="L1949">            .appendArg(&quot;name&quot;, String.class);</span>
+<span class="nc" id="L1950">    private static final Signature DYNAMIC_METHOD_SIG_1ARG = DYNAMIC_METHOD_SIG.appendArg(&quot;arg0&quot;, IRubyObject.class);</span>
+<span class="nc" id="L1951">    private static final Signature DYNAMIC_METHOD_SIG_2ARG = DYNAMIC_METHOD_SIG_1ARG.appendArg(&quot;arg1&quot;, IRubyObject.class);</span>
+<span class="nc" id="L1952">    private static final Signature DYNAMIC_METHOD_SIG_3ARG = DYNAMIC_METHOD_SIG_2ARG.appendArg(&quot;arg2&quot;, IRubyObject.class);</span>
+<span class="nc" id="L1953">    private static final Signature DYNAMIC_METHOD_SIG_NARG = DYNAMIC_METHOD_SIG.appendArg(&quot;args&quot;, IRubyObject[].class);</span>
+    
+<span class="nc" id="L1955">    private static final Signature DYNAMIC_METHOD_SIG_BLOCK = DYNAMIC_METHOD_SIG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L1956">    private static final Signature DYNAMIC_METHOD_SIG_1ARG_BLOCK = DYNAMIC_METHOD_SIG_1ARG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L1957">    private static final Signature DYNAMIC_METHOD_SIG_2ARG_BLOCK = DYNAMIC_METHOD_SIG_2ARG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L1958">    private static final Signature DYNAMIC_METHOD_SIG_3ARG_BLOCK = DYNAMIC_METHOD_SIG_3ARG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L1959">    private static final Signature DYNAMIC_METHOD_SIG_NARG_BLOCK = DYNAMIC_METHOD_SIG_NARG.appendArg(&quot;block&quot;, Block.class);</span>
+    
+    private static MethodHandle dynamicCallTarget(Signature from, Signature to) {
+<span class="nc" id="L1962">        return SmartBinder</span>
+<span class="nc" id="L1963">                .from(from)</span>
+<span class="nc" id="L1964">                .fold(&quot;selfClass&quot;, from.asFold(RubyClass.class).permuteWith(PGC, &quot;context&quot;, &quot;self&quot;))</span>
+<span class="nc" id="L1965">                .permute(to)</span>
+<span class="nc" id="L1966">                .cast(to)</span>
+<span class="nc" id="L1967">                .invokeVirtualQuiet(lookup(), &quot;call&quot;)</span>
+<span class="nc" id="L1968">                .handle();</span>
+    }
+
+<span class="nc" id="L1971">    private static final MethodHandle TARGET_0 = dynamicCallTarget(DYNAMIC_CALL_SIG, DYNAMIC_METHOD_SIG);</span>
+<span class="nc" id="L1972">    private static final MethodHandle TARGET_1 = dynamicCallTarget(DYNAMIC_CALL_SIG_1ARG, DYNAMIC_METHOD_SIG_1ARG);</span>
+<span class="nc" id="L1973">    private static final MethodHandle TARGET_2 = dynamicCallTarget(DYNAMIC_CALL_SIG_2ARG, DYNAMIC_METHOD_SIG_2ARG);</span>
+<span class="nc" id="L1974">    private static final MethodHandle TARGET_3 = dynamicCallTarget(DYNAMIC_CALL_SIG_3ARG, DYNAMIC_METHOD_SIG_3ARG);</span>
+<span class="nc" id="L1975">    private static final MethodHandle TARGET_N = dynamicCallTarget(DYNAMIC_CALL_SIG_NARG, DYNAMIC_METHOD_SIG_NARG);</span>
+<span class="nc" id="L1976">    private static final MethodHandle TARGET_0_B = dynamicCallTarget(DYNAMIC_CALL_SIG_BLOCK, DYNAMIC_METHOD_SIG_BLOCK);</span>
+<span class="nc" id="L1977">    private static final MethodHandle TARGET_1_B = dynamicCallTarget(DYNAMIC_CALL_SIG_1ARG_BLOCK, DYNAMIC_METHOD_SIG_1ARG_BLOCK);</span>
+<span class="nc" id="L1978">    private static final MethodHandle TARGET_2_B = dynamicCallTarget(DYNAMIC_CALL_SIG_2ARG_BLOCK, DYNAMIC_METHOD_SIG_2ARG_BLOCK);</span>
+<span class="nc" id="L1979">    private static final MethodHandle TARGET_3_B = dynamicCallTarget(DYNAMIC_CALL_SIG_3ARG_BLOCK, DYNAMIC_METHOD_SIG_3ARG_BLOCK);</span>
+<span class="nc" id="L1980">    private static final MethodHandle TARGET_N_B = dynamicCallTarget(DYNAMIC_CALL_SIG_NARG_BLOCK, DYNAMIC_METHOD_SIG_NARG_BLOCK);</span>
+    
+<span class="nc" id="L1982">    private static final Signature FALLBACK_SIG = Signature</span>
+<span class="nc" id="L1983">            .returning(IRubyObject.class)</span>
+<span class="nc" id="L1984">            .appendArg(&quot;site&quot;, JRubyCallSite.class)</span>
+<span class="nc" id="L1985">            .appendArg(&quot;context&quot;, ThreadContext.class)</span>
+<span class="nc" id="L1986">            .appendArg(&quot;caller&quot;, IRubyObject.class)</span>
+<span class="nc" id="L1987">            .appendArg(&quot;self&quot;, IRubyObject.class);</span>
+<span class="nc" id="L1988">    private static final Signature FALLBACK_SIG_1ARG = FALLBACK_SIG.appendArg(&quot;arg0&quot;, IRubyObject.class);</span>
+<span class="nc" id="L1989">    private static final Signature FALLBACK_SIG_2ARG = FALLBACK_SIG_1ARG.appendArg(&quot;arg1&quot;, IRubyObject.class);</span>
+<span class="nc" id="L1990">    private static final Signature FALLBACK_SIG_3ARG = FALLBACK_SIG_2ARG.appendArg(&quot;arg2&quot;, IRubyObject.class);</span>
+<span class="nc" id="L1991">    private static final Signature FALLBACK_SIG_NARG = FALLBACK_SIG.appendArg(&quot;args&quot;, IRubyObject[].class);</span>
+    
+<span class="nc" id="L1993">    private static final Signature FALLBACK_SIG_BLOCK = FALLBACK_SIG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L1994">    private static final Signature FALLBACK_SIG_1ARG_BLOCK = FALLBACK_SIG_1ARG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L1995">    private static final Signature FALLBACK_SIG_2ARG_BLOCK = FALLBACK_SIG_2ARG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L1996">    private static final Signature FALLBACK_SIG_3ARG_BLOCK = FALLBACK_SIG_3ARG.appendArg(&quot;block&quot;, Block.class);</span>
+<span class="nc" id="L1997">    private static final Signature FALLBACK_SIG_NARG_BLOCK = FALLBACK_SIG_NARG.appendArg(&quot;block&quot;, Block.class);</span>
+    
+<span class="nc" id="L1999">    private static final MethodHandle FALLBACK_0 = findStatic(InvocationLinker.class, &quot;invocationFallback&quot;, FALLBACK_SIG.type());</span>
+<span class="nc" id="L2000">    private static final MethodHandle FALLBACK_1 = findStatic(InvocationLinker.class, &quot;invocationFallback&quot;, FALLBACK_SIG_1ARG.type());</span>
+<span class="nc" id="L2001">    private static final MethodHandle FALLBACK_2 = findStatic(InvocationLinker.class, &quot;invocationFallback&quot;, FALLBACK_SIG_2ARG.type());</span>
+<span class="nc" id="L2002">    private static final MethodHandle FALLBACK_3 = findStatic(InvocationLinker.class, &quot;invocationFallback&quot;, FALLBACK_SIG_3ARG.type());</span>
+<span class="nc" id="L2003">    private static final MethodHandle FALLBACK_N = findStatic(InvocationLinker.class, &quot;invocationFallback&quot;, FALLBACK_SIG_NARG.type());</span>
+    
+<span class="nc" id="L2005">    private static final MethodHandle FALLBACK_0_B = findStatic(InvocationLinker.class, &quot;invocationFallback&quot;, FALLBACK_SIG_BLOCK.type());</span>
+<span class="nc" id="L2006">    private static final MethodHandle FALLBACK_1_B = findStatic(InvocationLinker.class, &quot;invocationFallback&quot;, FALLBACK_SIG_1ARG_BLOCK.type());</span>
+<span class="nc" id="L2007">    private static final MethodHandle FALLBACK_2_B = findStatic(InvocationLinker.class, &quot;invocationFallback&quot;, FALLBACK_SIG_2ARG_BLOCK.type());</span>
+<span class="nc" id="L2008">    private static final MethodHandle FALLBACK_3_B = findStatic(InvocationLinker.class, &quot;invocationFallback&quot;, FALLBACK_SIG_3ARG_BLOCK.type());</span>
+<span class="nc" id="L2009">    private static final MethodHandle FALLBACK_N_B = findStatic(InvocationLinker.class, &quot;invocationFallback&quot;, FALLBACK_SIG_NARG_BLOCK.type());</span>
+    
+<span class="nc" id="L2011">    private static final MethodHandle FAIL_0 = findStatic(InvocationLinker.class, &quot;fail&quot;, FALLBACK_SIG.type());</span>
+<span class="nc" id="L2012">    private static final MethodHandle FAIL_1 = findStatic(InvocationLinker.class, &quot;fail&quot;, FALLBACK_SIG_1ARG.type());</span>
+<span class="nc" id="L2013">    private static final MethodHandle FAIL_2 = findStatic(InvocationLinker.class, &quot;fail&quot;, FALLBACK_SIG_2ARG.type());</span>
+<span class="nc" id="L2014">    private static final MethodHandle FAIL_3 = findStatic(InvocationLinker.class, &quot;fail&quot;, FALLBACK_SIG_3ARG.type());</span>
+<span class="nc" id="L2015">    private static final MethodHandle FAIL_N = findStatic(InvocationLinker.class, &quot;fail&quot;, FALLBACK_SIG_NARG.type());</span>
+    
+<span class="nc" id="L2017">    private static final MethodHandle FAIL_0_B = findStatic(InvocationLinker.class, &quot;fail&quot;, FALLBACK_SIG_BLOCK.type());</span>
+<span class="nc" id="L2018">    private static final MethodHandle FAIL_1_B = findStatic(InvocationLinker.class, &quot;fail&quot;, FALLBACK_SIG_1ARG_BLOCK.type());</span>
+<span class="nc" id="L2019">    private static final MethodHandle FAIL_2_B = findStatic(InvocationLinker.class, &quot;fail&quot;, FALLBACK_SIG_2ARG_BLOCK.type());</span>
+<span class="nc" id="L2020">    private static final MethodHandle FAIL_3_B = findStatic(InvocationLinker.class, &quot;fail&quot;, FALLBACK_SIG_3ARG_BLOCK.type());</span>
+<span class="nc" id="L2021">    private static final MethodHandle FAIL_N_B = findStatic(InvocationLinker.class, &quot;fail&quot;, FALLBACK_SIG_NARG_BLOCK.type());</span>
+
+<span class="nc" id="L2023">    private static final MethodHandle[] FALLBACKS = new MethodHandle[] {</span>
+        FALLBACK_0,
+        FALLBACK_1,
+        FALLBACK_2,
+        FALLBACK_3,
+        FALLBACK_N
+    };
+    
+<span class="nc" id="L2031">    private static final MethodHandle[] FAILS = new MethodHandle[] {</span>
+        FAIL_0,
+        FAIL_1,
+        FAIL_2,
+        FAIL_3,
+        FAIL_N
+    };
+    
+<span class="nc" id="L2039">    private static final MethodHandle[] FALLBACKS_B = new MethodHandle[] {</span>
+        FALLBACK_0_B,
+        FALLBACK_1_B,
+        FALLBACK_2_B,
+        FALLBACK_3_B,
+        FALLBACK_N_B
+    };
+    
+<span class="nc" id="L2047">    private static final MethodHandle[] FAILS_B = new MethodHandle[] {</span>
+        FAIL_0_B,
+        FAIL_1_B,
+        FAIL_2_B,
+        FAIL_3_B,
+        FAIL_N_B
+    };
+    }
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

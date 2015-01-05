@@ -1,0 +1,273 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyUNIXSocket.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.socket</a> &gt; <span class="el_source">RubyUNIXSocket.java</span></div><h1>RubyUNIXSocket.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2008 Ola Bini &lt;ola.bini@gmail.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.ext.socket;
+
+import jnr.constants.platform.Fcntl;
+import jnr.constants.platform.OpenFlags;
+import jnr.constants.platform.SocketLevel;
+import jnr.constants.platform.SocketOption;
+import jnr.ffi.LastError;
+import jnr.unixsocket.UnixServerSocket;
+import jnr.unixsocket.UnixServerSocketChannel;
+import jnr.unixsocket.UnixSocketAddress;
+import jnr.unixsocket.UnixSocketChannel;
+import org.jruby.Ruby;
+import org.jruby.RubyClass;
+import org.jruby.RubyNumeric;
+import org.jruby.RubyString;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.Visibility;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
+import org.jruby.util.io.ModeFlags;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.channels.Channel;
+
+
+@JRubyClass(name=&quot;UNIXSocket&quot;, parent=&quot;BasicSocket&quot;)
+public class RubyUNIXSocket extends RubyBasicSocket {
+<span class="fc" id="L60">    private static ObjectAllocator UNIXSOCKET_ALLOCATOR = new ObjectAllocator() {</span>
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L62">            return new RubyUNIXSocket(runtime, klass);</span>
+        }
+    };
+
+    static void createUNIXSocket(Ruby runtime) {
+<span class="fc" id="L67">        RubyClass rb_cUNIXSocket = runtime.defineClass(&quot;UNIXSocket&quot;, runtime.getClass(&quot;BasicSocket&quot;), UNIXSOCKET_ALLOCATOR);</span>
+<span class="fc" id="L68">        runtime.getObject().setConstant(&quot;UNIXsocket&quot;, rb_cUNIXSocket);</span>
+        
+<span class="fc" id="L70">        rb_cUNIXSocket.defineAnnotatedMethods(RubyUNIXSocket.class);</span>
+<span class="fc" id="L71">    }</span>
+
+    public RubyUNIXSocket(Ruby runtime, RubyClass type) {
+<span class="fc" id="L74">        super(runtime, type);</span>
+<span class="fc" id="L75">    }</span>
+
+    @JRubyMethod(visibility = Visibility.PRIVATE)
+    public IRubyObject initialize(ThreadContext context, IRubyObject path) {
+<span class="nc" id="L79">        init_unixsock(context.runtime, path, false);</span>
+
+<span class="nc" id="L81">        return context.nil;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject path(ThreadContext context) {
+<span class="nc" id="L86">        return RubyString.newEmptyString(context.runtime);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject addr(ThreadContext context) {
+<span class="nc" id="L91">        Ruby runtime = context.runtime;</span>
+
+<span class="nc" id="L93">        return runtime.newArray(</span>
+<span class="nc" id="L94">                runtime.newString(&quot;AF_UNIX&quot;),</span>
+<span class="nc" id="L95">                RubyString.newEmptyString(runtime));</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject peeraddr(ThreadContext context) {
+<span class="nc" id="L100">        Ruby runtime = context.runtime;</span>
+
+<span class="nc" id="L102">        return runtime.newArray(</span>
+<span class="nc" id="L103">                runtime.newString(&quot;AF_UNIX&quot;),</span>
+<span class="nc" id="L104">                runtime.newString(openFile.getPath()));</span>
+    }
+
+    @JRubyMethod(name = &quot;recvfrom&quot;, required = 1, optional = 1)
+    public IRubyObject recvfrom(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L109">        Ruby runtime = context.runtime;</span>
+
+<span class="nc" id="L111">        IRubyObject _length = args[0];</span>
+        IRubyObject _flags;
+
+<span class="nc bnc" id="L114" title="All 2 branches missed.">        if(args.length == 2) {</span>
+<span class="nc" id="L115">            _flags = args[1];</span>
+        } else {
+<span class="nc" id="L117">            _flags = runtime.getNil();</span>
+        }
+
+        // TODO
+        int flags;
+
+<span class="nc" id="L123">        _length = args[0];</span>
+
+<span class="nc bnc" id="L125" title="All 2 branches missed.">        if(_flags.isNil()) {</span>
+<span class="nc" id="L126">            flags = 0;</span>
+        } else {
+<span class="nc" id="L128">            flags = RubyNumeric.fix2int(_flags);</span>
+        }
+
+<span class="nc" id="L131">        return runtime.newArray(</span>
+<span class="nc" id="L132">                recv(context, _length),</span>
+<span class="nc" id="L133">                peeraddr(context));</span>
+    }
+
+    @JRubyMethod(notImplemented = true)
+    public IRubyObject send_io(IRubyObject path) {
+        //TODO: implement, won't do this now
+<span class="nc" id="L139">        return  getRuntime().getNil();</span>
+    }
+
+    @JRubyMethod(rest = true, notImplemented = true)
+    public IRubyObject recv_io(IRubyObject[] args) {
+        //TODO: implement, won't do this now
+<span class="nc" id="L145">        return  getRuntime().getNil();</span>
+    }
+
+    @JRubyMethod(name = {&quot;socketpair&quot;, &quot;pair&quot;}, optional = 2, meta = true)
+    public static IRubyObject socketpair(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L150">        Ruby runtime = context.runtime;</span>
+
+        // TODO: type and protocol
+
+        UnixSocketChannel[] sp;
+
+        try {
+<span class="nc" id="L157">            sp = UnixSocketChannel.pair();</span>
+
+<span class="nc" id="L159">            RubyUNIXSocket sock = (RubyUNIXSocket)(Helpers.invoke(context, runtime.getClass(&quot;UNIXSocket&quot;), &quot;allocate&quot;));</span>
+<span class="nc" id="L160">            sock.init_sock(runtime, sp[0], &quot;&quot;);</span>
+
+<span class="nc" id="L162">            RubyUNIXSocket sock2 = (RubyUNIXSocket)(Helpers.invoke(context, runtime.getClass(&quot;UNIXSocket&quot;), &quot;allocate&quot;));</span>
+<span class="nc" id="L163">            sock2.init_sock(runtime, sp[1], &quot;&quot;);</span>
+
+<span class="nc" id="L165">            return runtime.newArray(sock, sock2);</span>
+
+<span class="nc" id="L167">        } catch (IOException ioe) {</span>
+<span class="nc" id="L168">            throw runtime.newIOErrorFromException(ioe);</span>
+
+        }
+    }
+
+    @Override
+    public IRubyObject setsockopt(ThreadContext context, IRubyObject _level, IRubyObject _opt, IRubyObject val) {
+<span class="nc" id="L175">        SocketLevel level = levelFromArg(_level);</span>
+<span class="nc" id="L176">        SocketOption opt = optionFromArg(_opt);</span>
+
+<span class="nc bnc" id="L178" title="All 2 branches missed.">        switch(level) {</span>
+            case SOL_SOCKET:
+<span class="nc bnc" id="L180" title="All 2 branches missed.">                switch(opt) {</span>
+                    case SO_KEEPALIVE: {
+                        // TODO: socket options
+                    }
+<span class="nc" id="L184">                    break;</span>
+                    default:
+<span class="nc" id="L186">                        throw context.runtime.newErrnoENOPROTOOPTError();</span>
+                }
+                break;
+            default:
+<span class="nc" id="L190">                throw context.runtime.newErrnoENOPROTOOPTError();</span>
+        }
+
+<span class="nc" id="L193">        return context.runtime.newFixnum(0);</span>
+    }
+
+    protected static void rb_sys_fail(Ruby runtime, String message) {
+<span class="nc" id="L197">        final int n = LastError.getLastError(jnr.ffi.Runtime.getSystemRuntime());</span>
+
+<span class="nc" id="L199">        RubyClass instance = runtime.getErrno(n);</span>
+
+<span class="nc bnc" id="L201" title="All 2 branches missed.">        if(instance == null) {</span>
+<span class="nc" id="L202">            throw runtime.newSystemCallError(message);</span>
+
+        } else {
+<span class="nc" id="L205">            throw runtime.newErrnoFromInt(n, message);</span>
+        }
+    }
+
+    protected void init_unixsock(Ruby runtime, IRubyObject _path, boolean server) {
+<span class="fc" id="L210">        ByteList path = _path.convertToString().getByteList();</span>
+<span class="fc" id="L211">        String fpath = Helpers.decodeByteList(runtime, path);</span>
+
+<span class="fc" id="L213">        int maxSize = 103; // Max size from Darwin, lowest common value we know of</span>
+<span class="pc bpc" id="L214" title="1 of 2 branches missed.">        if (fpath.length() &gt; 103) {</span>
+<span class="nc" id="L215">            throw runtime.newArgumentError(&quot;too long unix socket path (max: &quot; + maxSize + &quot;bytes)&quot;);</span>
+        }
+
+        try {
+<span class="pc bpc" id="L219" title="1 of 2 branches missed.">            if (server) {</span>
+<span class="fc" id="L220">                UnixServerSocketChannel channel = UnixServerSocketChannel.open();</span>
+<span class="fc" id="L221">                UnixServerSocket socket = channel.socket();</span>
+
+                // TODO: listen backlog
+
+<span class="fc" id="L225">                socket.bind(new UnixSocketAddress(new File(fpath)));</span>
+
+<span class="fc" id="L227">                init_sock(runtime, channel, fpath);</span>
+
+<span class="fc" id="L229">            } else {</span>
+<span class="nc" id="L230">                File fpathFile = new File(fpath);</span>
+
+<span class="nc bnc" id="L232" title="All 2 branches missed.">                if (!fpathFile.exists()) {</span>
+<span class="nc" id="L233">                    throw runtime.newErrnoENOENTError(&quot;unix socket&quot;);</span>
+                }
+                
+<span class="nc" id="L236">                UnixSocketChannel channel = UnixSocketChannel.open();</span>
+
+<span class="nc" id="L238">                channel.connect(new UnixSocketAddress(fpathFile));</span>
+
+<span class="nc" id="L240">                init_sock(runtime, channel);</span>
+
+            }
+
+<span class="nc" id="L244">        } catch (IOException ioe) {</span>
+<span class="nc" id="L245">            throw runtime.newIOErrorFromException(ioe);</span>
+<span class="fc" id="L246">        }</span>
+<span class="fc" id="L247">    }</span>
+
+    protected void init_sock(Ruby runtime, Channel channel, String path) {
+<span class="fc" id="L250">        MakeOpenFile();</span>
+        
+<span class="fc" id="L252">        ModeFlags modes = newModeFlags(runtime, ModeFlags.RDWR);</span>
+
+<span class="fc" id="L254">        openFile.setFD(newChannelFD(runtime, channel));</span>
+<span class="fc" id="L255">        openFile.setMode(modes.getOpenFileFlags());</span>
+<span class="fc" id="L256">        openFile.setSync(true);</span>
+<span class="fc" id="L257">        openFile.setPath(path);</span>
+<span class="fc" id="L258">    }</span>
+
+    protected void init_sock(Ruby runtime, Channel channel) {
+<span class="nc" id="L261">        init_sock(runtime, channel, null);</span>
+<span class="nc" id="L262">    }</span>
+
+    private UnixSocketChannel asUnixSocket() {
+<span class="nc" id="L265">        return (UnixSocketChannel)getOpenFile().fd().ch;</span>
+    }
+
+<span class="fc" id="L268">    protected final static int F_GETFL = Fcntl.F_GETFL.intValue();</span>
+<span class="fc" id="L269">    protected final static int F_SETFL = Fcntl.F_SETFL.intValue();</span>
+
+<span class="fc" id="L271">    protected final static int O_NONBLOCK = OpenFlags.O_NONBLOCK.intValue();</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

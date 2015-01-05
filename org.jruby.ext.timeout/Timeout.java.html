@@ -1,0 +1,256 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Timeout.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.timeout</a> &gt; <span class="el_source">Timeout.java</span></div><h1>Timeout.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.ext.timeout;
+
+import java.io.IOException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.jruby.Ruby;
+import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyKernel;
+import org.jruby.RubyModule;
+import org.jruby.RubyObject;
+import org.jruby.RubyRegexp;
+import org.jruby.RubyThread;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ThreadContext;
+import static org.jruby.runtime.Visibility.*;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.load.Library;
+import org.jruby.threading.DaemonThreadFactory;
+import org.jruby.util.RegexpOptions;
+
+<span class="fc" id="L56">public class Timeout implements Library {</span>
+    public void load(Ruby runtime, boolean wrap) throws IOException {
+<span class="fc" id="L58">        RubyModule timeout = runtime.defineModule(&quot;Timeout&quot;);</span>
+<span class="fc" id="L59">        RubyClass superclass = runtime.getRuntimeError();</span>
+<span class="fc" id="L60">        RubyClass timeoutError = runtime.defineClassUnder(&quot;Error&quot;, superclass, superclass.getAllocator(), timeout);</span>
+<span class="fc" id="L61">        runtime.defineClassUnder(&quot;ExitException&quot;, runtime.getException(), runtime.getException().getAllocator(), timeout);</span>
+
+        // Here we create an &quot;anonymous&quot; exception type used for unrolling the stack.
+        // MRI creates a new one for *every call* to timeout, which can be costly.
+        // We opt to use a single exception type for all cases to avoid this overhead.
+<span class="fc" id="L66">        RubyClass anonEx = runtime.defineClassUnder(&quot;AnonymousException&quot;, runtime.getException(), runtime.getException().getAllocator(), timeout);</span>
+<span class="fc" id="L67">        anonEx.setBaseName(null); // clear basename so it's anonymous when raising</span>
+
+        // These are not really used by timeout, but exposed for compatibility
+<span class="fc" id="L70">        timeout.defineConstant(&quot;THIS_FILE&quot;, RubyRegexp.newRegexp(runtime, &quot;timeout\\.rb&quot;, new RegexpOptions()));</span>
+<span class="fc" id="L71">        timeout.defineConstant(&quot;CALLER_OFFSET&quot;, RubyFixnum.newFixnum(runtime, 0));</span>
+
+        // Timeout module methods
+<span class="fc" id="L74">        timeout.defineAnnotatedMethods(Timeout.class);</span>
+
+        // Toplevel defines
+<span class="fc" id="L77">        runtime.getObject().defineConstant(&quot;TimeoutError&quot;, timeoutError);</span>
+<span class="fc" id="L78">        runtime.getObject().defineAnnotatedMethods(TimeoutToplevel.class);</span>
+<span class="fc" id="L79">    }</span>
+
+<span class="fc" id="L81">    private static ScheduledExecutorService timeoutExecutor = Executors.newScheduledThreadPool(Runtime.getRuntime().availableProcessors(), new DaemonThreadFactory());</span>
+
+<span class="pc" id="L83">    public static class TimeoutToplevel {</span>
+        @JRubyMethod(required = 1, optional = 1, visibility = PRIVATE)
+        public static IRubyObject timeout(ThreadContext context, IRubyObject self, IRubyObject[] args, Block block) {
+<span class="nc" id="L86">            RubyModule timeout = context.runtime.getModule(&quot;Timeout&quot;);</span>
+            
+<span class="nc bnc" id="L88" title="All 3 branches missed.">            switch (args.length) {</span>
+            case 1:
+<span class="nc" id="L90">                return Timeout.timeout(context, timeout, args[0], block);</span>
+            case 2:
+<span class="nc" id="L92">                return Timeout.timeout(context, timeout, args[0], args[1], block);</span>
+            default:
+<span class="nc" id="L94">                Arity.raiseArgumentError(context.runtime, args.length, 1, 2);</span>
+<span class="nc" id="L95">                return context.runtime.getNil();</span>
+            }
+        }
+    }
+
+    @JRubyMethod(module = true)
+    public static IRubyObject timeout(final ThreadContext context, IRubyObject timeout, IRubyObject seconds, Block block) {
+        // No seconds, just yield
+<span class="nc bnc" id="L103" title="All 4 branches missed.">        if (seconds.isNil() || Helpers.invoke(context, seconds, &quot;zero?&quot;).isTrue()) {</span>
+<span class="nc" id="L104">            return block.yieldSpecific(context);</span>
+        }
+
+<span class="nc" id="L107">        final Ruby runtime = context.runtime;</span>
+
+        // No timeout in critical section
+<span class="nc bnc" id="L110" title="All 2 branches missed.">        if (runtime.getThreadService().getCritical()) {</span>
+<span class="nc" id="L111">            return raiseBecauseCritical(context);</span>
+        }
+
+<span class="nc" id="L114">        final RubyThread currentThread = context.getThread();</span>
+<span class="nc" id="L115">        final AtomicBoolean latch = new AtomicBoolean(false);</span>
+
+<span class="nc" id="L117">        IRubyObject id = new RubyObject(runtime, runtime.getObject());</span>
+<span class="nc" id="L118">        Runnable timeoutRunnable = prepareRunnable(currentThread, runtime, latch, id);</span>
+<span class="nc" id="L119">        Future timeoutFuture = null;</span>
+
+        try {
+            try {
+<span class="nc" id="L123">                timeoutFuture = timeoutExecutor.schedule(timeoutRunnable,</span>
+<span class="nc" id="L124">                        (long)(seconds.convertToFloat().getDoubleValue() * 1000000), TimeUnit.MICROSECONDS);</span>
+
+<span class="nc" id="L126">                return block.yield(context, seconds);</span>
+            } finally {
+<span class="nc" id="L128">                killTimeoutThread(context, timeoutFuture, latch);</span>
+            }
+<span class="nc" id="L130">        } catch (RaiseException re) {</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">            if (re.getException().getInternalVariable(&quot;__identifier__&quot;) == id) {</span>
+<span class="nc" id="L132">                return raiseTimeoutError(context, re);</span>
+            } else {
+<span class="nc" id="L134">                throw re;</span>
+            }
+        }
+    }
+
+    @JRubyMethod(module = true)
+    public static IRubyObject timeout(final ThreadContext context, IRubyObject timeout, IRubyObject seconds, IRubyObject exceptionType, Block block) {
+        // No seconds, just yield
+<span class="nc bnc" id="L142" title="All 4 branches missed.">        if (seconds.isNil() || Helpers.invoke(context, seconds, &quot;zero?&quot;).isTrue()) {</span>
+<span class="nc" id="L143">            return block.yieldSpecific(context);</span>
+        }
+
+<span class="nc" id="L146">        final Ruby runtime = context.runtime;</span>
+
+        // No timeout in critical section
+<span class="nc bnc" id="L149" title="All 2 branches missed.">        if (runtime.getThreadService().getCritical()) {</span>
+<span class="nc" id="L150">            return raiseBecauseCritical(context);</span>
+        }
+
+<span class="nc" id="L153">        final RubyThread currentThread = context.getThread();</span>
+<span class="nc" id="L154">        final AtomicBoolean latch = new AtomicBoolean(false);</span>
+
+<span class="nc" id="L156">        IRubyObject id = new RubyObject(runtime, runtime.getObject());</span>
+<span class="nc" id="L157">        RubyClass anonException = (RubyClass)runtime.getClassFromPath(&quot;Timeout::AnonymousException&quot;);</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">        Runnable timeoutRunnable = exceptionType.isNil() ?</span>
+<span class="nc" id="L159">                prepareRunnable(currentThread, runtime, latch, id) :</span>
+<span class="nc" id="L160">                prepareRunnableWithException(currentThread, exceptionType, runtime, latch);</span>
+<span class="nc" id="L161">        Future timeoutFuture = null;</span>
+
+        try {
+            try {
+<span class="nc" id="L165">                timeoutFuture = timeoutExecutor.schedule(timeoutRunnable,</span>
+<span class="nc" id="L166">                        (long)(seconds.convertToFloat().getDoubleValue() * 1000000), TimeUnit.MICROSECONDS);</span>
+
+<span class="nc" id="L168">                return block.yield(context, seconds);</span>
+            } finally {
+<span class="nc" id="L170">                killTimeoutThread(context, timeoutFuture, latch);</span>
+            }
+<span class="nc" id="L172">        } catch (RaiseException re) {</span>
+            // if it's the exception we're expecting
+<span class="nc bnc" id="L174" title="All 2 branches missed.">            if (re.getException().getMetaClass() == anonException) {</span>
+                // and we were not given a specific exception
+<span class="nc bnc" id="L176" title="All 2 branches missed.">                if (exceptionType.isNil()) {</span>
+                    // and it's the exception intended for us
+<span class="nc bnc" id="L178" title="All 2 branches missed.">                    if (re.getException().getInternalVariable(&quot;__identifier__&quot;) == id) {</span>
+<span class="nc" id="L179">                        return raiseTimeoutError(context, re);</span>
+                    }
+                }
+            }
+
+            // otherwise, rethrow
+<span class="nc" id="L185">            throw re;</span>
+        }
+    }
+
+    private static Runnable prepareRunnable(final RubyThread currentThread, final Ruby runtime, final AtomicBoolean latch, final IRubyObject id) {
+<span class="nc" id="L190">        Runnable timeoutRunnable = new Runnable() {</span>
+            public void run() {
+<span class="nc bnc" id="L192" title="All 2 branches missed.">                if (latch.compareAndSet(false, true)) {</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">                    if (currentThread.isAlive()) {</span>
+<span class="nc" id="L194">                        RubyClass anonException = (RubyClass)runtime.getClassFromPath(&quot;Timeout::AnonymousException&quot;);</span>
+<span class="nc" id="L195">                        IRubyObject anonExceptionObj = anonException.newInstance(runtime.getCurrentContext(), runtime.newString(&quot;execution expired&quot;), Block.NULL_BLOCK);</span>
+<span class="nc" id="L196">                        anonExceptionObj.getInternalVariables().setInternalVariable(&quot;__identifier__&quot;, id);</span>
+<span class="nc" id="L197">                        currentThread.raise(anonExceptionObj);</span>
+                    }
+                }
+<span class="nc" id="L200">            }</span>
+        };
+<span class="nc" id="L202">        return timeoutRunnable;</span>
+    }
+
+    private static Runnable prepareRunnableWithException(final RubyThread currentThread, final IRubyObject exception, final Ruby runtime, final AtomicBoolean latch) {
+<span class="nc" id="L206">        Runnable timeoutRunnable = new Runnable() {</span>
+            public void run() {
+<span class="nc bnc" id="L208" title="All 2 branches missed.">                if (latch.compareAndSet(false, true)) {</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">                    if (currentThread.isAlive()) {</span>
+<span class="nc" id="L210">                        currentThread.genericRaise(runtime, new IRubyObject[]{exception, runtime.newString(&quot;execution expired&quot;)}, null);</span>
+                    }
+                }
+<span class="nc" id="L213">            }</span>
+        };
+<span class="nc" id="L215">        return timeoutRunnable;</span>
+    }
+
+    private static void killTimeoutThread(ThreadContext context, Future timeoutFuture, AtomicBoolean latch) {
+<span class="nc bnc" id="L219" title="All 4 branches missed.">        if (latch.compareAndSet(false, true) &amp;&amp; timeoutFuture.cancel(false)) {</span>
+            // ok, exception will not fire
+<span class="nc bnc" id="L221" title="All 4 branches missed.">            if (timeoutExecutor instanceof ScheduledThreadPoolExecutor &amp;&amp; timeoutFuture instanceof Runnable) {</span>
+<span class="nc" id="L222">                ((ScheduledThreadPoolExecutor) timeoutExecutor).remove((Runnable) timeoutFuture);</span>
+            }
+        } else {
+            // future is not cancellable, wait for it to run and then poll
+            try {
+<span class="nc" id="L227">                timeoutFuture.get();</span>
+<span class="nc" id="L228">            } catch (ExecutionException ex) {</span>
+<span class="nc" id="L229">            } catch (InterruptedException ex) {</span>
+<span class="nc" id="L230">            }</span>
+
+            // poll to propagate exception from child thread
+<span class="nc" id="L233">            context.pollThreadEvents();</span>
+        }
+<span class="nc" id="L235">    }</span>
+
+    private static IRubyObject raiseBecauseCritical(ThreadContext context) {
+<span class="nc" id="L238">        Ruby runtime = context.runtime;</span>
+
+<span class="nc" id="L240">        return RubyKernel.raise(context, runtime.getKernel(), new IRubyObject[]{runtime.getThreadError(), runtime.newString(&quot;timeout within critical section&quot;)}, Block.NULL_BLOCK);</span>
+    }
+
+    private static IRubyObject raiseTimeoutError(ThreadContext context, RaiseException re) {
+<span class="nc" id="L244">        Ruby runtime = context.runtime;</span>
+
+<span class="nc" id="L246">        return RubyKernel.raise(</span>
+                context,
+<span class="nc" id="L248">                runtime.getKernel(),</span>
+                new IRubyObject[]{
+<span class="nc" id="L250">                    runtime.getClassFromPath(&quot;Timeout::Error&quot;),</span>
+<span class="nc" id="L251">                    re.getException().callMethod(context, &quot;message&quot;),</span>
+<span class="nc" id="L252">                    re.getException().callMethod(context, &quot;backtrace&quot;)},</span>
+                Block.NULL_BLOCK);
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

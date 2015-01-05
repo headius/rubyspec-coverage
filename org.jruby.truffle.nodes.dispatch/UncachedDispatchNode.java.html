@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>UncachedDispatchNode.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.nodes.dispatch</a> &gt; <span class="el_source">UncachedDispatchNode.java</span></div><h1>UncachedDispatchNode.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2014 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.nodes.dispatch;
+
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.Truffle;
+import com.oracle.truffle.api.dsl.Specialization;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.nodes.IndirectCallNode;
+import com.oracle.truffle.api.utilities.BranchProfile;
+import org.jruby.truffle.nodes.conversion.ToJavaStringNode;
+import org.jruby.truffle.nodes.conversion.ToJavaStringNodeFactory;
+import org.jruby.truffle.nodes.conversion.ToSymbolNode;
+import org.jruby.truffle.nodes.conversion.ToSymbolNodeFactory;
+import org.jruby.truffle.runtime.LexicalScope;
+import org.jruby.truffle.runtime.RubyArguments;
+import org.jruby.truffle.runtime.RubyConstant;
+import org.jruby.truffle.runtime.RubyContext;
+import org.jruby.truffle.runtime.control.RaiseException;
+import org.jruby.truffle.runtime.core.RubyClass;
+import org.jruby.truffle.runtime.core.RubyModule;
+import org.jruby.truffle.runtime.core.RubyProc;
+import org.jruby.truffle.runtime.methods.RubyMethod;
+
+public abstract class UncachedDispatchNode extends DispatchNode {
+
+    private final boolean ignoreVisibility;
+
+    @Child protected IndirectCallNode callNode;
+    @Child protected ToSymbolNode toSymbolNode;
+    @Child protected ToJavaStringNode toJavaStringNode;
+
+<span class="nc" id="L40">    private final BranchProfile constantMissingProfile = BranchProfile.create();</span>
+<span class="nc" id="L41">    private final BranchProfile methodMissingProfile = BranchProfile.create();</span>
+
+    public UncachedDispatchNode(RubyContext context, boolean ignoreVisibility) {
+<span class="nc" id="L44">        super(context);</span>
+<span class="nc" id="L45">        this.ignoreVisibility = ignoreVisibility;</span>
+<span class="nc" id="L46">        callNode = Truffle.getRuntime().createIndirectCallNode();</span>
+<span class="nc" id="L47">        toSymbolNode = ToSymbolNodeFactory.create(context, null, null);</span>
+<span class="nc" id="L48">        toJavaStringNode = ToJavaStringNodeFactory.create(context, null, null);</span>
+<span class="nc" id="L49">    }</span>
+
+    public UncachedDispatchNode(UncachedDispatchNode prev) {
+<span class="nc" id="L52">        super(prev);</span>
+<span class="nc" id="L53">        ignoreVisibility = prev.ignoreVisibility;</span>
+<span class="nc" id="L54">        callNode = prev.callNode;</span>
+<span class="nc" id="L55">        toSymbolNode = prev.toSymbolNode;</span>
+<span class="nc" id="L56">        toJavaStringNode = prev.toJavaStringNode;</span>
+<span class="nc" id="L57">    }</span>
+
+    @Specialization(guards = &quot;actionIsReadConstant&quot;)
+    public Object dispatchReadConstant(
+            VirtualFrame frame,
+            LexicalScope lexicalScope,
+            RubyModule receiverObject,
+            Object constantName,
+            Object blockObject,
+            Object argumentsObjects,
+            Dispatch.DispatchAction dispatchAction) {
+<span class="nc" id="L68">        final RubyConstant constant = lookupConstant(lexicalScope, receiverObject,</span>
+<span class="nc" id="L69">                toJavaStringNode.executeJavaString(frame, constantName), ignoreVisibility, dispatchAction);</span>
+
+<span class="nc bnc" id="L71" title="All 2 branches missed.">        if (constant != null) {</span>
+<span class="nc" id="L72">            return constant.getValue();</span>
+        }
+
+<span class="nc" id="L75">        constantMissingProfile.enter();</span>
+
+<span class="nc bnc" id="L77" title="All 2 branches missed.">        final RubyClass callerClass = ignoreVisibility ? null : getContext().getCoreLibrary().getMetaClass(RubyArguments.getSelf(frame.getArguments()));</span>
+
+<span class="nc" id="L79">        final RubyMethod missingMethod = lookup(callerClass, receiverObject, &quot;const_missing&quot;, ignoreVisibility,</span>
+                dispatchAction);
+
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        if (missingMethod == null) {</span>
+<span class="nc" id="L83">            CompilerDirectives.transferToInterpreter();</span>
+<span class="nc" id="L84">            throw new RaiseException(getContext().getCoreLibrary().runtimeError(</span>
+<span class="nc" id="L85">                    receiverObject.toString() + &quot; didn't have a #const_missing&quot;, this));</span>
+        }
+
+<span class="nc" id="L88">        return callNode.call(</span>
+                frame,
+<span class="nc" id="L90">                missingMethod.getCallTarget(),</span>
+<span class="nc" id="L91">                RubyArguments.pack(</span>
+                        missingMethod,
+<span class="nc" id="L93">                        missingMethod.getDeclarationFrame(),</span>
+                        receiverObject,
+                        null,
+<span class="nc" id="L96">                        new Object[]{toSymbolNode.executeRubySymbol(frame, constantName)}));</span>
+    }
+
+    @Specialization(guards = &quot;actionIsCallOrRespondToMethod&quot;)
+    public Object dispatch(
+            VirtualFrame frame,
+            LexicalScope lexicalScope,
+            Object receiverObject,
+            Object methodName,
+            Object blockObject,
+            Object argumentsObjects,
+            Dispatch.DispatchAction dispatchAction) {
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        final RubyClass callerClass = ignoreVisibility ? null : getContext().getCoreLibrary().getMetaClass(RubyArguments.getSelf(frame.getArguments()));</span>
+
+<span class="nc" id="L110">        final RubyMethod method = lookup(callerClass, receiverObject, toJavaStringNode.executeJavaString(frame, methodName),</span>
+                ignoreVisibility, dispatchAction);
+
+<span class="nc bnc" id="L113" title="All 2 branches missed.">        if (method != null) {</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">            if (dispatchAction == Dispatch.DispatchAction.CALL_METHOD) {</span>
+<span class="nc" id="L115">                return callNode.call(</span>
+                        frame,
+<span class="nc" id="L117">                        method.getCallTarget(),</span>
+<span class="nc" id="L118">                        RubyArguments.pack(</span>
+                                method,
+<span class="nc" id="L120">                                method.getDeclarationFrame(),</span>
+                                receiverObject,
+                                (RubyProc) blockObject,
+<span class="nc" id="L123">                                CompilerDirectives.unsafeCast(argumentsObjects, Object[].class, true)));</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">            } else if (dispatchAction == Dispatch.DispatchAction.RESPOND_TO_METHOD) {</span>
+<span class="nc" id="L125">                return true;</span>
+            } else {
+<span class="nc" id="L127">                throw new UnsupportedOperationException();</span>
+            }
+        }
+
+<span class="nc" id="L131">        methodMissingProfile.enter();</span>
+
+<span class="nc" id="L133">        final RubyMethod missingMethod = lookup(callerClass, receiverObject, &quot;method_missing&quot;, true,</span>
+                dispatchAction);
+
+<span class="nc bnc" id="L136" title="All 2 branches missed.">        if (missingMethod == null) {</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">            if (dispatchAction == Dispatch.DispatchAction.RESPOND_TO_METHOD) {</span>
+<span class="nc" id="L138">                return false;</span>
+            } else {
+<span class="nc" id="L140">                CompilerDirectives.transferToInterpreter();</span>
+<span class="nc" id="L141">                throw new RaiseException(getContext().getCoreLibrary().runtimeError(</span>
+<span class="nc" id="L142">                        receiverObject.toString() + &quot; didn't have a #method_missing&quot;, this));</span>
+            }
+        }
+
+<span class="nc bnc" id="L146" title="All 2 branches missed.">        if (dispatchAction == Dispatch.DispatchAction.CALL_METHOD) {</span>
+<span class="nc" id="L147">            final Object[] argumentsObjectsArray = CompilerDirectives.unsafeCast(argumentsObjects, Object[].class, true);</span>
+
+<span class="nc" id="L149">            final Object[] modifiedArgumentsObjects = new Object[1 + argumentsObjectsArray.length];</span>
+
+<span class="nc" id="L151">            modifiedArgumentsObjects[0] = toSymbolNode.executeRubySymbol(frame, methodName);</span>
+
+<span class="nc" id="L153">            RubyArguments.arraycopy(argumentsObjectsArray, 0, modifiedArgumentsObjects, 1, argumentsObjectsArray.length);</span>
+
+<span class="nc" id="L155">            return callNode.call(</span>
+                    frame,
+<span class="nc" id="L157">                    missingMethod.getCallTarget(),</span>
+<span class="nc" id="L158">                    RubyArguments.pack(</span>
+                            missingMethod,
+<span class="nc" id="L160">                            missingMethod.getDeclarationFrame(),</span>
+                            receiverObject,
+                            (RubyProc) blockObject,
+                            modifiedArgumentsObjects));
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        } else if (dispatchAction == Dispatch.DispatchAction.RESPOND_TO_METHOD) {</span>
+<span class="nc" id="L165">            return false;</span>
+        } else {
+<span class="nc" id="L167">            throw new UnsupportedOperationException();</span>
+        }
+    }
+
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

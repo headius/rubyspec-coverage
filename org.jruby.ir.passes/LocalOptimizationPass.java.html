@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LocalOptimizationPass.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.passes</a> &gt; <span class="el_source">LocalOptimizationPass.java</span></div><h1>LocalOptimizationPass.java</h1><pre class="source lang-java linenums">package org.jruby.ir.passes;
+
+import org.jruby.ir.IRClosure;
+import org.jruby.ir.IRScope;
+import org.jruby.ir.Operation;
+import org.jruby.ir.instructions.CopyInstr;
+import org.jruby.ir.instructions.Instr;
+import org.jruby.ir.instructions.ResultInstr;
+import org.jruby.ir.operands.Operand;
+import org.jruby.ir.operands.Variable;
+import org.jruby.ir.representations.BasicBlock;
+import org.jruby.ir.representations.CFG;
+
+import java.util.*;
+
+<span class="fc" id="L16">public class LocalOptimizationPass extends CompilerPass {</span>
+<span class="fc" id="L17">    public static List&lt;Class&lt;? extends CompilerPass&gt;&gt; DEPENDENCIES = Arrays.&lt;Class&lt;? extends CompilerPass&gt;&gt;asList(CFGBuilder.class);</span>
+
+    @Override
+    public String getLabel() {
+<span class="fc" id="L21">        return &quot;Local Optimizations&quot;;</span>
+    }
+
+    @Override
+    public List&lt;Class&lt;? extends CompilerPass&gt;&gt; getDependencies() {
+<span class="fc" id="L26">        return DEPENDENCIES;</span>
+    }
+
+    @Override
+    public Object execute(IRScope s, Object... data) {
+        // This let us compute execute scope flags for a method based on what all nested closures do
+<span class="fc bfc" id="L32" title="All 2 branches covered.">        for (IRClosure c: s.getClosures()) {</span>
+<span class="fc" id="L33">            run(c, false, true);</span>
+<span class="fc" id="L34">        }</span>
+
+<span class="fc bfc" id="L36" title="All 2 branches covered.">        for (BasicBlock b: ((CFG) data[0]).getBasicBlocks()) {</span>
+<span class="fc" id="L37">            runLocalOptsOnInstrList(s, b.getInstrs().listIterator(), false);</span>
+<span class="fc" id="L38">        }</span>
+
+        // SSS FIXME: What is this about? 
+        // Why 'Only after running local opts'? Figure out and document.
+        //
+        // Only after running local opts, compute various execution scope flags.
+<span class="fc" id="L44">        s.computeScopeFlags();</span>
+
+        // LVA information is no longer valid after this pass
+        // Currently, we don't run this after LVA, but just in case ...
+        //
+        // FIXME: Grrr ... this seems broken to have to create a new object to invalidate
+<span class="fc" id="L50">        (new LiveVariableAnalysis()).invalidate(s);</span>
+
+<span class="fc" id="L52">        return null;</span>
+    }
+
+    private static void recordSimplification(Variable res, Operand val, Map&lt;Operand, Operand&gt; valueMap, Map&lt;Variable, List&lt;Variable&gt;&gt; simplificationMap) {
+<span class="fc" id="L56">        valueMap.put(res, val);</span>
+
+        // For all variables used by val, record a reverse mapping to let us track
+        // Read-After-Write scenarios when any of these variables are modified.
+<span class="fc" id="L60">        List&lt;Variable&gt; valVars = new ArrayList&lt;Variable&gt;();</span>
+<span class="fc" id="L61">        val.addUsedVariables(valVars);</span>
+<span class="fc bfc" id="L62" title="All 2 branches covered.">        for (Variable v: valVars) {</span>
+<span class="fc" id="L63">           List&lt;Variable&gt; x = simplificationMap.get(v);</span>
+<span class="fc bfc" id="L64" title="All 2 branches covered.">           if (x == null) {</span>
+<span class="fc" id="L65">              x = new ArrayList&lt;Variable&gt;();</span>
+<span class="fc" id="L66">              simplificationMap.put(v, x);</span>
+           }
+<span class="fc" id="L68">           x.add(res);</span>
+<span class="fc" id="L69">        }</span>
+<span class="fc" id="L70">    }</span>
+
+    public static void runLocalOptsOnInstrList(IRScope s, ListIterator&lt;Instr&gt; instrs, boolean preCFG) {
+        // Reset value map if this instruction is the start/end of a basic block
+<span class="fc" id="L74">        Map&lt;Operand,Operand&gt; valueMap = new HashMap&lt;Operand,Operand&gt;();</span>
+<span class="fc" id="L75">        Map&lt;Variable,List&lt;Variable&gt;&gt; simplificationMap = new HashMap&lt;Variable,List&lt;Variable&gt;&gt;();</span>
+<span class="fc bfc" id="L76" title="All 2 branches covered.">        while (instrs.hasNext()) {</span>
+<span class="fc" id="L77">            Instr i = instrs.next();</span>
+<span class="fc" id="L78">            Operation iop = i.getOperation();</span>
+<span class="pc bpc" id="L79" title="3 of 4 branches missed.">            if (preCFG &amp;&amp; iop.startsBasicBlock()) {</span>
+<span class="nc" id="L80">                valueMap = new HashMap&lt;Operand,Operand&gt;();</span>
+<span class="nc" id="L81">                simplificationMap = new HashMap&lt;Variable,List&lt;Variable&gt;&gt;();</span>
+            }
+
+            // Simplify instruction and record mapping between target variable and simplified value
+            // System.out.println(&quot;BEFORE: &quot; + i);
+<span class="fc" id="L86">            Operand  val = i.simplifyAndGetResult(s, valueMap);</span>
+            // FIXME: This logic can be simplified based on the number of res != null checks only done if doesn't
+<span class="fc bfc" id="L88" title="All 2 branches covered.">            Variable res = i instanceof ResultInstr ? ((ResultInstr) i).getResult() : null;</span>
+
+            // System.out.println(&quot;AFTER: &quot; + i + &quot;; dst = &quot; + res + &quot;; val = &quot; + val);
+
+<span class="fc bfc" id="L92" title="All 4 branches covered.">            if (res != null &amp;&amp; val != null) {</span>
+<span class="fc bfc" id="L93" title="All 2 branches covered.">                if (!res.equals(val)) {</span>
+<span class="fc" id="L94">                    recordSimplification(res, val, valueMap, simplificationMap);</span>
+                }
+
+<span class="fc bfc" id="L97" title="All 2 branches covered.">                if (!i.hasSideEffects()) {</span>
+<span class="fc bfc" id="L98" title="All 2 branches covered.">                    if (i instanceof CopyInstr) {</span>
+<span class="pc bpc" id="L99" title="3 of 4 branches missed.">                        if (res.equals(val) &amp;&amp; i.canBeDeleted(s)) {</span>
+<span class="nc" id="L100">                            i.markDead();</span>
+<span class="nc" id="L101">                            instrs.remove();</span>
+                        }
+                    } else {
+<span class="fc" id="L104">                        instrs.set(new CopyInstr(res, val));</span>
+                    }
+                }
+<span class="pc bpc" id="L107" title="1 of 4 branches missed.">            } else if (res != null &amp;&amp; val == null) {</span>
+                // If we didn't get a simplified value, remove any existing simplifications for the result
+                // to get rid of RAW hazards!
+<span class="fc" id="L110">                valueMap.remove(res);</span>
+            }
+
+            // Purge all entries in valueMap that have 'res' as their simplified value to take care of RAW scenarios (because we aren't in SSA form yet!)
+<span class="fc bfc" id="L114" title="All 4 branches covered.">            if (res != null &amp;&amp; !res.equals(val)) {</span>
+<span class="fc" id="L115">                List&lt;Variable&gt; simplifiedVars = simplificationMap.get(res);</span>
+<span class="fc bfc" id="L116" title="All 2 branches covered.">                if (simplifiedVars != null) {</span>
+<span class="fc bfc" id="L117" title="All 2 branches covered.">                    for (Variable v: simplifiedVars) {</span>
+<span class="fc" id="L118">                        valueMap.remove(v);</span>
+<span class="fc" id="L119">                    }</span>
+<span class="fc" id="L120">                    simplificationMap.remove(res);</span>
+                }
+            }
+
+            // If the call has been optimized away in the previous step, it is no longer a hard boundary for opts!
+            //
+            // Right now, calls are considered hard boundaries for optimization and
+            // information cannot be propagated across them!
+            //
+            // SSS FIXME: Rather than treat all calls with a broad brush, what we need
+            // is to capture different attributes about a call :
+            //   - uses closures
+            //   - known call target
+            //   - can modify scope,
+            //   - etc.
+            //
+            // This information is present in instruction flags on CallBase. Use it!
+<span class="pc bpc" id="L137" title="4 of 8 branches missed.">            if ((preCFG &amp;&amp; iop.endsBasicBlock()) || (iop.isCall() &amp;&amp; !i.isDead())) {</span>
+<span class="fc" id="L138">                valueMap = new HashMap&lt;Operand,Operand&gt;();</span>
+<span class="fc" id="L139">                simplificationMap = new HashMap&lt;Variable,List&lt;Variable&gt;&gt;();</span>
+            }
+<span class="fc" id="L141">        }</span>
+<span class="fc" id="L142">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

@@ -1,0 +1,478 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>UnmarshalStream.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime.marshal</a> &gt; <span class="el_source">UnmarshalStream.java</span></div><h1>UnmarshalStream.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2002-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2006 Ola Bini &lt;ola.bini@ki.se&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.runtime.marshal;
+
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import org.jcodings.Encoding;
+import org.jcodings.EncodingDB.Entry;
+import org.jcodings.specific.USASCIIEncoding;
+import org.jcodings.specific.UTF8Encoding;
+
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyBignum;
+import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyFloat;
+import org.jruby.RubyHash;
+import org.jruby.RubyModule;
+import org.jruby.RubyNumeric;
+import org.jruby.RubyObject;
+import org.jruby.RubyRegexp;
+import org.jruby.RubyString;
+import org.jruby.RubyStruct;
+import org.jruby.RubySymbol;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.Constants;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.encoding.EncodingCapable;
+import org.jruby.util.ByteList;
+
+/**
+ * Unmarshals objects from strings or streams in Ruby's marshal format.
+ *
+ * @author Anders
+ */
+<span class="pc bpc" id="L69" title="1 of 2 branches missed.">public class UnmarshalStream extends InputStream {</span>
+    protected final Ruby runtime;
+    private final UnmarshalCache cache;
+    private final IRubyObject proc;
+    private final InputStream inputStream;
+    private final boolean taint;
+
+<span class="fc" id="L76">    public UnmarshalStream(Ruby runtime, InputStream in, IRubyObject proc, boolean taint) throws IOException {</span>
+<span class="fc" id="L77">        this.runtime = runtime;</span>
+<span class="fc" id="L78">        this.cache = new UnmarshalCache(runtime);</span>
+<span class="fc" id="L79">        this.proc = proc;</span>
+<span class="fc" id="L80">        this.inputStream = in;</span>
+<span class="fc" id="L81">        this.taint = taint;</span>
+
+<span class="fc" id="L83">        int major = in.read(); // Major</span>
+<span class="fc" id="L84">        int minor = in.read(); // Minor</span>
+
+<span class="pc bpc" id="L86" title="1 of 4 branches missed.">        if(major == -1 || minor == -1) {</span>
+<span class="fc" id="L87">            throw new EOFException(&quot;Unexpected end of stream&quot;);</span>
+        }
+
+<span class="fc bfc" id="L90" title="All 4 branches covered.">        if(major != Constants.MARSHAL_MAJOR || minor &gt; Constants.MARSHAL_MINOR) {</span>
+<span class="fc" id="L91">            throw runtime.newTypeError(String.format(&quot;incompatible marshal file format (can't be read)\n\tformat version %d.%d required; %d.%d given&quot;, Constants.MARSHAL_MAJOR, Constants.MARSHAL_MINOR, major, minor));</span>
+        }
+<span class="fc" id="L93">    }</span>
+
+    // r_object
+    public IRubyObject unmarshalObject() throws IOException {
+<span class="fc" id="L97">        return unmarshalObject(new MarshalState(false));</span>
+    }
+
+    // r_object
+    public IRubyObject unmarshalObject(boolean callProc) throws IOException {
+<span class="fc" id="L102">        return unmarshalObject(new MarshalState(false), callProc);</span>
+    }
+
+    // introduced for keeping ivar read state recursively.
+    private class MarshalState {
+        private boolean ivarWaiting;
+        
+<span class="fc" id="L109">        MarshalState(boolean ivarWaiting) {</span>
+<span class="fc" id="L110">            this.ivarWaiting = ivarWaiting;</span>
+<span class="fc" id="L111">        }</span>
+        
+        boolean isIvarWaiting() {
+<span class="fc" id="L114">            return ivarWaiting;</span>
+        }
+        
+        void setIvarWaiting(boolean ivarWaiting) {
+<span class="fc" id="L118">            this.ivarWaiting = ivarWaiting;</span>
+<span class="fc" id="L119">        }</span>
+    }
+    
+    // r_object0
+    public IRubyObject unmarshalObject(MarshalState state) throws IOException {
+<span class="fc" id="L124">        return unmarshalObject(state, true);</span>
+    }
+
+    // r_object0
+    public IRubyObject unmarshalObject(MarshalState state, boolean callProc) throws IOException {
+<span class="fc" id="L129">        int type = readUnsignedByte();</span>
+<span class="fc" id="L130">        IRubyObject result = null;</span>
+<span class="fc bfc" id="L131" title="All 2 branches covered.">        if (cache.isLinkType(type)) {</span>
+<span class="fc" id="L132">            result = cache.readLink(this, type);</span>
+<span class="fc bfc" id="L133" title="All 2 branches covered.">            if (callProc) return doCallProcForLink(result, type);</span>
+        } else {
+<span class="fc" id="L135">            result = unmarshalObjectDirectly(type, state, callProc);</span>
+        }
+
+<span class="fc bfc" id="L138" title="All 2 branches covered.">        if (!(result instanceof RubyNumeric)) result.setTaint(taint);</span>
+
+<span class="fc" id="L140">        return result;</span>
+    }
+
+    public void registerLinkTarget(IRubyObject newObject) {
+<span class="pc bpc" id="L144" title="1 of 2 branches missed.">        if (MarshalStream.shouldBeRegistered(newObject)) {</span>
+<span class="fc" id="L145">            cache.register(newObject);</span>
+        }
+<span class="fc" id="L147">    }</span>
+
+    public static RubyModule getModuleFromPath(Ruby runtime, String path) {
+<span class="fc" id="L150">        RubyModule value = runtime.getClassFromPath(path);</span>
+<span class="fc bfc" id="L151" title="All 2 branches covered.">        if (!value.isModule()) throw runtime.newArgumentError(path + &quot; does not refer module&quot;);</span>
+<span class="fc" id="L152">        return value;</span>
+    }
+
+    public static RubyClass getClassFromPath(Ruby runtime, String path) {
+<span class="fc" id="L156">        RubyModule value = runtime.getClassFromPath(path);</span>
+<span class="fc bfc" id="L157" title="All 2 branches covered.">        if (!value.isClass()) throw runtime.newArgumentError(path + &quot; does not refer class&quot;);</span>
+<span class="fc" id="L158">        return (RubyClass)value;</span>
+    }
+
+    private IRubyObject doCallProcForLink(IRubyObject result, int type) {
+<span class="fc bfc" id="L162" title="All 4 branches covered.">        if (proc != null &amp;&amp; type != ';') {</span>
+            // return the result of the proc, but not for symbols
+<span class="fc" id="L164">            return Helpers.invoke(getRuntime().getCurrentContext(), proc, &quot;call&quot;, result);</span>
+        }
+<span class="fc" id="L166">        return result;</span>
+    }
+
+    private IRubyObject doCallProcForObj(IRubyObject result) {
+<span class="fc bfc" id="L170" title="All 2 branches covered.">        if (proc != null) {</span>
+            // return the result of the proc, but not for symbols
+<span class="fc" id="L172">            return Helpers.invoke(getRuntime().getCurrentContext(), proc, &quot;call&quot;, result);</span>
+        }
+<span class="fc" id="L174">        return result;</span>
+    }
+
+    private IRubyObject unmarshalObjectDirectly(int type, MarshalState state, boolean callProc) throws IOException {
+<span class="fc" id="L178">        IRubyObject rubyObj = null;</span>
+<span class="pc bpc" id="L179" title="1 of 22 branches missed.">        switch (type) {</span>
+            case 'I':
+<span class="fc" id="L181">                MarshalState childState = new MarshalState(true);</span>
+<span class="fc" id="L182">                rubyObj = unmarshalObject(childState);</span>
+<span class="fc bfc" id="L183" title="All 2 branches covered.">                if (childState.isIvarWaiting()) {</span>
+<span class="fc" id="L184">                    defaultVariablesUnmarshal(rubyObj);</span>
+                }
+<span class="fc" id="L186">                return rubyObj;</span>
+            case '0' :
+<span class="fc" id="L188">                rubyObj = runtime.getNil();</span>
+<span class="fc" id="L189">                break;</span>
+            case 'T' :
+<span class="fc" id="L191">                rubyObj = runtime.getTrue();</span>
+<span class="fc" id="L192">                break;</span>
+            case 'F' :
+<span class="fc" id="L194">                rubyObj = runtime.getFalse();</span>
+<span class="fc" id="L195">                break;</span>
+            case '&quot;' :
+<span class="fc" id="L197">                rubyObj = RubyString.unmarshalFrom(this);</span>
+<span class="fc" id="L198">                break;</span>
+            case 'i' :
+<span class="fc" id="L200">                rubyObj = RubyFixnum.unmarshalFrom(this);</span>
+<span class="fc" id="L201">                break;</span>
+            case 'f' :
+<span class="fc" id="L203">                rubyObj = RubyFloat.unmarshalFrom(this);</span>
+<span class="fc" id="L204">                break;</span>
+            case '/' :
+<span class="fc" id="L206">                rubyObj = RubyRegexp.unmarshalFrom(this);</span>
+<span class="fc" id="L207">                break;</span>
+            case ':' :
+<span class="fc" id="L209">                rubyObj = RubySymbol.unmarshalFrom(this);</span>
+<span class="fc" id="L210">                break;</span>
+            case '[' :
+<span class="fc" id="L212">                rubyObj = RubyArray.unmarshalFrom(this);</span>
+<span class="fc" id="L213">                break;</span>
+            case '{' :
+<span class="fc" id="L215">                rubyObj = RubyHash.unmarshalFrom(this, false);</span>
+<span class="fc" id="L216">                break;</span>
+            case '}' :
+                // &quot;hashdef&quot; object, a hash with a default
+<span class="nc" id="L219">                rubyObj = RubyHash.unmarshalFrom(this, true);</span>
+<span class="nc" id="L220">                break;</span>
+            case 'c' :
+<span class="fc" id="L222">                rubyObj = RubyClass.unmarshalFrom(this);</span>
+<span class="fc" id="L223">                break;</span>
+            case 'm' :
+<span class="fc" id="L225">                rubyObj = RubyModule.unmarshalFrom(this);</span>
+<span class="fc" id="L226">                break;</span>
+            case 'e':
+<span class="fc" id="L228">                RubySymbol moduleName = (RubySymbol) unmarshalObject();</span>
+<span class="fc" id="L229">                RubyModule tp = null;</span>
+                try {
+<span class="fc" id="L231">                    tp = runtime.getClassFromPath(moduleName.asJavaString());</span>
+<span class="nc" id="L232">                } catch (RaiseException e) {</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">                    if (runtime.getModule(&quot;NameError&quot;).isInstance(e.getException())) {</span>
+<span class="nc" id="L234">                        throw runtime.newArgumentError(&quot;undefined class/module &quot; + moduleName.asJavaString());</span>
+                    } 
+<span class="nc" id="L236">                    throw e;</span>
+<span class="fc" id="L237">                }</span>
+
+<span class="fc" id="L239">                rubyObj = unmarshalObject();</span>
+
+<span class="fc" id="L241">                tp.extend_object(rubyObj);</span>
+<span class="fc" id="L242">                tp.callMethod(runtime.getCurrentContext(),&quot;extended&quot;, rubyObj);</span>
+<span class="fc" id="L243">                break;</span>
+            case 'l' :
+<span class="fc" id="L245">                rubyObj = RubyBignum.unmarshalFrom(this);</span>
+<span class="fc" id="L246">                break;</span>
+            case 'S' :
+<span class="fc" id="L248">                rubyObj = RubyStruct.unmarshalFrom(this);</span>
+<span class="fc" id="L249">                break;</span>
+            case 'o' :
+<span class="fc" id="L251">                rubyObj = defaultObjectUnmarshal();</span>
+<span class="fc" id="L252">                break;</span>
+            case 'u' :
+<span class="fc" id="L254">                rubyObj = userUnmarshal(state);</span>
+<span class="fc" id="L255">                break;</span>
+            case 'U' :
+<span class="fc" id="L257">                rubyObj = userNewUnmarshal();</span>
+<span class="fc" id="L258">                break;</span>
+            case 'C' :
+<span class="fc" id="L260">                rubyObj = uclassUnmarshall();</span>
+<span class="fc" id="L261">                break;</span>
+            default :
+<span class="fc" id="L263">                throw getRuntime().newArgumentError(&quot;dump format error(&quot; + (char)type + &quot;)&quot;);</span>
+        }
+
+<span class="fc bfc" id="L266" title="All 2 branches covered.">        if (callProc) {</span>
+<span class="fc" id="L267">            return doCallProcForObj(rubyObj);</span>
+        }
+        
+<span class="fc" id="L270">        return rubyObj;</span>
+    }
+
+
+    public Ruby getRuntime() {
+<span class="fc" id="L275">        return runtime;</span>
+    }
+
+    public int readUnsignedByte() throws IOException {
+<span class="fc" id="L279">        int result = read();</span>
+<span class="fc bfc" id="L280" title="All 2 branches covered.">        if (result == -1) {</span>
+<span class="fc" id="L281">            throw new EOFException(&quot;Unexpected end of stream&quot;);</span>
+        }
+<span class="fc" id="L283">        return result;</span>
+    }
+
+    public byte readSignedByte() throws IOException {
+<span class="fc" id="L287">        int b = readUnsignedByte();</span>
+<span class="fc bfc" id="L288" title="All 2 branches covered.">        if (b &gt; 127) {</span>
+<span class="fc" id="L289">            return (byte) (b - 256);</span>
+        }
+<span class="fc" id="L291">        return (byte) b;</span>
+    }
+
+    public ByteList unmarshalString() throws IOException {
+<span class="fc" id="L295">        int length = unmarshalInt();</span>
+<span class="fc" id="L296">        byte[] buffer = new byte[length];</span>
+
+<span class="fc" id="L298">        int readLength = 0;</span>
+<span class="fc bfc" id="L299" title="All 2 branches covered.">        while (readLength &lt; length) {</span>
+<span class="fc" id="L300">            int read = inputStream.read(buffer, readLength, length - readLength);</span>
+
+<span class="pc bpc" id="L302" title="1 of 2 branches missed.">            if (read == -1) {</span>
+<span class="nc" id="L303">                throw getRuntime().newArgumentError(&quot;marshal data too short&quot;);</span>
+            }
+<span class="fc" id="L305">            readLength += read;</span>
+<span class="fc" id="L306">        }</span>
+
+<span class="fc" id="L308">        return new ByteList(buffer,false);</span>
+    }
+
+    public int unmarshalInt() throws IOException {
+<span class="fc" id="L312">        int c = readSignedByte();</span>
+<span class="fc bfc" id="L313" title="All 2 branches covered.">        if (c == 0) {</span>
+<span class="fc" id="L314">            return 0;</span>
+<span class="pc bpc" id="L315" title="1 of 4 branches missed.">        } else if (4 &lt; c &amp;&amp; c &lt; 128) {</span>
+<span class="fc" id="L316">            return c - 5;</span>
+<span class="pc bpc" id="L317" title="1 of 4 branches missed.">        } else if (-129 &lt; c &amp;&amp; c &lt; -4) {</span>
+<span class="fc" id="L318">            return c + 5;</span>
+        }
+        long result;
+<span class="fc bfc" id="L321" title="All 2 branches covered.">        if (c &gt; 0) {</span>
+<span class="fc" id="L322">            result = 0;</span>
+<span class="fc bfc" id="L323" title="All 2 branches covered.">            for (int i = 0; i &lt; c; i++) {</span>
+<span class="fc" id="L324">                result |= (long) readUnsignedByte() &lt;&lt; (8 * i);</span>
+            }
+        } else {
+<span class="fc" id="L327">            c = -c;</span>
+<span class="fc" id="L328">            result = -1;</span>
+<span class="fc bfc" id="L329" title="All 2 branches covered.">            for (int i = 0; i &lt; c; i++) {</span>
+<span class="fc" id="L330">                result &amp;= ~((long) 0xff &lt;&lt; (8 * i));</span>
+<span class="fc" id="L331">                result |= (long) readUnsignedByte() &lt;&lt; (8 * i);</span>
+            }
+        }
+<span class="fc" id="L334">        return (int) result;</span>
+    }
+
+    private IRubyObject defaultObjectUnmarshal() throws IOException {
+<span class="fc" id="L338">        RubySymbol className = (RubySymbol) unmarshalObject(false);</span>
+
+<span class="fc" id="L340">        RubyClass type = null;</span>
+        try {
+<span class="fc" id="L342">            type = getClassFromPath(runtime, className.toString());</span>
+<span class="fc" id="L343">        } catch (RaiseException e) {</span>
+<span class="pc bpc" id="L344" title="1 of 2 branches missed.">            if (runtime.getModule(&quot;NameError&quot;).isInstance(e.getException())) {</span>
+<span class="fc" id="L345">                throw runtime.newArgumentError(&quot;undefined class/module &quot; + className.asJavaString());</span>
+            }
+
+<span class="nc" id="L348">            throw e;</span>
+<span class="fc" id="L349">        }</span>
+
+<span class="pc bpc" id="L351" title="3 of 4 branches missed.">        assert type != null : &quot;type shouldn't be null.&quot;;</span>
+
+<span class="fc" id="L353">        IRubyObject result = (IRubyObject)type.unmarshal(this);</span>
+
+<span class="fc" id="L355">        return result;</span>
+    }
+
+    public void defaultVariablesUnmarshal(IRubyObject object) throws IOException {
+<span class="fc" id="L359">        int count = unmarshalInt();</span>
+
+<span class="fc" id="L361">        RubyClass cls = object.getMetaClass().getRealClass();</span>
+        
+<span class="fc bfc" id="L363" title="All 2 branches covered.">        for (int i = 0; i &lt; count; i++) {</span>
+            
+<span class="fc" id="L365">            IRubyObject key = unmarshalObject(false);</span>
+            
+<span class="pc bpc" id="L367" title="1 of 4 branches missed.">            if (runtime.is1_9() &amp;&amp; object instanceof EncodingCapable) {</span>
+                
+<span class="fc" id="L369">                EncodingCapable strObj = (EncodingCapable)object;</span>
+
+<span class="fc bfc" id="L371" title="All 2 branches covered.">                if (key.asJavaString().equals(MarshalStream.SYMBOL_ENCODING_SPECIAL)) {</span>
+                    
+                    // special case for USASCII and UTF8
+<span class="fc bfc" id="L374" title="All 2 branches covered.">                    if (unmarshalObject().isTrue()) {</span>
+<span class="fc" id="L375">                        strObj.setEncoding(UTF8Encoding.INSTANCE);</span>
+                    } else {
+<span class="fc" id="L377">                        strObj.setEncoding(USASCIIEncoding.INSTANCE);</span>
+                    }
+<span class="fc" id="L379">                    continue;</span>
+                    
+<span class="fc bfc" id="L381" title="All 2 branches covered.">                } else if (key.asJavaString().equals(&quot;encoding&quot;)) {</span>
+                    
+<span class="fc" id="L383">                    IRubyObject encodingNameObj = unmarshalObject(false);</span>
+<span class="fc" id="L384">                    String encodingNameStr = encodingNameObj.asJavaString();</span>
+<span class="fc" id="L385">                    ByteList encodingName = new ByteList(ByteList.plain(encodingNameStr));</span>
+
+<span class="fc" id="L387">                    Entry entry = runtime.getEncodingService().findEncodingOrAliasEntry(encodingName);</span>
+<span class="pc bpc" id="L388" title="1 of 2 branches missed.">                    if (entry == null) {</span>
+<span class="nc" id="L389">                        throw runtime.newArgumentError(&quot;invalid encoding in marshaling stream: &quot; + encodingName);</span>
+                    }
+<span class="fc" id="L391">                    Encoding encoding = entry.getEncoding();</span>
+<span class="fc" id="L392">                    strObj.setEncoding(encoding);</span>
+<span class="fc" id="L393">                    continue;</span>
+                    
+                } // else fall through as normal ivar
+            }
+            
+<span class="fc" id="L398">            String name = key.asJavaString();</span>
+<span class="fc" id="L399">            IRubyObject value = unmarshalObject();</span>
+
+<span class="fc" id="L401">            cls.getVariableAccessorForWrite(name).set(object, value);</span>
+        }
+<span class="fc" id="L403">    }</span>
+
+    private IRubyObject uclassUnmarshall() throws IOException {
+<span class="fc" id="L406">        RubySymbol className = (RubySymbol)unmarshalObject(false);</span>
+
+<span class="fc" id="L408">        RubyClass type = (RubyClass)runtime.getClassFromPath(className.asJavaString());</span>
+
+        // singleton, raise error
+<span class="pc bpc" id="L411" title="1 of 2 branches missed.">        if (type.isSingleton()) throw runtime.newTypeError(&quot;singleton can't be loaded&quot;);</span>
+
+        // All &quot;C&quot; marshalled objects descend from core classes, which are all at least RubyObject
+<span class="fc" id="L414">        RubyObject result = (RubyObject)unmarshalObject();</span>
+
+        // if result is a module or type doesn't extend result's class...
+<span class="pc bpc" id="L417" title="1 of 4 branches missed.">        if (result.getMetaClass() == runtime.getModule() || !type.isKindOfModule(result.getMetaClass())) {</span>
+            // if allocators do not match, error
+            // Note: MRI is a bit different here, and tests TYPE(type.allocate()) != TYPE(result)
+<span class="pc bpc" id="L420" title="1 of 2 branches missed.">            if (type.getAllocator() != result.getMetaClass().getRealClass().getAllocator()) {</span>
+<span class="fc" id="L421">                throw runtime.newArgumentError(&quot;dump format error (user class)&quot;);</span>
+            }
+        }
+
+<span class="fc" id="L425">        result.setMetaClass(type);</span>
+
+<span class="fc" id="L427">        return result;</span>
+    }
+
+    private IRubyObject userUnmarshal(MarshalState state) throws IOException {
+<span class="fc" id="L431">        String className = unmarshalObject(false).asJavaString();</span>
+<span class="fc" id="L432">        ByteList marshaled = unmarshalString();</span>
+<span class="fc" id="L433">        RubyClass classInstance = findClass(className);</span>
+<span class="fc" id="L434">        RubyString data = RubyString.newString(getRuntime(), marshaled);</span>
+<span class="fc bfc" id="L435" title="All 2 branches covered.">        if (state.isIvarWaiting()) {</span>
+<span class="fc" id="L436">            defaultVariablesUnmarshal(data);</span>
+<span class="fc" id="L437">            state.setIvarWaiting(false);</span>
+        }
+<span class="fc" id="L439">        IRubyObject unmarshaled = classInstance.smartLoadOldUser(data);</span>
+<span class="fc" id="L440">        registerLinkTarget(unmarshaled);</span>
+<span class="fc" id="L441">        return unmarshaled;</span>
+    }
+
+    private IRubyObject userNewUnmarshal() throws IOException {
+<span class="fc" id="L445">        String className = unmarshalObject(false).asJavaString();</span>
+<span class="fc" id="L446">        RubyClass classInstance = findClass(className);</span>
+<span class="fc" id="L447">        IRubyObject result = classInstance.allocate();</span>
+<span class="fc" id="L448">        registerLinkTarget(result);</span>
+<span class="fc" id="L449">        IRubyObject marshaled = unmarshalObject();</span>
+<span class="fc" id="L450">        return classInstance.smartLoadNewUser(result, marshaled);</span>
+    }
+
+    private RubyClass findClass(String className) {
+        RubyModule classInstance;
+        try {
+<span class="fc" id="L456">            classInstance = runtime.getClassFromPath(className);</span>
+<span class="nc" id="L457">        } catch (RaiseException e) {</span>
+<span class="nc bnc" id="L458" title="All 2 branches missed.">            if (runtime.getModule(&quot;NameError&quot;).isInstance(e.getException())) {</span>
+<span class="nc" id="L459">                throw runtime.newArgumentError(&quot;undefined class/module &quot; + className);</span>
+            } 
+<span class="nc" id="L461">            throw e;</span>
+<span class="fc" id="L462">        }</span>
+<span class="pc bpc" id="L463" title="1 of 2 branches missed.">        if (! (classInstance instanceof RubyClass)) {</span>
+<span class="nc" id="L464">            throw runtime.newArgumentError(className + &quot; does not refer class&quot;); // sic</span>
+        }
+<span class="fc" id="L466">        return (RubyClass) classInstance;</span>
+    }
+
+    public int read() throws IOException {
+<span class="fc" id="L470">        return inputStream.read();</span>
+    }
+
+    @Deprecated
+    public UnmarshalStream(Ruby runtime, InputStream in, IRubyObject proc, boolean taint, boolean untrust) throws IOException {
+<span class="nc" id="L475">        this(runtime, in, proc, taint);</span>
+<span class="nc" id="L476">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

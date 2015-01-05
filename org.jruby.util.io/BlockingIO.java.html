@@ -1,0 +1,257 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>BlockingIO.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util.io</a> &gt; <span class="el_source">BlockingIO.java</span></div><h1>BlockingIO.java</h1><pre class="source lang-java linenums">/*
+ **** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2008 The JRuby Community &lt;www.jruby.org&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+
+package org.jruby.util.io;
+
+import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.Channel;
+import java.nio.channels.ReadableByteChannel;
+import java.nio.channels.SelectableChannel;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.WritableByteChannel;
+import java.nio.channels.spi.SelectorProvider;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * A Utility class to emulate blocking I/O operations on non-blocking channels.
+ */
+<span class="nc" id="L54">public class BlockingIO {</span>
+    public static final class Condition {
+        private final IOChannel channel;
+<span class="nc" id="L57">        Condition(IOChannel channel) {</span>
+<span class="nc" id="L58">            this.channel = channel;</span>
+<span class="nc" id="L59">        }</span>
+        public void cancel() {
+<span class="nc" id="L61">            channel.wakeup(false);</span>
+<span class="nc" id="L62">        }</span>
+        public void interrupt() {
+<span class="nc" id="L64">            channel.interrupt();</span>
+<span class="nc" id="L65">        }</span>
+        public boolean await() throws InterruptedException {
+<span class="nc" id="L67">            return channel.await();</span>
+        }
+        public boolean await(long timeout, TimeUnit unit) throws InterruptedException {
+<span class="nc" id="L70">            return channel.await(timeout, unit);</span>
+        }
+    }
+    static final class IOChannel {
+        final SelectableChannel channel;
+        final int ops;        
+        private final Object monitor;
+<span class="nc" id="L77">        private boolean woken = false;</span>
+<span class="nc" id="L78">        private boolean ready = false;</span>
+<span class="nc" id="L79">        private boolean interrupted = false;</span>
+        
+<span class="nc" id="L81">        IOChannel(SelectableChannel channel, int ops, Object monitor) {</span>
+<span class="nc" id="L82">            this.channel = channel;</span>
+<span class="nc" id="L83">            this.ops = ops;</span>
+<span class="nc" id="L84">            this.monitor = monitor;</span>
+<span class="nc" id="L85">        }</span>
+        public final void wakeup(boolean ready) {
+<span class="nc" id="L87">            synchronized (monitor) {</span>
+<span class="nc" id="L88">                this.woken = true;</span>
+<span class="nc" id="L89">                this.ready = ready;</span>
+<span class="nc" id="L90">                monitor.notifyAll();</span>
+<span class="nc" id="L91">            }</span>
+<span class="nc" id="L92">        }</span>
+        public final void interrupt() {
+<span class="nc" id="L94">            synchronized (monitor) {</span>
+<span class="nc" id="L95">                this.woken = true;</span>
+<span class="nc" id="L96">                this.interrupted = true;</span>
+<span class="nc" id="L97">                monitor.notifyAll();</span>
+<span class="nc" id="L98">            }</span>
+<span class="nc" id="L99">        }</span>
+        public final boolean await() throws InterruptedException {
+<span class="nc" id="L101">            return await(0, TimeUnit.MILLISECONDS);</span>
+        }
+        public final boolean await(final long timeout, TimeUnit unit) throws InterruptedException {
+<span class="nc" id="L104">            synchronized (monitor) {</span>
+<span class="nc bnc" id="L105" title="All 2 branches missed.">                if (!woken) {</span>
+<span class="nc" id="L106">                    monitor.wait(TimeUnit.MILLISECONDS.convert(timeout, unit));</span>
+                }
+<span class="nc bnc" id="L108" title="All 2 branches missed.">                if (interrupted) {</span>
+<span class="nc" id="L109">                    throw new InterruptedException(&quot;Interrupted&quot;);</span>
+                }
+<span class="nc" id="L111">                return ready;</span>
+<span class="nc" id="L112">            }</span>
+        }
+    }
+<span class="nc" id="L115">    static final class IOSelector implements Runnable {</span>
+        private final Selector selector;
+        private final ConcurrentLinkedQueue&lt;IOChannel&gt; registrationQueue;
+
+<span class="nc" id="L119">        public IOSelector(SelectorProvider provider) throws IOException {</span>
+<span class="nc" id="L120">            selector = SelectorFactory.openWithRetryFrom(null, provider);</span>
+<span class="nc" id="L121">            registrationQueue = new ConcurrentLinkedQueue&lt;IOChannel&gt;();</span>
+<span class="nc" id="L122">        }</span>
+        public void run() {
+            for ( ; ; ) {
+                try {
+                    //
+                    // Wake up any channels that became unblocked
+                    //
+<span class="nc" id="L129">                    Set&lt;SelectionKey&gt; selected = new HashSet&lt;SelectionKey&gt;(selector.selectedKeys());</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">                    for (SelectionKey k : selected) {</span>
+<span class="nc" id="L131">                        List&lt;IOChannel&gt; waitq = (List&lt;IOChannel&gt;) k.attachment();</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">                        for (IOChannel ch : waitq) {</span>
+<span class="nc" id="L133">                            ch.wakeup(true);</span>
+<span class="nc" id="L134">                        }</span>
+<span class="nc" id="L135">                        waitq.clear();</span>
+<span class="nc" id="L136">                    }</span>
+
+                    //
+                    // Register any new blocking I/O requests
+                    //
+                    IOChannel ch;
+<span class="nc" id="L142">                    Set&lt;SelectableChannel&gt; added = new HashSet&lt;SelectableChannel&gt;();</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">                    while ((ch = registrationQueue.poll()) != null) {</span>
+<span class="nc" id="L144">                        SelectionKey k = ch.channel.keyFor(selector);</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">                        List&lt;IOChannel&gt; waitq = k == null</span>
+                                ? new LinkedList&lt;IOChannel&gt;()
+<span class="nc" id="L147">                                : (List&lt;IOChannel&gt;) k.attachment();</span>
+<span class="nc" id="L148">                        ch.channel.register(selector, ch.ops, waitq);</span>
+<span class="nc" id="L149">                        waitq.add(ch);</span>
+<span class="nc" id="L150">                        added.add(ch.channel);</span>
+<span class="nc" id="L151">                    }</span>
+
+                    // Now clear out any previously selected channels
+<span class="nc bnc" id="L154" title="All 2 branches missed.">                    for (SelectionKey k : selected) {</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">                        if (!added.contains(k.channel())) {</span>
+<span class="nc" id="L156">                            k.cancel();</span>
+                        }
+<span class="nc" id="L158">                    }</span>
+
+                    //
+                    // Wait for I/O on any channel
+                    //
+<span class="nc" id="L163">                    selector.select();</span>
+<span class="nc" id="L164">                } catch (IOException ex) {</span>
+
+<span class="nc" id="L166">                }</span>
+            }
+        }
+        Condition add(Channel channel, int ops, Object monitor) {
+<span class="nc" id="L170">            IOChannel io = new IOChannel((SelectableChannel) channel, ops, monitor);</span>
+<span class="nc" id="L171">            registrationQueue.add(io);</span>
+<span class="nc" id="L172">            selector.wakeup();</span>
+<span class="nc" id="L173">            return new Condition(io);</span>
+        }
+        public void await(Channel channel, int op) throws InterruptedException {
+<span class="nc" id="L176">            add(channel, op, new Object()).await();</span>
+<span class="nc" id="L177">        }</span>
+    }
+<span class="nc" id="L179">    static final private Map&lt;SelectorProvider, IOSelector&gt; selectors</span>
+            = new ConcurrentHashMap&lt;SelectorProvider, IOSelector&gt;();
+
+    private static IOSelector getSelector(SelectorProvider provider) throws IOException {
+<span class="nc" id="L183">        IOSelector sel = selectors.get(provider);</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        if (sel != null) {</span>
+<span class="nc" id="L185">            return sel;</span>
+        }
+
+        //
+        // Synchronize and re-check to avoid creating more than one Selector per provider
+        //
+<span class="nc" id="L191">        synchronized (provider) {</span>
+<span class="nc" id="L192">            sel = selectors.get(provider);</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">            if (sel == null) {</span>
+<span class="nc" id="L194">                sel = new IOSelector(provider);</span>
+<span class="nc" id="L195">                selectors.put(provider, sel);</span>
+<span class="nc" id="L196">                Thread t = new Thread(sel);</span>
+<span class="nc" id="L197">                t.setDaemon(true);</span>
+<span class="nc" id="L198">                t.start();</span>
+            }
+<span class="nc" id="L200">        }</span>
+<span class="nc" id="L201">        return sel;</span>
+    }
+    private static IOSelector getSelector(Channel channel) throws IOException {
+<span class="nc bnc" id="L204" title="All 2 branches missed.">        if (!(channel instanceof SelectableChannel)) {</span>
+<span class="nc" id="L205">            throw new IllegalArgumentException(&quot;channel must be a SelectableChannel&quot;);</span>
+        }        
+<span class="nc" id="L207">        return getSelector(((SelectableChannel) channel).provider());</span>
+    }
+    public static final Condition newCondition(Channel channel, int ops, Object monitor) throws IOException {
+<span class="nc" id="L210">        return getSelector(channel).add(channel, ops, monitor);</span>
+    }
+    public static final Condition newCondition(Channel channel, int ops) throws IOException {
+<span class="nc" id="L213">        return newCondition(channel, ops, new Object());</span>
+    }
+    public static void waitForIO(Channel channel, int op) throws InterruptedException, IOException {
+<span class="nc" id="L216">        getSelector(channel).await(channel, op);</span>
+<span class="nc" id="L217">    }</span>
+    public static void awaitReadable(ReadableByteChannel channel) throws InterruptedException, IOException {
+<span class="nc" id="L219">        waitForIO(channel, SelectionKey.OP_READ);</span>
+<span class="nc" id="L220">    }</span>
+    public static void awaitWritable(WritableByteChannel channel) throws InterruptedException, IOException {
+<span class="nc" id="L222">        waitForIO(channel, SelectionKey.OP_WRITE);</span>
+<span class="nc" id="L223">    }</span>
+    public static int read(ReadableByteChannel channel, ByteBuffer buf, boolean blocking) throws IOException {
+        do {
+<span class="nc" id="L226">            int n = channel.read(buf);</span>
+<span class="nc bnc" id="L227" title="All 8 branches missed.">            if (n != 0 || !blocking || !(channel instanceof SelectableChannel) || !buf.hasRemaining()) {</span>
+<span class="nc" id="L228">                return n;</span>
+            }
+            try {
+<span class="nc" id="L231">                awaitReadable(channel);</span>
+<span class="nc" id="L232">            } catch (InterruptedException ex) {</span>
+<span class="nc" id="L233">                throw new InterruptedIOException(ex.getMessage());</span>
+<span class="nc" id="L234">            }</span>
+<span class="nc" id="L235">        } while (true);</span>
+    }
+    public static int write(WritableByteChannel channel, ByteBuffer buf, boolean blocking) throws IOException {
+        do {
+<span class="nc" id="L239">            int n = channel.write(buf);</span>
+<span class="nc bnc" id="L240" title="All 8 branches missed.">            if (n != 0 || !blocking || !(channel instanceof SelectableChannel) || !buf.hasRemaining()) {</span>
+<span class="nc" id="L241">                return n;</span>
+            }
+            try {
+<span class="nc" id="L244">                awaitWritable(channel);</span>
+<span class="nc" id="L245">            } catch (InterruptedException ex) {</span>
+<span class="nc" id="L246">                throw new InterruptedIOException(ex.getMessage());</span>
+<span class="nc" id="L247">            }</span>
+<span class="nc" id="L248">        } while (true);</span>
+    }
+    public static int blockingRead(ReadableByteChannel channel, ByteBuffer buf) throws IOException {
+<span class="nc" id="L251">        return read(channel, buf, true);</span>
+    }
+    public static int blockingWrite(WritableByteChannel channel, ByteBuffer buf) throws IOException {
+<span class="nc" id="L254">        return write(channel, buf, true);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

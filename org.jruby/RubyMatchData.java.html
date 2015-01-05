@@ -1,0 +1,636 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyMatchData.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyMatchData.java</span></div><h1>RubyMatchData.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2001 Alan Moore &lt;alan_moore@gmx.net&gt;
+ * Copyright (C) 2001-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002 Benoit Cerrina &lt;b.cerrina@wanadoo.fr&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import java.util.Arrays;
+import java.util.Iterator;
+
+import org.jcodings.Encoding;
+import org.joni.NameEntry;
+import org.joni.Regex;
+import org.joni.Region;
+import org.joni.exception.JOniException;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.anno.JRubyClass;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.Visibility;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.Visibility;
+import org.jruby.util.ByteList;
+import org.jruby.util.StringSupport;
+
+/**
+ * @author olabini
+ */
+@JRubyClass(name=&quot;MatchData&quot;)
+public class RubyMatchData extends RubyObject {
+    Region regs;        // captures
+    int begin, end;     // begin and end are used when not groups defined
+    RubyString str;     // source string
+    Regex pattern;
+    RubyRegexp regexp;
+    boolean charOffsetUpdated;
+    Region charOffsets;
+
+    public static RubyClass createMatchDataClass(Ruby runtime) {
+<span class="fc" id="L70">        RubyClass matchDataClass = runtime.defineClass(&quot;MatchData&quot;, runtime.getObject(), MATCH_DATA_ALLOCATOR);</span>
+<span class="fc" id="L71">        runtime.setMatchData(matchDataClass);</span>
+
+<span class="fc" id="L73">        matchDataClass.setClassIndex(ClassIndex.MATCHDATA);</span>
+<span class="fc" id="L74">        matchDataClass.setReifiedClass(RubyMatchData.class);</span>
+        
+<span class="fc" id="L76">        runtime.defineGlobalConstant(&quot;MatchingData&quot;, matchDataClass);</span>
+<span class="fc" id="L77">        matchDataClass.kindOf = new RubyModule.JavaClassKindOf(RubyMatchData.class);</span>
+
+<span class="fc" id="L79">        matchDataClass.getMetaClass().undefineMethod(&quot;new&quot;);</span>
+<span class="fc" id="L80">        matchDataClass.defineAnnotatedMethods(RubyMatchData.class);</span>
+<span class="fc" id="L81">        return matchDataClass;</span>
+    }
+
+<span class="fc" id="L84">    private static ObjectAllocator MATCH_DATA_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L87">            return new RubyMatchData(runtime, klass);</span>
+        }
+    };
+
+    public RubyMatchData(Ruby runtime) {
+<span class="fc" id="L92">        super(runtime, runtime.getMatchData());</span>
+<span class="fc" id="L93">    }</span>
+
+    public RubyMatchData(Ruby runtime, RubyClass metaClass) {
+<span class="nc" id="L96">        super(runtime, metaClass);</span>
+<span class="nc" id="L97">    }</span>
+
+    @Override
+    public void copySpecialInstanceVariables(IRubyObject clone) {
+<span class="nc" id="L101">        RubyMatchData match = (RubyMatchData)clone;</span>
+<span class="nc" id="L102">        match.regs = regs;</span>
+<span class="nc" id="L103">        match.begin = begin;</span>
+<span class="nc" id="L104">        match.end = end;</span>
+<span class="nc" id="L105">        match.pattern = pattern;</span>
+<span class="nc" id="L106">        match.regexp = regexp;</span>
+<span class="nc" id="L107">        match.charOffsetUpdated = charOffsetUpdated;</span>
+<span class="nc" id="L108">        match.charOffsets = charOffsets;</span>
+<span class="nc" id="L109">    }</span>
+
+    @Override
+    public ClassIndex getNativeClassIndex() {
+<span class="fc" id="L113">        return ClassIndex.MATCHDATA;</span>
+    }
+
+<span class="fc" id="L116">    private static final class Pair implements Comparable&lt;Pair&gt; {</span>
+        int bytePos, charPos;
+        @Override
+        public int compareTo(Pair pair) {
+<span class="fc" id="L120">            return bytePos - pair.bytePos;</span>
+        }
+    }
+
+    private void updatePairs(ByteList value, Encoding encoding, Pair[] pairs) {
+<span class="fc" id="L125">        Arrays.sort(pairs);</span>
+
+<span class="fc" id="L127">        int length = pairs.length;</span>
+<span class="fc" id="L128">        byte[]bytes = value.getUnsafeBytes();</span>
+<span class="fc" id="L129">        int p = value.getBegin();</span>
+<span class="fc" id="L130">        int s = p;</span>
+<span class="fc" id="L131">        int c = 0;</span>
+        
+<span class="fc bfc" id="L133" title="All 2 branches covered.">        for (int i = 0; i &lt; length; i++) {</span>
+<span class="fc" id="L134">            int q = s + pairs[i].bytePos;</span>
+<span class="fc" id="L135">            c += StringSupport.strLength(encoding, bytes, p, q);</span>
+<span class="fc" id="L136">            pairs[i].charPos = c;</span>
+<span class="fc" id="L137">            p = q;</span>
+        }
+<span class="fc" id="L139">    }</span>
+
+    private void updateCharOffsetOnlyOneReg(ByteList value, Encoding encoding) {
+<span class="nc bnc" id="L142" title="All 4 branches missed.">        if (charOffsets == null || charOffsets.numRegs &lt; 1) charOffsets = new Region(1);</span>
+        
+<span class="nc bnc" id="L144" title="All 2 branches missed.">        if (encoding.maxLength() == 1) {</span>
+<span class="nc" id="L145">            charOffsets.beg[0] = begin;</span>
+<span class="nc" id="L146">            charOffsets.end[0] = end;</span>
+<span class="nc" id="L147">            charOffsetUpdated = true;</span>
+<span class="nc" id="L148">            return;</span>
+        }
+
+<span class="nc" id="L151">        Pair[] pairs = new Pair[2];</span>
+<span class="nc" id="L152">        pairs[0] = new Pair();</span>
+<span class="nc" id="L153">        pairs[0].bytePos = begin;</span>
+<span class="nc" id="L154">        pairs[1] = new Pair();</span>
+<span class="nc" id="L155">        pairs[1].bytePos = end;</span>
+
+<span class="nc" id="L157">        updatePairs(value, encoding, pairs);</span>
+
+<span class="nc" id="L159">        Pair key = new Pair();</span>
+<span class="nc" id="L160">        key.bytePos = begin;</span>
+<span class="nc" id="L161">        charOffsets.beg[0] = pairs[Arrays.binarySearch(pairs, key)].charPos;</span>
+<span class="nc" id="L162">        key.bytePos = end;</span>
+<span class="nc" id="L163">        charOffsets.end[0] = pairs[Arrays.binarySearch(pairs, key)].charPos;        </span>
+<span class="nc" id="L164">    }</span>
+
+    private void updateCharOffsetManyRegs(ByteList value, Encoding encoding) {
+<span class="fc" id="L167">        int numRegs = regs.numRegs;</span>
+
+<span class="pc bpc" id="L169" title="3 of 4 branches missed.">        if (charOffsets == null || charOffsets.numRegs &lt; numRegs) charOffsets = new Region(numRegs);</span>
+        
+<span class="pc bpc" id="L171" title="1 of 2 branches missed.">        if (encoding.maxLength() == 1) {</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">            for (int i = 0; i &lt; numRegs; i++) {</span>
+<span class="nc" id="L173">                charOffsets.beg[i] = regs.beg[i];</span>
+<span class="nc" id="L174">                charOffsets.end[i] = regs.end[i];</span>
+            }
+<span class="nc" id="L176">            return;</span>
+        }
+
+<span class="fc" id="L179">        Pair[] pairs = new Pair[numRegs * 2];</span>
+<span class="fc bfc" id="L180" title="All 2 branches covered.">        for (int i = 0; i &lt; pairs.length; i++) pairs[i] = new Pair();</span>
+
+<span class="fc" id="L182">        int numPos = 0;</span>
+<span class="fc bfc" id="L183" title="All 2 branches covered.">        for (int i = 0; i &lt; numRegs; i++) {</span>
+<span class="pc bpc" id="L184" title="1 of 2 branches missed.">            if (regs.beg[i] &lt; 0) continue;</span>
+<span class="fc" id="L185">            pairs[numPos++].bytePos = regs.beg[i];</span>
+<span class="fc" id="L186">            pairs[numPos++].bytePos = regs.end[i];</span>
+        }
+
+<span class="fc" id="L189">        updatePairs(value, encoding, pairs);</span>
+
+<span class="fc" id="L191">        Pair key = new Pair();</span>
+<span class="fc bfc" id="L192" title="All 2 branches covered.">        for (int i = 0; i &lt; regs.numRegs; i++) {</span>
+<span class="pc bpc" id="L193" title="1 of 2 branches missed.">            if (regs.beg[i] &lt; 0) {</span>
+<span class="nc" id="L194">                charOffsets.beg[i] = charOffsets.end[i] = -1;</span>
+<span class="nc" id="L195">                continue;</span>
+            }
+<span class="fc" id="L197">            key.bytePos = regs.beg[i];</span>
+<span class="fc" id="L198">            charOffsets.beg[i] = pairs[Arrays.binarySearch(pairs, key)].charPos;</span>
+<span class="fc" id="L199">            key.bytePos = regs.end[i];</span>
+<span class="fc" id="L200">            charOffsets.end[i] = pairs[Arrays.binarySearch(pairs, key)].charPos;</span>
+        }        
+<span class="fc" id="L202">    }</span>
+
+    private void updateCharOffset() {
+<span class="fc bfc" id="L205" title="All 2 branches covered.">        if (charOffsetUpdated) return;</span>
+
+<span class="fc" id="L207">        ByteList value = str.getByteList();</span>
+<span class="fc" id="L208">        Encoding enc = value.getEncoding();</span>
+
+<span class="pc bpc" id="L210" title="1 of 2 branches missed.">        if (regs == null) {</span>
+<span class="nc" id="L211">            updateCharOffsetOnlyOneReg(value, enc);</span>
+        } else {
+<span class="fc" id="L213">            updateCharOffsetManyRegs(value, enc);</span>
+        }
+
+<span class="fc" id="L216">        charOffsetUpdated = true;</span>
+<span class="fc" id="L217">    }</span>
+
+    private static final int MATCH_BUSY = USER2_F;
+
+    // rb_match_busy
+    public final void use() {
+<span class="fc" id="L223">        flags |= MATCH_BUSY; </span>
+<span class="fc" id="L224">    }</span>
+
+    public final boolean used() {
+<span class="nc bnc" id="L227" title="All 2 branches missed.">        return (flags &amp; MATCH_BUSY) != 0;</span>
+    }
+
+    void check() {
+<span class="pc bpc" id="L231" title="1 of 2 branches missed.">        if (str == null) throw getRuntime().newTypeError(&quot;uninitialized Match&quot;);</span>
+<span class="fc" id="L232">    }</span>
+
+    private void checkLazyRegexp() {
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">        if (regexp == null) regexp = RubyRegexp.newRegexp(getRuntime(), (ByteList)pattern.getUserObject(), pattern);</span>
+<span class="fc" id="L236">    }</span>
+    
+    private RubyString makeShared(Ruby runtime, RubyString str, int begin, int length) {
+<span class="fc" id="L239">        return str.makeShared19(runtime, begin, length);</span>
+    }
+
+    private RubyArray match_array(Ruby runtime, int start) {
+<span class="fc" id="L243">        check();</span>
+<span class="fc bfc" id="L244" title="All 2 branches covered.">        if (regs == null) {</span>
+<span class="pc bpc" id="L245" title="1 of 2 branches missed.">            if (start != 0) return runtime.newEmptyArray();</span>
+<span class="pc bpc" id="L246" title="1 of 2 branches missed.">            if (begin == -1) {</span>
+<span class="nc" id="L247">                return runtime.newArray(runtime.getNil());</span>
+            } else {
+<span class="fc" id="L249">                RubyString ss = makeShared(runtime, str, begin, end - begin);</span>
+<span class="pc bpc" id="L250" title="1 of 2 branches missed.">                if (isTaint()) ss.setTaint(true);</span>
+<span class="fc" id="L251">                return runtime.newArray(ss);</span>
+            }
+        } else {
+<span class="fc" id="L254">            RubyArray arr = runtime.newArray(regs.numRegs - start);</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">            for (int i=start; i&lt;regs.numRegs; i++) {</span>
+<span class="fc bfc" id="L256" title="All 2 branches covered.">                if (regs.beg[i] == -1) {</span>
+<span class="fc" id="L257">                    arr.append(runtime.getNil());</span>
+                } else {
+<span class="fc" id="L259">                    RubyString ss = makeShared(runtime, str, regs.beg[i], regs.end[i] - regs.beg[i]);                   </span>
+<span class="fc bfc" id="L260" title="All 2 branches covered.">                    if (isTaint()) ss.setTaint(true); </span>
+<span class="fc" id="L261">                    arr.append(ss);</span>
+                }
+            }
+<span class="fc" id="L264">            return arr;</span>
+        }
+        
+    }
+
+    public IRubyObject group(long n) {
+<span class="nc" id="L270">        return RubyRegexp.nth_match((int)n, this);</span>
+    }
+
+    public IRubyObject group(int n) {
+<span class="fc" id="L274">        return RubyRegexp.nth_match(n, this);</span>
+    }
+
+    public int getNameToBackrefNumber(String name) {
+        try {
+<span class="fc" id="L279">            byte[] bytes = name.getBytes();</span>
+<span class="fc" id="L280">            return pattern.nameToBackrefNumber(bytes, 0, bytes.length, regs);</span>
+<span class="nc" id="L281">        } catch (JOniException je) {</span>
+<span class="nc" id="L282">            throw getRuntime().newIndexError(je.getMessage());</span>
+        }
+    }
+
+    // This returns a list of values in the order the names are defined (named capture local var
+    // feature uses this).
+    public IRubyObject[] getNamedBackrefValues(Ruby runtime) {
+<span class="nc bnc" id="L289" title="All 2 branches missed.">        if (pattern.numberOfNames() == 0) return NULL_ARRAY;</span>
+
+<span class="nc" id="L291">        IRubyObject[] values = new IRubyObject[pattern.numberOfNames()];</span>
+
+<span class="nc" id="L293">        int j = 0;</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">        for (Iterator&lt;NameEntry&gt; i = pattern.namedBackrefIterator(); i.hasNext();) {</span>
+<span class="nc" id="L295">            NameEntry e = i.next();</span>
+
+<span class="nc" id="L297">            int nth = pattern.nameToBackrefNumber(e.name, e.nameP, e.nameEnd, regs);</span>
+<span class="nc" id="L298">            values[j++] = RubyRegexp.nth_match(nth, this);</span>
+<span class="nc" id="L299">        }</span>
+
+<span class="nc" id="L301">        return values;</span>
+    }
+
+    @JRubyMethod
+    @Override
+    public IRubyObject inspect() {
+<span class="pc bpc" id="L307" title="1 of 2 branches missed.">        if (str == null) return anyToString();</span>
+
+<span class="fc" id="L309">        Ruby runtime = getRuntime();</span>
+<span class="fc" id="L310">        RubyString result = runtime.newString();</span>
+<span class="fc" id="L311">        result.cat((byte)'#').cat((byte)'&lt;');</span>
+<span class="fc" id="L312">        result.append(getMetaClass().getRealClass().to_s());</span>
+
+<span class="pc bpc" id="L314" title="1 of 2 branches missed.">        NameEntry[]names = new NameEntry[regs == null ? 1 : regs.numRegs];</span>
+
+<span class="pc bpc" id="L316" title="1 of 2 branches missed.">        if (pattern.numberOfNames() &gt; 0) {</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">            for (Iterator&lt;NameEntry&gt; i = pattern.namedBackrefIterator(); i.hasNext();) {</span>
+<span class="nc" id="L318">                NameEntry e = i.next();</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">                for (int num : e.getBackRefs()) names[num] = e;</span>
+<span class="nc" id="L320">            }</span>
+        }
+
+<span class="fc bfc" id="L323" title="All 2 branches covered.">        for (int i=0; i&lt;names.length; i++) {</span>
+<span class="fc" id="L324">            result.cat((byte)' ');</span>
+<span class="fc bfc" id="L325" title="All 2 branches covered.">            if (i &gt; 0) {</span>
+<span class="fc" id="L326">                NameEntry e = names[i];</span>
+<span class="pc bpc" id="L327" title="1 of 2 branches missed.">                if (e != null) {</span>
+<span class="nc" id="L328">                    result.cat(e.name, e.nameP, e.nameEnd - e.nameP);</span>
+                } else {
+<span class="fc" id="L330">                    result.cat((byte)('0' + i));</span>
+                }
+<span class="fc" id="L332">                result.cat((byte)':');</span>
+            }
+<span class="fc" id="L334">            IRubyObject v = RubyRegexp.nth_match(i, this);</span>
+<span class="pc bpc" id="L335" title="1 of 2 branches missed.">            if (v.isNil()) {</span>
+<span class="nc" id="L336">                result.cat(&quot;nil&quot;.getBytes());</span>
+            } else {
+<span class="fc" id="L338">                result.append(((RubyString)v).inspect19());</span>
+            }
+        }
+
+<span class="fc" id="L342">        return result.cat((byte)'&gt;');</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject regexp(ThreadContext context, Block block) {
+<span class="fc" id="L347">        check();</span>
+<span class="fc" id="L348">        checkLazyRegexp();</span>
+<span class="fc" id="L349">        return regexp;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject names(ThreadContext context, Block block) {
+<span class="fc" id="L354">        check();</span>
+<span class="fc" id="L355">        checkLazyRegexp();</span>
+<span class="fc" id="L356">        return regexp.names(context);</span>
+    }
+
+    /** match_to_a
+     *
+     */
+    @JRubyMethod
+    @Override
+    public RubyArray to_a() {
+<span class="fc" id="L365">        return match_array(getRuntime(), 0);</span>
+    }
+
+    @JRubyMethod(rest = true)
+    public IRubyObject values_at(IRubyObject[] args) {
+<span class="fc" id="L370">        return to_a().values_at(args);</span>
+    }
+
+    /** match_captures
+     *
+     */
+    @JRubyMethod
+    public IRubyObject captures(ThreadContext context) {
+<span class="fc" id="L378">        return match_array(context.runtime, 1);</span>
+    }
+
+    private int nameToBackrefNumber(RubyString str) {
+<span class="fc" id="L382">        ByteList value = str.getByteList();</span>
+        try {
+<span class="fc" id="L384">            return pattern.nameToBackrefNumber(value.getUnsafeBytes(), value.getBegin(), value.getBegin() + value.getRealSize(), regs);</span>
+<span class="fc" id="L385">        } catch (JOniException je) {</span>
+<span class="fc" id="L386">            throw getRuntime().newIndexError(je.getMessage());</span>
+        }
+    }
+
+    public final int backrefNumber(IRubyObject obj) {
+<span class="fc" id="L391">        check();</span>
+<span class="pc bpc" id="L392" title="1 of 2 branches missed.">        if (obj instanceof RubySymbol) {</span>
+<span class="nc" id="L393">            return nameToBackrefNumber((RubyString)((RubySymbol)obj).id2name());</span>
+<span class="fc bfc" id="L394" title="All 2 branches covered.">        } else if (obj instanceof RubyString) {</span>
+<span class="fc" id="L395">            return nameToBackrefNumber((RubyString)obj);</span>
+        } else {
+<span class="fc" id="L397">            return RubyNumeric.num2int(obj);</span>
+        }
+    }
+
+    /** match_aref
+    *
+    */
+    public IRubyObject op_aref(IRubyObject idx) {
+<span class="nc" id="L405">        return op_aref19(idx);</span>
+    }
+
+    /** match_aref
+     *
+     */
+    public IRubyObject op_aref(IRubyObject idx, IRubyObject rest) {
+<span class="nc" id="L412">        return op_aref19(idx, rest);</span>
+    }
+
+    /** match_aref
+     *
+     */
+    @JRubyMethod(name = &quot;[]&quot;)
+    public IRubyObject op_aref19(IRubyObject idx) {
+<span class="fc" id="L420">        check();</span>
+<span class="fc" id="L421">        IRubyObject result = op_arefCommon(idx);</span>
+<span class="fc bfc" id="L422" title="All 2 branches covered.">        return result == null ? ((RubyArray)to_a()).aref19(idx) : result;</span>
+    }
+
+    /** match_aref
+    *
+    */
+    @JRubyMethod(name = &quot;[]&quot;)
+    public IRubyObject op_aref19(IRubyObject idx, IRubyObject rest) {
+        IRubyObject result;
+<span class="pc bpc" id="L431" title="3 of 4 branches missed.">        return !rest.isNil() || (result = op_arefCommon(idx)) == null ? ((RubyArray)to_a()).aref19(idx, rest) : result;</span>
+    }
+
+    private IRubyObject op_arefCommon(IRubyObject idx) {
+<span class="fc bfc" id="L435" title="All 2 branches covered.">        if (idx instanceof RubyFixnum) {</span>
+<span class="fc" id="L436">            int num = RubyNumeric.fix2int(idx);</span>
+<span class="pc bpc" id="L437" title="1 of 2 branches missed.">            if (num &gt;= 0) return RubyRegexp.nth_match(num, this);</span>
+<span class="nc" id="L438">        } else {</span>
+<span class="fc bfc" id="L439" title="All 2 branches covered.">            if (idx instanceof RubySymbol) {</span>
+<span class="fc" id="L440">                return RubyRegexp.nth_match(nameToBackrefNumber((RubyString)((RubySymbol)idx).id2name()), this);</span>
+<span class="fc bfc" id="L441" title="All 2 branches covered.">            } else if (idx instanceof RubyString) {</span>
+<span class="fc" id="L442">                return RubyRegexp.nth_match(nameToBackrefNumber((RubyString)idx), this);</span>
+            }
+        }
+<span class="fc" id="L445">        return null;</span>
+    }
+
+    /** match_size
+     *
+     */
+    @JRubyMethod(name = {&quot;size&quot;, &quot;length&quot;})
+    public IRubyObject size(ThreadContext context) {
+<span class="fc" id="L453">        check();</span>
+<span class="fc" id="L454">        Ruby runtime = context.runtime;</span>
+<span class="pc bpc" id="L455" title="1 of 2 branches missed.">        return regs == null ? RubyFixnum.one(runtime) : RubyFixnum.newFixnum(runtime, regs.numRegs);</span>
+    }
+
+    /** match_begin
+     *
+     */
+    public IRubyObject begin(ThreadContext context, IRubyObject index) {
+<span class="nc" id="L462">        return begin19(context, index);</span>
+    }
+
+    @JRubyMethod(name = &quot;begin&quot;)
+    public IRubyObject begin19(ThreadContext context, IRubyObject index) {
+<span class="fc" id="L467">        int i = backrefNumber(index);</span>
+<span class="fc" id="L468">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L469">        int b = beginCommon(runtime, i);</span>
+<span class="fc bfc" id="L470" title="All 2 branches covered.">        if (b &lt; 0) return runtime.getNil();</span>
+<span class="fc bfc" id="L471" title="All 2 branches covered.">        if (!str.singleByteOptimizable()) {</span>
+<span class="fc" id="L472">            updateCharOffset();</span>
+<span class="fc" id="L473">            b = charOffsets.beg[i];</span>
+        }
+<span class="fc" id="L475">        return RubyFixnum.newFixnum(runtime, b);</span>
+    }
+
+    private int beginCommon(Ruby runtime, int i) {
+<span class="fc" id="L479">        check();</span>
+<span class="pc bpc" id="L480" title="2 of 6 branches missed.">        if (i &lt; 0 || (regs == null ? 1 : regs.numRegs) &lt;= i) throw runtime.newIndexError(&quot;index &quot; + i + &quot; out of matches&quot;);</span>
+<span class="fc bfc" id="L481" title="All 2 branches covered.">        return regs == null ? begin : regs.beg[i];</span>
+    }
+
+    /** match_end
+     *
+     */
+    public IRubyObject end(ThreadContext context, IRubyObject index) {
+<span class="nc" id="L488">        return end19(context, index);</span>
+    }
+
+    @JRubyMethod(name = &quot;end&quot;)
+    public IRubyObject end19(ThreadContext context, IRubyObject index) {
+<span class="fc" id="L493">        int i = backrefNumber(index);</span>
+<span class="fc" id="L494">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L495">        int e = endCommon(runtime, i);</span>
+<span class="fc bfc" id="L496" title="All 2 branches covered.">        if (e &lt; 0) return runtime.getNil();</span>
+<span class="fc bfc" id="L497" title="All 2 branches covered.">        if (!str.singleByteOptimizable()) {</span>
+<span class="fc" id="L498">            updateCharOffset();</span>
+<span class="fc" id="L499">            e = charOffsets.end[i];</span>
+        }
+<span class="fc" id="L501">        return RubyFixnum.newFixnum(runtime, e);</span>
+    }
+
+    private int endCommon(Ruby runtime, int i) {
+<span class="fc" id="L505">        check();</span>
+<span class="pc bpc" id="L506" title="3 of 6 branches missed.">        if (i &lt; 0 || (regs == null ? 1 : regs.numRegs) &lt;= i) throw runtime.newIndexError(&quot;index &quot; + i + &quot; out of matches&quot;);</span>
+<span class="pc bpc" id="L507" title="1 of 2 branches missed.">        return regs == null ? end : regs.end[i];</span>
+    }
+
+    /** match_offset
+     *
+     */
+    public IRubyObject offset(ThreadContext context, IRubyObject index) {
+<span class="nc" id="L514">        return offset19(context, index);</span>
+    }
+
+    @JRubyMethod(name = &quot;offset&quot;)
+    public IRubyObject offset19(ThreadContext context, IRubyObject index) {
+<span class="fc" id="L519">        return offsetCommon(context, backrefNumber(index), true);</span>
+    }
+
+    private IRubyObject offsetCommon(ThreadContext context, int i, boolean is_19) {
+<span class="fc" id="L523">        check();</span>
+<span class="fc" id="L524">        Ruby runtime = context.runtime;</span>
+<span class="pc bpc" id="L525" title="2 of 6 branches missed.">        if (i &lt; 0 || (regs == null ? 1 : regs.numRegs) &lt;= i) throw runtime.newIndexError(&quot;index &quot; + i + &quot; out of matches&quot;);</span>
+        int b, e;
+<span class="fc bfc" id="L527" title="All 2 branches covered.">        if (regs == null) {</span>
+<span class="fc" id="L528">            b = begin;</span>
+<span class="fc" id="L529">            e = end;</span>
+        } else {
+<span class="fc" id="L531">            b = regs.beg[i];</span>
+<span class="fc" id="L532">            e = regs.end[i];</span>
+        }
+<span class="fc bfc" id="L534" title="All 2 branches covered.">        if (b &lt; 0) return runtime.newArray(runtime.getNil(), runtime.getNil());</span>
+<span class="pc bpc" id="L535" title="1 of 4 branches missed.">        if (is_19 &amp;&amp; !str.singleByteOptimizable()) {</span>
+<span class="fc" id="L536">            updateCharOffset();</span>
+<span class="fc" id="L537">            b = charOffsets.beg[i];</span>
+<span class="fc" id="L538">            e = charOffsets.end[i];</span>
+        }
+<span class="fc" id="L540">        return runtime.newArray(RubyFixnum.newFixnum(runtime, b), RubyFixnum.newFixnum(runtime, e));</span>
+    }
+
+    /** match_pre_match
+     *
+     */
+    @JRubyMethod
+    public IRubyObject pre_match(ThreadContext context) {
+<span class="fc" id="L548">        check();</span>
+<span class="pc bpc" id="L549" title="1 of 2 branches missed.">        if (begin == -1) {</span>
+<span class="nc" id="L550">            return context.runtime.getNil();</span>
+        }
+<span class="fc" id="L552">        return makeShared(context.runtime, str, 0, begin).infectBy(this);</span>
+    }
+
+    /** match_post_match
+     *
+     */
+    @JRubyMethod
+    public IRubyObject post_match(ThreadContext context) {
+<span class="fc" id="L560">        check();</span>
+<span class="pc bpc" id="L561" title="1 of 2 branches missed.">        if (begin == -1) {</span>
+<span class="nc" id="L562">            return context.runtime.getNil();</span>
+        }
+<span class="fc" id="L564">        return makeShared(context.runtime, str, end, str.getByteList().length() - end).infectBy(this);</span>
+    }
+
+    /** match_to_s
+     *
+     */
+    @JRubyMethod
+    @Override
+    public IRubyObject to_s() {
+<span class="fc" id="L573">        check();</span>
+<span class="fc" id="L574">        IRubyObject ss = RubyRegexp.last_match(this);</span>
+<span class="pc bpc" id="L575" title="1 of 2 branches missed.">        if (ss.isNil()) ss = RubyString.newEmptyString(getRuntime());</span>
+<span class="pc bpc" id="L576" title="1 of 2 branches missed.">        if (isTaint()) ss.setTaint(true);</span>
+<span class="fc" id="L577">        return ss;</span>
+    }
+
+    /** match_string
+     *
+     */
+    @JRubyMethod
+    public IRubyObject string() {
+<span class="fc" id="L585">        check();</span>
+<span class="fc" id="L586">        return str; //str is frozen</span>
+    }
+
+    @JRubyMethod(required = 1, visibility = Visibility.PRIVATE)
+    @Override
+    public IRubyObject initialize_copy(IRubyObject original) {
+<span class="nc bnc" id="L592" title="All 2 branches missed.">        if (this == original) return this;</span>
+
+<span class="nc" id="L594">        checkFrozen();</span>
+
+<span class="nc bnc" id="L596" title="All 2 branches missed.">        if (!(original instanceof RubyMatchData)) {</span>
+<span class="nc" id="L597">            throw getRuntime().newTypeError(&quot;wrong argument class&quot;);</span>
+        }
+
+<span class="nc" id="L600">        RubyMatchData origMatchData = (RubyMatchData)original;</span>
+<span class="nc" id="L601">        str = origMatchData.str;</span>
+<span class="nc" id="L602">        regs = origMatchData.regs;</span>
+
+<span class="nc" id="L604">        return this;</span>
+    }
+
+    @Override
+    public boolean equals(Object other) {
+<span class="fc bfc" id="L609" title="All 2 branches covered.">        if (this == other) return true;</span>
+<span class="fc bfc" id="L610" title="All 2 branches covered.">        if (!(other instanceof RubyMatchData)) return false;</span>
+
+<span class="fc" id="L612">        RubyMatchData match = (RubyMatchData)other;</span>
+
+<span class="pc bpc" id="L614" title="4 of 10 branches missed.">        return (this.str == match.str || (this.str != null &amp;&amp; this.str.equals(match.str))) &amp;&amp;</span>
+<span class="pc bpc" id="L615" title="3 of 6 branches missed.">                (this.regexp == match.regexp || (this.regexp != null &amp;&amp; this.regexp.equals(match.regexp))) &amp;&amp;</span>
+<span class="pc bpc" id="L616" title="5 of 8 branches missed.">                (this.charOffsets == match.charOffsets || (this.charOffsets != null &amp;&amp; this.charOffsets.equals(match.charOffsets))) &amp;&amp;</span>
+                this.begin == match.begin &amp;&amp;
+                this.end == match.end &amp;&amp;
+                this.charOffsetUpdated == match.charOffsetUpdated;
+    }
+
+    @JRubyMethod(name = {&quot;eql?&quot;, &quot;==&quot;}, required = 1)
+    @Override
+    public IRubyObject eql_p(IRubyObject obj) {
+<span class="fc" id="L625">        return getRuntime().newBoolean(equals(obj));</span>
+    }
+
+    @JRubyMethod
+    @Override
+    public RubyFixnum hash() {
+<span class="nc" id="L631">        check();</span>
+<span class="nc" id="L632">        return getRuntime().newFixnum(pattern.hashCode() ^ str.hashCode());</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

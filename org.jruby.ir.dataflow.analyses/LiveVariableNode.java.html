@@ -1,0 +1,353 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LiveVariableNode.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.dataflow.analyses</a> &gt; <span class="el_source">LiveVariableNode.java</span></div><h1>LiveVariableNode.java</h1><pre class="source lang-java linenums">package org.jruby.ir.dataflow.analyses;
+
+import org.jruby.dirgra.Edge;
+import org.jruby.ir.IRClosure;
+import org.jruby.ir.IRFlags;
+import org.jruby.ir.IRScope;
+import org.jruby.ir.dataflow.DataFlowConstants;
+import org.jruby.ir.dataflow.FlowGraphNode;
+import org.jruby.ir.instructions.ClosureAcceptingInstr;
+import org.jruby.ir.instructions.Instr;
+import org.jruby.ir.instructions.ResultInstr;
+import org.jruby.ir.operands.LocalVariable;
+import org.jruby.ir.operands.Operand;
+import org.jruby.ir.operands.Variable;
+import org.jruby.ir.operands.WrappedIRClosure;
+import org.jruby.ir.representations.BasicBlock;
+
+import java.util.*;
+
+public class LiveVariableNode extends FlowGraphNode&lt;LiveVariablesProblem, LiveVariableNode&gt; {
+    public LiveVariableNode(LiveVariablesProblem prob, BasicBlock n) {
+<span class="fc" id="L22">        super(prob, n);</span>
+<span class="fc" id="L23">    }</span>
+
+    @Override
+    public void init() {
+<span class="fc" id="L27">        setSize = problem.getDFVarsCount();</span>
+<span class="fc" id="L28">        out = new BitSet(setSize);</span>
+<span class="fc" id="L29">    }</span>
+
+    private void addDFVar(Variable v) {
+<span class="fc bfc" id="L32" title="All 2 branches covered.">        if (!problem.dfVarExists(v)) problem.addDFVar(v);</span>
+<span class="fc" id="L33">    }</span>
+
+    @Override
+    public void buildDataFlowVars(Instr i) {
+        // FIXME: We could potentially have used a Set&lt;Variable&gt; to represent live variables
+        // rather than use a BitSet. BitSet operations (meet/set/get) could be more
+        // efficient. However, given that we have to getDFVar(..) for every variable
+        // in every instruction when analysing it before accessing the BitSet, unsure
+        // if the bitset really buys us anything!
+        //
+        // StoreLocalVarPlacement and LoadLocalVarPlacement analyses use
+        // Set&lt;LocalVariable&gt; rather than BitSets.
+<span class="fc bfc" id="L45" title="All 2 branches covered.">        if (i instanceof ResultInstr) addDFVar(((ResultInstr) i).getResult());</span>
+
+<span class="fc bfc" id="L47" title="All 2 branches covered.">        for (Variable x: i.getUsedVariables()) {</span>
+<span class="fc" id="L48">            addDFVar(x);</span>
+<span class="fc" id="L49">        }</span>
+<span class="fc" id="L50">    }</span>
+
+    @Override
+    public void applyPreMeetHandler() {
+<span class="fc" id="L54">        in = new BitSet(setSize);</span>
+
+<span class="fc bfc" id="L56" title="All 2 branches covered.">        if (basicBlock.isExitBB()) {</span>
+<span class="fc" id="L57">            Collection&lt;LocalVariable&gt; lv = problem.getVarsLiveOnScopeExit();</span>
+<span class="pc bpc" id="L58" title="1 of 4 branches missed.">            if (lv != null &amp;&amp; !lv.isEmpty()) {</span>
+<span class="fc bfc" id="L59" title="All 2 branches covered.">                for (Variable v: lv) {</span>
+<span class="fc" id="L60">                    in.set(problem.getDFVar(v));</span>
+<span class="fc" id="L61">                }</span>
+            }
+        }
+        // System.out.println(&quot;Init state for BB &quot; + basicBlock.getID() + &quot; is &quot; + toString());
+<span class="fc" id="L65">    }</span>
+
+    @Override
+    public void compute_MEET(Edge e, LiveVariableNode pred) {
+        // System.out.println(&quot;computing meet for BB &quot; + basicBlock.getID() + &quot; with BB &quot; + pred.basicBlock.getID());
+        // All variables live at the entry of 'pred' are also live at exit of this node
+<span class="fc" id="L71">        in.or(pred.out);</span>
+<span class="fc" id="L72">    }</span>
+
+    private void markAllVariablesLive(LiveVariablesProblem lvp, BitSet living, Collection&lt;? extends Variable&gt; variableList) {
+<span class="fc bfc" id="L75" title="All 2 branches covered.">        for (Variable variable: variableList) {</span>
+<span class="fc" id="L76">            markVariableLive(lvp, living, variable);</span>
+<span class="fc" id="L77">        }</span>
+<span class="fc" id="L78">    }</span>
+
+    private void markVariableLive(LiveVariablesProblem lvp, BitSet living, Variable x) {
+<span class="fc" id="L81">        Integer dv = lvp.getDFVar(x);</span>
+
+        // A buggy Ruby program that uses but does not assign a value to a var
+        // will be null.
+<span class="fc bfc" id="L85" title="All 2 branches covered.">        if (dv != null) living.set(dv);</span>
+<span class="fc" id="L86">    }</span>
+
+    @Override
+    public void initSolution() {
+<span class="fc" id="L90">        living = (BitSet) in.clone();</span>
+<span class="fc" id="L91">    }</span>
+
+    @Override
+    public void applyTransferFunction(Instr i) {
+<span class="fc" id="L95">        boolean scopeBindingHasEscaped = problem.getScope().bindingHasEscaped();</span>
+
+        // v is defined =&gt; It is no longer live before 'i'
+<span class="fc bfc" id="L98" title="All 2 branches covered.">        if (i instanceof ResultInstr) {</span>
+<span class="fc" id="L99">            Variable v = ((ResultInstr) i).getResult();</span>
+<span class="fc" id="L100">            living.clear(problem.getDFVar(v));</span>
+        }
+
+        // Check if 'i' is a call and uses a closure!
+        // If so, we need to process the closure for live variable info.
+<span class="fc bfc" id="L105" title="All 2 branches covered.">        if (i instanceof ClosureAcceptingInstr) {</span>
+<span class="fc" id="L106">            Operand o = ((ClosureAcceptingInstr)i).getClosureArg();</span>
+            // System.out.println(&quot;Processing closure: &quot; + o + &quot;-------&quot;);
+<span class="fc bfc" id="L108" title="All 4 branches covered.">            if (o != null &amp;&amp; o instanceof WrappedIRClosure) {</span>
+<span class="fc" id="L109">                IRClosure cl = ((WrappedIRClosure)o).getClosure();</span>
+<span class="fc" id="L110">                LiveVariablesProblem cl_lvp = (LiveVariablesProblem) cl.getDataFlowSolution(DataFlowConstants.LVP_NAME);</span>
+<span class="fc" id="L111">                boolean needsInit = false;</span>
+<span class="fc bfc" id="L112" title="All 2 branches covered.">                if (cl_lvp == null) {</span>
+<span class="fc" id="L113">                    cl_lvp = new LiveVariablesProblem(cl, problem.getNonSelfLocalVars());</span>
+<span class="fc" id="L114">                    cl.setDataFlowSolution(cl_lvp.getName(), cl_lvp);</span>
+<span class="fc" id="L115">                    cl.computeScopeFlags();</span>
+<span class="fc" id="L116">                    needsInit = true;</span>
+                }
+
+                // Add all living local variables.
+<span class="fc" id="L120">                Set&lt;LocalVariable&gt; liveVars = problem.addLiveLocalVars(new HashSet&lt;LocalVariable&gt;(), living);</span>
+
+                // Collect variables live on entry of the closure -- they could all be live on exit as well (conservative, but safe).
+                //
+                //   def foo
+                //     i = 0;
+                //     loop { i += 1; break if i &gt; n }
+                //   end
+                //
+                // Here, i is not live outside the closure, but it is clearly live on exit of the closure because
+                // it is reused on the next iteration.  In the absence of information about the call accepting the closure,
+                // we have to assume that all vars live on exit from the closure will be live on entry into the closure as well
+                // because of looping.
+<span class="fc" id="L133">                List&lt;Variable&gt; liveOnEntryBefore = cl_lvp.getVarsLiveOnScopeEntry();</span>
+<span class="fc bfc" id="L134" title="All 2 branches covered.">                for (Variable y: liveOnEntryBefore) {</span>
+<span class="pc bpc" id="L135" title="1 of 2 branches missed.">                    if (y instanceof LocalVariable) liveVars.add((LocalVariable)y);</span>
+<span class="fc" id="L136">                }</span>
+
+                // Collect variables live out of the exception target node.  Since this call can directly jump to
+                // the rescue block (or scope exit) without executing the rest of the instructions in this bb, we
+                // have a control-flow edge from this call to that block.  Since we dont want to add a
+                // control-flow edge from pretty much every call to the rescuer/exit BB, we are handling it
+                // implicitly here.
+<span class="pc bpc" id="L143" title="1 of 2 branches missed.">                if (i.canRaiseException()) problem.addLiveLocalVars(liveVars, getExceptionTargetNode().out);</span>
+
+                // Run LVA on the closure to propagate current LVA state through the closure
+                // SSS FIXME: Think through this .. Is there any way out of having
+                // to recompute the entire lva for the closure each time through?
+<span class="fc" id="L148">                cl_lvp.setVarsLiveOnScopeExit(liveVars);</span>
+<span class="fc bfc" id="L149" title="All 2 branches covered.">                if (needsInit) {</span>
+                    // Init DF vars from this set
+<span class="fc bfc" id="L151" title="All 2 branches covered.">                    for (Variable v: liveVars) {</span>
+<span class="fc" id="L152">                        cl_lvp.addDFVar(v);</span>
+<span class="fc" id="L153">                    }</span>
+                }
+<span class="fc" id="L155">                cl_lvp.compute_MOP_Solution();</span>
+
+                // Check if liveOnScopeEntry added new vars -- if so, rerun.
+                // NOTE: This is conservative since we are not checking if some vars got deleted.
+                // But, this conservativeness guarantees forward progress of the analysis.
+                boolean changed;
+                List&lt;Variable&gt; liveOnEntryAfter;
+                do {
+<span class="fc" id="L163">                    changed = false;</span>
+<span class="fc" id="L164">                    liveOnEntryAfter = cl_lvp.getVarsLiveOnScopeEntry();</span>
+<span class="fc bfc" id="L165" title="All 2 branches covered.">                    for (Variable y: liveOnEntryAfter) {</span>
+<span class="pc bpc" id="L166" title="1 of 2 branches missed.">                        if (y instanceof LocalVariable) {</span>
+<span class="fc" id="L167">                            LocalVariable ly = (LocalVariable)y;</span>
+<span class="fc bfc" id="L168" title="All 2 branches covered.">                            if (!liveVars.contains(ly)) {</span>
+<span class="fc" id="L169">                                changed = true;</span>
+<span class="fc" id="L170">                                liveVars.add(ly);</span>
+                            }
+                        }
+<span class="fc" id="L173">                    }</span>
+
+<span class="fc bfc" id="L175" title="All 2 branches covered.">                    if (changed) {</span>
+<span class="fc" id="L176">                        cl_lvp.setVarsLiveOnScopeExit(liveVars);</span>
+<span class="fc" id="L177">                        cl_lvp.compute_MOP_Solution();</span>
+                    }
+<span class="fc bfc" id="L179" title="All 2 branches covered.">                } while (changed);</span>
+
+                // Merge live on closure entry info into the current problem.
+<span class="fc" id="L182">                markAllVariablesLive(problem, living, liveOnEntryAfter);</span>
+            }
+
+            // If this is a dataflow barrier -- mark all local vars but %self and %block live
+<span class="fc bfc" id="L186" title="All 2 branches covered.">            if (scopeBindingHasEscaped) {</span>
+                // System.out.println(&quot;.. call is a data flow barrier ..&quot;);
+                // Mark all non-self, non-block local variables live if 'c' is a dataflow barrier!
+<span class="fc bfc" id="L189" title="All 2 branches covered.">                for (Variable x: problem.getNonSelfLocalVars()) {</span>
+<span class="fc" id="L190">                    living.set(problem.getDFVar(x));</span>
+<span class="fc" id="L191">                }</span>
+            }
+        }
+
+        // NOTE: This is unnecessary in the case of calls in scopes where
+        // the binding has escaped since the if (scopeBindingHasEscapd) check above
+        // would have handled it. But, extra readability of the DRY-ed version is
+        // worth the the little bit of extra work.
+<span class="fc bfc" id="L199" title="All 2 branches covered.">        if (i.canRaiseException()) {</span>
+<span class="fc" id="L200">            makeOutExceptionVariablesLiving(living);</span>
+        }
+
+        // Now, for all variables used by 'i', mark them live before 'i'
+<span class="fc" id="L204">        markAllVariablesLive(problem, living, i.getUsedVariables());</span>
+<span class="fc" id="L205">    }</span>
+
+    @Override
+    public boolean solutionChanged() {
+<span class="fc bfc" id="L209" title="All 2 branches covered.">        return !living.equals(out);</span>
+    }
+
+    @Override
+    public void finalizeSolution() {
+<span class="fc" id="L214">        out = living;</span>
+<span class="fc" id="L215">    }</span>
+
+    /**
+     * Collect variables live out of the exception target node.  Since this instr. can directly jump to
+     * the rescue block (or scope exit) without executing the rest of the instructions in this bb, we
+     * have a control-flow edge from this instr. to that block.  Since we dont want to add a
+     * control-flow edge from pretty much every instr. to the rescuer/exit BB, we are handling it
+     * implicitly here.
+     */
+    private void makeOutExceptionVariablesLiving(BitSet living) {
+<span class="fc" id="L225">        BitSet etOut = getExceptionTargetNode().out;</span>
+
+<span class="fc bfc" id="L227" title="All 2 branches covered.">        for (int i = 0; i &lt; etOut.size(); i++) {</span>
+<span class="fc bfc" id="L228" title="All 2 branches covered.">            if (etOut.get(i)) living.set(i);</span>
+        }
+<span class="fc" id="L230">    }</span>
+
+    @Override
+    public String toString() {
+<span class="nc" id="L234">        StringBuilder buf = new StringBuilder();</span>
+<span class="nc" id="L235">        buf.append(&quot;\tVars Live on Entry: &quot;);</span>
+<span class="nc" id="L236">        int count = 0;</span>
+<span class="nc bnc" id="L237" title="All 2 branches missed.">        for (int i = 0; i &lt; in.size(); i++) {</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">            if (in.get(i)) {</span>
+<span class="nc" id="L239">                count++;</span>
+<span class="nc" id="L240">                buf.append(' ').append(i);</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">                if (count % 10 == 0) buf.append(&quot;\t\n&quot;);</span>
+            }
+        }
+
+<span class="nc bnc" id="L245" title="All 2 branches missed.">        if (count % 10 != 0) buf.append(&quot;\t\t&quot;);</span>
+
+<span class="nc" id="L247">        buf.append(&quot;\n\tVars Live on Exit: &quot;);</span>
+<span class="nc" id="L248">        count = 0;</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">        for (int i = 0; i &lt; out.size(); i++) {</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">            if (out.get(i)) {</span>
+<span class="nc" id="L251">                count++;</span>
+<span class="nc" id="L252">                buf.append(' ').append(i);</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">                if (count % 10 == 0) buf.append(&quot;\t\n&quot;);</span>
+            }
+        }
+
+<span class="nc bnc" id="L257" title="All 2 branches missed.">        if (count % 10 != 0) buf.append(&quot;\t\t&quot;);</span>
+
+<span class="nc" id="L259">        return buf.append('\n').toString();</span>
+    }
+
+/* ---------- Protected / package fields, methods --------- */
+    void markDeadInstructions() {
+        // System.out.println(&quot;-- Identifying dead instructions for &quot; + basicBlock.getID() + &quot; -- &quot;);
+<span class="fc" id="L265">        IRScope scope = problem.getScope();</span>
+<span class="fc" id="L266">        boolean scopeBindingHasEscaped = scope.bindingHasEscaped();</span>
+
+<span class="pc bpc" id="L268" title="1 of 2 branches missed.">        if (in == null) {</span>
+            // 'in' cannot be null for reachable bbs
+            // This bb is unreachable! (or we have a mighty bug!)
+            // Mark everything dead in here!
+<span class="nc bnc" id="L272" title="All 2 branches missed.">            for (Instr i: basicBlock.getInstrs()) {</span>
+<span class="nc" id="L273">                i.markDead();</span>
+<span class="nc" id="L274">            }</span>
+
+<span class="nc" id="L276">            return;</span>
+        }
+
+<span class="fc" id="L279">        initSolution();</span>
+
+        // Traverse the instructions in this basic block in reverse order!
+        // Mark as dead all instructions whose results are not used!
+<span class="fc" id="L283">        List&lt;Instr&gt; instrs = basicBlock.getInstrs();</span>
+<span class="fc" id="L284">        ListIterator&lt;Instr&gt; it = instrs.listIterator(instrs.size());</span>
+<span class="fc bfc" id="L285" title="All 2 branches covered.">        while (it.hasPrevious()) {</span>
+<span class="fc" id="L286">            Instr i = it.previous();</span>
+            // System.out.println(&quot;DEAD?? &quot; + i);
+<span class="fc bfc" id="L288" title="All 2 branches covered.">            if (i instanceof ResultInstr) {</span>
+<span class="fc" id="L289">                Variable v = ((ResultInstr) i).getResult();</span>
+<span class="fc" id="L290">                Integer dv = problem.getDFVar(v);</span>
+
+                // If 'v' is not live at the instruction site, and it has no side effects, mark it dead!
+                // System.out.println(&quot;df var for &quot; + v + &quot; is &quot; + dv);
+<span class="fc bfc" id="L294" title="All 2 branches covered.">                if (living.get(dv)) {</span>
+<span class="fc" id="L295">                    living.clear(dv);</span>
+                    // System.out.println(&quot;NO! LIVE result:&quot; + v);
+<span class="fc bfc" id="L297" title="All 2 branches covered.">                } else if (i.canBeDeleted(scope)) {</span>
+                    // System.out.println(&quot;YES!&quot;);
+<span class="fc" id="L299">                    i.markDead();</span>
+<span class="fc" id="L300">                    it.remove();</span>
+<span class="fc" id="L301">                    problem.getScope().getFlags().add(IRFlags.HAS_UNUSED_IMPLICIT_BLOCK_ARG);</span>
+                } else {
+                    // System.out.println(&quot;NO! has side effects! Op is: &quot; + i.getOperation());
+                }
+<span class="pc bpc" id="L305" title="1 of 2 branches missed.">            } else if (i.canBeDeleted(scope)) {</span>
+<span class="nc" id="L306">                 i.markDead();</span>
+<span class="nc" id="L307">                 it.remove();</span>
+            } else {
+                // System.out.println(&quot;IGNORING! No result!&quot;);
+            }
+
+<span class="fc bfc" id="L312" title="All 2 branches covered.">            if (i instanceof ClosureAcceptingInstr) {</span>
+<span class="fc" id="L313">                Operand o = ((ClosureAcceptingInstr)i).getClosureArg();</span>
+<span class="fc bfc" id="L314" title="All 4 branches covered.">                if (o != null &amp;&amp; o instanceof WrappedIRClosure) {</span>
+<span class="fc" id="L315">                    IRClosure cl = ((WrappedIRClosure)o).getClosure();</span>
+<span class="fc" id="L316">                    LiveVariablesProblem cl_lvp = (LiveVariablesProblem)cl.getDataFlowSolution(problem.getName());</span>
+                    // Collect variables live on entry and merge that info into the current problem.
+<span class="fc" id="L318">                    markAllVariablesLive(problem, living, cl_lvp.getVarsLiveOnScopeEntry());</span>
+<span class="fc bfc" id="L319" title="All 2 branches covered.">                } else if (scopeBindingHasEscaped) {</span>
+                    // Mark all non-self, non-block local variables live if 'c' is a dataflow barrier!
+<span class="fc bfc" id="L321" title="All 2 branches covered.">                    for (Variable x: problem.getNonSelfLocalVars()) {</span>
+<span class="fc" id="L322">                        living.set(problem.getDFVar(x));</span>
+<span class="fc" id="L323">                    }</span>
+                }
+            }
+
+            // NOTE: This is unnecessary in the case of calls in scopes where
+            // the binding has escaped since the if (scopeBindingHasEscapd) check above
+            // would have handled it. But, extra readability of the DRY-ed version is
+            // worth the the little bit of extra work.
+<span class="fc bfc" id="L331" title="All 2 branches covered.">            if (i.canRaiseException()) {</span>
+<span class="fc" id="L332">                makeOutExceptionVariablesLiving(living);</span>
+            }
+
+            // Do not mark this instruction's operands live if the instruction itself is dead!
+<span class="fc bfc" id="L336" title="All 2 branches covered.">            if (!i.isDead()) markAllVariablesLive(problem, living, i.getUsedVariables());</span>
+<span class="fc" id="L337">        }</span>
+<span class="fc" id="L338">    }</span>
+
+    BitSet getLiveInBitSet() {
+<span class="nc" id="L341">        return in;</span>
+    }
+
+    BitSet getLiveOutBitSet() {
+<span class="fc" id="L345">        return out;</span>
+    }
+
+    private BitSet in;      // Variables live at entry of this node
+    private BitSet out;     // Variables live at exit of node
+    private BitSet living;  // Temporary state while applying transfer function
+    private int setSize;    // Size of the &quot;this.in&quot; and &quot;this.out&quot; bit sets
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

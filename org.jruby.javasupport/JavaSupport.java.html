@@ -1,0 +1,378 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JavaSupport.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.javasupport</a> &gt; <span class="el_source">JavaSupport.java</span></div><h1>JavaSupport.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2001-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002 Benoit Cerrina &lt;b.cerrina@wanadoo.fr&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2005 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2007 William N Dortch &lt;bill.dortch@gmail.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.javasupport;
+
+import org.jruby.util.collections.MapBasedClassValue;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Member;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+
+import org.jruby.Ruby;
+import org.jruby.RubyClass;
+import org.jruby.RubyModule;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.exceptions.Unrescuable;
+import org.jruby.util.collections.ClassValue;
+import org.jruby.javasupport.proxy.JavaProxyClass;
+import org.jruby.javasupport.util.ObjectProxyCache;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.WeakIdentityHashMap;
+import org.jruby.util.cli.Options;
+import org.jruby.util.collections.ClassValueCalculator;
+
+public class JavaSupport {
+<span class="fc" id="L58">    private static final Map&lt;String,Class&gt; PRIMITIVE_CLASSES = new HashMap&lt;String,Class&gt;();</span>
+    static {
+<span class="fc" id="L60">        PRIMITIVE_CLASSES.put(&quot;boolean&quot;, Boolean.TYPE);</span>
+<span class="fc" id="L61">        PRIMITIVE_CLASSES.put(&quot;byte&quot;, Byte.TYPE);</span>
+<span class="fc" id="L62">        PRIMITIVE_CLASSES.put(&quot;char&quot;, Character.TYPE);</span>
+<span class="fc" id="L63">        PRIMITIVE_CLASSES.put(&quot;short&quot;, Short.TYPE);</span>
+<span class="fc" id="L64">        PRIMITIVE_CLASSES.put(&quot;int&quot;, Integer.TYPE);</span>
+<span class="fc" id="L65">        PRIMITIVE_CLASSES.put(&quot;long&quot;, Long.TYPE);</span>
+<span class="fc" id="L66">        PRIMITIVE_CLASSES.put(&quot;float&quot;, Float.TYPE);</span>
+<span class="fc" id="L67">        PRIMITIVE_CLASSES.put(&quot;double&quot;, Double.TYPE);</span>
+    }
+    
+    public static Class getPrimitiveClass(String primitiveType) {
+<span class="nc" id="L71">        return PRIMITIVE_CLASSES.get(primitiveType);</span>
+    }
+
+    private final Ruby runtime;
+    
+<span class="fc" id="L76">    private final ObjectProxyCache&lt;IRubyObject,RubyClass&gt; objectProxyCache = </span>
+        // TODO: specifying soft refs, may want to compare memory consumption,
+        // behavior with weak refs (specify WEAK in place of SOFT below)
+<span class="fc" id="L79">        new ObjectProxyCache&lt;IRubyObject,RubyClass&gt;(ObjectProxyCache.ReferenceType.WEAK) {</span>
+
+        public IRubyObject allocateProxy(Object javaObject, RubyClass clazz) {
+<span class="nc" id="L82">            return Java.allocateProxy(javaObject, clazz);</span>
+        }
+    };
+    
+    private final ClassValue&lt;JavaClass&gt; javaClassCache;
+    private final ClassValue&lt;RubyModule&gt; proxyClassCache;
+    private static final Constructor&lt;? extends ClassValue&gt; CLASS_VALUE_CONSTRUCTOR;
+    
+    static {
+<span class="fc" id="L91">        Constructor&lt;? extends ClassValue&gt; constructor = null;</span>
+
+<span class="pc bpc" id="L93" title="1 of 2 branches missed.">        if (Options.INVOKEDYNAMIC_CLASS_VALUES.load()) {</span>
+            try {
+                // try to load the ClassValue class. If it succeeds, we can use our
+                // ClassValue-based cache.
+<span class="nc" id="L97">                Class.forName(&quot;java.lang.ClassValue&quot;);</span>
+<span class="nc" id="L98">                constructor = (Constructor&lt;ClassValue&gt;)Class.forName(&quot;org.jruby.util.collections.Java7ClassValue&quot;).getConstructor(ClassValueCalculator.class);</span>
+            }
+<span class="nc" id="L100">            catch (Exception ex) {</span>
+                // fall through to Map version
+<span class="nc" id="L102">            }</span>
+        }
+
+<span class="pc bpc" id="L105" title="1 of 2 branches missed.">        if (constructor == null) {</span>
+            try {
+<span class="fc" id="L107">                constructor = MapBasedClassValue.class.getConstructor(ClassValueCalculator.class);</span>
+<span class="nc" id="L108">            } catch (Exception ex2) {</span>
+<span class="nc" id="L109">                throw new RuntimeException(ex2);</span>
+<span class="fc" id="L110">            }</span>
+        }
+
+<span class="fc" id="L113">        CLASS_VALUE_CONSTRUCTOR = constructor;</span>
+<span class="fc" id="L114">    }</span>
+
+    private RubyModule javaModule;
+    private RubyModule javaUtilitiesModule;
+    private RubyModule javaArrayUtilitiesModule;
+    private RubyClass javaObjectClass;
+    private JavaClass objectJavaClass;
+    private RubyClass javaClassClass;
+    private RubyClass javaArrayClass;
+    private RubyClass javaProxyClass;
+    private RubyClass arrayJavaProxyCreatorClass;
+    private RubyClass javaFieldClass;
+    private RubyClass javaMethodClass;
+    private RubyClass javaConstructorClass;
+    private RubyModule javaInterfaceTemplate;
+    private RubyModule packageModuleTemplate;
+    private RubyClass arrayProxyClass;
+    private RubyClass concreteProxyClass;
+    private RubyClass mapJavaProxy;
+    
+<span class="fc" id="L134">    private final Map&lt;String, JavaClass&gt; nameClassMap = new HashMap&lt;String, JavaClass&gt;();</span>
+
+<span class="fc" id="L136">    private final Map&lt;Object, Object[]&gt; javaObjectVariables = new WeakIdentityHashMap();</span>
+
+    // A cache of all JavaProxyClass objects created for this runtime
+<span class="fc" id="L139">    private Map&lt;Set&lt;?&gt;, JavaProxyClass&gt; javaProxyClassCache = Collections.synchronizedMap(new HashMap&lt;Set&lt;?&gt;, JavaProxyClass&gt;());</span>
+    
+<span class="fc" id="L141">    public JavaSupport(final Ruby ruby) {</span>
+<span class="fc" id="L142">        this.runtime = ruby;</span>
+        
+        try {
+<span class="fc" id="L145">            this.javaClassCache = CLASS_VALUE_CONSTRUCTOR.newInstance(new ClassValueCalculator&lt;JavaClass&gt;() {</span>
+                @Override
+                public JavaClass computeValue(Class&lt;?&gt; cls) {
+<span class="fc" id="L148">                    return new JavaClass(runtime, cls);</span>
+                }
+            });
+<span class="fc" id="L151">            this.proxyClassCache = CLASS_VALUE_CONSTRUCTOR.newInstance(new ClassValueCalculator&lt;RubyModule&gt;() {</span>
+                @Override
+                public RubyModule computeValue(Class&lt;?&gt; cls) {
+<span class="fc" id="L154">                    return Java.createProxyClassForClass(runtime, cls);</span>
+                }
+            });
+<span class="nc" id="L157">        } catch (Exception ex) {</span>
+<span class="nc" id="L158">            throw new RuntimeException(ex);</span>
+<span class="fc" id="L159">        }</span>
+<span class="fc" id="L160">    }</span>
+    
+    public Class loadJavaClass(String className) throws ClassNotFoundException {
+        Class primitiveClass;
+<span class="fc bfc" id="L164" title="All 2 branches covered.">        if ((primitiveClass = PRIMITIVE_CLASSES.get(className)) == null) {</span>
+<span class="pc bpc" id="L165" title="1 of 2 branches missed.">            if (!Ruby.isSecurityRestricted()) {</span>
+<span class="fc" id="L166">                return Class.forName(className, true, runtime.getJRubyClassLoader());</span>
+            }
+<span class="nc" id="L168">            return Class.forName(className);</span>
+        }
+<span class="fc" id="L170">        return primitiveClass;</span>
+    }
+    
+    public Class loadJavaClassVerbose(String className) {
+        try {
+<span class="fc" id="L175">            return loadJavaClass(className);</span>
+<span class="nc" id="L176">        } catch (ClassNotFoundException cnfExcptn) {</span>
+<span class="nc" id="L177">            throw runtime.newNameError(&quot;cannot load Java class &quot; + className, className, cnfExcptn);</span>
+<span class="nc" id="L178">        } catch (ExceptionInInitializerError eiie) {</span>
+<span class="nc" id="L179">            throw runtime.newNameError(&quot;cannot initialize Java class &quot; + className, className, eiie);</span>
+<span class="nc" id="L180">        } catch (LinkageError le) {</span>
+<span class="nc" id="L181">            throw runtime.newNameError(&quot;cannot link Java class &quot; + className + &quot;, probable missing dependency: &quot; + le.getLocalizedMessage(), className, le);</span>
+<span class="nc" id="L182">        } catch (SecurityException se) {</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">            if (runtime.isVerbose()) se.printStackTrace(runtime.getErrorStream());</span>
+<span class="nc" id="L184">            throw runtime.newSecurityError(se.getLocalizedMessage());</span>
+        }
+    }
+    
+    public Class loadJavaClassQuiet(String className) {
+        try {
+<span class="fc" id="L190">            return loadJavaClass(className);</span>
+<span class="fc" id="L191">        } catch (ClassNotFoundException cnfExcptn) {</span>
+<span class="fc" id="L192">            throw runtime.newNameError(&quot;cannot load Java class &quot; + className, className, cnfExcptn, false);</span>
+<span class="nc" id="L193">        } catch (ExceptionInInitializerError eiie) {</span>
+<span class="nc" id="L194">            throw runtime.newNameError(&quot;cannot initialize Java class &quot; + className, className, eiie, false);</span>
+<span class="nc" id="L195">        } catch (LinkageError le) {</span>
+<span class="nc" id="L196">            throw runtime.newNameError(&quot;cannot link Java class &quot; + className, className, le, false);</span>
+<span class="nc" id="L197">        } catch (SecurityException se) {</span>
+<span class="nc" id="L198">            throw runtime.newSecurityError(se.getLocalizedMessage());</span>
+        }
+    }
+
+    public JavaClass getJavaClassFromCache(Class clazz) {
+<span class="fc" id="L203">        return javaClassCache.get(clazz);</span>
+    }
+
+    public RubyModule getProxyClassFromCache(Class clazz) {
+<span class="fc" id="L207">        return proxyClassCache.get(clazz);</span>
+    }
+
+    public void handleNativeException(Throwable exception, Member target) {
+<span class="nc bnc" id="L211" title="All 2 branches missed.">        if (exception instanceof RaiseException) {</span>
+            // allow RaiseExceptions to propagate
+<span class="nc" id="L213">            throw (RaiseException) exception;</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">        } else if (exception instanceof Unrescuable) {</span>
+            // allow &quot;unrescuable&quot; flow-control exceptions to propagate
+<span class="nc bnc" id="L216" title="All 2 branches missed.">            if (exception instanceof Error) {</span>
+<span class="nc" id="L217">                throw (Error)exception;</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">            } else if (exception instanceof RuntimeException) {</span>
+<span class="nc" id="L219">                throw (RuntimeException)exception;</span>
+            }
+        }
+<span class="nc" id="L222">        throw createRaiseException(exception, target);</span>
+    }
+
+    private RaiseException createRaiseException(Throwable exception, Member target) {
+<span class="nc" id="L226">        return RaiseException.createNativeRaiseException(runtime, exception, target);</span>
+    }
+
+    public ObjectProxyCache&lt;IRubyObject,RubyClass&gt; getObjectProxyCache() {
+<span class="nc" id="L230">        return objectProxyCache;</span>
+    }
+
+    // not synchronizing these methods, no harm if these values get set more
+    // than once.
+    // (also note that there's no chance of getting a partially initialized
+    // class/module, as happens-before is guaranteed by volatile write/read
+    // of constants table.)
+    
+    public Map&lt;String, JavaClass&gt; getNameClassMap() {
+<span class="fc" id="L240">        return nameClassMap;</span>
+    }
+
+    public void setJavaObjectVariable(Object o, int i, Object v) {
+<span class="nc" id="L244">        synchronized (javaObjectVariables) {</span>
+<span class="nc" id="L245">            Object[] vars = javaObjectVariables.get(o);</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">            if (vars == null) {</span>
+<span class="nc" id="L247">                vars = new Object[i + 1];</span>
+<span class="nc" id="L248">                javaObjectVariables.put(o, vars);</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">            } else if (vars.length &lt;= i) {</span>
+<span class="nc" id="L250">                Object[] newVars = new Object[i + 1];</span>
+<span class="nc" id="L251">                System.arraycopy(vars, 0, newVars, 0, vars.length);</span>
+<span class="nc" id="L252">                javaObjectVariables.put(o, newVars);</span>
+<span class="nc" id="L253">                vars = newVars;</span>
+            }
+<span class="nc" id="L255">            vars[i] = v;</span>
+<span class="nc" id="L256">        }</span>
+<span class="nc" id="L257">    }</span>
+    
+    public Object getJavaObjectVariable(Object o, int i) {
+<span class="nc bnc" id="L260" title="All 2 branches missed.">        if (i == -1) return null;</span>
+        
+<span class="nc" id="L262">        synchronized (javaObjectVariables) {</span>
+<span class="nc" id="L263">            Object[] vars = javaObjectVariables.get(o);</span>
+<span class="nc bnc" id="L264" title="All 4 branches missed.">            if (vars == null || vars.length &lt;= i) return null;</span>
+<span class="nc" id="L265">            return vars[i];</span>
+<span class="nc" id="L266">        }</span>
+    }
+    
+    public RubyModule getJavaModule() {
+        RubyModule module;
+<span class="fc bfc" id="L271" title="All 2 branches covered.">        if ((module = javaModule) != null) return module;</span>
+<span class="fc" id="L272">        return javaModule = runtime.getModule(&quot;Java&quot;);</span>
+    }
+    
+    public RubyModule getJavaUtilitiesModule() {
+        RubyModule module;
+<span class="fc bfc" id="L277" title="All 2 branches covered.">        if ((module = javaUtilitiesModule) != null) return module;</span>
+<span class="fc" id="L278">        return javaUtilitiesModule = runtime.getModule(&quot;JavaUtilities&quot;);</span>
+    }
+    
+    public RubyModule getJavaArrayUtilitiesModule() {
+        RubyModule module;
+<span class="nc bnc" id="L283" title="All 2 branches missed.">        if ((module = javaArrayUtilitiesModule) != null) return module;</span>
+<span class="nc" id="L284">        return javaArrayUtilitiesModule = runtime.getModule(&quot;JavaArrayUtilities&quot;);</span>
+    }
+    
+    public RubyClass getJavaObjectClass() {
+        RubyClass clazz;
+<span class="nc bnc" id="L289" title="All 2 branches missed.">        if ((clazz = javaObjectClass) != null) return clazz;</span>
+<span class="nc" id="L290">        return javaObjectClass = getJavaModule().getClass(&quot;JavaObject&quot;);</span>
+    }
+    
+    public JavaClass getObjectJavaClass() {
+<span class="fc" id="L294">        return objectJavaClass;</span>
+    }
+    
+    public void setObjectJavaClass(JavaClass objectJavaClass) {
+<span class="fc" id="L298">        this.objectJavaClass = objectJavaClass;</span>
+<span class="fc" id="L299">    }</span>
+
+    public RubyClass getJavaArrayClass() {
+        RubyClass clazz;
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        if ((clazz = javaArrayClass) != null) return clazz;</span>
+<span class="nc" id="L304">        return javaArrayClass = getJavaModule().getClass(&quot;JavaArray&quot;);</span>
+    }
+    
+    public RubyClass getJavaClassClass() {
+        RubyClass clazz;
+<span class="fc bfc" id="L309" title="All 2 branches covered.">        if ((clazz = javaClassClass) != null) return clazz;</span>
+<span class="fc" id="L310">        return javaClassClass = getJavaModule().getClass(&quot;JavaClass&quot;);</span>
+    }
+
+    public RubyModule getJavaInterfaceTemplate() {
+        RubyModule module;
+<span class="fc bfc" id="L315" title="All 2 branches covered.">        if ((module = javaInterfaceTemplate) != null) return module;</span>
+<span class="fc" id="L316">        return javaInterfaceTemplate = runtime.getModule(&quot;JavaInterfaceTemplate&quot;);</span>
+    }
+
+    public RubyModule getPackageModuleTemplate() {
+        RubyModule module;
+<span class="fc bfc" id="L321" title="All 2 branches covered.">        if ((module = packageModuleTemplate) != null) return module;</span>
+<span class="fc" id="L322">        return packageModuleTemplate = runtime.getModule(&quot;JavaPackageModuleTemplate&quot;);</span>
+    }
+    
+    public RubyClass getJavaProxyClass() {
+        RubyClass clazz;
+<span class="fc bfc" id="L327" title="All 2 branches covered.">        if ((clazz = javaProxyClass) != null) return clazz;</span>
+<span class="fc" id="L328">        return javaProxyClass = runtime.getClass(&quot;JavaProxy&quot;);</span>
+    }
+
+    public RubyClass getArrayJavaProxyCreatorClass() {
+        RubyClass clazz;
+<span class="nc bnc" id="L333" title="All 2 branches missed.">        if ((clazz = arrayJavaProxyCreatorClass) != null) return clazz;</span>
+<span class="nc" id="L334">        return arrayJavaProxyCreatorClass = runtime.getClass(&quot;ArrayJavaProxyCreator&quot;);</span>
+    }
+    
+    public RubyClass getConcreteProxyClass() {
+        RubyClass clazz;
+<span class="fc bfc" id="L339" title="All 2 branches covered.">        if ((clazz = concreteProxyClass) != null) return clazz;</span>
+<span class="fc" id="L340">        return concreteProxyClass = runtime.getClass(&quot;ConcreteJavaProxy&quot;);</span>
+    }
+
+    public RubyClass getMapJavaProxyClass() {
+        RubyClass clazz;
+<span class="pc bpc" id="L345" title="1 of 2 branches missed.">        if ((clazz = mapJavaProxy) != null) return clazz;</span>
+<span class="fc" id="L346">        return mapJavaProxy = runtime.getClass(&quot;MapJavaProxy&quot;);</span>
+    }
+    
+    public RubyClass getArrayProxyClass() {
+        RubyClass clazz;
+<span class="fc bfc" id="L351" title="All 2 branches covered.">        if ((clazz = arrayProxyClass) != null) return clazz;</span>
+<span class="fc" id="L352">        return arrayProxyClass = runtime.getClass(&quot;ArrayJavaProxy&quot;);</span>
+    }
+    
+    public RubyClass getJavaFieldClass() {
+        RubyClass clazz;
+<span class="nc bnc" id="L357" title="All 2 branches missed.">        if ((clazz = javaFieldClass) != null) return clazz;</span>
+<span class="nc" id="L358">        return javaFieldClass = getJavaModule().getClass(&quot;JavaField&quot;);</span>
+    }
+
+    public RubyClass getJavaMethodClass() {
+        RubyClass clazz;
+<span class="fc bfc" id="L363" title="All 2 branches covered.">        if ((clazz = javaMethodClass) != null) return clazz;</span>
+<span class="fc" id="L364">        return javaMethodClass = getJavaModule().getClass(&quot;JavaMethod&quot;);</span>
+    }
+
+    public RubyClass getJavaConstructorClass() {
+        RubyClass clazz;
+<span class="fc bfc" id="L369" title="All 2 branches covered.">        if ((clazz = javaConstructorClass) != null) return clazz;</span>
+<span class="fc" id="L370">        return javaConstructorClass = getJavaModule().getClass(&quot;JavaConstructor&quot;);</span>
+    }
+
+    public Map&lt;Set&lt;?&gt;, JavaProxyClass&gt; getJavaProxyClassCache() {
+<span class="nc" id="L374">        return this.javaProxyClassCache;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

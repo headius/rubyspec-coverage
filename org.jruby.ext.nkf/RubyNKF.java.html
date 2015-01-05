@@ -1,0 +1,578 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyNKF.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.nkf</a> &gt; <span class="el_source">RubyNKF.java</span></div><h1>RubyNKF.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2007-2011 Koichiro Ohba &lt;koichiro@meadowy.org&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.ext.nkf;
+
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CharsetEncoder;
+import java.nio.charset.UnsupportedCharsetException;
+import java.util.ArrayList;
+import java.util.Map;
+import java.util.HashMap;
+
+import org.jcodings.Encoding;
+import org.jcodings.specific.ASCIIEncoding;
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyModule;
+import org.jruby.RubyString;
+
+import org.jruby.anno.JRubyMethod;
+import org.jruby.anno.JRubyModule;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
+import org.jruby.util.KCode;
+import org.jruby.util.Pack;
+
+@JRubyModule(name=&quot;NKF&quot;)
+<span class="nc" id="L59">public class RubyNKF {</span>
+<span class="nc" id="L60">    public static enum NKFCharset {</span>
+<span class="nc" id="L61">        AUTO(0, &quot;x-JISAutoDetect&quot;),</span>
+        // no ISO-2022-JP in jcodings
+<span class="nc" id="L63">        JIS(1, &quot;iso-2022-jp&quot;),</span>
+<span class="nc" id="L64">        EUC(2, &quot;EUC-JP&quot;),</span>
+<span class="nc" id="L65">        SJIS(3, &quot;Windows-31J&quot;),</span>
+<span class="nc" id="L66">        BINARY(4, null),</span>
+<span class="nc" id="L67">        NOCONV(4, null),</span>
+<span class="nc" id="L68">        UNKNOWN(0, null),</span>
+<span class="nc" id="L69">        ASCII(5, &quot;iso-8859-1&quot;),</span>
+<span class="nc" id="L70">        UTF8(6, &quot;UTF-8&quot;),</span>
+<span class="nc" id="L71">        UTF16(8, &quot;UTF-16&quot;),</span>
+<span class="nc" id="L72">        UTF32(12, &quot;UTF-32&quot;),</span>
+<span class="nc" id="L73">        OTHER(16, null),</span>
+<span class="nc" id="L74">        BASE64(20, &quot;base64&quot;),</span>
+<span class="nc" id="L75">        QENCODE(21, &quot;qencode&quot;),</span>
+<span class="nc" id="L76">        MIME_DETECT(22, &quot;MimeAutoDetect&quot;);</span>
+
+<span class="nc" id="L78">        private NKFCharset(int value, String charset) {</span>
+<span class="nc" id="L79">            this.value = value;</span>
+<span class="nc" id="L80">            this.charset = charset;</span>
+<span class="nc" id="L81">        }</span>
+
+        public int getValue() {
+<span class="nc" id="L84">            return value;</span>
+        }
+
+        public String getCharset() {
+<span class="nc" id="L88">            return charset;</span>
+        }
+
+        private final int value;
+        private final String charset;
+    }
+
+<span class="nc" id="L95">    private static final ByteList BEGIN_MIME_STRING = new ByteList(ByteList.plain(&quot;=?&quot;));</span>
+<span class="nc" id="L96">    private static final ByteList END_MIME_STRING = new ByteList(ByteList.plain(&quot;?=&quot;));</span>
+<span class="nc" id="L97">    private static final ByteList PACK_BASE64 = new ByteList(ByteList.plain(&quot;m&quot;));</span>
+<span class="nc" id="L98">    private static final ByteList PACK_QENCODE = new ByteList(ByteList.plain(&quot;M&quot;));</span>
+    
+<span class="nc" id="L100">    public static Map&lt;Integer, String&gt; NKFCharsetMap = new HashMap();</span>
+
+    public static void createNKF(Ruby runtime) {
+<span class="nc" id="L103">        RubyModule nkfModule = runtime.defineModule(&quot;NKF&quot;);</span>
+
+<span class="nc bnc" id="L105" title="All 2 branches missed.">        for (NKFCharset nkf : NKFCharset.values()) {</span>
+<span class="nc" id="L106">            nkfModule.defineConstant(nkf.name(), RubyFixnum.newFixnum(runtime, nkf.getValue()));</span>
+<span class="nc" id="L107">            NKFCharsetMap.put(nkf.getValue(), nkf.name());</span>
+        }
+
+<span class="nc" id="L110">        RubyString version = runtime.newString(&quot;2.0.7 (JRuby 2007-05-11)&quot;);</span>
+<span class="nc" id="L111">        RubyString nkfVersion = runtime.newString(&quot;2.0.7&quot;);</span>
+<span class="nc" id="L112">        RubyString nkfDate = runtime.newString(&quot;2007-05-11&quot;);</span>
+
+<span class="nc" id="L114">        ThreadContext context = runtime.getCurrentContext();</span>
+
+<span class="nc" id="L116">        version.freeze(context);</span>
+<span class="nc" id="L117">        nkfVersion.freeze(context);</span>
+<span class="nc" id="L118">        nkfDate.freeze(context);</span>
+
+<span class="nc" id="L120">        nkfModule.defineAnnotatedMethods(RubyNKF.class);</span>
+<span class="nc" id="L121">    }</span>
+
+    @JRubyMethod(name = &quot;guess&quot;, required = 1, module = true)
+    public static IRubyObject guess(ThreadContext context, IRubyObject recv, IRubyObject s) {
+        // TODO: Fix charset usage for JRUBY-4553
+<span class="nc" id="L126">        Ruby runtime = context.runtime;</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        if (!s.respondsTo(&quot;to_str&quot;)) {</span>
+<span class="nc" id="L128">            throw runtime.newTypeError(&quot;can't convert &quot; + s.getMetaClass() + &quot; into String&quot;);</span>
+        }
+<span class="nc" id="L130">        ByteList bytes = s.convertToString().getByteList();</span>
+<span class="nc" id="L131">        ByteBuffer buf = ByteBuffer.wrap(bytes.getUnsafeBytes(), bytes.begin(), bytes.length());</span>
+        CharsetDecoder decoder;
+        try {
+<span class="nc" id="L134">            decoder = Charset.forName(&quot;x-JISAutoDetect&quot;).newDecoder();</span>
+<span class="nc" id="L135">        } catch (UnsupportedCharsetException e) {</span>
+<span class="nc" id="L136">            throw runtime.newStandardError(&quot;charsets.jar is required to use NKF#guess. Please install JRE which supports m17n.&quot;);</span>
+<span class="nc" id="L137">        }</span>
+        try {
+<span class="nc" id="L139">            decoder.decode(buf);</span>
+<span class="nc" id="L140">        } catch (CharacterCodingException e) {</span>
+<span class="nc" id="L141">            return runtime.newFixnum(UNKNOWN.getValue());</span>
+<span class="nc" id="L142">        }</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        if (!decoder.isCharsetDetected()) {</span>
+<span class="nc" id="L144">            return runtime.newFixnum(UNKNOWN.getValue());</span>
+        }
+<span class="nc" id="L146">        Charset charset = decoder.detectedCharset();</span>
+<span class="nc" id="L147">        String name = charset.name();</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">        if (&quot;Shift_JIS&quot;.equals(name)) {</span>
+<span class="nc" id="L149">            return runtime.newFixnum(SJIS.getValue());</span>
+        }
+<span class="nc bnc" id="L151" title="All 2 branches missed.">        if (&quot;windows-31j&quot;.equals(name)) {</span>
+<span class="nc" id="L152">            return runtime.newFixnum(SJIS.getValue());</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        } else if (&quot;EUC-JP&quot;.equals(name)) {</span>
+<span class="nc" id="L154">            return runtime.newFixnum(EUC.getValue());</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        } else if (&quot;ISO-2022-JP&quot;.equals(name)) {</span>
+<span class="nc" id="L156">            return runtime.newFixnum(JIS.getValue());</span>
+        } else {
+<span class="nc" id="L158">            return runtime.newFixnum(UNKNOWN.getValue());</span>
+        }
+    }
+
+    @JRubyMethod(name = &quot;guess1&quot;, required = 1, module = true)
+    public static IRubyObject guess1(ThreadContext context, IRubyObject recv, IRubyObject str) {
+<span class="nc" id="L164">        return guess(context, recv, str);</span>
+    }
+
+    @JRubyMethod(name = &quot;guess2&quot;, required = 1, module = true)
+    public static IRubyObject guess2(ThreadContext context, IRubyObject recv, IRubyObject str) {
+<span class="nc" id="L169">        return guess(context, recv, str);</span>
+    }
+
+    @JRubyMethod(name = &quot;nkf&quot;, required = 2, module = true)
+    public static IRubyObject nkf(ThreadContext context, IRubyObject recv, IRubyObject opt, IRubyObject str) {
+<span class="nc" id="L174">        Ruby runtime = context.runtime;</span>
+
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        if (!opt.respondsTo(&quot;to_str&quot;)) {</span>
+<span class="nc" id="L177">            throw runtime.newTypeError(&quot;can't convert &quot; + opt.getMetaClass() + &quot; into String&quot;);</span>
+        }
+
+<span class="nc bnc" id="L180" title="All 2 branches missed.">        if (!str.respondsTo(&quot;to_str&quot;)) {</span>
+<span class="nc" id="L181">            throw runtime.newTypeError(&quot;can't convert &quot; + str.getMetaClass() + &quot; into String&quot;);</span>
+        }
+
+<span class="nc" id="L184">        Map&lt;String, NKFCharset&gt; options = parseOpt(opt.convertToString().toString());</span>
+
+<span class="nc bnc" id="L186" title="All 2 branches missed.">        if (options.get(&quot;input&quot;).getValue() == AUTO.getValue()) {</span>
+<span class="nc" id="L187">            KCode kcode = runtime.getKCode();</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">            if (kcode == KCode.SJIS) {</span>
+<span class="nc" id="L189">                options.put(&quot;input&quot;, SJIS);</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">            } else if (kcode == KCode.EUC) {</span>
+<span class="nc" id="L191">                options.put(&quot;input&quot;, EUC);</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">            } else if (kcode == KCode.UTF8) {</span>
+<span class="nc" id="L193">                options.put(&quot;input&quot;, UTF8);</span>
+            }
+        }
+
+<span class="nc" id="L197">        ByteList bstr = str.convertToString().getByteList();</span>
+<span class="nc" id="L198">        Converter converter = null;</span>
+<span class="nc bnc" id="L199" title="All 2 branches missed.">        if (Converter.isMimeText(bstr, options)) {</span>
+<span class="nc" id="L200">            converter = new MimeConverter(context, options);</span>
+        } else {
+<span class="nc" id="L202">            converter = new DefaultConverter(context, options);</span>
+        }
+
+<span class="nc" id="L205">        RubyString result = converter.convert(bstr);</span>
+
+<span class="nc bnc" id="L207" title="All 2 branches missed.">        if (options.get(&quot;mime-encode&quot;) == BASE64) {</span>
+<span class="nc" id="L208">            result = Converter.encodeMimeString(runtime, result, PACK_BASE64);</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">        } else if (options.get(&quot;mime-encode&quot;) == QENCODE) {</span>
+<span class="nc" id="L210">            result = Converter.encodeMimeString(runtime, result, PACK_QENCODE);</span>
+        }
+
+<span class="nc" id="L213">        return result;</span>
+    }
+
+    public static Command parseOption(String s) {
+<span class="nc" id="L217">        Options options = new Options();</span>
+<span class="nc" id="L218">        options.addOption(&quot;b&quot;);</span>
+<span class="nc" id="L219">        options.addOption(&quot;u&quot;);</span>
+<span class="nc" id="L220">        options.addOption(&quot;j&quot;, &quot;jis&quot;);</span>
+<span class="nc" id="L221">        options.addOption(&quot;s&quot;, &quot;sjis&quot;);</span>
+<span class="nc" id="L222">        options.addOption(&quot;e&quot;, &quot;euc&quot;);</span>
+<span class="nc" id="L223">        options.addOption(&quot;w&quot;, null, &quot;[0-9][0-9]&quot;);</span>
+<span class="nc" id="L224">        options.addOption(&quot;J&quot;, &quot;jis-input&quot;);</span>
+<span class="nc" id="L225">        options.addOption(&quot;S&quot;, &quot;sjis-input&quot;);</span>
+<span class="nc" id="L226">        options.addOption(&quot;E&quot;, &quot;euc-input&quot;);</span>
+<span class="nc" id="L227">        options.addOption(&quot;W&quot;, null, &quot;[0-9][0-9]&quot;);</span>
+<span class="nc" id="L228">        options.addOption(&quot;t&quot;);</span>
+<span class="nc" id="L229">        options.addOption(&quot;i_&quot;);</span>
+<span class="nc" id="L230">        options.addOption(&quot;o_&quot;);</span>
+<span class="nc" id="L231">        options.addOption(&quot;r&quot;);</span>
+<span class="nc" id="L232">        options.addOption(&quot;h1&quot;, &quot;hiragana&quot;);</span>
+<span class="nc" id="L233">        options.addOption(&quot;h2&quot;, &quot;katakana&quot;);</span>
+<span class="nc" id="L234">        options.addOption(&quot;h3&quot;, &quot;katakana-hiragana&quot;);</span>
+<span class="nc" id="L235">        options.addOption(&quot;T&quot;);</span>
+<span class="nc" id="L236">        options.addOption(&quot;l&quot;);</span>
+<span class="nc" id="L237">        options.addOption(&quot;f&quot;, null, &quot;[0-9]+-[0-9]*&quot;);</span>
+<span class="nc" id="L238">        options.addOption(&quot;F&quot;);</span>
+<span class="nc" id="L239">        options.addOption(&quot;Z&quot;, null, &quot;[0-3]&quot;);</span>
+<span class="nc" id="L240">        options.addOption(&quot;X&quot;);</span>
+<span class="nc" id="L241">        options.addOption(&quot;x&quot;);</span>
+<span class="nc" id="L242">        options.addOption(&quot;B&quot;, null, &quot;[0-2]&quot;);</span>
+<span class="nc" id="L243">        options.addOption(&quot;I&quot;);</span>
+<span class="nc" id="L244">        options.addOption(&quot;L&quot;, null, &quot;[uwm]&quot;);</span>
+<span class="nc" id="L245">        options.addOption(&quot;d&quot;);</span>
+<span class="nc" id="L246">        options.addOption(&quot;c&quot;);</span>
+<span class="nc" id="L247">        options.addOption(&quot;m&quot;, null, &quot;[BQN0]&quot;);</span>
+<span class="nc" id="L248">        options.addOption(&quot;M&quot;, null, &quot;[BQ]&quot;);</span>
+<span class="nc" id="L249">        options.addOption(null, &quot;fj&quot;);</span>
+<span class="nc" id="L250">        options.addOption(null, &quot;unix&quot;);</span>
+<span class="nc" id="L251">        options.addOption(null, &quot;mac&quot;);</span>
+<span class="nc" id="L252">        options.addOption(null, &quot;msdos&quot;);</span>
+<span class="nc" id="L253">        options.addOption(null, &quot;windows&quot;);</span>
+<span class="nc" id="L254">        options.addOption(null, &quot;mime&quot;);</span>
+<span class="nc" id="L255">        options.addOption(null, &quot;base64&quot;);</span>
+<span class="nc" id="L256">        options.addOption(null, &quot;mime-input&quot;);</span>
+<span class="nc" id="L257">        options.addOption(null, &quot;base64-input&quot;);</span>
+<span class="nc" id="L258">        options.addOption(null, &quot;ic&quot;, &quot;ic=(.*)&quot;);</span>
+<span class="nc" id="L259">        options.addOption(null, &quot;oc&quot;, &quot;oc=(.*)&quot;);</span>
+<span class="nc" id="L260">        options.addOption(null, &quot;fb-skip&quot;);</span>
+<span class="nc" id="L261">        options.addOption(null, &quot;fb-html&quot;);</span>
+<span class="nc" id="L262">        options.addOption(null, &quot;fb-xml&quot;);</span>
+<span class="nc" id="L263">        options.addOption(null, &quot;fb-perl&quot;);</span>
+<span class="nc" id="L264">        options.addOption(null, &quot;fb-java&quot;);</span>
+<span class="nc" id="L265">        options.addOption(null, &quot;fb-subchar&quot;, &quot;fb-subchar=(.*)&quot;);</span>
+<span class="nc" id="L266">        options.addOption(null, &quot;no-cp932ext&quot;);</span>
+<span class="nc" id="L267">        options.addOption(null, &quot;cap-input&quot;);</span>
+<span class="nc" id="L268">        options.addOption(null, &quot;url-input&quot;);</span>
+<span class="nc" id="L269">        options.addOption(null, &quot;numchar-input&quot;);</span>
+<span class="nc" id="L270">        options.addOption(null, &quot;no-best-fit-chars&quot;);</span>
+
+<span class="nc" id="L272">        CommandParser parser = new CommandParser();</span>
+<span class="nc" id="L273">        Command cmd = parser.parse(options, s);</span>
+<span class="nc" id="L274">        return cmd;</span>
+    }
+
+    private static Map&lt;String, NKFCharset&gt; parseOpt(String s) {
+<span class="nc" id="L278">        Map&lt;String, NKFCharset&gt; options = new HashMap&lt;String, NKFCharset&gt;();</span>
+
+        // default options
+<span class="nc" id="L281">        options.put(&quot;input&quot;, AUTO);</span>
+<span class="nc" id="L282">        options.put(&quot;output&quot;, JIS);</span>
+<span class="nc" id="L283">        options.put(&quot;mime-decode&quot;, MIME_DETECT);</span>
+<span class="nc" id="L284">        options.put(&quot;mime-encode&quot;, NOCONV);</span>
+
+<span class="nc" id="L286">        Command cmd = parseOption(s);</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">        if (cmd.hasOption(&quot;j&quot;)) {</span>
+<span class="nc" id="L288">            options.put(&quot;output&quot;, JIS);</span>
+        }
+<span class="nc bnc" id="L290" title="All 2 branches missed.">        if (cmd.hasOption(&quot;s&quot;)) {</span>
+<span class="nc" id="L291">            options.put(&quot;output&quot;, SJIS);</span>
+        }
+<span class="nc bnc" id="L293" title="All 2 branches missed.">        if (cmd.hasOption(&quot;e&quot;)) {</span>
+<span class="nc" id="L294">            options.put(&quot;output&quot;, EUC);</span>
+        }
+<span class="nc bnc" id="L296" title="All 2 branches missed.">        if (cmd.hasOption(&quot;w&quot;)) {</span>
+<span class="nc" id="L297">            Option opt = cmd.getOption(&quot;w&quot;);</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">            if (&quot;32&quot;.equals(opt.getValue())) {</span>
+<span class="nc" id="L299">                options.put(&quot;output&quot;, UTF32);</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">            } else if(&quot;16&quot;.equals(opt.getValue())) {</span>
+<span class="nc" id="L301">                options.put(&quot;output&quot;, UTF16);</span>
+            } else {
+<span class="nc" id="L303">                options.put(&quot;output&quot;, UTF8);</span>
+            }
+        }
+<span class="nc bnc" id="L306" title="All 2 branches missed.">        if (cmd.hasOption(&quot;J&quot;)) {</span>
+<span class="nc" id="L307">            options.put(&quot;input&quot;, JIS);</span>
+        }
+<span class="nc bnc" id="L309" title="All 2 branches missed.">        if (cmd.hasOption(&quot;S&quot;)) {</span>
+<span class="nc" id="L310">            options.put(&quot;input&quot;, SJIS);</span>
+        }
+<span class="nc bnc" id="L312" title="All 2 branches missed.">        if (cmd.hasOption(&quot;E&quot;)) {</span>
+<span class="nc" id="L313">            options.put(&quot;input&quot;, EUC);</span>
+        }
+<span class="nc bnc" id="L315" title="All 2 branches missed.">        if (cmd.hasOption(&quot;W&quot;)) {</span>
+<span class="nc" id="L316">            Option opt = cmd.getOption(&quot;W&quot;);</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">            if (&quot;32&quot;.equals(opt.getValue())) {</span>
+<span class="nc" id="L318">                options.put(&quot;input&quot;, UTF32);</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">            } else if(&quot;16&quot;.equals(opt.getValue())) {</span>
+<span class="nc" id="L320">                options.put(&quot;input&quot;, UTF16);</span>
+            } else {
+<span class="nc" id="L322">                options.put(&quot;input&quot;, UTF8);</span>
+            }
+        }
+<span class="nc bnc" id="L325" title="All 2 branches missed.">        if (cmd.hasOption(&quot;m&quot;)) {</span>
+<span class="nc" id="L326">            Option opt = cmd.getOption(&quot;m&quot;);</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">            if (opt.getValue() == null) {</span>
+<span class="nc" id="L328">                options.put(&quot;mime-decode&quot;, MIME_DETECT);</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">            } else if (&quot;B&quot;.equals(opt.getValue())) {</span>
+<span class="nc" id="L330">                options.put(&quot;mime-decode&quot;, BASE64);</span>
+<span class="nc bnc" id="L331" title="All 2 branches missed.">            } else if (&quot;Q&quot;.equals(opt.getValue())) {</span>
+<span class="nc" id="L332">                options.put(&quot;mime-decode&quot;, QENCODE);</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">            } else if (&quot;N&quot;.equals(opt.getValue())) {</span>
+                // TODO: non-strict option
+<span class="nc bnc" id="L335" title="All 2 branches missed.">            } else if (&quot;0&quot;.equals(opt.getValue())) {</span>
+<span class="nc" id="L336">                options.put(&quot;mime-decode&quot;, NOCONV);</span>
+            }
+        }
+<span class="nc bnc" id="L339" title="All 2 branches missed.">        if (cmd.hasOption(&quot;M&quot;)) {</span>
+<span class="nc" id="L340">            Option opt = cmd.getOption(&quot;M&quot;);</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">            if (opt.getValue() == null) {</span>
+<span class="nc" id="L342">                options.put(&quot;mime-encode&quot;, NOCONV);</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">            } else if (&quot;B&quot;.equals(opt.getValue())) {</span>
+<span class="nc" id="L344">                options.put(&quot;mime-encode&quot;, BASE64);</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">            } else if (&quot;Q&quot;.equals(opt.getValue())) {</span>
+<span class="nc" id="L346">                options.put(&quot;mime-encode&quot;, QENCODE);</span>
+            }
+        }
+<span class="nc bnc" id="L349" title="All 2 branches missed.">        if (cmd.hasOption(&quot;base64&quot;)) {</span>
+<span class="nc" id="L350">            options.put(&quot;mime-encode&quot;, BASE64);</span>
+        }
+<span class="nc bnc" id="L352" title="All 2 branches missed.">        if (cmd.hasOption(&quot;oc&quot;)) {</span>
+<span class="nc" id="L353">            Option opt = cmd.getOption(&quot;oc&quot;);</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">            if (&quot;ISO-2022-JP&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L355">                options.put(&quot;output&quot;, JIS);</span>
+<span class="nc bnc" id="L356" title="All 2 branches missed.">            } else if (&quot;EUC-JP&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L357">                options.put(&quot;output&quot;, EUC);</span>
+<span class="nc bnc" id="L358" title="All 2 branches missed.">            } else if (&quot;CP932&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L359">                options.put(&quot;output&quot;, SJIS);</span>
+<span class="nc bnc" id="L360" title="All 2 branches missed.">            } else if (&quot;Shift_JIS&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L361">                options.put(&quot;output&quot;, SJIS);</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">            } else if (&quot;UTF-8&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L363">                options.put(&quot;output&quot;, UTF8);</span>
+<span class="nc bnc" id="L364" title="All 2 branches missed.">            } else if (&quot;UTF-8N&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L365">                options.put(&quot;output&quot;, UTF8);</span>
+<span class="nc bnc" id="L366" title="All 2 branches missed.">            } else if (&quot;UTF-16&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L367">                options.put(&quot;output&quot;, UTF16);</span>
+<span class="nc bnc" id="L368" title="All 2 branches missed.">            } else if (&quot;UTF-16BE-BOM&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L369">                options.put(&quot;output&quot;, UTF16);</span>
+<span class="nc bnc" id="L370" title="All 2 branches missed.">            } else if (&quot;UTF-32&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L371">                options.put(&quot;output&quot;, UTF32);</span>
+<span class="nc bnc" id="L372" title="All 2 branches missed.">            } else if (&quot;UTF-32BE-BOM&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L373">                options.put(&quot;output&quot;, UTF32);</span>
+            }
+        }
+<span class="nc bnc" id="L376" title="All 2 branches missed.">        if (cmd.hasOption(&quot;ic&quot;)) {</span>
+<span class="nc" id="L377">            Option opt = cmd.getOption(&quot;ic&quot;);</span>
+<span class="nc bnc" id="L378" title="All 2 branches missed.">            if (&quot;ISO-2022-JP&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L379">                options.put(&quot;input&quot;, JIS);</span>
+<span class="nc bnc" id="L380" title="All 2 branches missed.">            } else if (&quot;EUC-JP&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L381">                options.put(&quot;input&quot;, EUC);</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">            } else if (&quot;CP932&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L383">                options.put(&quot;input&quot;, SJIS);</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">            } else if (&quot;Shift_JIS&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L385">                options.put(&quot;input&quot;, SJIS);</span>
+<span class="nc bnc" id="L386" title="All 2 branches missed.">            } else if (&quot;UTF-8&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L387">                options.put(&quot;input&quot;, UTF8);</span>
+<span class="nc bnc" id="L388" title="All 2 branches missed.">            } else if (&quot;UTF-8N&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L389">                options.put(&quot;input&quot;, UTF8);</span>
+<span class="nc bnc" id="L390" title="All 2 branches missed.">            } else if (&quot;UTF-16&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L391">                options.put(&quot;input&quot;, UTF16);</span>
+<span class="nc bnc" id="L392" title="All 2 branches missed.">            } else if (&quot;UTF-16BE-BOM&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L393">                options.put(&quot;input&quot;, UTF16);</span>
+<span class="nc bnc" id="L394" title="All 2 branches missed.">            } else if (&quot;UTF-32&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L395">                options.put(&quot;input&quot;, UTF32);</span>
+<span class="nc bnc" id="L396" title="All 2 branches missed.">            } else if (&quot;UTF-32BE-BOM&quot;.compareToIgnoreCase(opt.getValue()) == 0) {</span>
+<span class="nc" id="L397">                options.put(&quot;input&quot;, UTF32);</span>
+            }
+        }
+
+<span class="nc" id="L401">        return options;</span>
+    }
+
+    static abstract class Converter {
+
+        protected ThreadContext context;
+        protected Map&lt;String, NKFCharset&gt; options;
+
+<span class="nc" id="L409">        public Converter(ThreadContext ctx, Map&lt;String, NKFCharset&gt; opt) {</span>
+<span class="nc" id="L410">            context = ctx;</span>
+<span class="nc" id="L411">            options = opt;</span>
+<span class="nc" id="L412">        }</span>
+
+        static boolean isMimeText(ByteList str, Map&lt;String, NKFCharset&gt; options) {
+<span class="nc bnc" id="L415" title="All 2 branches missed.">            if (str.length() &lt;= 6) {</span>
+<span class="nc" id="L416">                return false;</span>
+            }
+<span class="nc bnc" id="L418" title="All 2 branches missed.">            if (options.get(&quot;mime-decode&quot;) == NOCONV) {</span>
+<span class="nc" id="L419">                return false;</span>
+            }
+<span class="nc bnc" id="L421" title="All 2 branches missed.">            if (str.indexOf(BEGIN_MIME_STRING) &lt; 0) {</span>
+<span class="nc" id="L422">                return false;</span>
+            }
+<span class="nc bnc" id="L424" title="All 2 branches missed.">            if (str.lastIndexOf(END_MIME_STRING) &lt; 0) {</span>
+<span class="nc" id="L425">                return false;</span>
+            }
+<span class="nc" id="L427">            return true;</span>
+        }
+
+        private static RubyString encodeMimeString(Ruby runtime, RubyString str, ByteList format) {
+<span class="nc" id="L431">            RubyArray array = RubyArray.newArray(runtime, str);</span>
+<span class="nc" id="L432">            return Pack.pack(runtime, array, format).chomp(runtime.getCurrentContext());</span>
+        }
+
+        abstract RubyString convert(ByteList str);
+
+        ByteList convert_byte(ByteList str, String inputCharset, NKFCharset output) {
+<span class="nc" id="L438">            String outputCharset = output.getCharset();</span>
+            CharsetDecoder decoder;
+            CharsetEncoder encoder;
+
+            try {
+<span class="nc" id="L443">                decoder = Charset.forName(inputCharset).newDecoder();</span>
+<span class="nc" id="L444">                encoder = Charset.forName(outputCharset).newEncoder();</span>
+<span class="nc" id="L445">            } catch (UnsupportedCharsetException e) {</span>
+<span class="nc" id="L446">                throw context.runtime.newArgumentError(&quot;invalid charset&quot;);</span>
+<span class="nc" id="L447">            }</span>
+
+<span class="nc" id="L449">            ByteBuffer buf = ByteBuffer.wrap(str.getUnsafeBytes(), str.begin(), str.length());</span>
+
+            try {
+<span class="nc" id="L452">                CharBuffer cbuf = decoder.decode(buf);</span>
+<span class="nc" id="L453">                encoder.onUnmappableCharacter(java.nio.charset.CodingErrorAction.IGNORE);</span>
+<span class="nc" id="L454">                buf = encoder.encode(cbuf);</span>
+<span class="nc" id="L455">            } catch (CharacterCodingException e) {</span>
+<span class="nc" id="L456">                throw context.runtime.newArgumentError(&quot;invalid encoding&quot;);</span>
+<span class="nc" id="L457">            }</span>
+<span class="nc" id="L458">            byte[] arr = buf.array();</span>
+<span class="nc" id="L459">            ByteList r = new ByteList(arr, 0, buf.limit());</span>
+<span class="nc bnc" id="L460" title="All 2 branches missed.">            if (outputCharset.equalsIgnoreCase(&quot;Windows-31J&quot;)) outputCharset = &quot;Shift_JIS&quot;;</span>
+<span class="nc bnc" id="L461" title="All 2 branches missed.">            if (outputCharset.equalsIgnoreCase(&quot;UTF-16&quot;)) outputCharset = &quot;UTF-16BE&quot;;</span>
+<span class="nc" id="L462">            Ruby ruby = context.runtime;</span>
+<span class="nc" id="L463">            Encoding enc = ruby.getEncodingService().findEncoding(ruby.newString(outputCharset));</span>
+<span class="nc bnc" id="L464" title="All 2 branches missed.">            if (enc != null) {</span>
+<span class="nc" id="L465">                r.setEncoding(enc);</span>
+            }
+
+<span class="nc" id="L468">            return r;</span>
+        }
+    }
+
+    static class DefaultConverter extends Converter {
+
+        public DefaultConverter(ThreadContext ctx, Map&lt;String, NKFCharset&gt; opt) {
+<span class="nc" id="L475">            super(ctx, opt);</span>
+<span class="nc" id="L476">        }</span>
+
+        RubyString convert(ByteList str) {
+<span class="nc" id="L479">            NKFCharset input = options.get(&quot;input&quot;);</span>
+<span class="nc" id="L480">            NKFCharset output = options.get(&quot;output&quot;);</span>
+<span class="nc" id="L481">            ByteList b = convert_byte(str,</span>
+<span class="nc" id="L482">                    input.getCharset(),</span>
+                    output);
+<span class="nc" id="L484">            return context.runtime.newString(b);</span>
+        }
+    }
+
+<span class="nc" id="L488">    static class MimeConverter extends Converter {</span>
+
+        public MimeConverter(ThreadContext ctx, Map&lt;String, NKFCharset&gt; opt) {
+<span class="nc" id="L491">            super(ctx, opt);</span>
+<span class="nc" id="L492">        }</span>
+
+        private String detectCharset(String charset) {
+<span class="nc bnc" id="L495" title="All 2 branches missed.">            if (charset.compareToIgnoreCase(UTF8.getCharset()) == 0) {</span>
+<span class="nc" id="L496">                return UTF8.getCharset();</span>
+<span class="nc bnc" id="L497" title="All 2 branches missed.">            } else if (charset.compareToIgnoreCase(JIS.getCharset()) == 0) {</span>
+<span class="nc" id="L498">                return JIS.getCharset();</span>
+<span class="nc bnc" id="L499" title="All 2 branches missed.">            } else if (charset.compareToIgnoreCase(EUC.getCharset()) == 0) {</span>
+<span class="nc" id="L500">                return EUC.getCharset();</span>
+            } else {
+<span class="nc" id="L502">                return ASCII.getCharset();</span>
+            }
+        }
+
+        private ByteList decodeMimeString(String str) {
+<span class="nc" id="L507">            String[] mime = str.split(&quot;^=\\?|\\?|\\?=$&quot;);</span>
+<span class="nc" id="L508">            String charset = detectCharset(mime[1]);</span>
+<span class="nc" id="L509">            int encode = mime[2].charAt(0);</span>
+<span class="nc" id="L510">            ByteList body = new ByteList(mime[3].getBytes(), ASCIIEncoding.INSTANCE);</span>
+
+<span class="nc" id="L512">            RubyArray array = null;</span>
+<span class="nc bnc" id="L513" title="All 4 branches missed.">            if ('B' == encode || 'b' == encode) { // BASE64</span>
+<span class="nc" id="L514">                array = Pack.unpack(context.runtime, body, PACK_BASE64);</span>
+            } else { // Qencode
+<span class="nc" id="L516">                array = Pack.unpack(context.runtime, body, PACK_QENCODE);</span>
+            }
+<span class="nc" id="L518">            RubyString s = (RubyString) array.entry(0);</span>
+<span class="nc" id="L519">            ByteList decodeStr = s.asString().getByteList();</span>
+
+<span class="nc" id="L521">            return convert_byte(decodeStr, charset, options.get(&quot;output&quot;));</span>
+        }
+
+        RubyString makeRubyString(ArrayList&lt;ByteList&gt; list) {
+<span class="nc" id="L525">            ByteList r = new ByteList();</span>
+<span class="nc bnc" id="L526" title="All 2 branches missed.">            for (ByteList l : list) {</span>
+<span class="nc" id="L527">                r.append(l);</span>
+<span class="nc" id="L528">            }</span>
+<span class="nc" id="L529">            return context.runtime.newString(r);</span>
+        }
+
+        RubyString convert(ByteList str) {
+<span class="nc" id="L533">            String s = Helpers.decodeByteList(context.runtime, str);</span>
+<span class="nc" id="L534">            String[] token = s.split(&quot;\\s&quot;);</span>
+<span class="nc" id="L535">            ArrayList&lt;ByteList&gt; raw_data = new ArrayList&lt;ByteList&gt;();</span>
+
+<span class="nc bnc" id="L537" title="All 2 branches missed.">            for (int i = 0; i &lt; token.length; i++) {</span>
+<span class="nc" id="L538">                raw_data.add(decodeMimeString(token[i]));</span>
+            }
+
+<span class="nc" id="L541">            return makeRubyString(raw_data);</span>
+        }
+
+    }
+
+    @Deprecated
+<span class="nc" id="L547">    public static final NKFCharset AUTO = NKFCharset.AUTO;</span>
+    // no ISO-2022-JP in jcodings
+    @Deprecated
+<span class="nc" id="L550">    public static final NKFCharset JIS = NKFCharset.JIS;</span>
+    @Deprecated
+<span class="nc" id="L552">    public static final NKFCharset EUC = NKFCharset.EUC;</span>
+    @Deprecated
+<span class="nc" id="L554">    public static final NKFCharset SJIS = NKFCharset.SJIS;</span>
+    @Deprecated
+<span class="nc" id="L556">    public static final NKFCharset BINARY = NKFCharset.BINARY;</span>
+    @Deprecated
+<span class="nc" id="L558">    public static final NKFCharset NOCONV = NKFCharset.NOCONV;</span>
+    @Deprecated
+<span class="nc" id="L560">    public static final NKFCharset UNKNOWN = NKFCharset.UNKNOWN;</span>
+    @Deprecated
+<span class="nc" id="L562">    public static final NKFCharset ASCII = NKFCharset.ASCII;</span>
+    @Deprecated
+<span class="nc" id="L564">    public static final NKFCharset UTF8 = NKFCharset.UTF8;</span>
+    @Deprecated
+<span class="nc" id="L566">    public static final NKFCharset UTF16 = NKFCharset.UTF16;</span>
+    @Deprecated
+<span class="nc" id="L568">    public static final NKFCharset UTF32 = NKFCharset.UTF32;</span>
+    @Deprecated
+<span class="nc" id="L570">    public static final NKFCharset OTHER = NKFCharset.OTHER;</span>
+    @Deprecated
+<span class="nc" id="L572">    public static final NKFCharset BASE64 = NKFCharset.BASE64;</span>
+    @Deprecated
+<span class="nc" id="L574">    public static final NKFCharset QENCODE = NKFCharset.QENCODE;</span>
+    @Deprecated
+<span class="nc" id="L576">    public static final NKFCharset MIME_DETECT = NKFCharset.MIME_DETECT;</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

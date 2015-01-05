@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AddCallProtocolInstructions.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.passes</a> &gt; <span class="el_source">AddCallProtocolInstructions.java</span></div><h1>AddCallProtocolInstructions.java</h1><pre class="source lang-java linenums">package org.jruby.ir.passes;
+
+import org.jruby.ir.*;
+import org.jruby.ir.dataflow.analyses.StoreLocalVarPlacementProblem;
+import org.jruby.ir.instructions.*;
+import org.jruby.ir.operands.Label;
+import org.jruby.ir.operands.Variable;
+import org.jruby.ir.representations.BasicBlock;
+import org.jruby.ir.representations.CFG;
+
+import java.util.Arrays;
+import java.util.List;
+import java.util.ListIterator;
+
+<span class="pc bpc" id="L15" title="1 of 2 branches missed.">public class AddCallProtocolInstructions extends CompilerPass {</span>
+    @Override
+    public String getLabel() {
+<span class="fc" id="L18">        return &quot;Add Call Protocol Instructions (push/pop of dyn-scope, frame, impl-class values)&quot;;</span>
+    }
+
+<span class="fc" id="L21">    public static List&lt;Class&lt;? extends CompilerPass&gt;&gt; DEPENDENCIES = Arrays.&lt;Class&lt;? extends CompilerPass&gt;&gt;asList(CFGBuilder.class);</span>
+
+    @Override
+    public List&lt;Class&lt;? extends CompilerPass&gt;&gt; getDependencies() {
+<span class="fc" id="L25">        return DEPENDENCIES;</span>
+    }
+
+    private boolean explicitCallProtocolSupported(IRScope scope) {
+<span class="fc bfc" id="L29" title="All 6 branches covered.">        return scope instanceof IRMethod || (scope instanceof IRModuleBody &amp;&amp; !(scope instanceof IRMetaClassBody));</span>
+    }
+
+    @Override
+    public Object execute(IRScope scope, Object... data) {
+        // IRScriptBody do not get explicit call protocol instructions right now.
+        // They dont push/pop a frame and do other special things like run begin/end blocks.
+        // So, for now, they go through the runtime stub in IRScriptBody.
+        //
+        // Add explicit frame and binding push/pop instrs ONLY for methods -- we cannot handle this in closures and evals yet
+        // If the scope uses $_ or $~ family of vars, has local load/stores, or if its binding has escaped, we have
+        // to allocate a dynamic scope for it and add binding push/pop instructions.
+<span class="fc bfc" id="L41" title="All 2 branches covered.">        if (explicitCallProtocolSupported(scope)) {</span>
+<span class="fc" id="L42">            StoreLocalVarPlacementProblem slvpp = (StoreLocalVarPlacementProblem)scope.getDataFlowSolution(StoreLocalVarPlacementProblem.NAME);</span>
+<span class="fc" id="L43">            boolean scopeHasLocalVarStores = false;</span>
+<span class="fc" id="L44">            boolean bindingHasEscaped      = scope.bindingHasEscaped();</span>
+
+<span class="fc" id="L46">            CFG cfg = scope.cfg();</span>
+
+<span class="pc bpc" id="L48" title="1 of 4 branches missed.">            if (slvpp != null &amp;&amp; bindingHasEscaped) {</span>
+<span class="nc" id="L49">                scopeHasLocalVarStores = slvpp.scopeHasLocalVarStores();</span>
+            } else {
+                // We dont require local-var load/stores to have been run.
+                // If it is not run, we go conservative and add push/pop binding instrs. everywhere
+<span class="fc" id="L53">                scopeHasLocalVarStores = bindingHasEscaped;</span>
+            }
+
+<span class="fc" id="L56">            boolean requireFrame = doesItRequireFrame(scope, bindingHasEscaped);</span>
+<span class="fc bfc" id="L57" title="All 2 branches covered.">            boolean requireBinding = !scope.getFlags().contains(IRFlags.DYNSCOPE_ELIMINATED);</span>
+
+<span class="fc bfc" id="L59" title="All 4 branches covered.">            if (requireBinding || requireFrame) {</span>
+<span class="fc" id="L60">                BasicBlock entryBB = cfg.getEntryBB();</span>
+                // Push
+<span class="fc bfc" id="L62" title="All 2 branches covered.">                if (requireFrame) entryBB.addInstr(new PushFrameInstr(scope.getName()));</span>
+<span class="fc bfc" id="L63" title="All 2 branches covered.">                if (requireBinding) entryBB.addInstr(new PushBindingInstr());</span>
+
+                // SSS FIXME: We are doing this conservatively.
+                // Only scopes that have unrescued exceptions need a GEB.
+                //
+                // Allocate GEB if necessary for popping
+<span class="fc" id="L69">                BasicBlock geb = cfg.getGlobalEnsureBB();</span>
+<span class="pc bpc" id="L70" title="1 of 2 branches missed.">                if (geb == null) {</span>
+<span class="fc" id="L71">                    Variable exc = scope.createTemporaryVariable();</span>
+<span class="fc" id="L72">                    geb = new BasicBlock(cfg, Label.getGlobalEnsureBlockLabel());</span>
+<span class="fc" id="L73">                    geb.addInstr(new ReceiveJRubyExceptionInstr(exc)); // JRuby Implementation exception handling</span>
+<span class="fc" id="L74">                    geb.addInstr(new ThrowExceptionInstr(exc));</span>
+<span class="fc" id="L75">                    cfg.addGlobalEnsureBB(geb);</span>
+                }
+
+                // Pop on all scope-exit paths
+<span class="fc bfc" id="L79" title="All 2 branches covered.">                for (BasicBlock bb: cfg.getBasicBlocks()) {</span>
+<span class="fc" id="L80">                    Instr i = null;</span>
+<span class="fc" id="L81">                    ListIterator&lt;Instr&gt; instrs = bb.getInstrs().listIterator();</span>
+<span class="fc bfc" id="L82" title="All 2 branches covered.">                    while (instrs.hasNext()) {</span>
+<span class="fc" id="L83">                        i = instrs.next();</span>
+                        // Right now, we only support explicit call protocol on methods.
+                        // So, non-local returns and breaks don't get here.
+                        // Non-local-returns and breaks are tricky since they almost always
+                        // throw an exception and we don't multiple pops (once before the
+                        // return/break, and once when the exception is caught).
+<span class="pc bpc" id="L89" title="1 of 4 branches missed.">                        if (!bb.isExitBB() &amp;&amp; i instanceof ReturnBase) {</span>
+                            // Add before the break/return
+<span class="fc" id="L91">                            instrs.previous();</span>
+<span class="fc bfc" id="L92" title="All 2 branches covered.">                            if (requireBinding) instrs.add(new PopBindingInstr());</span>
+<span class="fc bfc" id="L93" title="All 2 branches covered.">                            if (requireFrame) instrs.add(new PopFrameInstr());</span>
+                            break;
+                        }
+                    }
+
+<span class="pc bpc" id="L98" title="1 of 4 branches missed.">                    if (bb.isExitBB() &amp;&amp; !bb.isEmpty()) {</span>
+                        // Last instr could be a return -- so, move iterator one position back
+<span class="nc bnc" id="L100" title="All 4 branches missed.">                        if (i != null &amp;&amp; i instanceof ReturnBase) instrs.previous();</span>
+<span class="nc bnc" id="L101" title="All 2 branches missed.">                        if (requireBinding) instrs.add(new PopBindingInstr());</span>
+<span class="nc bnc" id="L102" title="All 2 branches missed.">                        if (requireFrame) instrs.add(new PopFrameInstr());</span>
+                    }
+
+<span class="fc bfc" id="L105" title="All 2 branches covered.">                    if (bb == geb) {</span>
+                        // Add before throw-exception-instr which would be the last instr
+<span class="pc bpc" id="L107" title="1 of 2 branches missed.">                        if (i != null) {</span>
+                            // Assumption: Last instr should always be a control-transfer instruction
+<span class="pc bpc" id="L109" title="3 of 4 branches missed.">                            assert i.getOperation().transfersControl(): &quot;Last instruction of GEB in scope: &quot; + scope + &quot; is &quot; + i + &quot;, not a control-xfer instruction&quot;;</span>
+<span class="fc" id="L110">                            instrs.previous();</span>
+                        }
+<span class="fc bfc" id="L112" title="All 2 branches covered.">                        if (requireBinding) instrs.add(new PopBindingInstr());</span>
+<span class="fc bfc" id="L113" title="All 2 branches covered.">                        if (requireFrame) instrs.add(new PopFrameInstr());</span>
+                    }
+<span class="fc" id="L115">                }</span>
+            }
+
+            // This scope has an explicit call protocol flag now
+<span class="fc" id="L119">            scope.setExplicitCallProtocolFlag();</span>
+        }
+
+        // FIXME: Useless for now
+        // Run on all nested closures.
+<span class="fc bfc" id="L124" title="All 2 branches covered.">        for (IRClosure c: scope.getClosures()) run(c, false, true);</span>
+
+        // LVA information is no longer valid after the pass
+        // FIXME: Grrr ... this seems broken to have to create a new object to invalidate
+<span class="fc" id="L128">        (new LiveVariableAnalysis()).invalidate(scope);</span>
+
+<span class="fc" id="L130">        return null;</span>
+    }
+
+    private boolean doesItRequireFrame(IRScope scope, boolean bindingHasEscaped) {
+<span class="pc bpc" id="L134" title="1 of 4 branches missed.">        boolean requireFrame = bindingHasEscaped || scope.usesEval();</span>
+
+<span class="fc bfc" id="L136" title="All 2 branches covered.">        for (IRFlags flag : scope.getFlags()) {</span>
+<span class="pc bfc" id="L137" title="All 2 branches covered.">            switch (flag) {</span>
+                case BINDING_HAS_ESCAPED:
+                case CAN_CAPTURE_CALLERS_BINDING:
+                case REQUIRES_FRAME:
+                case REQUIRES_VISIBILITY:
+                case USES_BACKREF_OR_LASTLINE:
+                case USES_EVAL:
+                case USES_ZSUPER:
+<span class="fc" id="L145">                    requireFrame = true;</span>
+            }
+<span class="fc" id="L147">        }</span>
+
+<span class="fc" id="L149">        return requireFrame;</span>
+    }
+
+    @Override
+    public boolean invalidate(IRScope scope) {
+        // Cannot add call protocol instructions after we've added them once.
+<span class="nc" id="L155">        return false;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

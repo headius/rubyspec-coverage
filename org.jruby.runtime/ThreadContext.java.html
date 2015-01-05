@@ -1,0 +1,1137 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ThreadContext.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime</a> &gt; <span class="el_source">ThreadContext.java</span></div><h1>ThreadContext.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2002-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004-2005 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2006 Michael Studman &lt;codehaus@michaelstudman.com&gt;
+ * Copyright (C) 2006 Miguel Covarrubias &lt;mlcovarrubias@gmail.com&gt;
+ * Copyright (C) 2007 William N Dortch &lt;bill.dortch@gmail.com&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.runtime;
+
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyClass;
+import org.jruby.RubyContinuation.Continuation;
+import org.jruby.RubyInstanceConfig;
+import org.jruby.RubyModule;
+import org.jruby.RubyString;
+import org.jruby.RubyThread;
+import org.jruby.ast.executable.RuntimeCache;
+import org.jruby.ext.fiber.ThreadFiber;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.lexer.yacc.ISourcePosition;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.backtrace.BacktraceElement;
+import org.jruby.runtime.backtrace.RubyStackTraceElement;
+import org.jruby.runtime.backtrace.TraceType;
+import org.jruby.runtime.backtrace.TraceType.Gather;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.profile.ProfileCollection;
+import org.jruby.runtime.scope.ManyVarsDynamicScope;
+import org.jruby.util.RecursiveComparator;
+import org.jruby.util.RubyDateFormatter;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+
+import java.lang.ref.WeakReference;
+import java.security.SecureRandom;
+import java.util.Arrays;
+import java.util.Locale;
+import java.util.Set;
+
+public final class ThreadContext {
+
+<span class="fc" id="L71">    private static final Logger LOG = LoggerFactory.getLogger(&quot;ThreadContext&quot;);</span>
+
+    public static ThreadContext newContext(Ruby runtime) {
+<span class="fc" id="L74">        ThreadContext context = new ThreadContext(runtime);</span>
+<span class="fc" id="L75">        return context;</span>
+    }
+    
+    private final static int INITIAL_SIZE = 10;
+    private final static int INITIAL_FRAMES_SIZE = 10;
+    
+    /** The number of calls after which to do a thread event poll */
+    private final static int CALL_POLL_COUNT = 0xFFF;
+
+    // runtime, nil, and runtimeCache cached here for speed of access from any thread
+    public final Ruby runtime;
+    public final IRubyObject nil;
+    public final RuntimeCache runtimeCache;
+
+    // Is this thread currently with in a function trace?
+    private boolean isWithinTrace;
+    
+    private RubyThread thread;
+    private RubyThread rootThread; // thread for fiber purposes
+<span class="fc" id="L94">    private static final WeakReference&lt;ThreadFiber&gt; NULL_FIBER_REF = new WeakReference&lt;ThreadFiber&gt;(null);</span>
+<span class="fc" id="L95">    private WeakReference&lt;ThreadFiber&gt; fiber = NULL_FIBER_REF;</span>
+    private ThreadFiber rootFiber; // hard anchor for root threads' fibers
+    // Cache format string because it is expensive to create on demand
+    private RubyDateFormatter dateFormatter;
+
+<span class="fc" id="L100">    private Frame[] frameStack = new Frame[INITIAL_FRAMES_SIZE];</span>
+<span class="fc" id="L101">    private int frameIndex = -1;</span>
+
+<span class="fc" id="L103">    private BacktraceElement[] backtrace = new BacktraceElement[INITIAL_FRAMES_SIZE];</span>
+<span class="fc" id="L104">    private int backtraceIndex = -1;</span>
+    
+    // List of active dynamic scopes.  Each of these may have captured other dynamic scopes
+    // to implement closures.
+<span class="fc" id="L108">    private DynamicScope[] scopeStack = new DynamicScope[INITIAL_SIZE];</span>
+<span class="fc" id="L109">    private int scopeIndex = -1;</span>
+
+<span class="fc" id="L111">    private static final Continuation[] EMPTY_CATCHTARGET_STACK = new Continuation[0];</span>
+<span class="fc" id="L112">    private Continuation[] catchStack = EMPTY_CATCHTARGET_STACK;</span>
+<span class="fc" id="L113">    private int catchIndex = -1;</span>
+    
+<span class="fc" id="L115">    private boolean isProfiling = false;</span>
+
+    // The flat profile data for this thread
+	// private ProfileData profileData;
+
+    private ProfileCollection profileCollection;
+	
+<span class="fc" id="L122">    private boolean eventHooksEnabled = true;</span>
+
+    CallType lastCallType;
+
+    Visibility lastVisibility;
+
+    IRubyObject lastExitStatus;
+
+    public final SecureRandom secureRandom;
+
+<span class="fc" id="L132">    private static boolean trySHA1PRNG = true;</span>
+
+    {
+        SecureRandom sr;
+        try {
+<span class="pc bpc" id="L137" title="1 of 2 branches missed.">            sr = trySHA1PRNG ?</span>
+<span class="pc" id="L138">                    SecureRandom.getInstance(&quot;SHA1PRNG&quot;) :</span>
+                    new SecureRandom();
+<span class="nc" id="L140">        } catch (Exception e) {</span>
+<span class="nc" id="L141">            trySHA1PRNG = false;</span>
+<span class="nc" id="L142">            sr = new SecureRandom();</span>
+<span class="fc" id="L143">        }</span>
+<span class="fc" id="L144">        secureRandom = sr;</span>
+    }
+    
+    /**
+     * Constructor for Context.
+     */
+<span class="fc" id="L150">    private ThreadContext(Ruby runtime) {</span>
+<span class="fc" id="L151">        this.runtime = runtime;</span>
+<span class="fc" id="L152">        this.nil = runtime.getNil();</span>
+
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">        if (runtime.getInstanceConfig().isProfilingEntireRun()) {</span>
+<span class="nc" id="L155">            startProfiling();</span>
+        }
+
+<span class="fc" id="L158">        this.runtimeCache = runtime.getRuntimeCache();</span>
+        
+        // TOPLEVEL self and a few others want a top-level scope.  We create this one right
+        // away and then pass it into top-level parse so it ends up being the top level.
+<span class="fc" id="L162">        StaticScope topStaticScope = runtime.getStaticScopeFactory().newLocalScope(null);</span>
+<span class="fc" id="L163">        pushScope(new ManyVarsDynamicScope(topStaticScope, null));</span>
+
+<span class="fc" id="L165">        Frame[] stack = frameStack;</span>
+<span class="fc" id="L166">        int length = stack.length;</span>
+<span class="fc bfc" id="L167" title="All 2 branches covered.">        for (int i = 0; i &lt; length; i++) {</span>
+<span class="fc" id="L168">            stack[i] = new Frame();</span>
+        }
+<span class="fc" id="L170">        BacktraceElement[] stack2 = backtrace;</span>
+<span class="fc" id="L171">        int length2 = stack2.length;</span>
+<span class="fc bfc" id="L172" title="All 2 branches covered.">        for (int i = 0; i &lt; length2; i++) {</span>
+<span class="fc" id="L173">            stack2[i] = new BacktraceElement();</span>
+        }
+<span class="fc" id="L175">        ThreadContext.pushBacktrace(this, &quot;&quot;, &quot;&quot;, 0);</span>
+<span class="fc" id="L176">        ThreadContext.pushBacktrace(this, &quot;&quot;, &quot;&quot;, 0);</span>
+<span class="fc" id="L177">    }</span>
+
+    @Override
+    protected void finalize() throws Throwable {
+<span class="fc bfc" id="L181" title="All 2 branches covered.">        if (thread != null) {</span>
+<span class="fc" id="L182">            thread.dispose();</span>
+        }
+<span class="fc" id="L184">    }</span>
+
+    /**
+     * Retrieve the runtime associated with this context.
+     *
+     * Note that there's no reason to call this method rather than accessing the
+     * runtime field directly.
+     *
+     * @see ThreadContext#runtime
+     *
+     * @return the runtime associated with this context
+     */
+    public final Ruby getRuntime() {
+<span class="fc" id="L197">        return runtime;</span>
+    }
+    
+    public IRubyObject getErrorInfo() {
+<span class="fc" id="L201">        return thread.getErrorInfo();</span>
+    }
+    
+    public IRubyObject setErrorInfo(IRubyObject errorInfo) {
+<span class="fc" id="L205">        thread.setErrorInfo(errorInfo);</span>
+<span class="fc" id="L206">        return errorInfo;</span>
+    }
+    
+    /**
+     * Returns the lastCallStatus.
+     * @return LastCallStatus
+     */
+    public void setLastCallStatus(CallType callType) {
+<span class="fc" id="L214">        lastCallType = callType;</span>
+<span class="fc" id="L215">    }</span>
+
+    public CallType getLastCallType() {
+<span class="fc" id="L218">        return lastCallType;</span>
+    }
+
+    public Visibility getLastVisibility() {
+<span class="fc" id="L222">        return lastVisibility;</span>
+    }
+    
+    public void setLastCallStatusAndVisibility(CallType callType, Visibility visibility) {
+<span class="nc" id="L226">        lastCallType = callType;</span>
+<span class="nc" id="L227">        lastVisibility = visibility;</span>
+<span class="nc" id="L228">    }</span>
+    
+    public IRubyObject getLastExitStatus() {
+<span class="fc" id="L231">        return lastExitStatus;</span>
+    }
+    
+    public void setLastExitStatus(IRubyObject lastExitStatus) {
+<span class="fc" id="L235">        this.lastExitStatus = lastExitStatus;</span>
+<span class="fc" id="L236">    }</span>
+
+    public void printScope() {
+<span class="nc" id="L239">        LOG.debug(&quot;SCOPE STACK:&quot;);</span>
+<span class="nc bnc" id="L240" title="All 2 branches missed.">        for (int i = 0; i &lt;= scopeIndex; i++) {</span>
+<span class="nc" id="L241">            LOG.debug(&quot;{}&quot;, scopeStack[i]);</span>
+        }
+<span class="nc" id="L243">    }</span>
+
+    public DynamicScope getCurrentScope() {
+<span class="fc" id="L246">        return scopeStack[scopeIndex];</span>
+    }
+
+    public StaticScope getCurrentStaticScope() {
+<span class="fc" id="L250">        return scopeStack[scopeIndex].getStaticScope();</span>
+    }
+
+    private void expandFrameStack() {
+<span class="fc" id="L254">        int newSize = frameStack.length * 2;</span>
+<span class="fc" id="L255">        frameStack = fillNewFrameStack(new Frame[newSize], newSize);</span>
+<span class="fc" id="L256">    }</span>
+
+    private Frame[] fillNewFrameStack(Frame[] newFrameStack, int newSize) {
+<span class="fc" id="L259">        System.arraycopy(frameStack, 0, newFrameStack, 0, frameStack.length);</span>
+
+<span class="fc bfc" id="L261" title="All 2 branches covered.">        for (int i = frameStack.length; i &lt; newSize; i++) {</span>
+<span class="fc" id="L262">            newFrameStack[i] = new Frame();</span>
+        }
+        
+<span class="fc" id="L265">        return newFrameStack;</span>
+    }
+
+    public void pushScope(DynamicScope scope) {
+<span class="fc" id="L269">        int index = ++scopeIndex;</span>
+<span class="fc" id="L270">        DynamicScope[] stack = scopeStack;</span>
+<span class="fc" id="L271">        stack[index] = scope;</span>
+<span class="fc bfc" id="L272" title="All 2 branches covered.">        if (index + 1 == stack.length) {</span>
+<span class="fc" id="L273">            expandScopeStack();</span>
+        }
+<span class="fc" id="L275">    }</span>
+    
+    public void popScope() {
+<span class="fc" id="L278">        scopeStack[scopeIndex--] = null;</span>
+<span class="fc" id="L279">    }</span>
+    
+    private void expandScopeStack() {
+<span class="fc" id="L282">        int newSize = scopeStack.length * 2;</span>
+<span class="fc" id="L283">        DynamicScope[] newScopeStack = new DynamicScope[newSize];</span>
+
+<span class="fc" id="L285">        System.arraycopy(scopeStack, 0, newScopeStack, 0, scopeStack.length);</span>
+
+<span class="fc" id="L287">        scopeStack = newScopeStack;</span>
+<span class="fc" id="L288">    }</span>
+    
+    public RubyThread getThread() {
+<span class="fc" id="L291">        return thread;</span>
+    }
+    
+    public RubyThread getFiberCurrentThread() {
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">        if (rootThread != null) return rootThread;</span>
+<span class="nc" id="L296">        return thread;</span>
+    }
+    
+    public RubyDateFormatter getRubyDateFormatter() {
+<span class="fc bfc" id="L300" title="All 2 branches covered.">        if (dateFormatter == null)</span>
+<span class="fc" id="L301">            dateFormatter = new RubyDateFormatter(this);</span>
+<span class="fc" id="L302">        return dateFormatter;</span>
+    }
+    
+    public void setThread(RubyThread thread) {
+<span class="fc" id="L306">        this.thread = thread;</span>
+<span class="fc" id="L307">        this.rootThread = thread; // may be reset by fiber</span>
+
+        // associate the thread with this context, unless we're clearing the reference
+<span class="fc bfc" id="L310" title="All 2 branches covered.">        if (thread != null) {</span>
+<span class="fc" id="L311">            thread.setContext(this);</span>
+        }
+<span class="fc" id="L313">    }</span>
+    
+    public ThreadFiber getFiber() {
+<span class="fc" id="L316">        ThreadFiber f = fiber.get();</span>
+        
+<span class="fc bfc" id="L318" title="All 2 branches covered.">        if (f == null) return rootFiber;</span>
+        
+<span class="fc" id="L320">        return f;</span>
+    }
+    
+    public void setFiber(ThreadFiber fiber) {
+<span class="fc" id="L324">        this.fiber = new WeakReference(fiber);</span>
+<span class="fc" id="L325">    }</span>
+    
+    public void setRootFiber(ThreadFiber rootFiber) {
+<span class="fc" id="L328">        this.rootFiber = rootFiber;</span>
+<span class="fc" id="L329">    }</span>
+    
+    public void setRootThread(RubyThread rootThread) {
+<span class="fc" id="L332">        this.rootThread = rootThread;</span>
+<span class="fc" id="L333">    }</span>
+    
+    //////////////////// CATCH MANAGEMENT ////////////////////////
+    private void expandCatchStack() {
+<span class="fc" id="L337">        int newSize = catchStack.length * 2;</span>
+<span class="fc bfc" id="L338" title="All 2 branches covered.">        if (newSize == 0) newSize = 1;</span>
+<span class="fc" id="L339">        Continuation[] newCatchStack = new Continuation[newSize];</span>
+
+<span class="fc" id="L341">        System.arraycopy(catchStack, 0, newCatchStack, 0, catchStack.length);</span>
+<span class="fc" id="L342">        catchStack = newCatchStack;</span>
+<span class="fc" id="L343">    }</span>
+    
+    public void pushCatch(Continuation catchTarget) {
+<span class="fc" id="L346">        int index = ++catchIndex;</span>
+<span class="fc bfc" id="L347" title="All 2 branches covered.">        if (index == catchStack.length) {</span>
+<span class="fc" id="L348">            expandCatchStack();</span>
+        }
+<span class="fc" id="L350">        catchStack[index] = catchTarget;</span>
+<span class="fc" id="L351">    }</span>
+    
+    public void popCatch() {
+<span class="fc" id="L354">        catchIndex--;</span>
+<span class="fc" id="L355">    }</span>
+
+    /**
+     * Find the active Continuation for the given tag. Must be called with an
+     * interned string.
+     *
+     * @param tag The interned string to search for
+     * @return The continuation associated with this tag
+     */
+    public Continuation getActiveCatch(Object tag) {
+<span class="fc bfc" id="L365" title="All 2 branches covered.">        for (int i = catchIndex; i &gt;= 0; i--) {</span>
+<span class="fc" id="L366">            Continuation c = catchStack[i];</span>
+<span class="fc bfc" id="L367" title="All 2 branches covered.">            if (c.tag == tag) return c;</span>
+        }
+
+        // if this is a fiber, search prev for tag
+<span class="fc" id="L371">        ThreadFiber fiber = getFiber();</span>
+        ThreadFiber prev;
+<span class="pc bpc" id="L373" title="2 of 4 branches missed.">        if (fiber != null &amp;&amp; (prev = fiber.getData().getPrev()) != null) {</span>
+<span class="nc" id="L374">            return prev.getThread().getContext().getActiveCatch(tag);</span>
+        }
+
+<span class="fc" id="L377">        return null;</span>
+    }
+    
+    //////////////////// FRAME MANAGEMENT ////////////////////////
+    private void pushFrameCopy() {
+<span class="nc" id="L382">        int index = ++this.frameIndex;</span>
+<span class="nc" id="L383">        Frame[] stack = frameStack;</span>
+<span class="nc" id="L384">        Frame currentFrame = stack[index - 1];</span>
+<span class="nc" id="L385">        stack[index].updateFrame(currentFrame);</span>
+<span class="nc bnc" id="L386" title="All 2 branches missed.">        if (index + 1 == stack.length) {</span>
+<span class="nc" id="L387">            expandFrameStack();</span>
+        }
+<span class="nc" id="L389">    }</span>
+    
+    private Frame pushFrame(Frame frame) {
+<span class="fc" id="L392">        int index = ++this.frameIndex;</span>
+<span class="fc" id="L393">        Frame[] stack = frameStack;</span>
+<span class="fc" id="L394">        stack[index] = frame;</span>
+<span class="pc bpc" id="L395" title="1 of 2 branches missed.">        if (index + 1 == stack.length) {</span>
+<span class="nc" id="L396">            expandFrameStack();</span>
+        }
+<span class="fc" id="L398">        return frame;</span>
+    }
+
+    public void pushEvalSimpleFrame(IRubyObject executeObject) {
+<span class="fc" id="L402">        Frame frame = getCurrentFrame();</span>
+<span class="fc" id="L403">        pushCallFrame(frame.getKlazz(), frame.getName(), executeObject, Block.NULL_BLOCK);</span>
+<span class="fc" id="L404">    }</span>
+    
+    private void pushCallFrame(RubyModule clazz, String name, 
+                               IRubyObject self, Block block) {
+<span class="fc" id="L408">        int index = ++this.frameIndex;</span>
+<span class="fc" id="L409">        Frame[] stack = frameStack;</span>
+<span class="fc" id="L410">        stack[index].updateFrame(clazz, self, name, block, callNumber);</span>
+<span class="fc bfc" id="L411" title="All 2 branches covered.">        if (index + 1 == stack.length) {</span>
+<span class="fc" id="L412">            expandFrameStack();</span>
+        }
+<span class="fc" id="L414">    }</span>
+    
+    private void pushEvalFrame(IRubyObject self) {
+<span class="fc" id="L417">        int index = ++this.frameIndex;</span>
+<span class="fc" id="L418">        Frame[] stack = frameStack;</span>
+<span class="fc" id="L419">        stack[index].updateFrameForEval(self, callNumber);</span>
+<span class="pc bpc" id="L420" title="1 of 2 branches missed.">        if (index + 1 == stack.length) {</span>
+<span class="nc" id="L421">            expandFrameStack();</span>
+        }
+<span class="fc" id="L423">    }</span>
+    
+    public void pushFrame() {
+<span class="fc" id="L426">        int index = ++this.frameIndex;</span>
+<span class="fc" id="L427">        Frame[] stack = frameStack;</span>
+<span class="pc bpc" id="L428" title="1 of 2 branches missed.">        if (index + 1 == stack.length) {</span>
+<span class="nc" id="L429">            expandFrameStack();</span>
+        }
+<span class="fc" id="L431">    }</span>
+    
+    public void popFrame() {
+<span class="fc" id="L434">        Frame[] stack = frameStack;</span>
+<span class="fc" id="L435">        int index = frameIndex--;</span>
+<span class="fc" id="L436">        Frame frame = stack[index];</span>
+        
+        // if the frame was captured, we must replace it but not clear
+<span class="fc bfc" id="L439" title="All 2 branches covered.">        if (frame.isCaptured()) {</span>
+<span class="fc" id="L440">            stack[index] = new Frame();</span>
+        } else {
+<span class="fc" id="L442">            frame.clear();</span>
+        }
+<span class="fc" id="L444">    }</span>
+        
+    private void popFrameReal(Frame oldFrame) {
+<span class="fc" id="L447">        frameStack[frameIndex--] = oldFrame;</span>
+<span class="fc" id="L448">    }</span>
+    
+    public Frame getCurrentFrame() {
+<span class="fc" id="L451">        return frameStack[frameIndex];</span>
+    }
+    
+    public Frame getNextFrame() {
+<span class="fc" id="L455">        int index = frameIndex;</span>
+<span class="fc" id="L456">        Frame[] stack = frameStack;</span>
+<span class="pc bpc" id="L457" title="1 of 2 branches missed.">        if (index + 1 == stack.length) {</span>
+<span class="nc" id="L458">            expandFrameStack();</span>
+        }
+<span class="fc" id="L460">        return stack[index + 1];</span>
+    }
+    
+    public Frame getPreviousFrame() {
+<span class="fc" id="L464">        int index = frameIndex;</span>
+<span class="pc bpc" id="L465" title="1 of 2 branches missed.">        return index &lt; 1 ? null : frameStack[index - 1];</span>
+    }
+    
+    /**
+     * Set the $~ (backref) &quot;global&quot; to the given value.
+     * 
+     * @param match the value to set
+     * @return the value passed in
+     */
+    public IRubyObject setBackRef(IRubyObject match) {
+<span class="fc" id="L475">        return getCurrentFrame().setBackRef(match);</span>
+    }
+    
+    /**
+     * Get the value of the $~ (backref) &quot;global&quot;.
+     * 
+     * @return the value of $~
+     */
+    public IRubyObject getBackRef() {
+<span class="fc" id="L484">        return getCurrentFrame().getBackRef(nil);</span>
+    }
+    
+    /**
+     * Set the $_ (lastlne) &quot;global&quot; to the given value.
+     * 
+     * @param last the value to set
+     * @return the value passed in
+     */
+    public IRubyObject setLastLine(IRubyObject last) {
+<span class="fc" id="L494">        return getCurrentFrame().setLastLine(last);</span>
+    }
+    
+    /**
+     * Get the value of the $_ (lastline) &quot;global&quot;.
+     * 
+     * @return the value of $_
+     */
+    public IRubyObject getLastLine() {
+<span class="fc" id="L503">        return getCurrentFrame().getLastLine(nil);</span>
+    }
+
+    /////////////////// BACKTRACE ////////////////////
+
+    private static void expandBacktraceStack(ThreadContext context) {
+<span class="fc" id="L509">        int newSize = context.backtrace.length * 2;</span>
+<span class="fc" id="L510">        context.backtrace = fillNewBacktrace(context, new BacktraceElement[newSize], newSize);</span>
+<span class="fc" id="L511">    }</span>
+
+    private static BacktraceElement[] fillNewBacktrace(ThreadContext context, BacktraceElement[] newBacktrace, int newSize) {
+<span class="fc" id="L514">        System.arraycopy(context.backtrace, 0, newBacktrace, 0, context.backtrace.length);</span>
+
+<span class="fc bfc" id="L516" title="All 2 branches covered.">        for (int i = context.backtrace.length; i &lt; newSize; i++) {</span>
+<span class="fc" id="L517">            newBacktrace[i] = new BacktraceElement();</span>
+        }
+
+<span class="fc" id="L520">        return newBacktrace;</span>
+    }
+
+    public static void pushBacktrace(ThreadContext context, String method, String file, int line) {
+<span class="fc" id="L524">        int index = ++context.backtraceIndex;</span>
+<span class="fc" id="L525">        BacktraceElement[] stack = context.backtrace;</span>
+<span class="fc" id="L526">        BacktraceElement.update(stack[index], method, file, line);</span>
+<span class="fc bfc" id="L527" title="All 2 branches covered.">        if (index + 1 == stack.length) {</span>
+<span class="fc" id="L528">            ThreadContext.expandBacktraceStack(context);</span>
+        }
+<span class="fc" id="L530">    }</span>
+
+    public static void popBacktrace(ThreadContext context) {
+<span class="fc" id="L533">        context.backtraceIndex--;</span>
+<span class="fc" id="L534">    }</span>
+
+    public boolean hasAnyScopes() {
+<span class="fc bfc" id="L537" title="All 2 branches covered.">        return scopeIndex &gt; -1;</span>
+    }
+
+    /**
+     * Check if a static scope is present on the call stack.
+     * This is the IR equivalent of isJumpTargetAlive
+     *
+     * @param scope the static scope to look for
+     * @return true if it exists
+     *         false if not
+     **/
+    public boolean scopeExistsOnCallStack(DynamicScope scope) {
+<span class="fc" id="L549">        DynamicScope[] stack = scopeStack;</span>
+<span class="fc bfc" id="L550" title="All 2 branches covered.">        for (int i = scopeIndex; i &gt;= 0; i--) {</span>
+<span class="fc bfc" id="L551" title="All 2 branches covered.">           if (stack[i] == scope) return true;</span>
+        }
+<span class="fc" id="L553">        return false;</span>
+    }
+
+    public String getFrameName() {
+<span class="fc" id="L557">        return getCurrentFrame().getName();</span>
+    }
+    
+    public IRubyObject getFrameSelf() {
+<span class="fc" id="L561">        return getCurrentFrame().getSelf();</span>
+    }
+    
+    public RubyModule getFrameKlazz() {
+<span class="fc" id="L565">        return getCurrentFrame().getKlazz();</span>
+    }
+    
+    public Block getFrameBlock() {
+<span class="fc" id="L569">        return getCurrentFrame().getBlock();</span>
+    }
+    
+    public String getFile() {
+<span class="fc" id="L573">        return backtrace[backtraceIndex].filename;</span>
+    }
+    
+    public int getLine() {
+<span class="fc" id="L577">        return backtrace[backtraceIndex].line;</span>
+    }
+    
+    public void setLine(int line) {
+<span class="fc" id="L581">        backtrace[backtraceIndex].line = line;</span>
+<span class="fc" id="L582">    }</span>
+    
+    public void setFileAndLine(String file, int line) {
+<span class="fc" id="L585">        BacktraceElement b = backtrace[backtraceIndex];</span>
+<span class="fc" id="L586">        b.filename = file;</span>
+<span class="fc" id="L587">        b.line = line;</span>
+<span class="fc" id="L588">    }</span>
+
+    public void setFileAndLine(ISourcePosition position) {
+<span class="fc" id="L591">        BacktraceElement b = backtrace[backtraceIndex];</span>
+<span class="fc" id="L592">        b.filename = position.getFile();</span>
+<span class="fc" id="L593">        b.line = position.getLine();</span>
+<span class="fc" id="L594">    }</span>
+    
+    public Visibility getCurrentVisibility() {
+<span class="fc" id="L597">        return getCurrentFrame().getVisibility();</span>
+    }
+    
+      public void setCurrentVisibility(Visibility visibility) {
+<span class="fc" id="L601">        getCurrentFrame().setVisibility(visibility);</span>
+<span class="fc" id="L602">    }</span>
+    
+    public void pollThreadEvents() {
+<span class="fc" id="L605">        thread.pollThreadEvents(this);</span>
+<span class="fc" id="L606">    }</span>
+    
+<span class="fc" id="L608">    public int callNumber = 0;</span>
+
+    public int getCurrentTarget() {
+<span class="nc" id="L611">        return callNumber;</span>
+    }
+    
+    public void callThreadPoll() {
+<span class="fc bfc" id="L615" title="All 2 branches covered.">        if ((callNumber++ &amp; CALL_POLL_COUNT) == 0) pollThreadEvents();</span>
+<span class="fc" id="L616">    }</span>
+
+    public static void callThreadPoll(ThreadContext context) {
+<span class="nc bnc" id="L619" title="All 2 branches missed.">        if ((context.callNumber++ &amp; CALL_POLL_COUNT) == 0) context.pollThreadEvents();</span>
+<span class="nc" id="L620">    }</span>
+    
+    public void trace(RubyEvent event, String name, RubyModule implClass) {
+<span class="nc" id="L623">        trace(event, name, implClass, backtrace[backtraceIndex].filename, backtrace[backtraceIndex].line);</span>
+<span class="nc" id="L624">    }</span>
+
+    public void trace(RubyEvent event, String name, RubyModule implClass, String file, int line) {
+<span class="nc" id="L627">        runtime.callEventHooks(this, event, file, line, name, implClass);</span>
+<span class="nc" id="L628">    }</span>
+
+    /**
+     * Used by the evaluator and the compiler to look up a constant by name
+     */
+    @Deprecated
+    public IRubyObject getConstant(String internedName) {
+<span class="nc" id="L635">        return getCurrentStaticScope().getConstant(internedName);</span>
+    }
+
+    private static void addBackTraceElement(Ruby runtime, RubyArray backtrace, RubyStackTraceElement element) {
+<span class="fc" id="L639">        RubyString str = RubyString.newString(runtime, element.mriStyleString());</span>
+<span class="fc" id="L640">        backtrace.append(str);</span>
+<span class="fc" id="L641">    }</span>
+    
+    /**
+     * Create an Array with backtrace information for Kernel#caller
+     * @param level
+     * @param length
+     * @return an Array with the backtrace
+     */
+    public IRubyObject createCallerBacktrace(int level, Integer length, StackTraceElement[] stacktrace) {
+<span class="fc" id="L650">        runtime.incrementCallerCount();</span>
+        
+<span class="fc" id="L652">        RubyStackTraceElement[] trace = getTraceSubset(level, length, stacktrace);</span>
+        
+<span class="pc bpc" id="L654" title="1 of 2 branches missed.">        if (trace == null) return nil;</span>
+        
+<span class="fc" id="L656">        RubyArray newTrace = runtime.newArray(trace.length);</span>
+
+<span class="fc bfc" id="L658" title="All 2 branches covered.">        for (int i = level; i - level &lt; trace.length; i++) {</span>
+<span class="fc" id="L659">            addBackTraceElement(runtime, newTrace, trace[i - level]);</span>
+        }
+        
+<span class="pc bpc" id="L662" title="1 of 2 branches missed.">        if (RubyInstanceConfig.LOG_CALLERS) TraceType.dumpCaller(newTrace);</span>
+        
+<span class="fc" id="L664">        return newTrace;</span>
+    }
+
+    /**
+     * Create an array containing Thread::Backtrace::Location objects for the
+     * requested caller trace level and length.
+     * 
+     * @param level the level at which the trace should start
+     * @param length the length of the trace
+     * @return an Array with the backtrace locations
+     */
+    public IRubyObject createCallerLocations(int level, Integer length, StackTraceElement[] stacktrace) {
+<span class="nc" id="L676">        RubyStackTraceElement[] trace = getTraceSubset(level, length, stacktrace);</span>
+        
+<span class="nc bnc" id="L678" title="All 2 branches missed.">        if (trace == null) return nil;</span>
+        
+<span class="nc" id="L680">        return RubyThread.Location.newLocationArray(runtime, trace);</span>
+    }
+    
+    private RubyStackTraceElement[] getTraceSubset(int level, Integer length, StackTraceElement[] stacktrace) {
+<span class="fc" id="L684">        runtime.incrementCallerCount();</span>
+        
+<span class="pc bpc" id="L686" title="3 of 4 branches missed.">        if (length != null &amp;&amp; length == 0) return new RubyStackTraceElement[0];</span>
+        
+<span class="fc" id="L688">        RubyStackTraceElement[] trace =</span>
+<span class="fc" id="L689">                TraceType.Gather.CALLER.getBacktraceData(this, stacktrace, false).getBacktrace(runtime);</span>
+        
+<span class="fc" id="L691">        int traceLength = safeLength(level, length, trace);</span>
+        
+<span class="pc bpc" id="L693" title="1 of 2 branches missed.">        if (traceLength &lt; 0) return null;</span>
+        
+<span class="fc" id="L695">        trace = Arrays.copyOfRange(trace, level, level + traceLength);</span>
+        
+<span class="pc bpc" id="L697" title="1 of 2 branches missed.">        if (RubyInstanceConfig.LOG_CALLERS) TraceType.dumpCaller(trace);</span>
+        
+<span class="fc" id="L699">        return trace;</span>
+    }
+    
+    private static int safeLength(int level, Integer length, RubyStackTraceElement[] trace) {
+<span class="fc" id="L703">        int baseLength = trace.length - level;</span>
+<span class="pc bpc" id="L704" title="1 of 2 branches missed.">        return length != null ? Math.min(length, baseLength) : baseLength;</span>
+    }
+
+    /**
+     * Create an Array with backtrace information for a built-in warning
+     * @param runtime
+     * @return an Array with the backtrace
+     */
+    public RubyStackTraceElement[] createWarningBacktrace(Ruby runtime) {
+<span class="fc" id="L713">        runtime.incrementWarningCount();</span>
+
+<span class="fc" id="L715">        RubyStackTraceElement[] trace = gatherCallerBacktrace();</span>
+
+<span class="pc bpc" id="L717" title="1 of 2 branches missed.">        if (RubyInstanceConfig.LOG_WARNINGS) TraceType.dumpWarning(trace);</span>
+
+<span class="fc" id="L719">        return trace;</span>
+    }
+    
+    public RubyStackTraceElement[] gatherCallerBacktrace() {
+<span class="fc" id="L723">        return Gather.CALLER.getBacktraceData(this, false).getBacktrace(runtime);</span>
+    }
+
+    public boolean isEventHooksEnabled() {
+<span class="fc" id="L727">        return eventHooksEnabled;</span>
+    }
+
+    public void setEventHooksEnabled(boolean flag) {
+<span class="fc" id="L731">        eventHooksEnabled = flag;</span>
+<span class="fc" id="L732">    }</span>
+    
+    /**
+     * Create an Array with backtrace information.
+     * @param level
+     * @param nativeException
+     * @return an Array with the backtrace
+     */
+    public BacktraceElement[] createBacktrace2(int level, boolean nativeException) {
+<span class="fc" id="L741">        BacktraceElement[] backtraceClone = backtrace.clone();</span>
+<span class="fc" id="L742">        int backtraceIndex = this.backtraceIndex;</span>
+<span class="fc" id="L743">        BacktraceElement[] newTrace = new BacktraceElement[backtraceIndex + 1];</span>
+<span class="fc bfc" id="L744" title="All 2 branches covered.">        for (int i = 0; i &lt;= backtraceIndex; i++) {</span>
+<span class="fc" id="L745">            newTrace[i] = backtraceClone[i];</span>
+        }
+<span class="fc" id="L747">        return newTrace;</span>
+    }
+    
+    private static String createRubyBacktraceString(StackTraceElement element) {
+<span class="nc" id="L751">        return element.getFileName() + &quot;:&quot; + element.getLineNumber() + &quot;:in `&quot; + element.getMethodName() + &quot;'&quot;;</span>
+    }
+    
+    public static String createRawBacktraceStringFromThrowable(Throwable t) {
+<span class="nc" id="L755">        StackTraceElement[] javaStackTrace = t.getStackTrace();</span>
+        
+<span class="nc" id="L757">        StringBuilder buffer = new StringBuilder();</span>
+<span class="nc bnc" id="L758" title="All 4 branches missed.">        if (javaStackTrace != null &amp;&amp; javaStackTrace.length &gt; 0) {</span>
+<span class="nc" id="L759">            StackTraceElement element = javaStackTrace[0];</span>
+
+<span class="nc" id="L761">            buffer</span>
+<span class="nc" id="L762">                    .append(createRubyBacktraceString(element))</span>
+<span class="nc" id="L763">                    .append(&quot;: &quot;)</span>
+<span class="nc" id="L764">                    .append(t.toString())</span>
+<span class="nc" id="L765">                    .append(&quot;\n&quot;);</span>
+<span class="nc bnc" id="L766" title="All 2 branches missed.">            for (int i = 1; i &lt; javaStackTrace.length; i++) {</span>
+<span class="nc" id="L767">                element = javaStackTrace[i];</span>
+                
+<span class="nc" id="L769">                buffer</span>
+<span class="nc" id="L770">                        .append(&quot;\tfrom &quot;)</span>
+<span class="nc" id="L771">                        .append(createRubyBacktraceString(element));</span>
+<span class="nc bnc" id="L772" title="All 2 branches missed.">                if (i + 1 &lt; javaStackTrace.length) buffer.append(&quot;\n&quot;);</span>
+            }
+        }
+        
+<span class="nc" id="L776">        return buffer.toString();</span>
+    }
+
+    private Frame pushFrameForBlock(Binding binding) {
+<span class="fc" id="L780">        Frame lastFrame = getNextFrame();</span>
+<span class="fc" id="L781">        Frame f = pushFrame(binding.getFrame());</span>
+<span class="fc" id="L782">        f.setVisibility(binding.getVisibility());</span>
+        
+<span class="fc" id="L784">        return lastFrame;</span>
+    }
+
+    private Frame pushFrameForEval(Binding binding) {
+<span class="fc" id="L788">        Frame lastFrame = getNextFrame();</span>
+<span class="fc" id="L789">        Frame f = pushFrame(binding.getFrame());</span>
+<span class="fc" id="L790">        f.setVisibility(binding.getVisibility());</span>
+<span class="fc" id="L791">        return lastFrame;</span>
+    }
+    
+    public void preAdoptThread() {
+<span class="fc" id="L795">        pushFrame();</span>
+<span class="fc" id="L796">        getCurrentFrame().setSelf(runtime.getTopSelf());</span>
+<span class="fc" id="L797">    }</span>
+
+    public void preExtensionLoad(IRubyObject self) {
+<span class="nc" id="L800">        pushFrame();</span>
+<span class="nc" id="L801">        getCurrentFrame().setSelf(self);</span>
+<span class="nc" id="L802">        getCurrentFrame().setVisibility(Visibility.PUBLIC);</span>
+<span class="nc" id="L803">    }</span>
+
+    public void preBsfApply(String[] names) {
+        // FIXME: I think we need these pushed somewhere?
+<span class="nc" id="L807">        StaticScope staticScope = runtime.getStaticScopeFactory().newLocalScope(null);</span>
+<span class="nc" id="L808">        staticScope.setVariables(names);</span>
+<span class="nc" id="L809">        pushFrame();</span>
+<span class="nc" id="L810">    }</span>
+    
+    public void postBsfApply() {
+<span class="nc" id="L813">        popFrame();</span>
+<span class="nc" id="L814">    }</span>
+
+    public void preMethodFrameAndScope(RubyModule clazz, String name, IRubyObject self, Block block,
+            StaticScope staticScope) {
+<span class="nc" id="L818">        pushCallFrame(clazz, name, self, block);</span>
+<span class="nc" id="L819">        pushScope(DynamicScope.newDynamicScope(staticScope));</span>
+<span class="nc" id="L820">    }</span>
+    
+    public void preMethodFrameAndDummyScope(RubyModule clazz, String name, IRubyObject self, Block block,
+            StaticScope staticScope) {
+<span class="nc" id="L824">        pushCallFrame(clazz, name, self, block);</span>
+<span class="nc" id="L825">        pushScope(staticScope.getDummyScope());</span>
+<span class="nc" id="L826">    }</span>
+
+    public void preMethodNoFrameAndDummyScope(StaticScope staticScope) {
+<span class="nc" id="L829">        pushScope(staticScope.getDummyScope());</span>
+<span class="nc" id="L830">    }</span>
+    
+    public void postMethodFrameAndScope() {
+<span class="nc" id="L833">        popScope();</span>
+<span class="nc" id="L834">        popFrame();</span>
+<span class="nc" id="L835">    }</span>
+    
+    public void preMethodFrameOnly(RubyModule clazz, String name, IRubyObject self, Block block) {
+<span class="fc" id="L838">        pushCallFrame(clazz, name, self, block);</span>
+<span class="fc" id="L839">    }</span>
+    
+    public void postMethodFrameOnly() {
+<span class="fc" id="L842">        popFrame();</span>
+<span class="fc" id="L843">    }</span>
+    
+    public void preMethodScopeOnly(StaticScope staticScope) {
+<span class="nc" id="L846">        pushScope(DynamicScope.newDynamicScope(staticScope));</span>
+<span class="nc" id="L847">    }</span>
+    
+    public void postMethodScopeOnly() {
+<span class="nc" id="L850">        popScope();</span>
+<span class="nc" id="L851">    }</span>
+    
+    public void preMethodBacktraceAndScope(String name, StaticScope staticScope) {
+<span class="nc" id="L854">        preMethodScopeOnly(staticScope);</span>
+<span class="nc" id="L855">    }</span>
+    
+    public void postMethodBacktraceAndScope() {
+<span class="nc" id="L858">        postMethodScopeOnly();</span>
+<span class="nc" id="L859">    }</span>
+    
+    public void preMethodBacktraceOnly(String name) {
+<span class="nc" id="L862">    }</span>
+
+    public void preMethodBacktraceDummyScope(String name, StaticScope staticScope) {
+<span class="nc" id="L865">        pushScope(staticScope.getDummyScope());</span>
+<span class="nc" id="L866">    }</span>
+    
+    public void postMethodBacktraceOnly() {
+<span class="nc" id="L869">    }</span>
+
+    public void postMethodBacktraceDummyScope() {
+<span class="nc" id="L872">        popScope();</span>
+<span class="nc" id="L873">    }</span>
+    
+    public void prepareTopLevel(RubyClass objectClass, IRubyObject topSelf) {
+<span class="fc" id="L876">        pushFrame();</span>
+<span class="fc" id="L877">        setCurrentVisibility(Visibility.PRIVATE);</span>
+<span class="fc" id="L878">        Frame frame = getCurrentFrame();</span>
+<span class="fc" id="L879">        frame.setSelf(topSelf);</span>
+        
+<span class="fc" id="L881">        getCurrentScope().getStaticScope().setModule(objectClass);</span>
+<span class="fc" id="L882">    }</span>
+    
+    public void preNodeEval(IRubyObject self) {
+<span class="fc" id="L885">        pushEvalFrame(self);</span>
+<span class="fc" id="L886">    }</span>
+    
+    public void postNodeEval() {
+<span class="fc" id="L889">        popFrame();</span>
+<span class="fc" id="L890">    }</span>
+    
+    // XXX: Again, screwy evaling under previous frame's scope
+    public void preExecuteUnder(IRubyObject executeUnderObj, RubyModule executeUnderClass, Block block) {
+<span class="fc" id="L894">        Frame frame = getCurrentFrame();</span>
+        
+<span class="fc" id="L896">        DynamicScope scope = getCurrentScope();</span>
+<span class="fc" id="L897">        StaticScope sScope = runtime.getStaticScopeFactory().newBlockScope(scope.getStaticScope());</span>
+<span class="fc" id="L898">        sScope.setModule(executeUnderClass);</span>
+<span class="fc" id="L899">        pushScope(DynamicScope.newDynamicScope(sScope, scope));</span>
+<span class="fc" id="L900">        pushCallFrame(frame.getKlazz(), frame.getName(), executeUnderObj, block);</span>
+<span class="fc" id="L901">        getCurrentFrame().setVisibility(getPreviousFrame().getVisibility());</span>
+<span class="fc" id="L902">    }</span>
+    
+    public void postExecuteUnder() {
+<span class="fc" id="L905">        popFrame();</span>
+<span class="fc" id="L906">        popScope();</span>
+<span class="fc" id="L907">    }</span>
+
+    public void preTrace() {
+<span class="fc" id="L910">        setWithinTrace(true);</span>
+<span class="fc" id="L911">        pushFrame();</span>
+<span class="fc" id="L912">    }</span>
+    
+    public void postTrace() {
+<span class="fc" id="L915">        popFrame();</span>
+<span class="fc" id="L916">        setWithinTrace(false);</span>
+<span class="fc" id="L917">    }</span>
+    
+    public Frame preForBlock(Binding binding) {
+<span class="nc" id="L920">        Frame lastFrame = preYieldNoScope(binding);</span>
+<span class="nc" id="L921">        pushScope(binding.getDynamicScope());</span>
+<span class="nc" id="L922">        return lastFrame;</span>
+    }
+    
+    public Frame preYieldSpecificBlock(Binding binding, StaticScope scope) {
+<span class="nc" id="L926">        Frame lastFrame = preYieldNoScope(binding);</span>
+        // new scope for this invocation of the block, based on parent scope
+<span class="nc" id="L928">        pushScope(DynamicScope.newDynamicScope(scope, binding.getDynamicScope()));</span>
+<span class="nc" id="L929">        return lastFrame;</span>
+    }
+    
+    public Frame preYieldLightBlock(Binding binding, DynamicScope emptyScope) {
+<span class="fc" id="L933">        Frame lastFrame = preYieldNoScope(binding);</span>
+        // just push the same empty scope, since we won't use one
+<span class="fc" id="L935">        pushScope(emptyScope);</span>
+<span class="fc" id="L936">        return lastFrame;</span>
+    }
+    
+    public Frame preYieldNoScope(Binding binding) {
+<span class="fc" id="L940">        return pushFrameForBlock(binding);</span>
+    }
+    
+    public void preEvalScriptlet(DynamicScope scope) {
+<span class="nc" id="L944">        pushScope(scope);</span>
+<span class="nc" id="L945">    }</span>
+    
+    public void postEvalScriptlet() {
+<span class="nc" id="L948">        popScope();</span>
+<span class="nc" id="L949">    }</span>
+    
+    public Frame preEvalWithBinding(Binding binding) {
+<span class="fc" id="L952">        return pushFrameForEval(binding);</span>
+    }
+    
+    public void postEvalWithBinding(Binding binding, Frame lastFrame) {
+<span class="fc" id="L956">        popFrameReal(lastFrame);</span>
+<span class="fc" id="L957">    }</span>
+    
+    public void postYield(Binding binding, Frame lastFrame) {
+<span class="fc" id="L960">        popScope();</span>
+<span class="fc" id="L961">        popFrameReal(lastFrame);</span>
+<span class="fc" id="L962">    }</span>
+    
+    public void postYieldLight(Binding binding, Frame lastFrame) {
+<span class="fc" id="L965">        popScope();</span>
+<span class="fc" id="L966">        popFrameReal(lastFrame);</span>
+<span class="fc" id="L967">    }</span>
+    
+    public void postYieldNoScope(Frame lastFrame) {
+<span class="fc" id="L970">        popFrameReal(lastFrame);</span>
+<span class="fc" id="L971">    }</span>
+    
+    public void preScopedBody(DynamicScope scope) {
+<span class="fc" id="L974">        pushScope(scope);</span>
+<span class="fc" id="L975">    }</span>
+    
+    public void postScopedBody() {
+<span class="fc" id="L978">        popScope();</span>
+<span class="fc" id="L979">    }</span>
+    
+    /**
+     * Is this thread actively tracing at this moment.
+     *
+     * @return true if so
+     * @see org.jruby.Ruby#callEventHooks(ThreadContext, RubyEvent, String, int, String, org.jruby.runtime.builtin.IRubyObject)
+     */
+    public boolean isWithinTrace() {
+<span class="fc" id="L988">        return isWithinTrace;</span>
+    }
+    
+    /**
+     * Set whether we are actively tracing or not on this thread.
+     *
+     * @param isWithinTrace true is so
+     * @see org.jruby.Ruby#callEventHooks(ThreadContext, RubyEvent, String, int, String, org.jruby.runtime.builtin.IRubyObject)
+     */
+    public void setWithinTrace(boolean isWithinTrace) {
+<span class="fc" id="L998">        this.isWithinTrace = isWithinTrace;</span>
+<span class="fc" id="L999">    }</span>
+    
+    /**
+     * Return a binding representing the current call's state
+     * @return the current binding
+     */
+    public Binding currentBinding() {
+<span class="fc" id="L1006">        Frame frame = getCurrentFrame().capture();</span>
+<span class="fc" id="L1007">        return new Binding(frame, getCurrentScope(), backtrace[backtraceIndex].clone());</span>
+    }
+
+    /**
+     * Return a binding representing the current call's state but with a specified self
+     * @param self the self object to use
+     * @return the current binding, using the specified self
+     */
+    public Binding currentBinding(IRubyObject self) {
+<span class="nc" id="L1016">        Frame frame = getCurrentFrame().capture();</span>
+<span class="nc" id="L1017">        return new Binding(self, frame, frame.getVisibility(), getCurrentScope(), backtrace[backtraceIndex].clone());</span>
+    }
+
+    /**
+     * Return a binding representing the current call's state but with the
+     * specified visibility and self.
+     * @param self the self object to use
+     * @param visibility the visibility to use
+     * @return the current binding using the specified self and visibility
+     */
+    public Binding currentBinding(IRubyObject self, Visibility visibility) {
+<span class="fc" id="L1028">        Frame frame = getCurrentFrame().capture();</span>
+<span class="fc" id="L1029">        return new Binding(self, frame, visibility, getCurrentScope(), backtrace[backtraceIndex].clone());</span>
+    }
+
+    /**
+     * Return a binding representing the current call's state but with the
+     * specified scope and self.
+     * @param self the self object to use
+     * @param scope the scope to use
+     * @return the current binding using the specified self and scope
+     */
+    public Binding currentBinding(IRubyObject self, DynamicScope scope) {
+<span class="fc" id="L1040">        Frame frame = getCurrentFrame().capture();</span>
+<span class="fc" id="L1041">        return new Binding(self, frame, frame.getVisibility(), scope, backtrace[backtraceIndex].clone());</span>
+    }
+
+    /**
+     * Return a binding representing the current call's state but with the
+     * specified visibility, scope, and self. For shared-scope binding
+     * consumers like for loops.
+     * 
+     * @param self the self object to use
+     * @param visibility the visibility to use
+     * @param scope the scope to use
+     * @return the current binding using the specified self, scope, and visibility
+     */
+    public Binding currentBinding(IRubyObject self, Visibility visibility, DynamicScope scope) {
+<span class="nc" id="L1055">        Frame frame = getCurrentFrame().capture();</span>
+<span class="nc" id="L1056">        return new Binding(self, frame, visibility, scope, backtrace[backtraceIndex].clone());</span>
+    }
+
+    /**
+     * Get the profile collection for this thread (ThreadContext).
+     *
+     * @return the thread's profile collection
+     *
+     */
+    public ProfileCollection getProfileCollection() {
+<span class="nc" id="L1066">        return profileCollection;</span>
+    }
+
+    public void startProfiling() {
+<span class="nc" id="L1070">        isProfiling = true;</span>
+        // use new profiling data every time profiling is started, useful in
+        // case users keep a reference to previous data after profiling stop
+<span class="nc" id="L1073">        profileCollection = getRuntime().getProfilingService().newProfileCollection( this );</span>
+<span class="nc" id="L1074">    }</span>
+    
+    public void stopProfiling() {
+<span class="nc" id="L1077">        isProfiling = false;</span>
+<span class="nc" id="L1078">    }</span>
+    
+    public boolean isProfiling() {
+<span class="nc" id="L1081">        return isProfiling;</span>
+    }
+    
+<span class="fc" id="L1084">    private int currentMethodSerial = 0;</span>
+    
+    public int profileEnter(int nextMethod) {
+<span class="nc" id="L1087">        int previousMethodSerial = currentMethodSerial;</span>
+<span class="nc" id="L1088">        currentMethodSerial = nextMethod;</span>
+<span class="nc bnc" id="L1089" title="All 2 branches missed.">        if (isProfiling()) {</span>
+<span class="nc" id="L1090">            getProfileCollection().profileEnter(nextMethod);</span>
+        }
+<span class="nc" id="L1092">        return previousMethodSerial;</span>
+    }
+
+    public int profileEnter(String name, DynamicMethod nextMethod) {
+<span class="nc bnc" id="L1096" title="All 2 branches missed.">        if (isProfiling()) {</span>
+            // TODO This can be removed, because the profiled method will be added in the MethodEnhancer if necessary
+<span class="nc" id="L1098">            getRuntime().getProfiledMethods().addProfiledMethod( name, nextMethod );</span>
+        }
+<span class="nc" id="L1100">        return profileEnter((int) nextMethod.getSerialNumber());</span>
+    }
+    
+    public int profileExit(int nextMethod, long startTime) {
+<span class="nc" id="L1104">        int previousMethodSerial = currentMethodSerial;</span>
+<span class="nc" id="L1105">        currentMethodSerial = nextMethod;</span>
+<span class="nc bnc" id="L1106" title="All 2 branches missed.">        if (isProfiling()) {</span>
+<span class="nc" id="L1107">            getProfileCollection().profileExit(nextMethod, startTime);</span>
+        }
+<span class="nc" id="L1109">        return previousMethodSerial;</span>
+    }
+    
+    public Set&lt;RecursiveComparator.Pair&gt; getRecursiveSet() {
+<span class="fc" id="L1113">        return recursiveSet;</span>
+    }
+    
+    public void setRecursiveSet(Set&lt;RecursiveComparator.Pair&gt; recursiveSet) {
+<span class="fc" id="L1117">        this.recursiveSet = recursiveSet;</span>
+<span class="fc" id="L1118">    }</span>
+
+    @Deprecated
+    public void setFile(String file) {
+<span class="nc" id="L1122">        backtrace[backtraceIndex].filename = file;</span>
+<span class="nc" id="L1123">    }</span>
+    
+    private Set&lt;RecursiveComparator.Pair&gt; recursiveSet;
+    
+    @Deprecated
+    private org.jruby.util.RubyDateFormat dateFormat;
+    
+    @Deprecated
+    public org.jruby.util.RubyDateFormat getRubyDateFormat() {
+<span class="nc bnc" id="L1132" title="All 2 branches missed.">        if (dateFormat == null) dateFormat = new org.jruby.util.RubyDateFormat(&quot;-&quot;, Locale.US, true);</span>
+        
+<span class="nc" id="L1134">        return dateFormat;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

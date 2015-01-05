@@ -1,0 +1,489 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AnnotationBinder.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.anno</a> &gt; <span class="el_source">AnnotationBinder.java</span></div><h1>AnnotationBinder.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2008-2013 Charles Oliver Nutter &lt;headius@headius.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.anno;
+
+import org.jruby.util.CodegenUtils;
+
+import javax.annotation.processing.AbstractProcessor;
+import javax.annotation.processing.RoundEnvironment;
+import javax.annotation.processing.SupportedAnnotationTypes;
+import javax.annotation.processing.SupportedSourceVersion;
+import javax.lang.model.SourceVersion;
+import javax.lang.model.element.*;
+import javax.lang.model.type.TypeMirror;
+import javax.lang.model.util.ElementFilter;
+import java.io.*;
+import java.util.*;
+import java.util.logging.Logger;
+
+/**
+ * Annotation processor for generating &quot;populators&quot; to bind native Java methods as Ruby methods, and
+ * to gather a list of classes seen during compilation that should have their invokers regenerated.
+ *
+ * NOTE: This class must ONLY reference classes in the org.jruby.anno package, to avoid forcing
+ * a transitive dependency on any runtime JRuby classes.
+ */
+@SupportedAnnotationTypes({&quot;org.jruby.anno.JRubyMethod&quot;})
+@SupportedSourceVersion(SourceVersion.RELEASE_6)
+<span class="nc" id="L54">public class AnnotationBinder extends AbstractProcessor {</span>
+
+    public static final String POPULATOR_SUFFIX = &quot;$POPULATOR&quot;;
+<span class="nc" id="L57">    private static final Logger LOG = Logger.getLogger(&quot;AnnotationBinder&quot;);</span>
+    public static final String SRC_GEN_DIR = &quot;target/generated-sources/org/jruby/gen/&quot;;
+<span class="nc" id="L59">    private final List&lt;CharSequence&gt; classNames = new ArrayList&lt;CharSequence&gt;();</span>
+    private PrintStream out;
+    private static final boolean DEBUG = false;
+
+    @Override
+    public boolean process(Set&lt;? extends TypeElement&gt; typeElements, RoundEnvironment roundEnvironment) {
+<span class="nc bnc" id="L65" title="All 2 branches missed.">        for (TypeElement element : ElementFilter.typesIn(roundEnvironment.getRootElements())) {</span>
+<span class="nc" id="L66">            processType(element);</span>
+<span class="nc" id="L67">        }</span>
+
+        try {
+<span class="nc" id="L70">            FileWriter fw = new FileWriter(&quot;target/generated-sources/annotated_classes.txt&quot;);</span>
+<span class="nc bnc" id="L71" title="All 2 branches missed.">            for (CharSequence name : classNames) {</span>
+<span class="nc" id="L72">                fw.write(name.toString());</span>
+<span class="nc" id="L73">                fw.write('\n');</span>
+<span class="nc" id="L74">            }</span>
+<span class="nc" id="L75">            fw.close();</span>
+<span class="nc" id="L76">        } catch (Exception e) {</span>
+<span class="nc" id="L77">            throw new RuntimeException(e);</span>
+<span class="nc" id="L78">        }</span>
+
+<span class="nc" id="L80">        return true;</span>
+    }
+
+    public void processType(TypeElement cd) {
+        // process inner classes
+<span class="nc bnc" id="L85" title="All 2 branches missed.">        for (TypeElement innerType : ElementFilter.typesIn(cd.getEnclosedElements())) {</span>
+<span class="nc" id="L86">            processType(innerType);</span>
+<span class="nc" id="L87">        }</span>
+
+        try {
+<span class="nc" id="L90">            String qualifiedName = cd.getQualifiedName().toString().replace('.', '$');</span>
+
+            // skip anything not related to jruby
+<span class="nc bnc" id="L93" title="All 2 branches missed.">            if (!qualifiedName.contains(&quot;org$jruby&quot;)) {</span>
+<span class="nc" id="L94">                return;</span>
+            }
+<span class="nc" id="L96">            ByteArrayOutputStream bytes = new ByteArrayOutputStream(1024);</span>
+<span class="nc" id="L97">            out = new PrintStream(bytes);</span>
+
+            // start a new populator
+<span class="nc" id="L100">            out.println(&quot;/* THIS FILE IS GENERATED. DO NOT EDIT */&quot;);</span>
+<span class="nc" id="L101">            out.println(&quot;package org.jruby.gen;&quot;);</span>
+
+<span class="nc" id="L103">            out.println(&quot;import org.jruby.Ruby;&quot;);</span>
+<span class="nc" id="L104">            out.println(&quot;import org.jruby.RubyModule;&quot;);</span>
+<span class="nc" id="L105">            out.println(&quot;import org.jruby.RubyClass;&quot;);</span>
+<span class="nc" id="L106">            out.println(&quot;import org.jruby.anno.TypePopulator;&quot;);</span>
+<span class="nc" id="L107">            out.println(&quot;import org.jruby.internal.runtime.methods.CallConfiguration;&quot;);</span>
+<span class="nc" id="L108">            out.println(&quot;import org.jruby.internal.runtime.methods.JavaMethod;&quot;);</span>
+<span class="nc" id="L109">            out.println(&quot;import org.jruby.internal.runtime.methods.DynamicMethod;&quot;);</span>
+<span class="nc" id="L110">            out.println(&quot;import org.jruby.runtime.Arity;&quot;);</span>
+<span class="nc" id="L111">            out.println(&quot;import org.jruby.runtime.Visibility;&quot;);</span>
+<span class="nc" id="L112">            out.println(&quot;import org.jruby.runtime.MethodIndex;&quot;);</span>
+<span class="nc" id="L113">            out.println(&quot;import java.util.Arrays;&quot;);</span>
+<span class="nc" id="L114">            out.println(&quot;import java.util.List;&quot;);</span>
+<span class="nc" id="L115">            out.println(&quot;import javax.annotation.Generated;&quot;);</span>
+
+<span class="nc" id="L117">            out.println(&quot;@Generated(\&quot;org.jruby.anno.AnnotationBinder\&quot;)&quot;);</span>
+<span class="nc" id="L118">            out.println(&quot;public class &quot; + qualifiedName + POPULATOR_SUFFIX + &quot; extends TypePopulator {&quot;);</span>
+<span class="nc" id="L119">            out.println(&quot;    public void populate(RubyModule cls, Class clazz) {&quot;);</span>
+            if (DEBUG) {
+                out.println(&quot;        System.out.println(\&quot;Using pregenerated populator: \&quot; + \&quot;&quot; + qualifiedName + POPULATOR_SUFFIX + &quot;\&quot;);&quot;);
+            }
+
+            // scan for meta, compat, etc to reduce findbugs complaints about &quot;dead assignments&quot;
+<span class="nc" id="L125">            boolean hasAnno = false;</span>
+<span class="nc" id="L126">            boolean hasMeta = false;</span>
+<span class="nc" id="L127">            boolean hasModule = false;</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">            for (ExecutableElement method : ElementFilter.methodsIn(cd.getEnclosedElements())) {</span>
+<span class="nc" id="L129">                JRubyMethod anno = method.getAnnotation(JRubyMethod.class);</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">                if (anno == null) {</span>
+<span class="nc" id="L131">                    continue;</span>
+                }
+<span class="nc" id="L133">                hasAnno = true;</span>
+<span class="nc" id="L134">                hasMeta |= anno.meta();</span>
+<span class="nc" id="L135">                hasModule |= anno.module();</span>
+<span class="nc" id="L136">            }</span>
+
+<span class="nc bnc" id="L138" title="All 2 branches missed.">            if (!hasAnno) return;</span>
+
+<span class="nc" id="L140">            out.println(&quot;        JavaMethod javaMethod;&quot;);</span>
+<span class="nc" id="L141">            out.println(&quot;        DynamicMethod moduleMethod;&quot;);</span>
+<span class="nc bnc" id="L142" title="All 4 branches missed.">            if (hasMeta || hasModule) out.println(&quot;        RubyClass singletonClass = cls.getSingletonClass();&quot;);</span>
+<span class="nc" id="L143">            out.println(&quot;        Ruby runtime = cls.getRuntime();&quot;);</span>
+
+<span class="nc" id="L145">            Map&lt;CharSequence, List&lt;ExecutableElement&gt;&gt; annotatedMethods = new HashMap&lt;CharSequence, List&lt;ExecutableElement&gt;&gt;();</span>
+<span class="nc" id="L146">            Map&lt;CharSequence, List&lt;ExecutableElement&gt;&gt; staticAnnotatedMethods = new HashMap&lt;CharSequence, List&lt;ExecutableElement&gt;&gt;();</span>
+
+<span class="nc" id="L148">            Set&lt;String&gt; frameAwareMethods = new HashSet&lt;String&gt;();</span>
+<span class="nc" id="L149">            Set&lt;String&gt; scopeAwareMethods = new HashSet&lt;String&gt;();</span>
+
+<span class="nc" id="L151">            int methodCount = 0;</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">            for (ExecutableElement method : ElementFilter.methodsIn(cd.getEnclosedElements())) {</span>
+<span class="nc" id="L153">                JRubyMethod anno = method.getAnnotation(JRubyMethod.class);</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">                if (anno == null) {</span>
+<span class="nc" id="L155">                    continue;</span>
+                }
+<span class="nc" id="L157">                methodCount++;</span>
+
+                // warn if the method raises any exceptions (JRUBY-4494)
+<span class="nc bnc" id="L160" title="All 2 branches missed.">                if (method.getThrownTypes().size() != 0) {</span>
+<span class="nc" id="L161">                    System.err.print(&quot;Method &quot; + cd.toString() + &quot;.&quot; + method.toString() + &quot; should not throw exceptions: &quot;);</span>
+<span class="nc" id="L162">                    boolean comma = false;</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">                    for (TypeMirror thrownType : method.getThrownTypes()) {</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">                        if (comma) System.err.print(&quot;, &quot;);</span>
+<span class="nc" id="L165">                        System.err.print(thrownType);</span>
+<span class="nc" id="L166">                        comma = true;</span>
+<span class="nc" id="L167">                    }</span>
+<span class="nc" id="L168">                    System.err.print(&quot;\n&quot;);</span>
+                }
+
+<span class="nc bnc" id="L171" title="All 2 branches missed.">                CharSequence name = anno.name().length == 0 ? method.getSimpleName() : anno.name()[0];</span>
+
+                List&lt;ExecutableElement&gt; methodDescs;
+<span class="nc" id="L174">                Map&lt;CharSequence, List&lt;ExecutableElement&gt;&gt; methodsHash = null;</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">                if (method.getModifiers().contains(Modifier.STATIC)) {</span>
+<span class="nc" id="L176">                    methodsHash = staticAnnotatedMethods;</span>
+                } else {
+<span class="nc" id="L178">                    methodsHash = annotatedMethods;</span>
+                }
+
+<span class="nc" id="L181">                methodDescs = methodsHash.get(name);</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">                if (methodDescs == null) {</span>
+<span class="nc" id="L183">                    methodDescs = new ArrayList&lt;ExecutableElement&gt;();</span>
+<span class="nc" id="L184">                    methodsHash.put(name, methodDescs);</span>
+                }
+
+<span class="nc" id="L187">                methodDescs.add(method);</span>
+
+                // check for frame field reads or writes
+<span class="nc" id="L190">                boolean frame = false;</span>
+<span class="nc" id="L191">                boolean scope = false;</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">                if (anno.frame()) {</span>
+                    if (DEBUG)
+                        System.out.println(&quot;Method has frame = true: &quot; + methodDescs.get(0).getEnclosingElement() + &quot;:&quot; + methodDescs);
+<span class="nc" id="L195">                    frame = true;</span>
+                }
+<span class="nc bnc" id="L197" title="All 2 branches missed.">                if (anno.scope()) {</span>
+                    if (DEBUG)
+                        System.out.println(&quot;Method has frame = true: &quot; + methodDescs.get(0).getEnclosingElement() + &quot;:&quot; + methodDescs);
+<span class="nc" id="L200">                    scope = true;</span>
+                }
+<span class="nc bnc" id="L202" title="All 2 branches missed.">                for (FrameField field : anno.reads()) {</span>
+<span class="nc" id="L203">                    frame |= field.needsFrame();</span>
+<span class="nc" id="L204">                    scope |= field.needsScope();</span>
+                }
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                for (FrameField field : anno.writes()) {</span>
+<span class="nc" id="L207">                    frame |= field.needsFrame();</span>
+<span class="nc" id="L208">                    scope |= field.needsScope();</span>
+                }
+                
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                if (frame) AnnotationHelper.addMethodNamesToSet(frameAwareMethods, anno, method.getSimpleName().toString());</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">                if (scope) AnnotationHelper.addMethodNamesToSet(scopeAwareMethods, anno, method.getSimpleName().toString());</span>
+<span class="nc" id="L213">            }</span>
+
+<span class="nc bnc" id="L215" title="All 2 branches missed.">            if (methodCount == 0) {</span>
+                // no annotated methods found, skip
+<span class="nc" id="L217">                return;</span>
+            }
+
+<span class="nc" id="L220">            classNames.add(getActualQualifiedName(cd));</span>
+
+<span class="nc" id="L222">            processMethodDeclarations(staticAnnotatedMethods);</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">            for (Map.Entry&lt;CharSequence, List&lt;ExecutableElement&gt;&gt; entry : staticAnnotatedMethods.entrySet()) {</span>
+<span class="nc" id="L224">                ExecutableElement decl = entry.getValue().get(0);</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">                if (!decl.getAnnotation(JRubyMethod.class).omit()) addCoreMethodMapping(entry.getKey(), decl, out);</span>
+<span class="nc" id="L226">            }</span>
+
+<span class="nc" id="L228">            processMethodDeclarations(annotatedMethods);</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">            for (Map.Entry&lt;CharSequence, List&lt;ExecutableElement&gt;&gt; entry : annotatedMethods.entrySet()) {</span>
+<span class="nc" id="L230">                ExecutableElement decl = entry.getValue().get(0);</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">                if (!decl.getAnnotation(JRubyMethod.class).omit()) addCoreMethodMapping(entry.getKey(), decl, out);</span>
+<span class="nc" id="L232">            }</span>
+
+<span class="nc" id="L234">            out.println(&quot;    }&quot;);</span>
+
+            // write out a static initializer for frame names, so it only fires once
+<span class="nc" id="L237">            out.println(&quot;    static {&quot;);</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">            if (!frameAwareMethods.isEmpty()) {</span>
+<span class="nc" id="L239">                StringBuffer frameMethodsString = new StringBuffer();</span>
+<span class="nc" id="L240">                boolean first = true;</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">                for (CharSequence name : frameAwareMethods) {</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">                    if (!first) frameMethodsString.append(',');</span>
+<span class="nc" id="L243">                    first = false;</span>
+<span class="nc" id="L244">                    frameMethodsString.append('&quot;').append(name).append('&quot;');</span>
+<span class="nc" id="L245">                }</span>
+<span class="nc" id="L246">                out.println(&quot;        MethodIndex.addFrameAwareMethods(&quot; + frameMethodsString + &quot;);&quot;);</span>
+            }
+<span class="nc bnc" id="L248" title="All 2 branches missed.">            if (!scopeAwareMethods.isEmpty()) {</span>
+<span class="nc" id="L249">                StringBuffer scopeMethodsString = new StringBuffer();</span>
+<span class="nc" id="L250">                boolean first = true;</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">                for (CharSequence name : scopeAwareMethods) {</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">                    if (!first) scopeMethodsString.append(',');</span>
+<span class="nc" id="L253">                    first = false;</span>
+<span class="nc" id="L254">                    scopeMethodsString.append('&quot;').append(name).append('&quot;');</span>
+<span class="nc" id="L255">                }</span>
+<span class="nc" id="L256">                out.println(&quot;        MethodIndex.addScopeAwareMethods(&quot; + scopeMethodsString + &quot;);&quot;);</span>
+            }
+<span class="nc" id="L258">            out.println(&quot;    }&quot;);</span>
+
+<span class="nc" id="L260">            out.println(&quot;}&quot;);</span>
+<span class="nc" id="L261">            out.close();</span>
+<span class="nc" id="L262">            out = null;</span>
+
+<span class="nc" id="L264">            new File(SRC_GEN_DIR).mkdirs();</span>
+<span class="nc" id="L265">            FileOutputStream fos = new FileOutputStream(SRC_GEN_DIR + qualifiedName + POPULATOR_SUFFIX + &quot;.java&quot;);</span>
+<span class="nc" id="L266">            fos.write(bytes.toByteArray());</span>
+<span class="nc" id="L267">            fos.close();</span>
+<span class="nc" id="L268">        } catch (IOException ioe) {</span>
+<span class="nc" id="L269">            LOG.severe(&quot;FAILED TO GENERATE: &quot; + ioe);</span>
+<span class="nc" id="L270">            System.exit(1);</span>
+<span class="nc" id="L271">        }</span>
+<span class="nc" id="L272">    }</span>
+
+    public void processMethodDeclarations(Map&lt;CharSequence, List&lt;ExecutableElement&gt;&gt; declarations) {
+<span class="nc bnc" id="L275" title="All 2 branches missed.">        for (Map.Entry&lt;CharSequence, List&lt;ExecutableElement&gt;&gt; entry : declarations.entrySet()) {</span>
+<span class="nc" id="L276">            List&lt;ExecutableElement&gt; list = entry.getValue();</span>
+
+<span class="nc bnc" id="L278" title="All 2 branches missed.">            if (list.size() == 1) {</span>
+                // single method, use normal logic
+<span class="nc" id="L280">                processMethodDeclaration(list.get(0));</span>
+            } else {
+                // multimethod, new logic
+<span class="nc" id="L283">                processMethodDeclarationMulti(list.get(0));</span>
+            }
+<span class="nc" id="L285">        }</span>
+<span class="nc" id="L286">    }</span>
+
+    public void processMethodDeclaration(ExecutableElement method) {
+<span class="nc" id="L289">        JRubyMethod anno = method.getAnnotation(JRubyMethod.class);</span>
+<span class="nc bnc" id="L290" title="All 4 branches missed.">        if (anno != null &amp;&amp; out != null) {</span>
+<span class="nc" id="L291">            boolean isStatic = method.getModifiers().contains(Modifier.STATIC);</span>
+<span class="nc" id="L292">            CharSequence qualifiedName = getActualQualifiedName((TypeElement)method.getEnclosingElement());</span>
+
+<span class="nc" id="L294">            boolean hasContext = false;</span>
+<span class="nc" id="L295">            boolean hasBlock = false;</span>
+
+<span class="nc" id="L297">            StringBuffer buffer = new StringBuffer();</span>
+<span class="nc" id="L298">            boolean first = true;</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">            for (VariableElement parameter : method.getParameters()) {</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">                if (!first) buffer.append(&quot;, &quot;);</span>
+<span class="nc" id="L301">                first = false;</span>
+<span class="nc" id="L302">                buffer.append(parameter.asType().toString());</span>
+<span class="nc" id="L303">                buffer.append(&quot;.class&quot;);</span>
+<span class="nc" id="L304">                hasContext |= parameter.asType().toString().equals(&quot;org.jruby.runtime.ThreadContext&quot;);</span>
+<span class="nc" id="L305">                hasBlock |= parameter.asType().toString().equals(&quot;org.jruby.runtime.Block&quot;);</span>
+<span class="nc" id="L306">            }</span>
+
+<span class="nc" id="L308">            int actualRequired = calculateActualRequired(method, method.getParameters().size(), anno.optional(), anno.rest(), isStatic, hasContext, hasBlock);</span>
+
+<span class="nc" id="L310">            String annotatedBindingName = CodegenUtils.getAnnotatedBindingClassName(</span>
+<span class="nc" id="L311">                    method.getSimpleName(),</span>
+                    qualifiedName,
+                    isStatic,
+                    actualRequired,
+<span class="nc" id="L315">                    anno.optional(),</span>
+                    false,
+<span class="nc" id="L317">                    anno.frame());</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">            String implClass = anno.meta() ? &quot;singletonClass&quot; : &quot;cls&quot;;</span>
+
+<span class="nc" id="L320">            String callRequirement = AnnotationHelper.getCallConfigNameByAnno(anno);</span>
+<span class="nc" id="L321">            String callerRequirement = AnnotationHelper.getCallerCallConfigNameByAnno(anno);</span>
+
+<span class="nc" id="L323">            out.println(&quot;        javaMethod = new &quot; + annotatedBindingName + &quot;(&quot; + implClass + &quot;, Visibility.&quot; + anno.visibility() + &quot;);&quot;);</span>
+<span class="nc" id="L324">            out.println(&quot;        populateMethod(javaMethod, &quot; +</span>
+<span class="nc" id="L325">                    +AnnotationHelper.getArityValue(anno, actualRequired) + &quot;, \&quot;&quot;</span>
+<span class="nc" id="L326">                    + method.getSimpleName() + &quot;\&quot;, &quot;</span>
+                    + isStatic + &quot;, &quot;
+                    + &quot;CallConfiguration.&quot; + callRequirement + &quot;,&quot;
+<span class="nc" id="L329">                    + anno.notImplemented() + &quot;, &quot;</span>
+<span class="nc" id="L330">                    + ((TypeElement)method.getEnclosingElement()).getQualifiedName() + &quot;.class, &quot;</span>
+<span class="nc" id="L331">                    + &quot;\&quot;&quot; + method.getSimpleName() + &quot;\&quot;, &quot;</span>
+<span class="nc" id="L332">                    + method.getReturnType().toString() + &quot;.class, &quot;</span>
+<span class="nc" id="L333">                    + &quot;new Class[] {&quot; + buffer.toString() + &quot;},&quot;</span>
+                    + &quot;CallConfiguration.&quot; + callerRequirement + &quot;);&quot;);
+<span class="nc" id="L335">            generateMethodAddCalls(method, anno);</span>
+        }
+<span class="nc" id="L337">    }</span>
+
+    public void processMethodDeclarationMulti(ExecutableElement method) {
+<span class="nc" id="L340">        JRubyMethod anno = method.getAnnotation(JRubyMethod.class);</span>
+<span class="nc bnc" id="L341" title="All 4 branches missed.">        if (anno != null &amp;&amp; out != null) {</span>
+<span class="nc" id="L342">            boolean isStatic = method.getModifiers().contains(Modifier.STATIC);</span>
+<span class="nc" id="L343">            CharSequence qualifiedName = getActualQualifiedName((TypeElement)method.getEnclosingElement());</span>
+
+<span class="nc" id="L345">            boolean hasContext = false;</span>
+<span class="nc" id="L346">            boolean hasBlock = false;</span>
+
+<span class="nc" id="L348">            StringBuffer buffer = new StringBuffer();</span>
+<span class="nc" id="L349">            boolean first = true;</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">            for (VariableElement parameter : method.getParameters()) {</span>
+<span class="nc bnc" id="L351" title="All 2 branches missed.">                if (!first) buffer.append(&quot;, &quot;);</span>
+<span class="nc" id="L352">                first = false;</span>
+<span class="nc" id="L353">                buffer.append(parameter.asType().toString());</span>
+<span class="nc" id="L354">                buffer.append(&quot;.class&quot;);</span>
+<span class="nc" id="L355">                hasContext |= parameter.asType().toString().equals(&quot;org.jruby.runtime.ThreadContext&quot;);</span>
+<span class="nc" id="L356">                hasBlock |= parameter.asType().toString().equals(&quot;org.jruby.runtime.Block&quot;);</span>
+<span class="nc" id="L357">            }</span>
+
+<span class="nc" id="L359">            int actualRequired = calculateActualRequired(method, method.getParameters().size(), anno.optional(), anno.rest(), isStatic, hasContext, hasBlock);</span>
+
+<span class="nc" id="L361">            String annotatedBindingName = CodegenUtils.getAnnotatedBindingClassName(</span>
+<span class="nc" id="L362">                    method.getSimpleName(),</span>
+                    qualifiedName,
+                    isStatic,
+                    actualRequired,
+<span class="nc" id="L366">                    anno.optional(),</span>
+                    true,
+<span class="nc" id="L368">                    anno.frame());</span>
+<span class="nc bnc" id="L369" title="All 2 branches missed.">            String implClass = anno.meta() ? &quot;singletonClass&quot; : &quot;cls&quot;;</span>
+
+<span class="nc" id="L371">            String callRequirement = AnnotationHelper.getCallConfigNameByAnno(anno);</span>
+<span class="nc" id="L372">            String callerRequirement = AnnotationHelper.getCallerCallConfigNameByAnno(anno);</span>
+
+<span class="nc" id="L374">            out.println(&quot;        javaMethod = new &quot; + annotatedBindingName + &quot;(&quot; + implClass + &quot;, Visibility.&quot; + anno.visibility() + &quot;);&quot;);</span>
+<span class="nc" id="L375">            out.println(&quot;        populateMethod(javaMethod, &quot; +</span>
+                    &quot;-1, \&quot;&quot; +
+<span class="nc" id="L377">                    method.getSimpleName() + &quot;\&quot;, &quot; +</span>
+                    isStatic + &quot;, &quot; +
+                    &quot;CallConfiguration.&quot; + callRequirement + &quot;, &quot; +
+<span class="nc" id="L380">                    anno.notImplemented() + &quot;, &quot;</span>
+<span class="nc" id="L381">                    + ((TypeElement)method.getEnclosingElement()).getQualifiedName() + &quot;.class, &quot;</span>
+<span class="nc" id="L382">                    + &quot;\&quot;&quot; + method.getSimpleName() + &quot;\&quot;, &quot;</span>
+<span class="nc" id="L383">                    + method.getReturnType().toString() + &quot;.class, &quot;</span>
+<span class="nc" id="L384">                    + &quot;new Class[] {&quot; + buffer.toString() + &quot;},&quot;</span>
+                    + &quot;CallConfiguration.&quot; + callerRequirement + &quot;);&quot;);
+<span class="nc" id="L386">            generateMethodAddCalls(method, anno);</span>
+        }
+<span class="nc" id="L388">    }</span>
+
+    private void addCoreMethodMapping(CharSequence rubyName, ExecutableElement decl, PrintStream out) {
+<span class="nc" id="L391">        out.println(new StringBuilder(50)</span>
+<span class="nc" id="L392">                .append(&quot;        runtime.addBoundMethod(&quot;)</span>
+<span class="nc" id="L393">                .append('&quot;').append(((TypeElement)decl.getEnclosingElement()).getQualifiedName()).append('&quot;')</span>
+<span class="nc" id="L394">                .append(',')</span>
+<span class="nc" id="L395">                .append('&quot;').append(decl.getSimpleName()).append('&quot;')</span>
+<span class="nc" id="L396">                .append(',')</span>
+<span class="nc" id="L397">                .append('&quot;').append(rubyName).append('&quot;')</span>
+<span class="nc" id="L398">                .append(&quot;);&quot;).toString());</span>
+<span class="nc" id="L399">    }</span>
+
+    private CharSequence getActualQualifiedName(TypeElement td) {
+<span class="nc bnc" id="L402" title="All 2 branches missed.">        if (td.getNestingKind() == NestingKind.MEMBER) {</span>
+<span class="nc" id="L403">            return getActualQualifiedName((TypeElement)td.getEnclosingElement()) + &quot;$&quot; + td.getSimpleName();</span>
+        }
+<span class="nc" id="L405">        return td.getQualifiedName().toString();</span>
+    }
+
+    private int calculateActualRequired(ExecutableElement md, int paramsLength, int optional, boolean rest, boolean isStatic, boolean hasContext, boolean hasBlock) {
+        int actualRequired;
+<span class="nc bnc" id="L410" title="All 4 branches missed.">        if (optional == 0 &amp;&amp; !rest) {</span>
+<span class="nc" id="L411">            int args = paramsLength;</span>
+<span class="nc bnc" id="L412" title="All 2 branches missed.">            if (args == 0) {</span>
+<span class="nc" id="L413">                actualRequired = 0;</span>
+            } else {
+<span class="nc bnc" id="L415" title="All 2 branches missed.">                if (isStatic) {</span>
+<span class="nc" id="L416">                    args--;</span>
+                }
+<span class="nc bnc" id="L418" title="All 2 branches missed.">                if (hasContext) {</span>
+<span class="nc" id="L419">                    args--;</span>
+                }
+<span class="nc bnc" id="L421" title="All 2 branches missed.">                if (hasBlock) {</span>
+<span class="nc" id="L422">                    args--;                        // TODO: confirm expected args are IRubyObject (or similar)</span>
+                }
+<span class="nc" id="L424">                actualRequired = args;</span>
+            }
+<span class="nc" id="L426">        } else {</span>
+            // optional args, so we have IRubyObject[]
+            // TODO: confirm
+<span class="nc" id="L429">            int args = paramsLength;</span>
+<span class="nc bnc" id="L430" title="All 2 branches missed.">            if (args == 0) {</span>
+<span class="nc" id="L431">                actualRequired = 0;</span>
+            } else {
+<span class="nc bnc" id="L433" title="All 2 branches missed.">                if (isStatic) {</span>
+<span class="nc" id="L434">                    args--;</span>
+                }
+<span class="nc bnc" id="L436" title="All 2 branches missed.">                if (hasContext) {</span>
+<span class="nc" id="L437">                    args--;</span>
+                }
+<span class="nc bnc" id="L439" title="All 2 branches missed.">                if (hasBlock) {</span>
+<span class="nc" id="L440">                    args--;                        // minus one more for IRubyObject[]</span>
+                }
+<span class="nc" id="L442">                args--;</span>
+
+                // TODO: confirm expected args are IRubyObject (or similar)
+<span class="nc" id="L445">                actualRequired = args;</span>
+            }
+
+<span class="nc bnc" id="L448" title="All 2 branches missed.">            if (actualRequired != 0) {</span>
+<span class="nc" id="L449">                throw new RuntimeException(&quot;Combining specific args with IRubyObject[] is not yet supported: &quot;</span>
+<span class="nc" id="L450">                        + ((TypeElement)md.getEnclosingElement()).getQualifiedName() + &quot;.&quot; + md.toString());</span>
+            }
+        }
+
+<span class="nc" id="L454">        return actualRequired;</span>
+    }
+
+    public void generateMethodAddCalls(ExecutableElement md, JRubyMethod jrubyMethod) {
+<span class="nc bnc" id="L458" title="All 2 branches missed.">        if (jrubyMethod.meta()) {</span>
+<span class="nc" id="L459">            defineMethodOnClass(&quot;javaMethod&quot;, &quot;singletonClass&quot;, jrubyMethod, md);</span>
+        } else {
+<span class="nc" id="L461">            defineMethodOnClass(&quot;javaMethod&quot;, &quot;cls&quot;, jrubyMethod, md);</span>
+<span class="nc bnc" id="L462" title="All 2 branches missed.">            if (jrubyMethod.module()) {</span>
+<span class="nc" id="L463">                out.println(&quot;        moduleMethod = populateModuleMethod(cls, javaMethod);&quot;);</span>
+<span class="nc" id="L464">                defineMethodOnClass(&quot;moduleMethod&quot;, &quot;singletonClass&quot;, jrubyMethod, md);</span>
+            }
+        }
+        //                }
+<span class="nc" id="L468">    }</span>
+
+    private void defineMethodOnClass(String methodVar, String classVar, JRubyMethod jrubyMethod, ExecutableElement md) {
+        CharSequence baseName;
+<span class="nc bnc" id="L472" title="All 2 branches missed.">        if (jrubyMethod.name().length == 0) {</span>
+<span class="nc" id="L473">            baseName = md.getSimpleName();</span>
+<span class="nc" id="L474">            out.println(&quot;        &quot; + classVar + &quot;.addMethodAtBootTimeOnly(\&quot;&quot; + baseName + &quot;\&quot;, &quot; + methodVar + &quot;);&quot;);</span>
+        } else {
+<span class="nc" id="L476">            baseName = jrubyMethod.name()[0];</span>
+<span class="nc bnc" id="L477" title="All 2 branches missed.">            for (String name : jrubyMethod.name()) {</span>
+<span class="nc" id="L478">                out.println(&quot;        &quot; + classVar + &quot;.addMethodAtBootTimeOnly(\&quot;&quot; + name + &quot;\&quot;, &quot; + methodVar + &quot;);&quot;);</span>
+            }
+        }
+
+<span class="nc bnc" id="L482" title="All 2 branches missed.">        if (jrubyMethod.alias().length &gt; 0) {</span>
+<span class="nc bnc" id="L483" title="All 2 branches missed.">            for (String alias : jrubyMethod.alias()) {</span>
+<span class="nc" id="L484">                out.println(&quot;        &quot; + classVar + &quot;.defineAlias(\&quot;&quot; + alias + &quot;\&quot;, \&quot;&quot; + baseName + &quot;\&quot;);&quot;);</span>
+            }
+        }
+<span class="nc" id="L487">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

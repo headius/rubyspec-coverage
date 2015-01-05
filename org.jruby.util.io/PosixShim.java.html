@@ -1,0 +1,618 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PosixShim.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util.io</a> &gt; <span class="el_source">PosixShim.java</span></div><h1>PosixShim.java</h1><pre class="source lang-java linenums">package org.jruby.util.io;
+
+import jnr.constants.platform.Errno;
+import jnr.constants.platform.Fcntl;
+import jnr.enxio.channels.NativeDeviceChannel;
+import jnr.posix.FileStat;
+import jnr.posix.POSIX;
+import org.jruby.ext.fcntl.FcntlLibrary;
+import org.jruby.platform.Platform;
+import org.jruby.runtime.Helpers;
+import org.jruby.util.JRubyFile;
+import org.jruby.util.ResourceException;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.Channel;
+import java.nio.channels.Channels;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
+import java.nio.channels.Pipe;
+
+/**
+ * Representations of as many native posix functions as possible applied to an NIO channel
+ */
+public class PosixShim {
+    public static final int LOCK_SH = 1;
+    public static final int LOCK_EX = 2;
+    public static final int LOCK_NB = 4;
+    public static final int LOCK_UN = 8;
+
+    public static final int SEEK_SET = 0;
+    public static final int SEEK_CUR = 1;
+    public static final int SEEK_END = 2;
+
+<span class="fc" id="L36">    public PosixShim(POSIX posix) {</span>
+<span class="fc" id="L37">        this.posix = posix;</span>
+<span class="fc" id="L38">    }</span>
+    
+    // pseudo lseek(2)
+    public long lseek(ChannelFD fd, long offset, int type) {
+<span class="fc" id="L42">        clear();</span>
+
+<span class="pc bpc" id="L44" title="1 of 2 branches missed.">        if (fd.chSeek != null) {</span>
+<span class="nc" id="L45">            int adj = 0;</span>
+            try {
+<span class="nc bnc" id="L47" title="All 4 branches missed.">                switch (type) {</span>
+                    case SEEK_SET:
+<span class="nc" id="L49">                        return fd.chSeek.position(offset).position();</span>
+                    case SEEK_CUR:
+<span class="nc" id="L51">                        return fd.chSeek.position(fd.chSeek.position() - adj + offset).position();</span>
+                    case SEEK_END:
+<span class="nc" id="L53">                        return fd.chSeek.position(fd.chSeek.size() + offset).position();</span>
+                    default:
+<span class="nc" id="L55">                        errno = Errno.EINVAL;</span>
+<span class="nc" id="L56">                        return -1;</span>
+                }
+<span class="nc" id="L58">            } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L59">                errno = Errno.EINVAL;</span>
+<span class="nc" id="L60">                return -1;</span>
+<span class="nc" id="L61">            } catch (IOException ioe) {</span>
+<span class="nc" id="L62">                errno = Helpers.errnoFromException(ioe);</span>
+<span class="nc" id="L63">                return -1;</span>
+            }
+<span class="fc bfc" id="L65" title="All 2 branches covered.">        } else if (fd.chNative != null) {</span>
+            // native channel, use native lseek
+<span class="fc" id="L67">            int ret = posix.lseek(fd.chNative.getFD(), offset, type);</span>
+<span class="fc bfc" id="L68" title="All 2 branches covered.">            if (ret &lt; 0) errno = Errno.valueOf(posix.errno());</span>
+<span class="fc" id="L69">            return ret;</span>
+        }
+
+        // For other channel types, we can't get at a native descriptor to lseek, and we can't use FileChannel
+        // .position, so we have to treat them as unseekable and raise EPIPE
+<span class="fc" id="L74">        errno = Errno.EPIPE;</span>
+<span class="fc" id="L75">        return -1;</span>
+    }
+
+    public int write(ChannelFD fd, byte[] bytes, int offset, int length, boolean nonblock) {
+<span class="fc" id="L79">        clear();</span>
+
+        // FIXME: don't allocate every time
+<span class="fc" id="L82">        ByteBuffer tmp = ByteBuffer.wrap(bytes, offset, length);</span>
+        try {
+<span class="fc bfc" id="L84" title="All 2 branches covered.">            if (nonblock) {</span>
+                // TODO: figure out what nonblocking writes against atypical streams (files?) actually do
+                // Ff we can't set the channel nonblocking, I'm not sure what we can do to
+                // pretend the channel is blocking.
+            }
+
+<span class="fc" id="L90">            int written = fd.chWrite.write(tmp);</span>
+
+<span class="pc bpc" id="L92" title="1 of 2 branches missed.">            if (written == 0) {</span>
+                // if it's a nonblocking write against a file and we've hit EOF, do EAGAIN
+<span class="nc bnc" id="L94" title="All 2 branches missed.">                if (nonblock) {</span>
+<span class="nc" id="L95">                    errno = Errno.EAGAIN;</span>
+<span class="nc" id="L96">                    return -1;</span>
+                }
+            }
+
+<span class="fc" id="L100">            return written;</span>
+<span class="nc" id="L101">        } catch (IOException ioe) {</span>
+<span class="nc" id="L102">            errno = Helpers.errnoFromException(ioe);</span>
+<span class="nc" id="L103">            error = ioe;</span>
+<span class="nc" id="L104">            return -1;</span>
+        }
+    }
+
+    private static final int NATIVE_EOF = 0;
+    private static final int JAVA_EOF = -1;
+
+    public int read(ChannelFD fd, byte[] target, int offset, int length, boolean nonblock) {
+<span class="fc" id="L112">        clear();</span>
+
+        try {
+<span class="fc bfc" id="L115" title="All 2 branches covered.">            if (nonblock) {</span>
+                // need to ensure channels that don't support nonblocking IO at least
+                // appear to be nonblocking
+<span class="pc bpc" id="L118" title="1 of 2 branches missed.">                if (fd.chSelect != null) {</span>
+                    // ok...we should have set it nonblocking already in setNonblock
+                } else {
+<span class="nc bnc" id="L121" title="All 2 branches missed.">                    if (fd.chFile != null) {</span>
+<span class="nc" id="L122">                        long position = fd.chFile.position();</span>
+<span class="nc" id="L123">                        long size = fd.chFile.size();</span>
+<span class="nc bnc" id="L124" title="All 6 branches missed.">                        if (position != -1 &amp;&amp; size != -1 &amp;&amp; position &lt; size) {</span>
+                            // there should be bytes available...proceed
+                        } else {
+<span class="nc" id="L127">                            errno = Errno.EAGAIN;</span>
+<span class="nc" id="L128">                            return -1;</span>
+                        }
+<span class="nc" id="L130">                    } else {</span>
+<span class="nc" id="L131">                        errno = Errno.EAGAIN;</span>
+<span class="nc" id="L132">                        return -1;</span>
+                    }
+                }
+            }
+
+            // FIXME: inefficient to recreate ByteBuffer every time
+<span class="fc" id="L138">            ByteBuffer buffer = ByteBuffer.wrap(target, offset, length);</span>
+<span class="fc" id="L139">            int read = fd.chRead.read(buffer);</span>
+
+<span class="fc bfc" id="L141" title="All 2 branches covered.">            if (nonblock) {</span>
+<span class="fc bfc" id="L142" title="All 2 branches covered.">                if (read == JAVA_EOF) {</span>
+<span class="fc" id="L143">                    read = NATIVE_EOF; // still treat EOF as EOF</span>
+<span class="fc bfc" id="L144" title="All 2 branches covered.">                } else if (read == 0) {</span>
+<span class="fc" id="L145">                    errno = Errno.EAGAIN;</span>
+<span class="fc" id="L146">                    return -1;</span>
+                } else {
+<span class="fc" id="L148">                    return read;</span>
+                }
+            } else {
+                // NIO channels will always raise for errors, so -1 only means EOF.
+<span class="fc bfc" id="L152" title="All 2 branches covered.">                if (read == JAVA_EOF) read = NATIVE_EOF;</span>
+            }
+
+<span class="fc" id="L155">            return read;</span>
+<span class="nc" id="L156">        } catch (IOException ioe) {</span>
+<span class="nc" id="L157">            errno = Helpers.errnoFromException(ioe);</span>
+<span class="nc" id="L158">            return -1;</span>
+        }
+    }
+
+    // rb_thread_flock
+    public int flock(ChannelFD fd, int lockMode) {
+        // TODO: null channel always succeeds for all locking operations
+//        if (descriptor.isNull()) return RubyFixnum.zero(runtime);
+
+<span class="fc" id="L167">        Channel channel = fd.ch;</span>
+<span class="fc" id="L168">        clear();</span>
+
+<span class="fc" id="L170">        int real_fd = fd.realFileno;</span>
+
+<span class="pc bpc" id="L172" title="2 of 4 branches missed.">        if (real_fd != -1 &amp;&amp; real_fd &lt; FilenoUtil.FIRST_FAKE_FD) {</span>
+<span class="fc" id="L173">            int result = posix.flock(real_fd, lockMode);</span>
+<span class="fc bfc" id="L174" title="All 2 branches covered.">            if (result &lt; 0) {</span>
+<span class="fc" id="L175">                errno = Errno.valueOf(posix.errno());</span>
+<span class="fc" id="L176">                return -1;</span>
+            }
+<span class="fc" id="L178">            return 0;</span>
+        }
+
+<span class="nc bnc" id="L181" title="All 2 branches missed.">        if (fd.chFile != null) {</span>
+<span class="nc" id="L182">            int ret = checkSharedExclusive(fd, lockMode);</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">            if (ret &lt; 0) return ret;</span>
+
+<span class="nc bnc" id="L185" title="All 2 branches missed.">            if (!lockStateChanges(fd.currentLock, lockMode)) return 0;</span>
+
+            try {
+<span class="nc" id="L188">                synchronized (fd.chFile) {</span>
+                    // check again, to avoid unnecessary overhead
+<span class="nc bnc" id="L190" title="All 2 branches missed.">                    if (!lockStateChanges(fd.currentLock, lockMode)) return 0;</span>
+
+<span class="nc bnc" id="L192" title="All 6 branches missed.">                    switch (lockMode) {</span>
+                        case LOCK_UN:
+                        case LOCK_UN | LOCK_NB:
+<span class="nc" id="L195">                            return unlock(fd);</span>
+                        case LOCK_EX:
+<span class="nc" id="L197">                            return lock(fd, true);</span>
+                        case LOCK_EX | LOCK_NB:
+<span class="nc" id="L199">                            return tryLock(fd, true);</span>
+                        case LOCK_SH:
+<span class="nc" id="L201">                            return lock(fd, false);</span>
+                        case LOCK_SH | LOCK_NB:
+<span class="nc" id="L203">                            return tryLock(fd, false);</span>
+                    }
+<span class="nc" id="L205">                }</span>
+<span class="nc" id="L206">            } catch (IOException ioe) {</span>
+<span class="nc" id="L207">                errno = Helpers.errnoFromException(ioe);</span>
+<span class="nc" id="L208">                return -1;</span>
+<span class="nc" id="L209">            } catch (OverlappingFileLockException ioe) {</span>
+<span class="nc" id="L210">                errno = Errno.EINVAL;</span>
+<span class="nc" id="L211">                errmsg = &quot;overlapping file locks&quot;;</span>
+<span class="nc" id="L212">            }</span>
+<span class="nc" id="L213">            return lockFailedReturn(lockMode);</span>
+        } else {
+            // We're not actually a real file, so we can't flock
+            // FIXME: This needs to be ENOTSUP
+<span class="nc" id="L217">            errno = Errno.EINVAL;</span>
+<span class="nc" id="L218">            errmsg = &quot;stream is not a file&quot;;</span>
+<span class="nc" id="L219">            return -1;</span>
+        }
+    }
+
+    public int dup2(ChannelFD filedes, ChannelFD filedes2) {
+<span class="fc" id="L224">        return filedes2.dup2From(posix, filedes);</span>
+    }
+
+    public int close(ChannelFD fd) {
+<span class="fc" id="L228">        return close((Closeable)fd);</span>
+    }
+
+    public int close(Closeable closeable) {
+<span class="fc" id="L232">        clear();</span>
+
+        try {
+<span class="fc" id="L235">            closeable.close();</span>
+<span class="fc" id="L236">            return 0;</span>
+<span class="fc" id="L237">        } catch (IOException ioe) {</span>
+<span class="fc" id="L238">            Errno errno = Helpers.errnoFromException(ioe);</span>
+<span class="pc bpc" id="L239" title="1 of 2 branches missed.">            if (errno == null) {</span>
+<span class="nc" id="L240">                throw new RuntimeException(&quot;unknown IOException: &quot; + ioe);</span>
+            }
+<span class="fc" id="L242">            this.errno = errno;</span>
+<span class="fc" id="L243">            return -1;</span>
+        }
+    }
+
+    public Channel[] pipe() {
+<span class="fc" id="L248">        clear();</span>
+        try {
+<span class="fc" id="L250">            Pipe pipe = Pipe.open();</span>
+<span class="fc" id="L251">            Channel source = pipe.source(), sink = pipe.sink();</span>
+
+<span class="pc bpc" id="L253" title="1 of 2 branches missed.">            if (posix.isNative()) {</span>
+                // set cloexec if possible
+<span class="fc" id="L255">                int read = FilenoUtil.filenoFrom(source);</span>
+<span class="fc" id="L256">                int write = FilenoUtil.filenoFrom(sink);</span>
+<span class="fc" id="L257">                setCloexec(read, true);</span>
+<span class="fc" id="L258">                setCloexec(write, true);</span>
+            }
+
+<span class="fc" id="L261">            return new Channel[]{source, sink};</span>
+<span class="nc" id="L262">        } catch (IOException ioe) {</span>
+<span class="nc" id="L263">            errno = Helpers.errnoFromException(ioe);</span>
+<span class="nc" id="L264">            return null;</span>
+        }
+    }
+    
+    public interface WaitMacros {
+        public abstract boolean WIFEXITED(long status);
+        public abstract boolean WIFSIGNALED(long status);
+        public abstract int WTERMSIG(long status);
+        public abstract int WEXITSTATUS(long status);
+        public abstract int WSTOPSIG(long status);
+        public abstract boolean WIFSTOPPED(long status);
+        public abstract boolean WCOREDUMP(long status);
+    }
+
+<span class="fc" id="L278">    public static class BSDWaitMacros implements WaitMacros {</span>
+<span class="fc" id="L279">        public final long _WSTOPPED = 0177;</span>
+
+        // Only confirmed on Darwin
+<span class="fc" id="L282">        public final long WCOREFLAG = 0200;</span>
+
+        public long _WSTATUS(long status) {
+<span class="fc" id="L285">            return status &amp; _WSTOPPED;</span>
+        }
+
+        public boolean WIFEXITED(long status) {
+<span class="fc bfc" id="L289" title="All 2 branches covered.">            return _WSTATUS(status) == 0;</span>
+        }
+
+        public boolean WIFSIGNALED(long status) {
+<span class="pc bpc" id="L293" title="1 of 4 branches missed.">            return _WSTATUS(status) != _WSTOPPED &amp;&amp; _WSTATUS(status) != 0;</span>
+        }
+
+        public int WTERMSIG(long status) {
+<span class="fc" id="L297">            return (int)_WSTATUS(status);</span>
+        }
+
+        public int WEXITSTATUS(long status) {
+            // not confirmed on all platforms
+<span class="fc" id="L302">            return (int)((status &gt;&gt;&gt; 8) &amp; 0xFF);</span>
+        }
+
+        public int WSTOPSIG(long status) {
+<span class="nc" id="L306">            return (int)(status &gt;&gt;&gt; 8);</span>
+        }
+
+        public boolean WIFSTOPPED(long status) {
+<span class="nc bnc" id="L310" title="All 4 branches missed.">            return _WSTATUS(status) == _WSTOPPED &amp;&amp; WSTOPSIG(status) != 0x13;</span>
+        }
+
+        public boolean WCOREDUMP(long status) {
+<span class="nc bnc" id="L314" title="All 2 branches missed.">            return (status &amp; WCOREFLAG) != 0;</span>
+        }
+    }
+
+<span class="nc" id="L318">    public static class LinuxWaitMacros implements WaitMacros {</span>
+<span class="nc" id="L319">        private int __WAIT_INT(long status) { return (int)status; }</span>
+
+<span class="nc" id="L321">        private int __W_EXITCODE(int ret, int sig) { return (ret &lt;&lt; 8) | sig; }</span>
+<span class="nc" id="L322">        private int __W_STOPCODE(int sig) { return (sig &lt;&lt; 8) | 0x7f; }</span>
+<span class="nc" id="L323">        private static int __W_CONTINUED = 0xffff;</span>
+<span class="nc" id="L324">        private static int __WCOREFLAG = 0x80;</span>
+
+        /* If WIFEXITED(STATUS), the low-order 8 bits of the status.  */
+<span class="nc" id="L327">        private int __WEXITSTATUS(long status) { return (int)((status &amp; 0xff00) &gt;&gt; 8); }</span>
+
+        /* If WIFSIGNALED(STATUS), the terminating signal.  */
+<span class="nc" id="L330">        private int __WTERMSIG(long status) { return (int)(status &amp; 0x7f); }</span>
+
+        /* If WIFSTOPPED(STATUS), the signal that stopped the child.  */
+<span class="nc" id="L333">        private int __WSTOPSIG(long status) { return __WEXITSTATUS(status); }</span>
+
+        /* Nonzero if STATUS indicates normal termination.  */
+<span class="nc bnc" id="L336" title="All 2 branches missed.">        private boolean __WIFEXITED(long status) { return __WTERMSIG(status) == 0; }</span>
+
+        /* Nonzero if STATUS indicates termination by a signal.  */
+        private boolean __WIFSIGNALED(long status) {
+<span class="nc bnc" id="L340" title="All 2 branches missed.">            return ((status &amp; 0x7f) + 1) &gt;&gt; 1 &gt; 0;</span>
+        }
+
+        /* Nonzero if STATUS indicates the child is stopped.  */
+<span class="nc bnc" id="L344" title="All 2 branches missed.">        private boolean __WIFSTOPPED(long status) { return (status &amp; 0xff) == 0x7f; }</span>
+
+        /* Nonzero if STATUS indicates the child dumped core.  */
+<span class="nc bnc" id="L347" title="All 2 branches missed.">        private boolean __WCOREDUMP(long status) { return (status &amp; __WCOREFLAG) != 0; }</span>
+
+        /* Macros for constructing status values.  */
+<span class="nc" id="L350">        public int WEXITSTATUS(long status) { return __WEXITSTATUS (__WAIT_INT (status)); }</span>
+<span class="nc" id="L351">        public int WTERMSIG(long status) { return __WTERMSIG(__WAIT_INT(status)); }</span>
+<span class="nc" id="L352">        public int WSTOPSIG(long status) { return __WSTOPSIG(__WAIT_INT(status)); }</span>
+<span class="nc" id="L353">        public boolean WIFEXITED(long status) { return __WIFEXITED(__WAIT_INT(status)); }</span>
+<span class="nc" id="L354">        public boolean WIFSIGNALED(long status) { return __WIFSIGNALED(__WAIT_INT(status)); }</span>
+<span class="nc" id="L355">        public boolean WIFSTOPPED(long status) { return __WIFSTOPPED(__WAIT_INT(status)); }</span>
+<span class="nc" id="L356">        public boolean WCOREDUMP(long status) { return __WCOREDUMP(__WAIT_INT(status)); }</span>
+    }
+
+    public static final WaitMacros WAIT_MACROS;
+    static {
+<span class="pc bpc" id="L361" title="1 of 2 branches missed.">        if (Platform.IS_BSD) {</span>
+<span class="fc" id="L362">            WAIT_MACROS = new BSDWaitMacros();</span>
+        } else {
+            // need other platforms
+<span class="nc" id="L365">            WAIT_MACROS = new LinuxWaitMacros();</span>
+        }
+    }
+
+    public int setCloexec(int fd, boolean cloexec) {
+<span class="fc" id="L370">        int ret = posix.fcntl(fd, Fcntl.F_GETFD);</span>
+<span class="pc bpc" id="L371" title="1 of 2 branches missed.">        if (ret == -1) {</span>
+<span class="nc" id="L372">            errno = Errno.valueOf(posix.errno());</span>
+<span class="nc" id="L373">            return -1;</span>
+        }
+<span class="pc bpc" id="L375" title="5 of 8 branches missed.">        if (</span>
+                (cloexec &amp;&amp; (ret &amp; FcntlLibrary.FD_CLOEXEC) == FcntlLibrary.FD_CLOEXEC)
+                || (!cloexec &amp;&amp; (ret &amp; FcntlLibrary.FD_CLOEXEC) == 0)) {
+<span class="nc" id="L378">            return 0;</span>
+        }
+<span class="pc bpc" id="L380" title="1 of 2 branches missed.">        ret = cloexec ?</span>
+                ret | FcntlLibrary.FD_CLOEXEC :
+                ret &amp; ~FcntlLibrary.FD_CLOEXEC;
+<span class="fc" id="L383">        ret = posix.fcntlInt(fd, Fcntl.F_SETFD, ret);</span>
+<span class="pc bpc" id="L384" title="1 of 2 branches missed.">        if (ret == -1) errno = Errno.valueOf(posix.errno());</span>
+<span class="fc" id="L385">        return ret;</span>
+    }
+
+    public Channel open(String cwd, String path, ModeFlags flags, int perm) {
+<span class="fc" id="L389">        return open(cwd, path, flags, perm, null);</span>
+    }
+
+    public Channel open(String cwd, String path, ModeFlags flags, int perm, ClassLoader classLoader) {
+<span class="pc bpc" id="L393" title="3 of 6 branches missed.">        if (path.equals(&quot;/dev/null&quot;) || path.equalsIgnoreCase(&quot;nul:&quot;) || path.equalsIgnoreCase(&quot;nul&quot;)) {</span>
+<span class="nc" id="L394">            return new NullChannel();</span>
+        }
+
+<span class="pc bpc" id="L397" title="3 of 4 branches missed.">        if (path.startsWith(&quot;classpath:/&quot;) &amp;&amp; classLoader != null) {</span>
+<span class="nc" id="L398">            path = path.substring(&quot;classpath:/&quot;.length());</span>
+<span class="nc" id="L399">            return Channels.newChannel(classLoader.getResourceAsStream(path));</span>
+        }
+
+        try {
+<span class="fc" id="L403">            return JRubyFile.createResource(posix, cwd, path).openChannel(flags, perm);</span>
+<span class="fc" id="L404">        } catch (ResourceException.FileExists e) {</span>
+<span class="fc" id="L405">            errno = Errno.EEXIST;</span>
+<span class="nc" id="L406">        } catch (ResourceException.FileIsDirectory e) {</span>
+<span class="nc" id="L407">            errno = Errno.EISDIR;</span>
+<span class="fc" id="L408">        } catch (ResourceException.NotFound e) {</span>
+<span class="fc" id="L409">            errno = Errno.ENOENT;</span>
+<span class="fc" id="L410">        } catch (ResourceException.PermissionDenied e) {</span>
+<span class="fc" id="L411">            errno = Errno.EACCES;</span>
+<span class="nc" id="L412">        } catch (ResourceException.TooManySymlinks e) {</span>
+<span class="nc" id="L413">            errno = Errno.ELOOP;</span>
+<span class="nc" id="L414">        } catch (IOException e) {</span>
+<span class="nc" id="L415">            throw new RuntimeException(&quot;Unhandled IOException: &quot; + e.getLocalizedMessage(), e);</span>
+<span class="pc" id="L416">        }</span>
+<span class="fc" id="L417">        return null;</span>
+    }
+
+    /**
+     * Joy of POSIX, only way to get the umask is to set the umask,
+     * then set it back. That's unsafe in a threaded program. We
+     * minimize but may not totally remove this race by caching the
+     * obtained or previously set (see umask() above) umask and using
+     * that as the initial set value which, cross fingers, is a
+     * no-op. The cache access is then synchronized. TODO: Better?
+     */
+    public static int umask(POSIX posix) {
+<span class="fc" id="L429">        synchronized (_umaskLock) {</span>
+<span class="fc" id="L430">            final int umask = posix.umask(_cachedUmask);</span>
+<span class="pc bpc" id="L431" title="1 of 2 branches missed.">            if (_cachedUmask != umask ) {</span>
+<span class="nc" id="L432">                posix.umask(umask);</span>
+<span class="nc" id="L433">                _cachedUmask = umask;</span>
+            }
+<span class="fc" id="L435">            return umask;</span>
+<span class="nc" id="L436">        }</span>
+    }
+
+    public static int umask(POSIX posix, int newMask) {
+        int oldMask;
+<span class="fc" id="L441">        synchronized (_umaskLock) {</span>
+<span class="fc" id="L442">            oldMask = posix.umask(newMask);</span>
+<span class="fc" id="L443">            _cachedUmask = newMask;</span>
+<span class="pc" id="L444">        }</span>
+<span class="fc" id="L445">        return oldMask;</span>
+    }
+
+    public int ftruncate(ChannelFD fd, long pos) {
+<span class="pc bpc" id="L449" title="1 of 2 branches missed.">        if (fd.chNative != null) {</span>
+<span class="fc" id="L450">            int ret = posix.ftruncate(fd.chNative.getFD(), pos);</span>
+<span class="pc bpc" id="L451" title="1 of 2 branches missed.">            if (ret == -1) errno = Errno.valueOf(posix.errno());</span>
+<span class="fc" id="L452">            return ret;</span>
+<span class="nc bnc" id="L453" title="All 2 branches missed.">        } else if (fd.chFile != null) {</span>
+            try {
+<span class="nc" id="L455">                fd.chFile.truncate(pos);</span>
+<span class="nc" id="L456">            } catch (IOException ioe) {</span>
+<span class="nc" id="L457">                errno = Helpers.errnoFromException(ioe);</span>
+<span class="nc" id="L458">                return -1;</span>
+<span class="nc" id="L459">            }</span>
+        } else {
+<span class="nc" id="L461">            errno = Errno.EINVAL;</span>
+<span class="nc" id="L462">            return -1;</span>
+        }
+<span class="nc" id="L464">        return 0;</span>
+    }
+
+    public long size(ChannelFD fd) {
+<span class="pc bpc" id="L468" title="1 of 2 branches missed.">        if (fd.chNative != null) { // native fd, use fstat</span>
+<span class="fc" id="L469">            FileStat stat = posix.allocateStat();</span>
+<span class="fc" id="L470">            int ret = posix.fstat(fd.chNative.getFD(), stat);</span>
+<span class="pc bpc" id="L471" title="1 of 2 branches missed.">            if (ret == -1) {</span>
+<span class="nc" id="L472">                errno = Errno.valueOf(posix.errno());</span>
+<span class="nc" id="L473">                return -1;</span>
+            }
+<span class="fc" id="L475">            return stat.st_size();</span>
+<span class="nc bnc" id="L476" title="All 2 branches missed.">        } else if (fd.chSeek != null) { // if it is seekable, get size directly</span>
+            try {
+<span class="nc" id="L478">                return fd.chSeek.size();</span>
+<span class="nc" id="L479">            } catch (IOException ioe) {</span>
+<span class="nc" id="L480">                errno = Helpers.errnoFromException(ioe);</span>
+<span class="nc" id="L481">                return -1;</span>
+            }
+        } else {
+            // otherwise just return -1 (should be rare, since size is only defined on File
+<span class="nc" id="L485">            errno = Errno.EINVAL;</span>
+<span class="nc" id="L486">            return -1;</span>
+        }
+    }
+
+    private void clear() {
+<span class="fc" id="L491">        errno = null;</span>
+<span class="fc" id="L492">        errmsg = null;</span>
+<span class="fc" id="L493">    }</span>
+
+    private int checkSharedExclusive(ChannelFD fd, int lockMode) {
+        // This logic used to attempt a shared lock instead of an exclusive
+        // lock, because LOCK_EX on some systems (as reported in JRUBY-1214)
+        // allow exclusively locking a read-only file. However, the JDK
+        // APIs do not allow acquiring an exclusive lock on files that are
+        // not open for read, and there are other platforms (such as Solaris,
+        // see JRUBY-5627) that refuse at an *OS* level to exclusively lock
+        // files opened only for read. As a result, this behavior is platform-
+        // dependent, and so we will obey the JDK's policy of disallowing
+        // exclusive locks on files opened only for read.
+<span class="nc bnc" id="L505" title="All 4 branches missed.">        if (fd.chWrite == null &amp;&amp; (lockMode &amp; LOCK_EX) &gt; 0) {</span>
+<span class="nc" id="L506">            errno = Errno.EINVAL;</span>
+<span class="nc" id="L507">            errmsg = &quot;cannot acquire exclusive lock on File not opened for write&quot;;</span>
+<span class="nc" id="L508">            return -1;</span>
+        }
+
+        // Likewise, JDK does not allow acquiring a shared lock on files
+        // that have not been opened for read. We comply here.
+<span class="nc bnc" id="L513" title="All 4 branches missed.">        if (fd.chRead == null &amp;&amp; (lockMode &amp; LOCK_SH) &gt; 0) {</span>
+<span class="nc" id="L514">            errno = Errno.EINVAL;</span>
+<span class="nc" id="L515">            errmsg = &quot;cannot acquire shared lock on File not opened for read&quot;;</span>
+<span class="nc" id="L516">            return -1;</span>
+        }
+
+<span class="nc" id="L519">        return 0;</span>
+    }
+
+    private static int lockFailedReturn(int lockMode) {
+<span class="nc bnc" id="L523" title="All 2 branches missed.">        return (lockMode &amp; LOCK_EX) == 0 ? 0 : -1;</span>
+    }
+
+    private static boolean lockStateChanges(FileLock lock, int lockMode) {
+<span class="nc bnc" id="L527" title="All 2 branches missed.">        if (lock == null) {</span>
+            // no lock, only proceed if we are acquiring
+<span class="nc bnc" id="L529" title="All 2 branches missed.">            switch (lockMode &amp; 0xF) {</span>
+                case LOCK_UN:
+                case LOCK_UN | LOCK_NB:
+<span class="nc" id="L532">                    return false;</span>
+                default:
+<span class="nc" id="L534">                    return true;</span>
+            }
+        } else {
+            // existing lock, only proceed if we are unlocking or changing
+<span class="nc bnc" id="L538" title="All 4 branches missed.">            switch (lockMode &amp; 0xF) {</span>
+                case LOCK_UN:
+                case LOCK_UN | LOCK_NB:
+<span class="nc" id="L541">                    return true;</span>
+                case LOCK_EX:
+                case LOCK_EX | LOCK_NB:
+<span class="nc" id="L544">                    return lock.isShared();</span>
+                case LOCK_SH:
+                case LOCK_SH | LOCK_NB:
+<span class="nc bnc" id="L547" title="All 2 branches missed.">                    return !lock.isShared();</span>
+                default:
+<span class="nc" id="L549">                    return false;</span>
+            }
+        }
+    }
+
+    private int unlock(ChannelFD fd) throws IOException {
+<span class="nc bnc" id="L555" title="All 2 branches missed.">        if (fd.currentLock != null) {</span>
+<span class="nc" id="L556">            fd.currentLock.release();</span>
+<span class="nc" id="L557">            fd.currentLock = null;</span>
+
+<span class="nc" id="L559">            return 0;</span>
+        }
+<span class="nc" id="L561">        return -1;</span>
+    }
+
+    private int lock(ChannelFD fd, boolean exclusive) throws IOException {
+<span class="nc bnc" id="L565" title="All 2 branches missed.">        if (fd.currentLock != null) fd.currentLock.release();</span>
+
+<span class="nc bnc" id="L567" title="All 2 branches missed.">        fd.currentLock = fd.chFile.lock(0L, Long.MAX_VALUE, !exclusive);</span>
+
+<span class="nc bnc" id="L569" title="All 2 branches missed.">        if (fd.currentLock != null) {</span>
+<span class="nc" id="L570">            return 0;</span>
+        }
+
+<span class="nc bnc" id="L573" title="All 2 branches missed.">        return lockFailedReturn(exclusive ? LOCK_EX : LOCK_SH);</span>
+    }
+
+    private int tryLock(ChannelFD fd, boolean exclusive) throws IOException {
+<span class="nc bnc" id="L577" title="All 2 branches missed.">        if (fd.currentLock != null) fd.currentLock.release();</span>
+
+<span class="nc bnc" id="L579" title="All 2 branches missed.">        fd.currentLock = fd.chFile.tryLock(0L, Long.MAX_VALUE, !exclusive);</span>
+
+<span class="nc bnc" id="L581" title="All 2 branches missed.">        if (fd.currentLock != null) {</span>
+<span class="nc" id="L582">            return 0;</span>
+        }
+
+<span class="nc bnc" id="L585" title="All 2 branches missed.">        return lockFailedReturn(exclusive ? LOCK_EX : LOCK_SH);</span>
+    }
+
+    /**
+     * The last Throwable exception raised by a call.
+     */
+    public Throwable error;
+
+    /**
+     * The appropriate errno value for the last thrown error, if any.
+     */
+    public Errno errno;
+
+    /**
+     * The recommended error message, if any.
+     */
+    public String errmsg;
+
+    /**
+     * The POSIX instance to use for native calls
+     */
+    private final POSIX posix;
+
+    /**
+     * An object to synchronize calls to umask
+     */
+<span class="fc" id="L611">    private static final Object _umaskLock = new Object();</span>
+
+    /**
+     * The last umask we set
+     */
+<span class="fc" id="L616">    private static int _cachedUmask = 0;</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

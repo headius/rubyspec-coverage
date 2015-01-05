@@ -1,0 +1,1472 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>StructLayout.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.ffi</a> &gt; <span class="el_source">StructLayout.java</span></div><h1>StructLayout.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2008 JRuby project
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+
+package org.jruby.ext.ffi;
+
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyHash;
+import org.jruby.RubyInteger;
+import org.jruby.RubyModule;
+import org.jruby.RubyNumeric;
+import org.jruby.RubyObject;
+import org.jruby.RubyString;
+import org.jruby.RubySymbol;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.Visibility;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.callsite.CachingCallSite;
+import org.jruby.runtime.callsite.FunctionalCachingCallSite;
+import org.jruby.util.ByteList;
+import static org.jruby.runtime.Visibility.*;
+
+/**
+ * Defines the memory layout for a native structure.
+ */
+@JRubyClass(name=StructLayout.CLASS_NAME, parent=&quot;Object&quot;)
+public final class StructLayout extends Type {
+<span class="fc" id="L69">    static final Storage nullStorage = new NullStorage();</span>
+    
+    /** The name to use to register this class in the JRuby runtime */
+    static final String CLASS_NAME = &quot;StructLayout&quot;;
+
+    private final Member[] identityLookupTable;
+
+    /** The name:offset map for this struct */
+    private final Map&lt;IRubyObject, Member&gt; memberMap;
+    
+    /** The ordered list of field names (as symbols) */
+    private final List&lt;IRubyObject&gt; fieldNames;
+
+    /** The ordered list of fields */
+    private final List&lt;Field&gt; fields;
+
+    /** The ordered list of fields */
+    private final Collection&lt;Member&gt; members;
+
+    /** The number of cacheable fields in this struct */
+    private final int cacheableFieldCount;
+
+    /** The number of reference fields in this struct */
+    private final int referenceFieldCount;
+
+    private final boolean isUnion;
+
+    /**
+     * Registers the StructLayout class in the JRuby runtime.
+     * @param runtime The JRuby runtime to register the new class in.
+     * @return The new class
+     */
+    public static RubyClass createStructLayoutClass(Ruby runtime, RubyModule module) {
+<span class="fc" id="L102">        RubyClass layoutClass = runtime.defineClassUnder(CLASS_NAME, module.getClass(&quot;Type&quot;),</span>
+                ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR, module);
+<span class="fc" id="L104">        layoutClass.defineAnnotatedMethods(StructLayout.class);</span>
+<span class="fc" id="L105">        layoutClass.defineAnnotatedConstants(StructLayout.class);</span>
+<span class="fc" id="L106">        layoutClass.setReifiedClass(StructLayout.class);</span>
+
+<span class="fc" id="L108">        RubyClass inlineArrayClass = module.getClass(&quot;Struct&quot;).defineClassUnder(&quot;InlineArray&quot;, </span>
+<span class="fc" id="L109">                runtime.getObject(), ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);</span>
+        
+<span class="fc" id="L111">        RubyClass arrayClass = runtime.defineClassUnder(&quot;ArrayProxy&quot;, inlineArrayClass,</span>
+                ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR, layoutClass);
+<span class="fc" id="L113">        arrayClass.includeModule(runtime.getEnumerable());</span>
+<span class="fc" id="L114">        arrayClass.defineAnnotatedMethods(ArrayProxy.class);</span>
+
+<span class="fc" id="L116">        RubyClass charArrayClass = runtime.defineClassUnder(&quot;CharArrayProxy&quot;, arrayClass,</span>
+                ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR, layoutClass);
+<span class="fc" id="L118">        charArrayClass.defineAnnotatedMethods(CharArrayProxy.class);</span>
+
+<span class="fc" id="L120">        RubyClass fieldClass = runtime.defineClassUnder(&quot;Field&quot;, runtime.getObject(),</span>
+<span class="fc" id="L121">                FieldAllocator.INSTANCE, layoutClass);</span>
+<span class="fc" id="L122">        fieldClass.defineAnnotatedMethods(Field.class);</span>
+
+<span class="fc" id="L124">        RubyClass numberFieldClass = runtime.defineClassUnder(&quot;Number&quot;, fieldClass,</span>
+<span class="fc" id="L125">                NumberFieldAllocator.INSTANCE, layoutClass);</span>
+<span class="fc" id="L126">        numberFieldClass.defineAnnotatedMethods(NumberField.class);</span>
+
+<span class="fc" id="L128">        RubyClass enumFieldClass = runtime.defineClassUnder(&quot;Enum&quot;, fieldClass,</span>
+<span class="fc" id="L129">                EnumFieldAllocator.INSTANCE, layoutClass);</span>
+<span class="fc" id="L130">        enumFieldClass.defineAnnotatedMethods(EnumField.class);</span>
+
+<span class="fc" id="L132">        RubyClass stringFieldClass = runtime.defineClassUnder(&quot;String&quot;, fieldClass,</span>
+<span class="fc" id="L133">                StringFieldAllocator.INSTANCE, layoutClass);</span>
+<span class="fc" id="L134">        stringFieldClass.defineAnnotatedMethods(StringField.class);</span>
+
+<span class="fc" id="L136">        RubyClass pointerFieldClass = runtime.defineClassUnder(&quot;Pointer&quot;, fieldClass,</span>
+<span class="fc" id="L137">                PointerFieldAllocator.INSTANCE, layoutClass);</span>
+<span class="fc" id="L138">        pointerFieldClass.defineAnnotatedMethods(PointerField.class);</span>
+
+<span class="fc" id="L140">        RubyClass functionFieldClass = runtime.defineClassUnder(&quot;Function&quot;, fieldClass,</span>
+<span class="fc" id="L141">                FunctionFieldAllocator.INSTANCE, layoutClass);</span>
+<span class="fc" id="L142">        functionFieldClass.defineAnnotatedMethods(FunctionField.class);</span>
+
+<span class="fc" id="L144">        RubyClass innerStructFieldClass = runtime.defineClassUnder(&quot;InnerStruct&quot;, fieldClass,</span>
+<span class="fc" id="L145">                InnerStructFieldAllocator.INSTANCE, layoutClass);</span>
+<span class="fc" id="L146">        innerStructFieldClass.defineAnnotatedMethods(InnerStructField.class);</span>
+
+<span class="fc" id="L148">        RubyClass arrayFieldClass = runtime.defineClassUnder(&quot;Array&quot;, fieldClass,</span>
+<span class="fc" id="L149">                ArrayFieldAllocator.INSTANCE, layoutClass);</span>
+<span class="fc" id="L150">        arrayFieldClass.defineAnnotatedMethods(ArrayField.class);</span>
+
+<span class="fc" id="L152">        RubyClass mappedFieldClass = runtime.defineClassUnder(&quot;Mapped&quot;, fieldClass,</span>
+<span class="fc" id="L153">                MappedFieldAllocator.INSTANCE, layoutClass);</span>
+<span class="fc" id="L154">        mappedFieldClass.defineAnnotatedMethods(MappedField.class);</span>
+
+
+<span class="fc" id="L157">        return layoutClass;</span>
+    }
+    
+    
+    /**
+     * Creates a new &lt;tt&gt;StructLayout&lt;/tt&gt; instance.
+     *
+     * @param runtime The runtime for the &lt;tt&gt;StructLayout&lt;/tt&gt;.
+     * @param fields The fields map for this struct.
+     * @param size the total size of the struct.
+     * @param alignment The minimum alignment required when allocating memory.
+     */
+    private StructLayout(Ruby runtime, RubyClass klass, Collection&lt;IRubyObject&gt; fields, int size, int alignment) {
+<span class="fc" id="L170">        super(runtime, klass, NativeType.STRUCT, size, alignment);</span>
+
+<span class="fc" id="L172">        int cfCount = 0, refCount = 0;</span>
+<span class="fc" id="L173">        List&lt;Field&gt; fieldList = new ArrayList&lt;Field&gt;(fields.size());</span>
+<span class="fc" id="L174">        List&lt;IRubyObject&gt; names = new ArrayList&lt;IRubyObject&gt;(fields.size());</span>
+<span class="fc" id="L175">        List&lt;Member&gt; memberList = new ArrayList&lt;Member&gt;(fields.size());</span>
+<span class="fc" id="L176">        Map&lt;IRubyObject, Member&gt; memberStringMap = new HashMap&lt;IRubyObject, Member&gt;(fields.size());</span>
+<span class="fc" id="L177">        Member[] memberSymbolLookupTable = new Member[Util.roundUpToPowerOfTwo(fields.size() * 8)];</span>
+<span class="fc" id="L178">        int offset = 0;</span>
+        
+<span class="fc" id="L180">        int index = 0;</span>
+<span class="fc bfc" id="L181" title="All 2 branches covered.">        for (IRubyObject obj : fields) {</span>
+            
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">            if (!(obj instanceof Field)) {</span>
+<span class="nc" id="L184">                throw runtime.newTypeError(obj, runtime.getModule(&quot;FFI&quot;).getClass(&quot;StructLayout&quot;).getClass(&quot;Field&quot;));</span>
+            }
+
+<span class="fc" id="L187">            Field f = (Field) obj;</span>
+<span class="pc bpc" id="L188" title="1 of 2 branches missed.">            if (!(f.name instanceof RubySymbol)) {</span>
+<span class="nc" id="L189">                throw runtime.newTypeError(&quot;fields list contains field with invalid name&quot;);</span>
+            }
+<span class="pc bpc" id="L191" title="3 of 4 branches missed.">            if (f.type.getNativeSize() &lt; 1 &amp;&amp; index &lt; (fields.size() - 1)) {</span>
+<span class="nc" id="L192">                throw runtime.newTypeError(&quot;sizeof field == 0&quot;);</span>
+            }
+
+<span class="fc" id="L195">            names.add(f.name);</span>
+<span class="fc" id="L196">            fieldList.add(f);</span>
+
+<span class="pc bpc" id="L198" title="1 of 4 branches missed.">            Member m = new Member(f, index, f.isCacheable() ? cfCount++ : -1, f.isValueReferenceNeeded() ? refCount++ : -1);</span>
+<span class="fc" id="L199">            for (int idx = symbolIndex(f.name, memberSymbolLookupTable.length); ; idx = nextIndex(idx, memberSymbolLookupTable.length)) {</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">                if (memberSymbolLookupTable[idx] == null) {</span>
+<span class="fc" id="L201">                    memberSymbolLookupTable[idx] = m;</span>
+<span class="fc" id="L202">                    break;</span>
+                }
+            }
+
+            // Allow fields to be accessed as ['name'] as well as [:name] for legacy code
+<span class="fc" id="L207">            memberStringMap.put(f.name, m);</span>
+<span class="fc" id="L208">            memberStringMap.put(f.name.asString(), m);</span>
+<span class="fc" id="L209">            memberList.add(m);</span>
+<span class="fc" id="L210">            offset = Math.max(offset, f.offset);</span>
+<span class="fc" id="L211">            index++;</span>
+<span class="fc" id="L212">        }</span>
+
+
+<span class="fc" id="L215">        this.cacheableFieldCount = cfCount;</span>
+<span class="fc" id="L216">        this.referenceFieldCount = refCount;</span>
+
+        // Create the ordered list of field names from the map
+<span class="fc" id="L219">        this.fieldNames = Collections.unmodifiableList(new ArrayList&lt;IRubyObject&gt;(names));</span>
+<span class="fc" id="L220">        this.fields = Collections.unmodifiableList(fieldList);</span>
+<span class="fc" id="L221">        this.memberMap = Collections.unmodifiableMap(memberStringMap);</span>
+<span class="fc" id="L222">        this.identityLookupTable = memberSymbolLookupTable;</span>
+<span class="fc" id="L223">        this.members = Collections.unmodifiableList(memberList);</span>
+<span class="pc bpc" id="L224" title="3 of 4 branches missed.">        this.isUnion = offset == 0 &amp;&amp; memberList.size() &gt; 1;</span>
+<span class="fc" id="L225">    }</span>
+    
+    @JRubyMethod(name = &quot;new&quot;, meta = true, required = 3, optional = 1)
+    public static final IRubyObject newStructLayout(ThreadContext context, IRubyObject klass, 
+            IRubyObject[] args) {
+
+<span class="fc" id="L231">        IRubyObject rbFields = args[0], size = args[1], alignment = args[2];</span>
+
+<span class="pc bpc" id="L233" title="1 of 2 branches missed.">        if (!(rbFields instanceof RubyArray)) {</span>
+<span class="nc" id="L234">            throw context.runtime.newTypeError(rbFields, context.runtime.getArray());</span>
+        }
+
+<span class="fc" id="L237">        List&lt;IRubyObject&gt; fields = Arrays.asList(((RubyArray) rbFields).toJavaArrayMaybeUnsafe());</span>
+
+<span class="fc" id="L239">        return new StructLayout(context.runtime, (RubyClass) klass, fields,</span>
+<span class="fc" id="L240">                RubyNumeric.num2int(size), RubyNumeric.num2int(alignment));</span>
+    }
+
+    /**
+     * Gets the value of the struct member corresponding to &lt;tt&gt;name&lt;/tt&gt;.
+     * 
+     * @param ptr The address of the structure in memory.
+     * @param name The name of the member.
+     * @return A ruby value for the native value of the struct member.
+     */
+    @JRubyMethod(name = &quot;get&quot;, required = 2)
+    public IRubyObject get(ThreadContext context, IRubyObject ptr, IRubyObject name) {
+<span class="nc" id="L252">        return getValue(context, name, nullStorage, ptr);</span>
+    }
+    
+    /**
+     * Sets the native value of the struct member corresponding to &lt;tt&gt;name&lt;/tt&gt;.
+     * 
+     * @param ptr The address of the structure in memory.
+     * @param name The name of the member.
+     * @return A ruby value for the native value of the struct member.
+     */
+    @JRubyMethod(name = &quot;put&quot;, required = 3)
+    public IRubyObject put(ThreadContext context, IRubyObject ptr, IRubyObject name, IRubyObject value) {
+<span class="nc" id="L264">        putValue(context, name, nullStorage, ptr, value);</span>
+
+<span class="nc" id="L266">        return value;</span>
+    }
+    
+    /**
+     * Gets a ruby array of the names of all members of this struct.
+     * 
+     * @return a &lt;tt&gt;RubyArray&lt;/tt&gt; containing the names of all members.
+     */
+    @JRubyMethod(name = &quot;members&quot;)
+    public IRubyObject members(ThreadContext context) {
+<span class="nc" id="L276">        RubyArray mbrs = RubyArray.newArray(context.runtime, fieldNames.size());</span>
+<span class="nc bnc" id="L277" title="All 2 branches missed.">        for (IRubyObject name : fieldNames) {</span>
+<span class="nc" id="L278">            mbrs.append(name);</span>
+<span class="nc" id="L279">        }</span>
+<span class="nc" id="L280">        return mbrs;</span>
+    }
+
+    /**
+     * Gets a ruby array of the offsets of all members of this struct.
+     *
+     * @return a &lt;tt&gt;RubyArray&lt;/tt&gt; containing the offsets of all members.
+     */
+    @JRubyMethod(name = &quot;offsets&quot;)
+    public IRubyObject offsets(ThreadContext context) {
+<span class="nc" id="L290">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L291">        RubyArray offsets = RubyArray.newArray(runtime);</span>
+
+<span class="nc bnc" id="L293" title="All 2 branches missed.">        for (IRubyObject name : fieldNames) {</span>
+<span class="nc" id="L294">            RubyArray offset = RubyArray.newArray(runtime);</span>
+            // Assemble a [ :name, offset ] array
+<span class="nc" id="L296">            offset.append(name);</span>
+<span class="nc" id="L297">            offset.append(runtime.newFixnum(getMember(runtime, name).offset));</span>
+<span class="nc" id="L298">            offsets.append(offset);</span>
+<span class="nc" id="L299">        }</span>
+
+<span class="nc" id="L301">        return offsets;</span>
+    }
+
+    @JRubyMethod(name = &quot;offset_of&quot;)
+    public IRubyObject offset_of(ThreadContext context, IRubyObject fieldName) {
+<span class="nc" id="L306">        return getField(context.runtime, fieldName).offset(context);</span>
+    }
+    
+    @JRubyMethod(name = &quot;[]&quot;)
+    public IRubyObject aref(ThreadContext context, IRubyObject fieldName) {
+<span class="nc" id="L311">        return getField(context.runtime, fieldName);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject fields(ThreadContext context) {
+<span class="nc" id="L316">        return RubyArray.newArray(context.runtime, fields);</span>
+    }
+
+    final IRubyObject getValue(ThreadContext context, IRubyObject name, Storage cache, IRubyObject ptr) {
+<span class="nc bnc" id="L320" title="All 2 branches missed.">        if (!(ptr instanceof AbstractMemory)) {</span>
+<span class="nc" id="L321">            throw context.runtime.newTypeError(ptr, context.runtime.getFFI().memoryClass);</span>
+        }
+
+<span class="nc" id="L324">        return getMember(context.runtime, name).get(context, cache, (AbstractMemory) ptr);</span>
+    }
+
+    final void putValue(ThreadContext context, IRubyObject name, Storage cache, IRubyObject ptr, IRubyObject value) {
+<span class="nc bnc" id="L328" title="All 2 branches missed.">        if (!(ptr instanceof AbstractMemory)) {</span>
+<span class="nc" id="L329">            throw context.runtime.newTypeError(ptr, context.runtime.getFFI().memoryClass);</span>
+        }
+
+<span class="nc" id="L332">        getMember(context.runtime, name).put(context, cache, (AbstractMemory) ptr, value);</span>
+<span class="nc" id="L333">    }</span>
+
+    @Override
+    public boolean equals(Object o) {
+<span class="nc bnc" id="L337" title="All 2 branches missed.">        if (this == o) return true;</span>
+<span class="nc bnc" id="L338" title="All 4 branches missed.">        if (o == null || getClass() != o.getClass()) return false;</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">        if (!super.equals(o)) return false;</span>
+
+<span class="nc" id="L341">        StructLayout that = (StructLayout) o;</span>
+
+<span class="nc bnc" id="L343" title="All 6 branches missed.">        if (fields != null ? !fields.equals(that.fields) : that.fields != null) return false;</span>
+
+<span class="nc" id="L345">        return true;</span>
+    }
+
+    @Override
+    public int hashCode() {
+<span class="nc" id="L350">        int result = super.hashCode();</span>
+<span class="nc bnc" id="L351" title="All 2 branches missed.">        result = 31 * result + (fields != null ? fields.hashCode() : 0);</span>
+<span class="nc" id="L352">        return result;</span>
+    }
+
+    private static int symbolIndex(IRubyObject name, int length) {
+<span class="fc" id="L356">        return System.identityHashCode(name) &amp; (length - 1);</span>
+    }
+
+    private static int nextIndex(int idx, int length) {
+<span class="fc" id="L360">        return (idx + 1) &amp; (length - 1);</span>
+    }
+
+    /**
+     * Returns a {@link Member} descriptor for a struct field.
+     * 
+     * @param name The name of the struct field.
+     * @return A &lt;tt&gt;Member&lt;/tt&gt; descriptor.
+     */
+    final Member getMember(Ruby runtime, IRubyObject name) {
+        Member m;
+<span class="nc" id="L371">        int idx = symbolIndex(name, identityLookupTable.length);</span>
+<span class="nc bnc" id="L372" title="All 2 branches missed.">        while ((m = identityLookupTable[idx]) != null) {</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">            if (m.name == name) {</span>
+<span class="nc" id="L374">                return m;</span>
+            }
+<span class="nc" id="L376">            idx = nextIndex(idx, identityLookupTable.length);</span>
+        }
+
+<span class="nc" id="L379">        Member f = memberMap.get(name);</span>
+<span class="nc bnc" id="L380" title="All 2 branches missed.">        if (f != null) {</span>
+<span class="nc" id="L381">            return f;</span>
+        }
+
+<span class="nc" id="L384">        throw runtime.newArgumentError(&quot;Unknown field: &quot; + name);</span>
+    }
+
+    /**
+     * Returns a {@link Field} descriptor for a struct field.
+     *
+     * @param name The name of the struct field.
+     * @return A &lt;tt&gt;Member&lt;/tt&gt; descriptor.
+     */
+    final Field getField(Ruby runtime, IRubyObject name) {
+<span class="nc" id="L394">        return getMember(runtime, name).field;</span>
+    }
+
+    public final int getSize() {
+<span class="nc" id="L398">        return getNativeSize();</span>
+    }
+
+    final int getReferenceFieldCount() {
+<span class="nc" id="L402">        return referenceFieldCount;</span>
+    }
+
+    final int getReferenceFieldIndex(Member member) {
+<span class="nc" id="L406">        return member.referenceIndex;</span>
+    }
+
+    final int getCacheableFieldCount() {
+<span class="nc" id="L410">        return cacheableFieldCount;</span>
+    }
+
+    final int getCacheableFieldIndex(Member member) {
+<span class="nc" id="L414">        return member.cacheIndex;</span>
+    }
+
+    public final int getFieldCount() {
+<span class="nc" id="L418">        return fields.size();</span>
+    }
+
+    public final java.util.Collection&lt;Field&gt; getFields() {
+<span class="nc" id="L422">        return fields;</span>
+    }
+
+    public final java.util.Collection&lt;Member&gt; getMembers() {
+<span class="nc" id="L426">        return members;</span>
+    }
+
+    public final boolean isUnion() {
+<span class="nc" id="L430">        return isUnion;</span>
+    }
+
+    /**
+     * A struct member.  This defines the offset within a chunk of memory to use
+     * when reading/writing the member, as well as how to convert between the 
+     * native representation of the member and the JRuby representation.
+     */
+    public static final class Member {
+        final FieldIO io;
+
+        final Field field;
+
+        /** The {@link Type} of this member. */
+        final Type type;
+
+        /** The offset within the memory area of this member */
+        final int offset;
+
+        /** The index of this member within the struct field cache */
+        final int cacheIndex;
+
+        /** The index of this member within the struct field reference array*/
+        final int referenceIndex;
+
+        /** The index of this member within the struct */
+        final int index;
+
+        final IRubyObject name;
+
+        /** Initializes a new Member instance */
+<span class="fc" id="L461">        protected Member(Field f, int index, int cacheIndex, int referenceIndex) {</span>
+<span class="fc" id="L462">            this.field = f;</span>
+<span class="fc" id="L463">            this.io = f.io;</span>
+<span class="fc" id="L464">            this.type = f.type;</span>
+<span class="fc" id="L465">            this.offset = f.offset;</span>
+<span class="fc" id="L466">            this.index = index;</span>
+<span class="fc" id="L467">            this.cacheIndex = cacheIndex;</span>
+<span class="fc" id="L468">            this.referenceIndex = referenceIndex;</span>
+<span class="fc" id="L469">            this.name = f.name;</span>
+<span class="fc" id="L470">        }</span>
+
+        final long getOffset(IRubyObject ptr) {
+<span class="nc" id="L473">            return offset;</span>
+        }
+
+        final int getIndex() {
+<span class="nc" id="L477">            return index;</span>
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+<span class="nc bnc" id="L482" title="All 6 branches missed.">            return obj instanceof Member &amp;&amp; ((Member) obj).offset == offset &amp;&amp; type.equals(((Member) obj).type);</span>
+        }
+
+        @Override
+        public int hashCode() {
+<span class="nc" id="L487">            return 53 * 5 + (int) (this.offset ^ (this.offset &gt;&gt;&gt; 32)) + 37 * type.hashCode();</span>
+        }
+        
+        /**
+         * Writes a ruby value to the native struct member as the appropriate native value.
+         *
+         * @param runtime The ruby runtime
+         * @param cache The value cache
+         * @param ptr The struct memory area.
+         * @param value The ruby value to write to the native struct member.
+         */
+        public final void put(ThreadContext context, Storage cache, AbstractMemory ptr, IRubyObject value) {
+<span class="nc" id="L499">            io.put(context, cache, this, ptr, value);</span>
+<span class="nc" id="L500">        }</span>
+
+        /**
+         * Reads a ruby value from the struct member.
+         *
+         * @param cache The cache used to store
+         * @param ptr The struct memory area.
+         * @return A ruby object equivalent to the native member value.
+         */
+        public final IRubyObject get(ThreadContext context, Storage cache, AbstractMemory ptr) {
+<span class="nc" id="L510">            return io.get(context, cache, this, ptr);</span>
+        }
+
+        public final int offset() {
+<span class="nc" id="L514">            return offset;</span>
+        }
+
+        public final Type type() {
+<span class="nc" id="L518">            return type;</span>
+        }
+    }
+
+    interface FieldIO {
+        /**
+         * Writes a ruby value to the native struct member as the appropriate native value.
+         *
+         * @param runtime The ruby runtime
+         * @param cache The value cache
+         * @param ptr The struct memory area.
+         * @param value The ruby value to write to the native struct member.
+         */
+        public abstract void put(ThreadContext context, Storage cache, Member m, AbstractMemory ptr, IRubyObject value);
+
+        /**
+         * Reads a ruby value from the struct member.
+         *
+         * @param cache The cache used to store
+         * @param ptr The struct memory area.
+         * @return A ruby object equivalent to the native member value.
+         */
+        public abstract IRubyObject get(ThreadContext context, Storage cache, Member m, AbstractMemory ptr);
+
+        /**
+         * Gets the cacheable status of this Struct member
+         *
+         * @return &lt;tt&gt;true&lt;/tt&gt; if this member type is cacheable
+         */
+        public abstract boolean isCacheable();
+
+        /**
+         * Checks if a reference to the ruby object assigned to this field needs to be stored
+         *
+         * @return &lt;tt&gt;true&lt;/tt&gt; if this member type requires the ruby value to be stored.
+         */
+        public abstract boolean isValueReferenceNeeded();
+    }
+
+<span class="fc" id="L557">    static final class DefaultFieldIO implements FieldIO {</span>
+<span class="fc" id="L558">        public static final FieldIO INSTANCE = new DefaultFieldIO();</span>
+<span class="fc" id="L559">        private final CachingCallSite getCallSite = new FunctionalCachingCallSite(&quot;get&quot;);</span>
+<span class="fc" id="L560">        private final CachingCallSite putCallSite = new FunctionalCachingCallSite(&quot;put&quot;);</span>
+
+        public IRubyObject get(ThreadContext context, Storage cache, Member m, AbstractMemory ptr) {
+<span class="nc" id="L563">            return getCallSite.call(context, m.field, m.field, ptr);</span>
+        }
+
+        public void put(ThreadContext context, Storage cache, Member m, AbstractMemory ptr, IRubyObject value) {
+<span class="nc" id="L567">            putCallSite.call(context, m.field, m.field, ptr, value);</span>
+<span class="nc" id="L568">        }</span>
+
+        public final boolean isCacheable() {
+<span class="nc" id="L571">            return false;</span>
+        }
+
+        public final boolean isValueReferenceNeeded() {
+<span class="nc" id="L575">            return false;</span>
+        }
+    }
+
+<span class="fc" id="L579">    private static final class FieldAllocator implements ObjectAllocator {</span>
+        public final IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L581">            return new Field(runtime, klass);</span>
+        }
+<span class="fc" id="L583">        private static final ObjectAllocator INSTANCE = new FieldAllocator();</span>
+    }
+
+    @JRubyClass(name=&quot;FFI::StructLayout::Field&quot;, parent=&quot;Object&quot;)
+    public static class Field extends RubyObject {
+
+        /** The basic ops to read/write this field */
+        private FieldIO io;
+
+        /** The name of this field */
+        private IRubyObject name;
+
+        /** The {@link Type} of this field. */
+        private Type type;
+
+        /** The offset within the memory area of this member */
+        private int offset;
+
+
+        Field(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L603">            this(runtime, klass, DefaultFieldIO.INSTANCE);</span>
+<span class="fc" id="L604">        }</span>
+
+        Field(Ruby runtime, RubyClass klass, FieldIO io) {
+<span class="fc" id="L607">            this(runtime, klass, (Type) runtime.getModule(&quot;FFI&quot;).getClass(&quot;Type&quot;).getConstant(&quot;VOID&quot;),</span>
+                    -1, io);
+            
+<span class="fc" id="L610">        }</span>
+        
+        Field(Ruby runtime, RubyClass klass, Type type, int offset, FieldIO io) {
+<span class="fc" id="L613">            super(runtime, klass);</span>
+<span class="fc" id="L614">            this.name = runtime.getNil();</span>
+<span class="fc" id="L615">            this.type = type;</span>
+<span class="fc" id="L616">            this.offset = offset;</span>
+<span class="fc" id="L617">            this.io = io;</span>
+<span class="fc" id="L618">        }</span>
+
+        void init(IRubyObject name, IRubyObject type, IRubyObject offset) {
+<span class="fc" id="L621">            this.name = name;</span>
+<span class="fc" id="L622">            this.type = checkType(type);</span>
+<span class="fc" id="L623">            this.offset = RubyNumeric.num2int(offset);</span>
+<span class="fc" id="L624">        }</span>
+
+        void init(IRubyObject name, IRubyObject type, IRubyObject offset, FieldIO io) {
+<span class="fc" id="L627">            init(name, type, offset);</span>
+<span class="fc" id="L628">            this.io = io;</span>
+<span class="fc" id="L629">        }</span>
+
+        void init(IRubyObject[] args, FieldIO io) {
+<span class="fc" id="L632">            init(args[0], args[2], args[1], io);</span>
+<span class="fc" id="L633">        }</span>
+
+        @JRubyMethod(name=&quot;initialize&quot;, visibility = PRIVATE, required = 3, optional = 1)
+        public IRubyObject initialize(ThreadContext context, IRubyObject[] args) {
+            
+<span class="nc" id="L638">            init(args[0], args[2], args[1]);</span>
+
+<span class="nc" id="L640">            return this;</span>
+        }
+
+        final Type checkType(IRubyObject type) {
+<span class="pc bpc" id="L644" title="1 of 2 branches missed.">            if (!(type instanceof Type)) {</span>
+<span class="nc" id="L645">                throw getRuntime().newTypeError(type, getRuntime().getModule(&quot;FFI&quot;).getClass(&quot;Type&quot;));</span>
+            }
+<span class="fc" id="L647">            return (Type) type;</span>
+        }
+
+        public final int offset() {
+<span class="nc" id="L651">            return this.offset;</span>
+        }
+
+        public final Type ffiType() {
+<span class="nc" id="L655">            return type;</span>
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+<span class="nc bnc" id="L660" title="All 6 branches missed.">            return obj instanceof Field &amp;&amp; ((Field) obj).offset == offset &amp;&amp; ((Field) obj).type.equals(type);</span>
+        }
+
+        @Override
+        public int hashCode() {
+<span class="nc" id="L665">            return 53 * 5 + (int) (this.offset ^ (this.offset &gt;&gt;&gt; 32)) ^ type.hashCode();</span>
+        }
+
+        /**
+         * Gets the cacheable status of this Struct member
+         *
+         * @return &lt;tt&gt;true&lt;/tt&gt; if this member type is cacheable
+         */
+        public final boolean isCacheable() {
+<span class="fc" id="L674">            return io.isCacheable();</span>
+        }
+
+        /**
+         * Checks if a reference to the ruby object assigned to this field needs to be stored
+         *
+         * @return &lt;tt&gt;true&lt;/tt&gt; if this member type requires the ruby value to be stored.
+         */
+        public final boolean isValueReferenceNeeded() {
+<span class="fc" id="L683">            return io.isValueReferenceNeeded();</span>
+        }
+
+        final FieldIO getFieldIO() {
+<span class="nc" id="L687">            return io;</span>
+        }
+
+        static ByteOrder getByteOrderOption(ThreadContext context, IRubyObject[] args) {
+
+<span class="fc" id="L692">            ByteOrder order = ByteOrder.nativeOrder();</span>
+
+<span class="pc bpc" id="L694" title="3 of 4 branches missed.">            if (args.length &gt; 3 &amp;&amp; args[3] instanceof RubyHash) {</span>
+<span class="nc" id="L695">                RubyHash options = (RubyHash) args[3];</span>
+<span class="nc" id="L696">                IRubyObject byte_order = options.fastARef(RubySymbol.newSymbol(context.runtime, &quot;byte_order&quot;));</span>
+<span class="nc bnc" id="L697" title="All 4 branches missed.">                if (byte_order instanceof RubySymbol || byte_order instanceof RubyString) {</span>
+<span class="nc" id="L698">                    String orderName = byte_order.asJavaString();</span>
+<span class="nc bnc" id="L699" title="All 4 branches missed.">                    if (&quot;network&quot;.equals(orderName) || &quot;big&quot;.equals(orderName)) {</span>
+<span class="nc" id="L700">                        order = ByteOrder.BIG_ENDIAN;</span>
+                    
+<span class="nc bnc" id="L702" title="All 2 branches missed.">                    } else if (&quot;little&quot;.equals(orderName)) {</span>
+<span class="nc" id="L703">                        order = ByteOrder.LITTLE_ENDIAN;</span>
+                    }
+                }
+            }
+            
+<span class="fc" id="L708">            return order;</span>
+        }
+
+        @JRubyMethod
+        public final IRubyObject size(ThreadContext context) {
+<span class="fc" id="L713">            return context.runtime.newFixnum(type.getNativeSize());</span>
+        }
+
+        @JRubyMethod
+        public final IRubyObject alignment(ThreadContext context) {
+<span class="fc" id="L718">            return context.runtime.newFixnum(type.getNativeAlignment());</span>
+        }
+
+        @JRubyMethod
+        public final IRubyObject offset(ThreadContext context) {
+<span class="fc" id="L723">            return context.runtime.newFixnum(offset);</span>
+        }
+
+        @JRubyMethod(name = { &quot;type&quot;, &quot;ffi_type&quot; })
+        public final IRubyObject type(ThreadContext context) {
+<span class="nc" id="L728">            return type;</span>
+        }
+
+        @JRubyMethod
+        public final IRubyObject name(ThreadContext context) {
+<span class="nc" id="L733">            return name;</span>
+        }
+    }
+
+<span class="fc" id="L737">    private static final class NumberFieldAllocator implements ObjectAllocator {</span>
+        public final IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L739">            return new NumberField(runtime, klass);</span>
+        }
+<span class="fc" id="L741">        private static final ObjectAllocator INSTANCE = new NumberFieldAllocator();</span>
+    }
+
+    @JRubyClass(name=&quot;FFI::StructLayout::Number&quot;, parent=&quot;FFI::StructLayout::Field&quot;)
+    public static final class NumberField extends Field {
+
+        public NumberField(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L748">            super(runtime, klass);</span>
+<span class="fc" id="L749">        }</span>
+
+        @Override
+        public final IRubyObject initialize(ThreadContext context, IRubyObject[] args) {
+
+<span class="fc" id="L754">            init(args, new NumberFieldIO(checkType(args[2]), getByteOrderOption(context, args)));</span>
+
+<span class="fc" id="L756">            return this;</span>
+        }
+    }
+
+<span class="fc" id="L760">    private static final class EnumFieldAllocator implements ObjectAllocator {</span>
+        public final IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L762">            return new EnumField(runtime, klass);</span>
+        }
+<span class="fc" id="L764">        private static final ObjectAllocator INSTANCE = new EnumFieldAllocator();</span>
+    }
+
+    @JRubyClass(name=&quot;FFI::StructLayout::Enum&quot;, parent=&quot;FFI::StructLayout::Field&quot;)
+    public static final class EnumField extends Field {
+        public EnumField(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L770">            super(runtime, klass);</span>
+<span class="nc" id="L771">        }</span>
+
+        @Override
+        public final IRubyObject initialize(ThreadContext context, IRubyObject[] args) {
+
+<span class="nc" id="L776">            init(args, new EnumFieldIO(getByteOrderOption(context, args)));</span>
+
+<span class="nc" id="L778">            return this;</span>
+        }
+    }
+
+<span class="fc" id="L782">    private static final class StringFieldAllocator implements ObjectAllocator {</span>
+        public final IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L784">            return new StringField(runtime, klass);</span>
+        }
+<span class="fc" id="L786">        private static final ObjectAllocator INSTANCE = new StringFieldAllocator();</span>
+    }
+
+    @JRubyClass(name=&quot;FFI::StructLayout::String&quot;, parent=&quot;FFI::StructLayout::Field&quot;)
+    static final class StringField extends Field {
+        public StringField(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L792">            super(runtime, klass, StringFieldIO.INSTANCE);</span>
+<span class="nc" id="L793">        }</span>
+    }
+
+<span class="fc" id="L796">    private static final class PointerFieldAllocator implements ObjectAllocator {</span>
+        public final IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L798">            return new PointerField(runtime, klass);</span>
+        }
+<span class="fc" id="L800">        private static final ObjectAllocator INSTANCE = new PointerFieldAllocator();</span>
+    }
+
+    @JRubyClass(name=&quot;FFI::StructLayout::Pointer&quot;, parent=&quot;FFI::StructLayout::Field&quot;)
+    public static final class PointerField extends Field {
+        public PointerField(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L806">            super(runtime, klass, PointerFieldIO.INSTANCE);</span>
+<span class="nc" id="L807">        }</span>
+    }
+
+<span class="fc" id="L810">    private static final class FunctionFieldAllocator implements ObjectAllocator {</span>
+        public final IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L812">            return new FunctionField(runtime, klass);</span>
+        }
+<span class="fc" id="L814">        private static final ObjectAllocator INSTANCE = new FunctionFieldAllocator();</span>
+    }
+
+    @JRubyClass(name=&quot;FFI::StructLayout::Function&quot;, parent=&quot;FFI::StructLayout::Field&quot;)
+    public static final class FunctionField extends Field {
+
+        public FunctionField(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L821">            super(runtime, klass, FunctionFieldIO.INSTANCE);</span>
+<span class="nc" id="L822">        }</span>
+
+        @Override
+        @JRubyMethod(name=&quot;initialize&quot;, visibility = PRIVATE, required = 3, optional = 1)
+        public final IRubyObject initialize(ThreadContext context, IRubyObject[] args) {
+            
+<span class="nc" id="L828">            IRubyObject type = args[2];</span>
+
+<span class="nc bnc" id="L830" title="All 2 branches missed.">            if (!(type instanceof CallbackInfo)) {</span>
+<span class="nc" id="L831">                throw context.runtime.newTypeError(type, context.runtime.getModule(&quot;FFI&quot;).getClass(&quot;Type&quot;).getClass(&quot;Function&quot;));</span>
+            }
+<span class="nc" id="L833">            init(args, FunctionFieldIO.INSTANCE);</span>
+
+<span class="nc" id="L835">            return this;</span>
+        }
+    }
+
+<span class="fc" id="L839">    private static final class InnerStructFieldAllocator implements ObjectAllocator {</span>
+        public final IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L841">            return new InnerStructField(runtime, klass);</span>
+        }
+<span class="fc" id="L843">        private static final ObjectAllocator INSTANCE = new InnerStructFieldAllocator();</span>
+    }
+    
+    @JRubyClass(name=&quot;FFI::StructLayout::InnerStruct&quot;, parent=&quot;FFI::StructLayout::Field&quot;)
+    public static final class InnerStructField extends Field {
+
+        public InnerStructField(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L850">            super(runtime, klass, DefaultFieldIO.INSTANCE);</span>
+<span class="nc" id="L851">        }</span>
+        
+        @Override
+        @JRubyMethod(name=&quot;initialize&quot;, visibility = PRIVATE, required = 3, optional = 1)
+        public IRubyObject initialize(ThreadContext context, IRubyObject[] args) {
+
+<span class="nc" id="L857">            IRubyObject type = args[2];</span>
+
+<span class="nc bnc" id="L859" title="All 2 branches missed.">            if (!(type instanceof StructByValue)) {</span>
+<span class="nc" id="L860">                throw context.runtime.newTypeError(type,</span>
+<span class="nc" id="L861">                        context.runtime.getModule(&quot;FFI&quot;).getClass(&quot;Type&quot;).getClass(&quot;Struct&quot;));</span>
+            }
+<span class="nc" id="L863">            init(args, new InnerStructFieldIO((StructByValue) type));</span>
+
+<span class="nc" id="L865">            return this;</span>
+        }
+    }
+
+<span class="fc" id="L869">    private static final class ArrayFieldAllocator implements ObjectAllocator {</span>
+        public final IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L871">            return new ArrayField(runtime, klass);</span>
+        }
+<span class="fc" id="L873">        private static final ObjectAllocator INSTANCE = new ArrayFieldAllocator();</span>
+    }
+    
+    @JRubyClass(name=&quot;FFI::StructLayout::Array&quot;, parent=&quot;FFI::StructLayout::Field&quot;)
+    public static final class ArrayField extends Field {
+
+        public ArrayField(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L880">            super(runtime, klass, DefaultFieldIO.INSTANCE);</span>
+<span class="fc" id="L881">        }</span>
+
+        @Override
+        @JRubyMethod(name=&quot;initialize&quot;, visibility = PRIVATE, required = 3, optional = 1)
+        public final IRubyObject initialize(ThreadContext context, IRubyObject[] args) {
+
+<span class="fc" id="L887">            IRubyObject type = args[2];</span>
+<span class="pc bpc" id="L888" title="1 of 2 branches missed.">            if (!(type instanceof Type.Array)) {</span>
+<span class="nc" id="L889">                throw context.runtime.newTypeError(type,</span>
+<span class="nc" id="L890">                        context.runtime.getModule(&quot;FFI&quot;).getClass(&quot;Type&quot;).getClass(&quot;Array&quot;));</span>
+            }
+<span class="fc" id="L892">            init(args, new ArrayFieldIO((Type.Array) type));</span>
+
+<span class="fc" id="L894">            return this;</span>
+        }
+    }
+
+<span class="fc" id="L898">    private static final class MappedFieldAllocator implements ObjectAllocator {</span>
+        public final IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L900">            return new MappedField(runtime, klass);</span>
+        }
+<span class="fc" id="L902">        private static final ObjectAllocator INSTANCE = new MappedFieldAllocator();</span>
+    }
+
+    @JRubyClass(name=&quot;FFI::StructLayout::Mapped&quot;, parent=&quot;FFI::StructLayout::Field&quot;)
+    public static final class MappedField extends Field {
+
+        public MappedField(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L909">            super(runtime, klass, DefaultFieldIO.INSTANCE);</span>
+<span class="nc" id="L910">        }</span>
+
+        @JRubyMethod(required = 4, visibility = PRIVATE)
+        public IRubyObject initialize(ThreadContext context, IRubyObject[] args) {
+<span class="nc bnc" id="L914" title="All 2 branches missed.">            if (!(args[2] instanceof MappedType)) {</span>
+<span class="nc" id="L915">                throw context.runtime.newTypeError(args[2],</span>
+<span class="nc" id="L916">                        context.runtime.getModule(&quot;FFI&quot;).getClass(&quot;Type&quot;).getClass(&quot;Mapped&quot;));</span>
+            }
+
+<span class="nc bnc" id="L919" title="All 2 branches missed.">            if (!(args[3] instanceof Field)) {</span>
+<span class="nc" id="L920">                throw context.runtime.newTypeError(args[3],</span>
+<span class="nc" id="L921">                        context.runtime.getModule(&quot;FFI&quot;).getClass(&quot;StructLayout&quot;).getClass(&quot;Field&quot;));</span>
+            }
+
+<span class="nc" id="L924">            init(args[0], args[2], args[1], new MappedFieldIO((MappedType) args[2], ((Field) args[3]).getFieldIO()));</span>
+
+<span class="nc" id="L926">            return this;</span>
+        }
+    }
+
+
+    public static interface Storage {
+        IRubyObject getCachedValue(Member member);
+        void putCachedValue(Member member, IRubyObject value);
+        void putReference(Member member, Object value);
+    }
+
+<span class="fc" id="L937">    static class NullStorage implements Storage {</span>
+<span class="nc" id="L938">        public IRubyObject getCachedValue(Member member) { return null; }</span>
+<span class="nc" id="L939">        public void putCachedValue(Member member, IRubyObject value) { }</span>
+<span class="nc" id="L940">        public void putReference(Member member, Object value) { }</span>
+    }
+    
+    @JRubyClass(name=&quot;FFI::StructLayout::ArrayProxy&quot;, parent=&quot;Object&quot;)
+    public static class ArrayProxy extends RubyObject {
+        protected final AbstractMemory ptr;
+        final MemoryOp aio;
+        protected final Type.Array arrayType;
+        private final boolean cacheable;
+        private IRubyObject[] valueCache;
+
+        ArrayProxy(Ruby runtime, IRubyObject ptr, long offset, Type.Array type, MemoryOp aio) {
+<span class="nc" id="L952">            this(runtime, runtime.getModule(&quot;FFI&quot;).getClass(CLASS_NAME).getClass(&quot;ArrayProxy&quot;),</span>
+                    ptr, offset, type, aio);
+<span class="nc" id="L954">        }</span>
+
+        ArrayProxy(Ruby runtime, RubyClass klass, IRubyObject ptr, long offset, Type.Array type, MemoryOp aio) {
+<span class="nc" id="L957">            super(runtime, klass);</span>
+<span class="nc bnc" id="L958" title="All 2 branches missed.">            this.ptr = type.length() &gt; 0 </span>
+<span class="nc" id="L959">                    ? ((AbstractMemory) ptr).slice(runtime, offset, type.getNativeSize())</span>
+<span class="nc" id="L960">                    : ((AbstractMemory) ptr).slice(runtime, offset);</span>
+<span class="nc" id="L961">            this.arrayType = type;</span>
+<span class="nc" id="L962">            this.aio = aio;</span>
+<span class="nc bnc" id="L963" title="All 4 branches missed.">            this.cacheable = type.length() &gt; 0 &amp;&amp; (type.getComponentType() instanceof Type.Array </span>
+<span class="nc bnc" id="L964" title="All 2 branches missed.">                    || type.getComponentType() instanceof StructByValue);</span>
+<span class="nc" id="L965">        }</span>
+
+        private final long getOffset(IRubyObject index) {
+<span class="nc" id="L968">            return getOffset(Util.int32Value(index));</span>
+        }
+
+        private final long getOffset(int index) {
+<span class="nc bnc" id="L972" title="All 6 branches missed.">            if (index &lt; 0 || (index &gt;= arrayType.length() &amp;&amp; arrayType.length() &gt; 0)) {</span>
+<span class="nc" id="L973">                throw getRuntime().newIndexError(&quot;index &quot; + index + &quot; out of bounds&quot;);</span>
+            }
+
+<span class="nc" id="L976">            return (long) (index * arrayType.getComponentType().getNativeSize());</span>
+        }
+
+        private IRubyObject get(ThreadContext context, int index) {
+            IRubyObject obj;
+            
+<span class="nc bnc" id="L982" title="All 4 branches missed.">            if (valueCache != null &amp;&amp; (obj = valueCache[index]) != null) {</span>
+<span class="nc" id="L983">                return obj;</span>
+            }
+<span class="nc" id="L985">            putCachedValue(index, obj = aio.get(context, ptr, getOffset(index)));</span>
+            
+<span class="nc" id="L987">            return obj;</span>
+        }
+        
+        public final void putCachedValue(int idx, IRubyObject value) {
+<span class="nc bnc" id="L991" title="All 2 branches missed.">            if (cacheable) {</span>
+<span class="nc bnc" id="L992" title="All 2 branches missed.">                if (valueCache == null) {</span>
+<span class="nc" id="L993">                    valueCache = new IRubyObject[arrayType.length()];</span>
+                }
+<span class="nc" id="L995">                valueCache[idx] = value;</span>
+            }
+<span class="nc" id="L997">        }</span>
+
+        @JRubyMethod(name = &quot;[]&quot;)
+        public IRubyObject get(ThreadContext context, IRubyObject index) {
+<span class="nc" id="L1001">            return get(context, Util.int32Value(index));</span>
+        }
+
+        @JRubyMethod(name = &quot;[]=&quot;)
+        public IRubyObject put(ThreadContext context, IRubyObject index, IRubyObject value) {
+<span class="nc" id="L1006">            int idx = Util.int32Value(index);</span>
+            
+<span class="nc" id="L1008">            putCachedValue(idx, value);</span>
+            
+<span class="nc" id="L1010">            aio.put(context, ptr, getOffset(idx), value);</span>
+            
+<span class="nc" id="L1012">            return value;</span>
+        }
+
+        @JRubyMethod(name = { &quot;to_a&quot;, &quot;to_ary&quot; })
+        public IRubyObject get(ThreadContext context) {
+            
+<span class="nc" id="L1018">            IRubyObject[] elems = new IRubyObject[arrayType.length()];</span>
+<span class="nc bnc" id="L1019" title="All 2 branches missed.">            for (int i = 0; i &lt; elems.length; ++i) {</span>
+<span class="nc" id="L1020">                elems[i] = get(context, i);</span>
+            }
+
+<span class="nc" id="L1023">            return RubyArray.newArrayNoCopy(context.runtime, elems);</span>
+        }
+
+        @JRubyMethod(name = { &quot;to_ptr&quot; })
+        public IRubyObject to_ptr(ThreadContext context) {
+<span class="nc" id="L1028">            return ptr;</span>
+        }
+
+        @JRubyMethod(name = { &quot;size&quot; })
+        public IRubyObject size(ThreadContext context) {
+<span class="nc" id="L1033">            return arrayType.length(context);</span>
+        }
+
+        /**
+         * Needed for Enumerable implementation
+         */
+        @JRubyMethod(name = &quot;each&quot;)
+        public IRubyObject each(ThreadContext context, Block block) {
+<span class="nc bnc" id="L1041" title="All 2 branches missed.">            if (!block.isGiven()) {</span>
+<span class="nc" id="L1042">                throw context.runtime.newLocalJumpErrorNoBlock();</span>
+            }
+<span class="nc bnc" id="L1044" title="All 2 branches missed.">            for (int i = 0; i &lt; arrayType.length(); ++i) {</span>
+<span class="nc" id="L1045">                block.yield(context, get(context, i));</span>
+            }
+<span class="nc" id="L1047">            return this;</span>
+        }
+
+        
+    }
+
+    @JRubyClass(name=&quot;FFI::StructLayout::CharArrayProxy&quot;, parent=&quot;FFI::StructLayout::ArrayProxy&quot;)
+    public static final class CharArrayProxy extends ArrayProxy {
+        CharArrayProxy(Ruby runtime, IRubyObject ptr, long offset, Type.Array type, MemoryOp aio) {
+<span class="nc" id="L1056">            super(runtime, runtime.getModule(&quot;FFI&quot;).getClass(&quot;StructLayout&quot;).getClass(&quot;CharArrayProxy&quot;),</span>
+                    ptr, offset, type, aio);
+<span class="nc" id="L1058">        }</span>
+
+        @JRubyMethod(name = { &quot;to_s&quot; })
+        public IRubyObject to_s(ThreadContext context) {
+<span class="nc" id="L1062">            return MemoryUtil.getTaintedString(context.runtime, ptr.getMemoryIO(), 0, arrayType.length());</span>
+        }
+    }
+
+    /**
+     * Primitive (byte, short, int, long, float, double) types are all handled by
+     * a PrimitiveMember type.
+     */
+    static final class NumberFieldIO implements FieldIO {
+        private final MemoryOp op;
+
+<span class="fc" id="L1073">        NumberFieldIO(Type type, ByteOrder order) {</span>
+<span class="fc" id="L1074">            this.op = MemoryOp.getMemoryOp(type, order);</span>
+<span class="fc" id="L1075">        }</span>
+        
+<span class="nc" id="L1077">        NumberFieldIO(MemoryOp op) {</span>
+<span class="nc" id="L1078">            this.op = op;</span>
+<span class="nc" id="L1079">        }</span>
+
+        public void put(ThreadContext context, StructLayout.Storage cache, Member m, AbstractMemory ptr, IRubyObject value) {
+<span class="nc" id="L1082">            op.put(context, ptr, m.offset, value);</span>
+<span class="nc" id="L1083">        }</span>
+
+        public IRubyObject get(ThreadContext context, StructLayout.Storage cache, Member m, AbstractMemory ptr) {
+<span class="nc" id="L1086">            return op.get(context, ptr, m.offset);</span>
+        }
+
+        public final boolean isCacheable() {
+<span class="fc" id="L1090">            return false;</span>
+        }
+
+        public final boolean isValueReferenceNeeded() {
+<span class="fc" id="L1094">            return false;</span>
+        }
+    }
+
+    /**
+     * Enum (maps :foo =&gt; 1, :bar =&gt; 2, etc)
+     */
+    static final class EnumFieldIO implements FieldIO {
+        private final MemoryOp op;
+
+<span class="nc" id="L1104">        public EnumFieldIO(ByteOrder order) {</span>
+<span class="nc" id="L1105">            this.op = MemoryOp.getMemoryOp(NativeType.INT, order);</span>
+<span class="nc" id="L1106">        }</span>
+
+
+        public void put(ThreadContext context, StructLayout.Storage cache, Member m, AbstractMemory ptr, IRubyObject value) {
+            // Upcall to ruby to convert :foo to an int, then write it out
+<span class="nc" id="L1111">            op.put(context, ptr, m.offset, m.type.callMethod(context, &quot;find&quot;, value));</span>
+<span class="nc" id="L1112">        }</span>
+
+        public IRubyObject get(ThreadContext context, StructLayout.Storage cache, Member m, AbstractMemory ptr) {
+            // Read an int from the native memory, then upcall to the ruby value
+            // lookup code to convert it to the appropriate symbol
+<span class="nc" id="L1117">            return m.type.callMethod(context, &quot;find&quot;, op.get(context, ptr, m.offset));</span>
+        }
+
+        public final boolean isCacheable() {
+<span class="nc" id="L1121">            return false;</span>
+        }
+
+        public final boolean isValueReferenceNeeded() {
+<span class="nc" id="L1125">            return false;</span>
+        }
+    }
+
+    
+
+<span class="nc" id="L1131">    static final class PointerFieldIO implements FieldIO {</span>
+<span class="nc" id="L1132">        public static final FieldIO INSTANCE = new PointerFieldIO();</span>
+        
+        public void put(ThreadContext context, StructLayout.Storage cache, Member m, AbstractMemory ptr, IRubyObject value) {
+            DynamicMethod conversionMethod;
+<span class="nc bnc" id="L1136" title="All 2 branches missed.">            if (value instanceof Pointer) {</span>
+<span class="nc" id="L1137">                ptr.getMemoryIO().putMemoryIO(m.offset, ((Pointer) value).getMemoryIO());</span>
+<span class="nc bnc" id="L1138" title="All 2 branches missed.">            } else if (value instanceof Struct) {</span>
+<span class="nc" id="L1139">                MemoryIO mem = ((Struct) value).getMemoryIO();</span>
+
+<span class="nc bnc" id="L1141" title="All 2 branches missed.">                if (!mem.isDirect()) {</span>
+<span class="nc" id="L1142">                    throw context.runtime.newArgumentError(&quot;Struct memory not backed by a native pointer&quot;);</span>
+                }
+<span class="nc" id="L1144">                ptr.getMemoryIO().putMemoryIO(m.offset, mem);</span>
+
+<span class="nc bnc" id="L1146" title="All 2 branches missed.">            } else if (value instanceof RubyInteger) {</span>
+<span class="nc" id="L1147">                ptr.getMemoryIO().putAddress(m.offset, Util.int64Value(ptr));</span>
+
+<span class="nc bnc" id="L1149" title="All 2 branches missed.">            } else if (value.isNil()) {</span>
+<span class="nc" id="L1150">                ptr.getMemoryIO().putAddress(m.offset, 0L);</span>
+
+<span class="nc bnc" id="L1152" title="All 2 branches missed.">            } else if (!(conversionMethod = value.getMetaClass().searchMethod(&quot;to_ptr&quot;)).isUndefined()) {</span>
+<span class="nc" id="L1153">                IRubyObject addr = conversionMethod.call(context, value, value.getMetaClass(), &quot;to_ptr&quot;);</span>
+<span class="nc bnc" id="L1154" title="All 2 branches missed.">                if (addr instanceof Pointer) {</span>
+<span class="nc" id="L1155">                    ptr.getMemoryIO().putMemoryIO(m.offset, ((Pointer) addr).getMemoryIO());</span>
+                } else {
+<span class="nc" id="L1157">                    throw context.runtime.newArgumentError(&quot;Invalid pointer value&quot;);</span>
+                }
+<span class="nc" id="L1159">            } else {</span>
+<span class="nc" id="L1160">                throw context.runtime.newArgumentError(&quot;Invalid pointer value&quot;);</span>
+            }
+<span class="nc" id="L1162">            cache.putReference(m, value);</span>
+<span class="nc" id="L1163">        }</span>
+
+        public IRubyObject get(ThreadContext context, StructLayout.Storage cache, Member m, AbstractMemory ptr) {
+<span class="nc" id="L1166">            MemoryIO memory = ((AbstractMemory) ptr).getMemoryIO().getMemoryIO(m.getOffset(ptr));</span>
+<span class="nc" id="L1167">            IRubyObject old = cache.getCachedValue(m);</span>
+<span class="nc bnc" id="L1168" title="All 2 branches missed.">            if (old instanceof Pointer) {</span>
+<span class="nc" id="L1169">                MemoryIO oldMemory = ((Pointer) old).getMemoryIO();</span>
+<span class="nc bnc" id="L1170" title="All 2 branches missed.">                if (memory.equals(oldMemory)) {</span>
+<span class="nc" id="L1171">                    return old;</span>
+                }
+            }
+<span class="nc" id="L1174">            Pointer retval = new Pointer(context.runtime, memory);</span>
+<span class="nc" id="L1175">            cache.putCachedValue(m, retval);</span>
+
+<span class="nc" id="L1177">            return retval;</span>
+        }
+
+        public final boolean isCacheable() {
+<span class="nc" id="L1181">            return true;</span>
+        }
+
+        public final boolean isValueReferenceNeeded() {
+<span class="nc" id="L1185">            return true;</span>
+        }
+    }
+
+<span class="nc" id="L1189">    static final class StringFieldIO implements FieldIO {</span>
+<span class="nc" id="L1190">        public static final FieldIO INSTANCE = new StringFieldIO();</span>
+        
+        public IRubyObject get(ThreadContext context, StructLayout.Storage cache, Member m, AbstractMemory ptr) {
+<span class="nc" id="L1193">            MemoryIO io = ptr.getMemoryIO().getMemoryIO(m.getOffset(ptr));</span>
+<span class="nc bnc" id="L1194" title="All 4 branches missed.">            if (io == null || io.isNull()) {</span>
+<span class="nc" id="L1195">                return context.runtime.getNil();</span>
+            }
+
+<span class="nc" id="L1198">            return RubyString.newStringNoCopy(context.runtime, io.getZeroTerminatedByteArray(0));</span>
+        }
+
+        public void put(ThreadContext context, StructLayout.Storage cache, Member m, AbstractMemory ptr, IRubyObject value) {
+<span class="nc" id="L1202">            ByteList bl = value.convertToString().getByteList();</span>
+
+<span class="nc" id="L1204">            MemoryPointer mem = MemoryPointer.allocate(context.runtime, 1, bl.length() + 1, false);</span>
+            //
+            // Keep a reference to the temporary memory in the cache so it does
+            // not get freed by the GC until the struct is freed
+            //
+<span class="nc" id="L1209">            cache.putReference(m, mem);</span>
+
+<span class="nc" id="L1211">            MemoryIO io = mem.getMemoryIO();</span>
+<span class="nc" id="L1212">            io.put(0, bl.getUnsafeBytes(), bl.begin(), bl.length());</span>
+<span class="nc" id="L1213">            io.putByte(bl.length(), (byte) 0);</span>
+
+<span class="nc" id="L1215">            ptr.getMemoryIO().putMemoryIO(m.getOffset(ptr), io);</span>
+<span class="nc" id="L1216">        }</span>
+
+        public final boolean isCacheable() {
+<span class="nc" id="L1219">            return false;</span>
+        }
+
+        public final boolean isValueReferenceNeeded() {
+<span class="nc" id="L1223">            return true;</span>
+        }
+    }
+
+
+<span class="nc" id="L1228">    static final class FunctionFieldIO implements FieldIO {</span>
+<span class="nc" id="L1229">        public static final FieldIO INSTANCE = new FunctionFieldIO();</span>
+
+        public void put(ThreadContext context, Storage cache, Member m, AbstractMemory ptr, IRubyObject value) {
+<span class="nc bnc" id="L1232" title="All 2 branches missed.">            if (value.isNil()) {</span>
+<span class="nc" id="L1233">                ptr.getMemoryIO().putAddress(m.getOffset(ptr), 0L);</span>
+<span class="nc" id="L1234">                cache.putReference(m, value);</span>
+            } else {
+<span class="nc" id="L1236">                Pointer cb = Factory.getInstance().getCallbackManager().getCallback(context.runtime, (CallbackInfo) m.type, value);</span>
+<span class="nc" id="L1237">                ptr.getMemoryIO().putMemoryIO(m.getOffset(ptr), cb.getMemoryIO());</span>
+<span class="nc" id="L1238">                cache.putReference(m, cb);</span>
+            }
+<span class="nc" id="L1240">        }</span>
+
+        public IRubyObject get(ThreadContext context, StructLayout.Storage cache, Member m, AbstractMemory ptr) {
+<span class="nc" id="L1243">            final long address = ((Pointer) ptr).getMemoryIO().getAddress(m.getOffset(ptr));</span>
+            
+<span class="nc" id="L1245">            AbstractInvoker fptr = (AbstractInvoker) cache.getCachedValue(m);</span>
+<span class="nc bnc" id="L1246" title="All 4 branches missed.">            if (fptr != null &amp;&amp; fptr.getAddress() == address) {</span>
+<span class="nc" id="L1247">                return fptr;</span>
+            }
+
+<span class="nc" id="L1250">            fptr = Factory.getInstance().newFunction(context.runtime,</span>
+<span class="nc" id="L1251">                    ((Pointer) ptr).getPointer(context.runtime, m.getOffset(ptr)), (CallbackInfo) m.type);</span>
+<span class="nc" id="L1252">            cache.putCachedValue(m, fptr);</span>
+
+<span class="nc" id="L1254">            return fptr;</span>
+        }
+
+        public final boolean isCacheable() {
+<span class="nc" id="L1258">            return true;</span>
+        }
+
+        public final boolean isValueReferenceNeeded() {
+<span class="nc" id="L1262">            return true;</span>
+        }
+    }
+
+    
+
+    static final class InnerStructFieldIO implements FieldIO {
+        private final StructByValue sbv;
+
+<span class="nc" id="L1271">        public InnerStructFieldIO(StructByValue sbv) {</span>
+<span class="nc" id="L1272">            this.sbv = sbv;</span>
+<span class="nc" id="L1273">        }</span>
+
+        public void put(ThreadContext context, StructLayout.Storage cache, Member m, AbstractMemory ptr, IRubyObject value) {
+<span class="nc bnc" id="L1276" title="All 2 branches missed.">            if (!(value instanceof Struct)) {</span>
+<span class="nc" id="L1277">                throw context.runtime.newTypeError(value, context.runtime.getFFI().structClass);</span>
+            }
+
+<span class="nc" id="L1280">            Struct s = (Struct) value;</span>
+<span class="nc bnc" id="L1281" title="All 2 branches missed.">            if (!s.getLayout(context).equals(sbv.getStructLayout())) {</span>
+<span class="nc" id="L1282">                throw context.runtime.newTypeError(&quot;incompatible struct layout&quot;);</span>
+            }
+
+<span class="nc" id="L1285">            ByteBuffer src = s.getMemoryIO().asByteBuffer();</span>
+<span class="nc bnc" id="L1286" title="All 2 branches missed.">            if (src.remaining() != sbv.size) {</span>
+<span class="nc" id="L1287">                throw context.runtime.newRuntimeError(&quot;bad size in &quot; + value.getMetaClass().toString());</span>
+            }
+
+<span class="nc" id="L1290">            ptr.getMemoryIO().slice(m.offset(), sbv.size).asByteBuffer().put(src);</span>
+<span class="nc" id="L1291">        }</span>
+
+        public IRubyObject get(ThreadContext context, StructLayout.Storage cache, Member m, AbstractMemory ptr) {
+<span class="nc" id="L1294">            IRubyObject s = cache.getCachedValue(m);</span>
+<span class="nc bnc" id="L1295" title="All 2 branches missed.">            if (s == null) {</span>
+<span class="nc" id="L1296">                s = sbv.getStructClass().newInstance(context, ptr.slice(context.runtime, m.getOffset(ptr)), Block.NULL_BLOCK);</span>
+<span class="nc" id="L1297">                cache.putCachedValue(m, s);</span>
+            }
+
+<span class="nc" id="L1300">            return s;</span>
+        }
+
+        public final boolean isCacheable() {
+<span class="nc" id="L1304">            return true;</span>
+        }
+
+        public final boolean isValueReferenceNeeded() {
+<span class="nc" id="L1308">            return false;</span>
+        }
+    }    
+    
+    private static MemoryOp getArrayComponentMemoryOp(Type.Array arrayType) {
+<span class="fc" id="L1313">        Type componentType = arrayType.getComponentType();</span>
+<span class="pc bpc" id="L1314" title="1 of 2 branches missed.">        MemoryOp op = componentType instanceof Type.Array</span>
+                ? new MultiDimensionArrayOp((Type.Array) componentType)
+<span class="fc" id="L1316">                : MemoryOp.getMemoryOp(componentType);</span>
+<span class="pc bpc" id="L1317" title="1 of 2 branches missed.">        if (op == null) {</span>
+<span class="nc" id="L1318">            throw arrayType.getRuntime().newNotImplementedError(&quot;unsupported array field type: &quot; + arrayType.getComponentType());</span>
+        }
+
+<span class="fc" id="L1321">        return op;</span>
+    }
+
+    
+    static final class MultiDimensionArrayOp extends MemoryOp {
+        private final Type.Array arrayType;
+        private final MemoryOp op;
+        
+<span class="nc" id="L1329">        public MultiDimensionArrayOp(Type.Array arrayType) {</span>
+<span class="nc" id="L1330">            this.arrayType = arrayType;</span>
+<span class="nc" id="L1331">            this.op = getArrayComponentMemoryOp(arrayType);</span>
+<span class="nc" id="L1332">        }</span>
+        
+        @Override
+        IRubyObject get(ThreadContext context, MemoryIO io, long offset) {
+<span class="nc" id="L1336">            throw context.runtime.newNotImplementedError(&quot;cannot get multi deminesional array field&quot;);</span>
+        }
+
+        @Override
+        void put(ThreadContext context, MemoryIO io, long offset, IRubyObject value) {
+<span class="nc bnc" id="L1341" title="All 4 branches missed.">            if (isCharArray() &amp;&amp; value instanceof RubyString) {</span>
+<span class="nc" id="L1342">                ByteList bl = value.convertToString().getByteList();</span>
+<span class="nc" id="L1343">                io.putZeroTerminatedByteArray(offset, bl.getUnsafeBytes(), bl.begin(),</span>
+<span class="nc" id="L1344">                    Math.min(bl.length(), arrayType.length() - 1));</span>
+<span class="nc" id="L1345">            } else {</span>
+<span class="nc" id="L1346">                throw context.runtime.newNotImplementedError(&quot;cannot set multi deminesional array field&quot;);</span>
+            }
+<span class="nc" id="L1348">        }</span>
+
+        @Override
+        IRubyObject get(ThreadContext context, AbstractMemory ptr, long offset) {
+<span class="nc bnc" id="L1352" title="All 2 branches missed.">            return isCharArray()</span>
+                    ? new StructLayout.CharArrayProxy(context.runtime, ptr, offset, arrayType, op)
+                    : new StructLayout.ArrayProxy(context.runtime, ptr, offset, arrayType, op);
+        }
+        
+        private boolean isCharArray() {
+<span class="nc bnc" id="L1358" title="All 2 branches missed.">            return arrayType.getComponentType().nativeType == NativeType.CHAR</span>
+<span class="nc bnc" id="L1359" title="All 2 branches missed.">                    || arrayType.getComponentType().nativeType == NativeType.UCHAR;</span>
+        }
+    }
+    
+    static final class ArrayFieldIO implements FieldIO {
+        private final Type.Array arrayType;
+        private final MemoryOp op;
+
+<span class="fc" id="L1367">        public ArrayFieldIO(Type.Array arrayType) {</span>
+<span class="fc" id="L1368">            this.arrayType = arrayType;</span>
+<span class="fc" id="L1369">            this.op = getArrayComponentMemoryOp(arrayType);</span>
+<span class="fc" id="L1370">        }</span>
+
+
+        public void put(ThreadContext context, StructLayout.Storage cache, Member m, AbstractMemory ptr, IRubyObject value) {
+            
+<span class="nc bnc" id="L1375" title="All 4 branches missed.">            if (isCharArray() &amp;&amp; value instanceof RubyString) {</span>
+<span class="nc" id="L1376">                ByteList bl = value.convertToString().getByteList();</span>
+<span class="nc" id="L1377">                ptr.getMemoryIO().putZeroTerminatedByteArray(m.offset, bl.getUnsafeBytes(), bl.begin(),</span>
+<span class="nc" id="L1378">                    Math.min(bl.length(), arrayType.length() - 1));</span>
+
+<span class="nc" id="L1380">            } else if (false) {</span>
+                RubyArray ary = value.convertToArray();
+                int count = ary.size();
+                if (count &gt; arrayType.length()) {
+                    throw context.runtime.newIndexError(&quot;array too big&quot;);
+                }
+                AbstractMemory memory = (AbstractMemory) ptr;
+
+                // Clear any elements that will not be filled by the array
+                if (count &lt; arrayType.length()) {
+                    memory.getMemoryIO().setMemory(m.offset + (count * arrayType.getComponentType().getNativeSize()),
+                            (arrayType.length() - count) * arrayType.getComponentType().getNativeSize(), (byte) 0);
+                }
+                
+                for (int i = 0; i &lt; count; ++i) {
+                    op.put(context, memory, 
+                            m.offset + (i * arrayType.getComponentType().getNativeSize()),
+                            ary.entry(i));
+                }
+            } else {
+<span class="nc" id="L1400">                throw context.runtime.newNotImplementedError(&quot;cannot set array field&quot;);</span>
+            }
+<span class="nc" id="L1402">        }</span>
+
+        public IRubyObject get(ThreadContext context, StructLayout.Storage cache, Member m, AbstractMemory ptr) {
+<span class="nc" id="L1405">            IRubyObject s = cache.getCachedValue(m);</span>
+<span class="nc bnc" id="L1406" title="All 2 branches missed.">            if (s == null) {</span>
+<span class="nc bnc" id="L1407" title="All 2 branches missed.">                s = isCharArray()</span>
+                    ? new StructLayout.CharArrayProxy(context.runtime, ptr, m.offset, arrayType, op)
+                    : new StructLayout.ArrayProxy(context.runtime, ptr, m.offset, arrayType, op);
+
+<span class="nc" id="L1411">                cache.putCachedValue(m, s);</span>
+            }
+
+<span class="nc" id="L1414">            return s;</span>
+        }
+
+        private final boolean isCharArray() {
+<span class="nc bnc" id="L1418" title="All 2 branches missed.">            return arrayType.getComponentType().nativeType == NativeType.CHAR</span>
+<span class="nc bnc" id="L1419" title="All 2 branches missed.">                    || arrayType.getComponentType().nativeType == NativeType.UCHAR;</span>
+        }
+
+        private boolean isVariableLength() {
+<span class="nc bnc" id="L1423" title="All 2 branches missed.">            return arrayType.length() &lt; 1;</span>
+        }
+
+
+        public final boolean isCacheable() {
+<span class="fc" id="L1428">            return true;</span>
+        }
+
+        public final boolean isValueReferenceNeeded() {
+<span class="fc" id="L1432">            return false;</span>
+        }
+    }
+
+    static final class MappedFieldIO implements FieldIO {
+        private final FieldIO nativeFieldIO;
+        private final MappedType mappedType;
+
+<span class="nc" id="L1440">        public MappedFieldIO(MappedType mappedType, FieldIO nativeFieldIO) {</span>
+<span class="nc" id="L1441">            this.nativeFieldIO = nativeFieldIO;</span>
+<span class="nc" id="L1442">            this.mappedType = mappedType;</span>
+<span class="nc" id="L1443">        }</span>
+
+        /* since we always need to call in to ruby to convert the native value to
+         * a ruby value, we cannot cache it here.
+         */
+        public final boolean isCacheable() {
+<span class="nc" id="L1449">            return false;</span>
+        }
+
+        public final boolean isValueReferenceNeeded() {
+<span class="nc bnc" id="L1453" title="All 4 branches missed.">            return nativeFieldIO.isValueReferenceNeeded() || mappedType.isReferenceRequired();</span>
+        }
+
+        public final IRubyObject get(ThreadContext context, Storage cache, Member m, AbstractMemory ptr) {
+<span class="nc" id="L1457">            return mappedType.fromNative(context, nativeFieldIO.get(context, nullStorage, m, ptr));</span>
+        }
+
+        public void put(ThreadContext context, Storage cache, Member m, AbstractMemory ptr, IRubyObject value) {
+<span class="nc" id="L1461">            final IRubyObject nativeValue = mappedType.toNative(context, value);</span>
+<span class="nc" id="L1462">            nativeFieldIO.put(context, cache, m, ptr, nativeValue);</span>
+
+<span class="nc bnc" id="L1464" title="All 2 branches missed.">            if (isValueReferenceNeeded()) {</span>
+                // keep references to both the ruby and native values to preserve
+                // reference chains
+<span class="nc" id="L1467">                cache.putReference(m, new Object[] { value, nativeValue });</span>
+            }
+<span class="nc" id="L1469">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

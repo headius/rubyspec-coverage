@@ -1,0 +1,451 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>InvokeDynamicMethodFactory.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.internal.runtime.methods</a> &gt; <span class="el_source">InvokeDynamicMethodFactory.java</span></div><h1>InvokeDynamicMethodFactory.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ * 
+ * Copyright (C) 2012 The JRuby Community &lt;www.jruby.org&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.internal.runtime.methods;
+
+import com.headius.invokebinder.Signature;
+import com.headius.invokebinder.SmartBinder;
+import com.headius.invokebinder.SmartHandle;
+import org.jruby.RubyInstanceConfig;
+import org.jruby.parser.StaticScope;
+import org.jruby.RubyModule;
+import org.jruby.lexer.yacc.ISourcePosition;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.MethodFactory;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.Visibility;
+import org.jruby.runtime.builtin.IRubyObject;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.reflect.Array;
+import java.lang.reflect.Modifier;
+import java.util.Arrays;
+import java.util.List;
+import org.jruby.Ruby;
+import org.jruby.anno.JavaMethodDescriptor;
+import org.jruby.runtime.invokedynamic.InvocationLinker;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+
+/**
+ * In order to avoid the overhead with reflection-based method handles, this
+ * MethodFactory uses ASM to generate tiny invoker classes. This allows for
+ * better performance and more specialization per-handle than can be supported
+ * via reflection. It also allows optimizing away many conditionals that can
+ * be determined once ahead of time.
+ * 
+ * When running in secured environments, this factory may not function. When
+ * this can be detected, MethodFactory will fall back on the reflection-based
+ * factory instead.
+ * 
+ * @see org.jruby.runtime.MethodFactory
+ */
+public class InvokeDynamicMethodFactory extends InvocationMethodFactory {
+
+<span class="nc" id="L70">    private static final Logger LOG = LoggerFactory.getLogger(&quot;InvokeDynamicMethodFactory&quot;);</span>
+    
+<span class="nc" id="L72">    private static final MethodHandles.Lookup LOOKUP = MethodHandles.lookup();</span>
+    
+    /**
+     */
+    public InvokeDynamicMethodFactory(ClassLoader classLoader) {
+<span class="nc" id="L77">        super(classLoader);</span>
+<span class="nc" id="L78">    }</span>
+
+    /**
+     * Use code generation to provide a method handle for a compiled Ruby method.
+     * 
+     * @see org.jruby.runtime.MethodFactory#getCompiledMethod
+     */
+    @Override
+    public DynamicMethod getCompiledMethodLazily(
+            RubyModule implementationClass,
+            String rubyName,
+            String javaName,
+            Arity arity,
+            Visibility visibility,
+            StaticScope scope,
+            Object scriptObject,
+            CallConfiguration callConfig,
+            ISourcePosition position,
+            String parameterDesc,
+            MethodNodes methodNodes) {
+
+<span class="nc" id="L99">        return getCompiledMethod(implementationClass, rubyName, javaName, arity, visibility, scope, scriptObject, callConfig, position, parameterDesc, methodNodes);</span>
+    }
+
+    /**
+     * Use JSR292 to provide a method handle for a compiled Ruby method.
+     * 
+     * @see org.jruby.runtime.MethodFactory#getCompiledMethod
+     */
+    @Override
+    public DynamicMethod getCompiledMethod(
+            RubyModule implementationClass,
+            String rubyName,
+            String javaName,
+            Arity arity,
+            Visibility visibility,
+            StaticScope scope,
+            Object scriptObject,
+            CallConfiguration callConfig,
+            ISourcePosition position,
+            String parameterDesc,
+            MethodNodes methodNodes) {
+<span class="nc" id="L120">        Class scriptClass = scriptObject.getClass();</span>
+
+        try {
+<span class="nc" id="L123">            MethodHandle[] targets = new MethodHandle[5];</span>
+            SmartHandle directCall;
+<span class="nc" id="L125">            int specificArity = -1;</span>
+
+            // acquire handle to the actual method body
+<span class="nc bnc" id="L128" title="All 6 branches missed.">            if (scope.getRestArg() &gt;= 0 || scope.getOptionalArgs() &gt; 0 || scope.getRequiredArgs() &gt; 3) {</span>
+                // variable arity method (has optional, rest, or more args than we can splat)
+<span class="nc" id="L130">                directCall = SmartBinder</span>
+<span class="nc" id="L131">                        .from(VARIABLE_ARITY_SIGNATURE.prependArg(&quot;script&quot;, scriptClass))</span>
+<span class="nc" id="L132">                        .invokeStaticQuiet(LOOKUP, scriptClass, javaName)</span>
+<span class="nc" id="L133">                        .bindTo(scriptObject);</span>
+            } else {
+                // specific arity method (less than 4 required args only)
+<span class="nc" id="L136">                specificArity = scope.getRequiredArgs();</span>
+
+<span class="nc" id="L138">                directCall = SmartBinder</span>
+<span class="nc" id="L139">                        .from(SPECIFIC_ARITY_SIGNATURES[specificArity].prependArg(&quot;script&quot;, scriptClass))</span>
+<span class="nc" id="L140">                        .invokeStaticQuiet(LOOKUP, scriptClass, javaName)</span>
+<span class="nc" id="L141">                        .bindTo(scriptObject);</span>
+            }
+
+            // wrap with framing logic if needed
+<span class="nc bnc" id="L145" title="All 2 branches missed.">            if (!callConfig.isNoop()) {</span>
+<span class="nc" id="L146">                directCall = SmartHandle</span>
+<span class="nc" id="L147">                        .from(directCall.signature(), InvocationLinker.wrapWithFraming(directCall.signature(), callConfig, implementationClass, rubyName, directCall.handle(), scope));</span>
+            }
+
+            // provide a variable-arity path for specific-arity target
+            SmartHandle variableCall;
+<span class="nc bnc" id="L152" title="All 2 branches missed.">            if (specificArity &gt;= 0) {</span>
+<span class="nc" id="L153">                SmartHandle arityCheck = SmartBinder</span>
+<span class="nc" id="L154">                        .from(ARITY_CHECK_FOLD)</span>
+<span class="nc" id="L155">                        .append(new String[]{&quot;min&quot;, &quot;max&quot;}, new Class[]{int.class, int.class}, specificArity, specificArity)</span>
+<span class="nc" id="L156">                        .cast(ARITY_CHECK_SIGNATURE)</span>
+<span class="nc" id="L157">                        .invokeStaticQuiet(LOOKUP, Arity.class, &quot;checkArgumentCount&quot;);</span>
+
+<span class="nc" id="L159">                variableCall = SmartBinder</span>
+<span class="nc" id="L160">                        .from(VARIABLE_ARITY_SIGNATURE)</span>
+<span class="nc" id="L161">                        .foldVoid(arityCheck)</span>
+<span class="nc" id="L162">                        .permute(&quot;script&quot;, &quot;context&quot;, &quot;self&quot;, &quot;block&quot;, &quot;args&quot;)</span>
+<span class="nc" id="L163">                        .spread(&quot;arg&quot;, specificArity)</span>
+<span class="nc" id="L164">                        .permute(&quot;script&quot;, &quot;context&quot;, &quot;self&quot;, &quot;arg*&quot;, &quot;block&quot;)</span>
+<span class="nc" id="L165">                        .invoke(directCall);</span>
+<span class="nc" id="L166">            } else {</span>
+<span class="nc" id="L167">                variableCall = directCall;</span>
+            }
+
+            // TODO: tracing
+
+            // pre-call trace
+<span class="nc bnc" id="L173" title="All 2 branches missed.">            if (RubyInstanceConfig.FULL_TRACE_ENABLED) {</span>
+            }
+            
+<span class="nc bnc" id="L176" title="All 2 branches missed.">            if (specificArity &gt;= 0) {</span>
+<span class="nc" id="L177">                targets[specificArity] = directCall.handle();</span>
+<span class="nc" id="L178">                targets[4] = variableCall.handle();</span>
+            } else {
+<span class="nc" id="L180">                targets[4] = directCall.handle();</span>
+            }
+            
+<span class="nc" id="L183">            return new HandleMethod(implementationClass, visibility, callConfig, targets, parameterDesc);</span>
+
+<span class="nc" id="L185">        } catch(Exception e) {</span>
+<span class="nc" id="L186">            throw new RuntimeException(e);</span>
+        }
+    }
+
+    @Override
+    public byte[] getCompiledMethodOffline(
+            String rubyName, String javaName, String className, String invokerPath, Arity arity,
+            StaticScope scope, CallConfiguration callConfig, String filename, int line,
+            MethodNodes methodNodes) {
+<span class="nc" id="L195">        throw new RuntimeException(&quot;no offline support for invokedynamic handles&quot;);</span>
+    }
+
+    @Override
+    public DynamicMethod getAnnotatedMethod(RubyModule implementationClass, List&lt;JavaMethodDescriptor&gt; descs) {
+<span class="nc" id="L200">        JavaMethodDescriptor desc1 = descs.get(0);</span>
+        
+<span class="nc bnc" id="L202" title="All 2 branches missed.">        if (desc1.anno.frame()) {</span>
+            // super logic does not work yet because we need to take impl class
+            // and method name from the DynamicMethod#call call, so punt to
+            // generated class for now
+<span class="nc" id="L206">            return super.getAnnotatedMethod(implementationClass, descs);</span>
+        }
+
+<span class="nc bnc" id="L209" title="All 2 branches missed.">        if (!Modifier.isPublic(desc1.getDeclaringClass().getModifiers())) {</span>
+<span class="nc" id="L210">            LOG.warn(&quot;warning: binding non-public class {}; reflected handles won't work&quot;, desc1.declaringClassName);</span>
+        }
+
+<span class="nc" id="L213">        DescriptorInfo info = new DescriptorInfo(descs);</span>
+<span class="nc" id="L214">        MethodHandle[] targets = buildAnnotatedMethodHandles(implementationClass.getRuntime(), descs, implementationClass);</span>
+        
+<span class="nc" id="L216">        return new HandleMethod(implementationClass, desc1.anno.visibility(), CallConfiguration.getCallConfig(info.isFrame(), info.isScope()), targets, null);</span>
+    }
+
+    private MethodHandle[] buildAnnotatedMethodHandles(Ruby runtime, List&lt;JavaMethodDescriptor&gt; descs, RubyModule implementationClass) {
+<span class="nc" id="L220">        MethodHandle[] targets = new MethodHandle[5];</span>
+        
+<span class="nc bnc" id="L222" title="All 2 branches missed.">        for (JavaMethodDescriptor desc: descs) {</span>
+<span class="nc" id="L223">            int specificArity = -1;</span>
+<span class="nc bnc" id="L224" title="All 4 branches missed.">            if (desc.optional == 0 &amp;&amp; !desc.rest) {</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">                if (desc.required == 0) {</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                    if (desc.actualRequired &lt;= 3) {</span>
+<span class="nc" id="L227">                        specificArity = desc.actualRequired;</span>
+                    } else {
+<span class="nc" id="L229">                        specificArity = -1;</span>
+                    }
+<span class="nc bnc" id="L231" title="All 4 branches missed.">                } else if (desc.required &gt;= 0 &amp;&amp; desc.required &lt;= 3) {</span>
+<span class="nc" id="L232">                    specificArity = desc.required;</span>
+                }
+            }
+
+<span class="nc" id="L236">            String javaMethodName = desc.name;</span>
+            String rubyName;
+            
+<span class="nc bnc" id="L239" title="All 4 branches missed.">            if (desc.anno.name() != null &amp;&amp; desc.anno.name().length &gt; 0) {</span>
+                // FIXME: Using this for super may super up the wrong name
+<span class="nc" id="L241">                rubyName = desc.anno.name()[0];</span>
+            } else {
+<span class="nc" id="L243">                rubyName = javaMethodName;</span>
+            }
+
+//            checkArity(desc.anno, method, specificArity);
+
+            SmartBinder targetBinder;
+            SmartHandle target;
+            Signature baseSignature;
+<span class="nc bnc" id="L251" title="All 2 branches missed.">            if (specificArity &gt;= 0) {</span>
+<span class="nc" id="L252">                baseSignature = SPECIFIC_ARITY_SIGNATURES[specificArity];</span>
+            } else {
+<span class="nc" id="L254">                baseSignature = VARIABLE_ARITY_SIGNATURE;</span>
+            }
+            
+<span class="nc" id="L257">            targetBinder = SmartBinder.from(baseSignature);</span>
+            
+<span class="nc" id="L259">            MethodHandle returnFilter = null;</span>
+<span class="nc" id="L260">            boolean castReturn = false;</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">            if (desc.returnClass != IRubyObject.class) {</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">                if (desc.returnClass == void.class) {</span>
+<span class="nc" id="L263">                    returnFilter = MethodHandles.constant(IRubyObject.class, runtime.getNil());</span>
+                } else {
+<span class="nc" id="L265">                    castReturn = true;</span>
+                }
+            }
+            
+<span class="nc bnc" id="L269" title="All 2 branches missed.">            if (desc.isStatic) {</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">                if (desc.hasContext) {</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">                    if (desc.hasBlock) {</span>
+                        // straight through with no permutation necessary
+                    } else {
+<span class="nc" id="L274">                        targetBinder = targetBinder.exclude(&quot;block&quot;);</span>
+                    }
+                } else {
+<span class="nc bnc" id="L277" title="All 2 branches missed.">                    if (desc.hasBlock) {</span>
+<span class="nc" id="L278">                        targetBinder = targetBinder.exclude(&quot;context&quot;);</span>
+                    } else {
+<span class="nc" id="L280">                        targetBinder = targetBinder.exclude(&quot;context&quot;, &quot;block&quot;);</span>
+                    }
+                }
+                
+<span class="nc bnc" id="L284" title="All 2 branches missed.">                if (returnFilter != null) {</span>
+<span class="nc" id="L285">                    targetBinder = targetBinder</span>
+<span class="nc" id="L286">                            .filterReturn(returnFilter);</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">                } else if (castReturn) {</span>
+<span class="nc" id="L288">                    targetBinder = targetBinder</span>
+<span class="nc" id="L289">                            .castReturn(desc.returnClass);</span>
+                }
+            } else {
+<span class="nc bnc" id="L292" title="All 2 branches missed.">                if (desc.hasContext) {</span>
+<span class="nc bnc" id="L293" title="All 2 branches missed.">                    if (desc.hasBlock) {</span>
+<span class="nc" id="L294">                        targetBinder = targetBinder.permute(&quot;self&quot;, &quot;context&quot;, &quot;arg*&quot;, &quot;block&quot;);</span>
+                    } else {
+<span class="nc" id="L296">                        targetBinder = targetBinder.permute(&quot;self&quot;, &quot;context&quot;, &quot;arg*&quot;);</span>
+                    }
+                } else {
+<span class="nc bnc" id="L299" title="All 2 branches missed.">                    if (desc.hasBlock) {</span>
+<span class="nc" id="L300">                        targetBinder = targetBinder.permute(&quot;self&quot;, &quot;arg*&quot;, &quot;block&quot;);</span>
+                    } else {
+<span class="nc" id="L302">                        targetBinder = targetBinder.permute(&quot;self&quot;, &quot;arg*&quot;);</span>
+                    }
+                }
+                
+<span class="nc bnc" id="L306" title="All 2 branches missed.">                if (returnFilter != null) {</span>
+<span class="nc" id="L307">                    targetBinder = targetBinder</span>
+<span class="nc" id="L308">                            .filterReturn(returnFilter);</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">                } else if (castReturn) {</span>
+<span class="nc" id="L310">                    targetBinder = targetBinder</span>
+<span class="nc" id="L311">                            .castReturn(desc.returnClass);</span>
+                }
+<span class="nc" id="L313">                targetBinder = targetBinder</span>
+<span class="nc" id="L314">                        .castArg(&quot;self&quot;, desc.getDeclaringClass());</span>
+            }
+            
+<span class="nc bnc" id="L317" title="All 2 branches missed.">            if (desc.isStatic) {</span>
+<span class="nc" id="L318">                target = targetBinder</span>
+<span class="nc" id="L319">                        .invokeStaticQuiet(LOOKUP, desc.getDeclaringClass(), javaMethodName);</span>
+            } else {
+<span class="nc" id="L321">                target = targetBinder</span>
+<span class="nc" id="L322">                        .invokeVirtualQuiet(LOOKUP, javaMethodName);</span>
+            }
+
+<span class="nc" id="L325">            CallConfiguration callConfig = CallConfiguration.getCallConfigByAnno(desc.anno);</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">            if (!callConfig.isNoop()) {</span>
+<span class="nc" id="L327">                target = SmartHandle</span>
+<span class="nc" id="L328">                        .from(target.signature(), InvocationLinker.wrapWithFraming(baseSignature, callConfig, implementationClass, rubyName, target.handle(), null));</span>
+            }
+            
+<span class="nc bnc" id="L331" title="All 2 branches missed.">            if (specificArity &gt;= 0) {</span>
+<span class="nc" id="L332">                targets[specificArity] = target.handle();</span>
+            } else {
+<span class="nc" id="L334">                targets[4] = target.handle();</span>
+            }
+<span class="nc" id="L336">        }</span>
+        
+<span class="nc bnc" id="L338" title="All 2 branches missed.">        if (targets[4] == null) {</span>
+            // provide a variable-arity path for specific-arity target
+<span class="nc" id="L340">            Signature VARIABLE_ARITY_SIGNATURE = Signature</span>
+<span class="nc" id="L341">                    .returning(IRubyObject.class)</span>
+<span class="nc" id="L342">                    .appendArg(&quot;context&quot;, ThreadContext.class)</span>
+<span class="nc" id="L343">                    .appendArg(&quot;self&quot;, IRubyObject.class)</span>
+<span class="nc" id="L344">                    .appendArg(&quot;args&quot;, IRubyObject[].class)</span>
+<span class="nc" id="L345">                    .appendArg(&quot;block&quot;, Block.class);</span>
+            
+            // convert all specific-arity handles into varargs handles
+<span class="nc" id="L348">            MethodHandle[] varargsTargets = new MethodHandle[4];</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">            for (int i = 0; i &lt; 4; i++) {</span>
+                // TODO arity error
+<span class="nc bnc" id="L351" title="All 2 branches missed.">                if (targets[i] == null) continue;</span>
+<span class="nc bnc" id="L352" title="All 2 branches missed.">                if (i == 0) {</span>
+<span class="nc" id="L353">                    varargsTargets[i] = MethodHandles.dropArguments(targets[i], 2, IRubyObject[].class);</span>
+                } else {
+<span class="nc" id="L355">                    varargsTargets[i] = SmartBinder</span>
+<span class="nc" id="L356">                            .from(VARIABLE_ARITY_SIGNATURE)</span>
+<span class="nc" id="L357">                            .permute(&quot;context&quot;, &quot;self&quot;, &quot;block&quot;, &quot;args&quot;)</span>
+<span class="nc" id="L358">                            .spread(&quot;arg&quot;, i)</span>
+<span class="nc" id="L359">                            .permute(&quot;context&quot;, &quot;self&quot;, &quot;arg*&quot;, &quot;block&quot;)</span>
+<span class="nc" id="L360">                            .invoke(targets[i]).handle();</span>
+                }
+            }
+            
+<span class="nc" id="L364">            SmartHandle HANDLE_GETTER = SmartBinder</span>
+<span class="nc" id="L365">                    .from(Signature.returning(MethodHandle.class).appendArg(&quot;targets&quot;, MethodHandle[].class).appendArg(&quot;arity&quot;, int.class))</span>
+<span class="nc" id="L366">                    .arrayGet();</span>
+            
+<span class="nc" id="L368">            SmartHandle handleLookup = SmartBinder</span>
+<span class="nc" id="L369">                    .from(Signature.returning(MethodHandle.class).appendArg(&quot;args&quot;, IRubyObject[].class))</span>
+<span class="nc" id="L370">                    .filterReturn(HANDLE_GETTER.bindTo(varargsTargets))</span>
+<span class="nc" id="L371">                    .cast(int.class, Object.class)</span>
+<span class="nc" id="L372">                    .invokeStaticQuiet(LOOKUP, Array.class, &quot;getLength&quot;);</span>
+            
+<span class="nc" id="L374">            SmartHandle variableCall = SmartBinder</span>
+<span class="nc" id="L375">                    .from(VARIABLE_ARITY_SIGNATURE)</span>
+<span class="nc" id="L376">                    .fold(&quot;handle&quot;, handleLookup)</span>
+<span class="nc" id="L377">                    .invoker();</span>
+            
+<span class="nc" id="L379">            targets[4] = variableCall.handle();</span>
+        }
+        
+        
+        // TODO: tracing
+        
+<span class="nc" id="L385">        return targets;</span>
+    }
+
+    /**
+     * Use code generation to provide a method handle based on an annotated Java
+     * method.
+     * 
+     * @see org.jruby.runtime.MethodFactory#getAnnotatedMethod
+     */
+    @Override
+    public DynamicMethod getAnnotatedMethod(RubyModule implementationClass, JavaMethodDescriptor desc) {
+<span class="nc" id="L396">        return getAnnotatedMethod(implementationClass, Arrays.asList(desc));</span>
+    }
+    
+<span class="nc" id="L399">    public static final Signature VARIABLE_ARITY_SIGNATURE = Signature</span>
+<span class="nc" id="L400">            .returning(IRubyObject.class)</span>
+<span class="nc" id="L401">            .appendArg(&quot;context&quot;, ThreadContext.class)</span>
+<span class="nc" id="L402">            .appendArg(&quot;self&quot;, IRubyObject.class)</span>
+<span class="nc" id="L403">            .appendArg(&quot;args&quot;, IRubyObject[].class)</span>
+<span class="nc" id="L404">            .appendArg(&quot;block&quot;, Block.class);</span>
+    
+<span class="nc" id="L406">    public static final Signature ARITY_CHECK_FOLD = Signature</span>
+<span class="nc" id="L407">            .returning(void.class)</span>
+<span class="nc" id="L408">            .appendArg(&quot;context&quot;, ThreadContext.class)</span>
+<span class="nc" id="L409">            .appendArg(&quot;args&quot;, IRubyObject[].class);</span>
+    
+<span class="nc" id="L411">    public static final Signature ARITY_CHECK_SIGNATURE = Signature</span>
+<span class="nc" id="L412">            .returning(int.class)</span>
+<span class="nc" id="L413">            .appendArg(&quot;context&quot;, ThreadContext.class)</span>
+<span class="nc" id="L414">            .appendArg(&quot;args&quot;, IRubyObject[].class)</span>
+<span class="nc" id="L415">            .appendArg(&quot;min&quot;, int.class)</span>
+<span class="nc" id="L416">            .appendArg(&quot;max&quot;, int.class);</span>
+    
+    public static final Signature[] SPECIFIC_ARITY_SIGNATURES;
+    static {
+<span class="nc" id="L420">            Signature[] specifics = new Signature[4];</span>
+<span class="nc" id="L421">            Signature specific = Signature</span>
+<span class="nc" id="L422">                    .returning(IRubyObject.class)</span>
+<span class="nc" id="L423">                    .appendArg(&quot;context&quot;, ThreadContext.class)</span>
+<span class="nc" id="L424">                    .appendArg(&quot;self&quot;, IRubyObject.class);</span>
+            
+<span class="nc" id="L426">            specifics[0] = specific.appendArg(&quot;block&quot;, Block.class);</span>
+            
+<span class="nc bnc" id="L428" title="All 2 branches missed.">            for (int i = 0; i &lt; 3; i++) {</span>
+<span class="nc" id="L429">                specific = specific</span>
+<span class="nc" id="L430">                        .appendArg(&quot;arg&quot; + i, IRubyObject.class);</span>
+<span class="nc" id="L431">                specifics[i + 1] = specific.appendArg(&quot;block&quot;, Block.class);</span>
+            }
+<span class="nc" id="L433">            SPECIFIC_ARITY_SIGNATURES = specifics;</span>
+    }
+    
+<span class="nc" id="L436">    private static final SmartBinder[] SPREAD_BINDERS = new SmartBinder[4];</span>
+    static {
+<span class="nc bnc" id="L438" title="All 2 branches missed.">        for (int i = 0; i &lt; 4; i++) {</span>
+<span class="nc" id="L439">            SPREAD_BINDERS[i] = SmartBinder</span>
+<span class="nc" id="L440">                    .from(VARIABLE_ARITY_SIGNATURE)</span>
+<span class="nc" id="L441">                    .permute(&quot;context&quot;, &quot;self&quot;, &quot;block&quot;, &quot;args&quot;)</span>
+<span class="nc" id="L442">                    .spread(&quot;arg&quot;, i)</span>
+<span class="nc" id="L443">                    .permute(&quot;context&quot;, &quot;self&quot;, &quot;arg*&quot;, &quot;block&quot;);</span>
+        }
+    }
+    
+<span class="nc" id="L447">    private static final SmartHandle HANDLE_GETTER = SmartBinder</span>
+<span class="nc" id="L448">                    .from(Signature.returning(MethodHandle.class).appendArg(&quot;targets&quot;, MethodHandle[].class).appendArg(&quot;arity&quot;, int.class))</span>
+<span class="nc" id="L449">                    .arrayGet();</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

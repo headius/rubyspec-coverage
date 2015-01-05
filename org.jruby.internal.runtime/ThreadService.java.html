@@ -1,0 +1,386 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ThreadService.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.internal.runtime</a> &gt; <span class="el_source">ThreadService.java</span></div><h1>ThreadService.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2004 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2006 Miguel Covarrubias &lt;mlcovarrubias@gmail.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.internal.runtime;
+
+import java.lang.ref.SoftReference;
+import java.util.concurrent.locks.ReentrantLock;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
+import java.util.WeakHashMap;
+import java.util.concurrent.Future;
+import org.jruby.Ruby;
+import org.jruby.RubyThread;
+import org.jruby.ext.fiber.ThreadFiber;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.ThreadContext;
+
+/**
+ * ThreadService maintains lists ofall the JRuby-specific thread data structures
+ * needed for Ruby's threading API and for JRuby's execution. The main
+ * structures are:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;ThreadContext, which contains frames, scopes, etc needed for Ruby execution&lt;/li&gt;
+ * &lt;li&gt;RubyThread, the Ruby object representation of a thread's state&lt;/li&gt;
+ * &lt;li&gt;RubyThreadGroup, which represents a group of Ruby threads&lt;/li&gt;
+ * &lt;li&gt;NativeThread, used to wrap native Java threads&lt;/li&gt;
+ * &lt;li&gt;FutureThread, used to wrap java.util.concurrent.Future&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * In order to ensure these structures do not linger after the thread has terminated,
+ * most of them are either weakly or softly referenced. The references associated
+ * with these structures are:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;ThreadService has a hard reference to a ThreadLocal, which holds a soft reference
+ * to a ThreadContext. So the thread's locals softly reference ThreadContext.
+ * We use a soft reference to keep ThreadContext instances from going away too
+ * quickly when a Java thread leaves Ruby space completely, which would otherwise
+ * result in a lot of ThreadContext object churn.&lt;/li&gt;
+ * &lt;li&gt;ThreadService maintains a weak map from the actual java.lang.Thread (or
+ * java.util.concurrent.Future) instance to the associated RubyThread. The map
+ * is weak-keyyed, so it will not prevent the collection of the associated
+ * Thread or Future. The associated RubyThread will remain alive as long as the
+ * Thread/Future and this ThreadService instance are both alive, maintaining
+ * the external thread's identity in Ruby-land.&lt;/li&gt;
+ * &lt;li&gt;RubyThread has a weak reference to its to ThreadContext.&lt;/li&gt;
+ * &lt;li&gt;ThreadContext has a hard reference to its associated RubyThread. Ignoring other
+ * references, this will usually mean RubyThread is softly reachable via the
+ * soft threadlocal reference to ThreadContext in ThreadService.&lt;/li&gt;
+ * &lt;li&gt;RubyThreadGroup has hard references to threads it owns. The thread removes
+ * itself on termination (if it's a Ruby thread) or when the ThreadContext is
+ * collected (as in the case of &quot;adopted&quot; Java threads.&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * These data structures can come to life in one of two ways:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;A Ruby thread is started. This constructs a new RubyThread object, which
+ * calls to ThreadService to initialize a ThreadContext and appropriate mappings
+ * in all ThreadService's structures. The body of the thread is wrapped with a
+ * finally block that will forcibly unregister the thread and all related
+ * structures from ThreadService.&lt;/li&gt;
+ * &lt;li&gt;A Java thread enters Ruby by doing a call. The thread is &quot;adopted&quot;, and
+ * gains a RubyThread instance, a ThreadContext instance, and all associated
+ * mappings in ThreadService. Since we don't know when the thread has &quot;left&quot;
+ * Ruby permanently, no forcible unregistration is attempted for the various
+ * structures and maps. However, they should not be hard-rooted; the
+ * ThreadContext is only softly reachable at best if no calls are in-flight,
+ * so it will collect. Its collection will release the reference to RubyThread,
+ * and its finalizer will unregister that RubyThread from its RubyThreadGroup.
+ * With the RubyThread gone, the Thread-to-RubyThread map will eventually clear,
+ * releasing the hard reference to the Thread itself.&lt;/li&gt;
+ * &lt;ul&gt;
+ */
+public class ThreadService {
+    private Ruby runtime;
+    /**
+     * A hard reference to the &quot;main&quot; context, so we always have one waiting for
+     * &quot;main&quot; thread execution.
+     */
+    private ThreadContext mainContext;
+
+    /**
+     * A thread-local soft reference to the current thread's ThreadContext. We
+     * use a soft reference so that the ThreadContext is still collectible but
+     * will not immediately disappear once dereferenced, to avoid churning
+     * through ThreadContext instances every time a Java thread enters and exits
+     * Ruby space.
+     */
+    private ThreadLocal&lt;SoftReference&lt;ThreadContext&gt;&gt; localContext;
+
+    /**
+     * The Java thread group into which we register all Ruby threads. This is
+     * distinct from the RubyThreadGroup, which is simply a mutable collection
+     * of threads.
+     */
+    private ThreadGroup rubyThreadGroup;
+
+    /**
+     * A map from a Java Thread or Future to its RubyThread instance. This is
+     * a synchronized WeakHashMap, so it weakly references its keys; this means
+     * that when the Thread/Future goes away, eventually its entry in this map
+     * will follow.
+     */
+    private final Map&lt;Object, RubyThread&gt; rubyThreadMap;
+
+    /**
+     * Indicates whether there's only a single thread executing, in which case
+     * we don't need to be polling for cross-thread events.
+     */
+<span class="fc" id="L143">    private volatile boolean polling = false;</span>
+    
+<span class="fc" id="L145">    private final ReentrantLock criticalLock = new ReentrantLock();</span>
+
+<span class="fc" id="L147">    public ThreadService(Ruby runtime) {</span>
+<span class="fc" id="L148">        this.runtime = runtime;</span>
+<span class="fc" id="L149">        this.localContext = new ThreadLocal&lt;SoftReference&lt;ThreadContext&gt;&gt;();</span>
+
+        try {
+<span class="fc" id="L152">            this.rubyThreadGroup = new ThreadGroup(&quot;Ruby Threads#&quot; + runtime.hashCode());</span>
+<span class="nc" id="L153">        } catch(SecurityException e) {</span>
+<span class="nc" id="L154">            this.rubyThreadGroup = Thread.currentThread().getThreadGroup();</span>
+<span class="fc" id="L155">        }</span>
+
+<span class="fc" id="L157">        this.rubyThreadMap = Collections.synchronizedMap(new WeakHashMap&lt;Object, RubyThread&gt;());</span>
+<span class="fc" id="L158">    }</span>
+
+    public void disposeCurrentThread() {
+<span class="fc" id="L161">        localContext.set(null);</span>
+<span class="fc" id="L162">        rubyThreadMap.remove(Thread.currentThread());</span>
+<span class="fc" id="L163">    }</span>
+
+    public void initMainThread() {
+<span class="fc" id="L166">        this.mainContext = ThreadContext.newContext(runtime);</span>
+
+        // Must be called from main thread (it is currently, but this bothers me)
+<span class="fc" id="L169">        localContext.set(new SoftReference&lt;ThreadContext&gt;(mainContext));</span>
+<span class="fc" id="L170">    }</span>
+
+    /**
+     * In order to provide an appropriate execution context for a given thread,
+     * we store ThreadContext instances in a threadlocal. This method is a utility
+     * to get at that threadlocal context from anywhere in the program it may
+     * not be immediately available. This method should be used sparingly, and
+     * if it is possible to pass ThreadContext on the argument list, it is
+     * preferable.
+     * 
+     * &lt;b&gt;Description of behavior&lt;/b&gt;
+     * 
+     * The threadlocal does not actually contain the ThreadContext directly;
+     * instead, it contains a SoftReference that holds the ThreadContext. This
+     * is to allow new threads to enter the system and execute Ruby code with
+     * a valid context, but still allow that context to garbage collect if the
+     * thread stays alive much longer. We use SoftReference here because
+     * WeakReference is collected too quickly, resulting in very expensive
+     * ThreadContext churn (and this originally lead to JRUBY-2261's leak of
+     * adopted RubyThread instances).
+     * 
+     * @return The ThreadContext instance for the current thread, or a new one
+     * if none has previously been created or the old ThreadContext has been
+     * collected.
+     */
+    public ThreadContext getCurrentContext() {
+<span class="fc" id="L196">        SoftReference sr = null;</span>
+<span class="fc" id="L197">        ThreadContext context = null;</span>
+        
+<span class="fc bfc" id="L199" title="All 2 branches covered.">        while (context == null) {</span>
+            // loop until a context is available, to clean up softrefs that might have been collected
+<span class="fc bfc" id="L201" title="All 2 branches covered.">            if ((sr = (SoftReference)localContext.get()) == null) {</span>
+<span class="fc" id="L202">                sr = adoptCurrentThread();</span>
+<span class="fc" id="L203">                context = (ThreadContext)sr.get();</span>
+            } else {
+<span class="fc" id="L205">                context = (ThreadContext)sr.get();</span>
+            }
+            
+            // context is null, wipe out the SoftReference (this could be done with a reference queue)
+<span class="pc bpc" id="L209" title="1 of 2 branches missed.">            if (context == null) {</span>
+<span class="nc" id="L210">                localContext.set(null);</span>
+            }
+        }
+
+<span class="fc" id="L214">        return context;</span>
+    }
+
+    /*
+     * Used only for Fiber context management
+     */
+    public void setCurrentContext(ThreadContext context) {
+<span class="nc" id="L221">        localContext.set(new SoftReference&lt;ThreadContext&gt;(context));</span>
+<span class="nc" id="L222">    }</span>
+    
+    private SoftReference adoptCurrentThread() {
+<span class="fc" id="L225">        Thread current = Thread.currentThread();</span>
+        
+<span class="fc" id="L227">        RubyThread.adopt(runtime.getThread(), current);</span>
+        
+<span class="fc" id="L229">        return (SoftReference) localContext.get();</span>
+    }
+
+    public RubyThread getMainThread() {
+<span class="fc" id="L233">        return mainContext.getThread();</span>
+    }
+
+    public void setMainThread(Thread thread, RubyThread rubyThread) {
+<span class="fc" id="L237">        mainContext.setThread(rubyThread);</span>
+<span class="fc" id="L238">        rubyThreadMap.put(thread, rubyThread);</span>
+<span class="fc" id="L239">    }</span>
+
+    public boolean getPolling() {
+<span class="nc" id="L242">        return polling;</span>
+    }
+    
+    public synchronized RubyThread[] getActiveRubyThreads() {
+    	// all threads in ruby thread group plus main thread
+
+<span class="fc" id="L248">        synchronized(rubyThreadMap) {</span>
+<span class="fc" id="L249">            List&lt;RubyThread&gt; rtList = new ArrayList&lt;RubyThread&gt;(rubyThreadMap.size());</span>
+        
+<span class="fc bfc" id="L251" title="All 2 branches covered.">            for (Map.Entry&lt;Object, RubyThread&gt; entry : rubyThreadMap.entrySet()) {</span>
+<span class="fc" id="L252">                Object key = entry.getKey();</span>
+<span class="pc bpc" id="L253" title="1 of 2 branches missed.">                if (key == null) continue;</span>
+                
+<span class="pc bpc" id="L255" title="1 of 2 branches missed.">                if (key instanceof Thread) {</span>
+<span class="fc" id="L256">                    Thread t = (Thread)key;</span>
+
+                    // thread is not alive, skip it
+<span class="fc bfc" id="L259" title="All 2 branches covered.">                    if (!t.isAlive()) continue;</span>
+<span class="pc bnc" id="L260" title="All 2 branches missed.">                } else if (key instanceof Future) {</span>
+<span class="nc" id="L261">                    Future f = (Future)key;</span>
+
+                    // future is done or cancelled, skip it
+<span class="nc bnc" id="L264" title="All 4 branches missed.">                    if (f.isDone() || f.isCancelled()) continue;</span>
+                }
+            
+<span class="fc" id="L267">                rtList.add(entry.getValue());</span>
+<span class="fc" id="L268">            }</span>
+
+<span class="fc" id="L270">            RubyThread[] rubyThreads = new RubyThread[rtList.size()];</span>
+<span class="fc" id="L271">            rtList.toArray(rubyThreads);</span>
+    	
+<span class="fc" id="L273">            return rubyThreads;</span>
+<span class="nc" id="L274">        }</span>
+    }
+
+    public ThreadGroup getRubyThreadGroup() {
+<span class="nc" id="L278">    	return rubyThreadGroup;</span>
+    }
+
+    public ThreadContext getThreadContextForThread(RubyThread thread) {
+<span class="nc" id="L282">        return thread.getContext();</span>
+    }
+
+    public synchronized ThreadContext registerNewThread(RubyThread thread) {
+<span class="fc" id="L286">        ThreadContext context = ThreadContext.newContext(runtime);</span>
+<span class="fc" id="L287">        localContext.set(new SoftReference(context));</span>
+<span class="fc" id="L288">        context.setThread(thread);</span>
+<span class="fc" id="L289">        ThreadFiber.initRootFiber(context); // may be overwritten by fiber</span>
+<span class="fc" id="L290">        return context;</span>
+    }
+
+    public synchronized void associateThread(Object threadOrFuture, RubyThread rubyThread) {
+<span class="fc" id="L294">        rubyThreadMap.put(threadOrFuture, rubyThread);</span>
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">        if (rubyThreadMap.size() &gt;= 0) polling = true;</span>
+<span class="fc" id="L296">    }</span>
+
+    public synchronized void dissociateThread(Object threadOrFuture) {
+<span class="nc" id="L299">        rubyThreadMap.remove(threadOrFuture);</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">        if (rubyThreadMap.size() &lt;= 1) polling = false;</span>
+<span class="nc" id="L301">    }</span>
+    
+    public synchronized void unregisterThread(RubyThread thread) {
+<span class="fc" id="L304">        rubyThreadMap.remove(Thread.currentThread());</span>
+<span class="fc" id="L305">        getCurrentContext().setThread(null);</span>
+<span class="fc" id="L306">        localContext.set(null);</span>
+<span class="pc bpc" id="L307" title="1 of 2 branches missed.">        if (rubyThreadMap.size() &gt;= 0) polling = false;</span>
+<span class="fc" id="L308">    }</span>
+    
+    public void setCritical(boolean critical) {
+<span class="pc bpc" id="L311" title="1 of 4 branches missed.">        if (critical &amp;&amp; !criticalLock.isHeldByCurrentThread()) {</span>
+<span class="fc" id="L312">            acquireCritical();</span>
+<span class="pc bpc" id="L313" title="1 of 4 branches missed.">        } else if (!critical &amp;&amp; criticalLock.isHeldByCurrentThread()) {</span>
+<span class="fc" id="L314">            releaseCritical();</span>
+        }
+<span class="fc" id="L316">    }</span>
+
+    private void acquireCritical() {
+<span class="fc" id="L319">        criticalLock.lock();</span>
+<span class="fc" id="L320">    }</span>
+
+    private void releaseCritical() {
+<span class="fc" id="L323">        criticalLock.unlock();</span>
+<span class="fc" id="L324">    }</span>
+    
+    public boolean getCritical() {
+<span class="fc" id="L327">        return criticalLock.isHeldByCurrentThread();</span>
+    }
+
+    /**
+     * Get the map from threadlike objects to RubyThread instances. Used mainly
+     * for testing purposes.
+     *
+     * @return The ruby thread map
+     */
+    public Map&lt;Object, RubyThread&gt; getRubyThreadMap() {
+<span class="nc" id="L337">        return rubyThreadMap;</span>
+    }
+
+    @Deprecated
+    public void deliverEvent(RubyThread sender, RubyThread target, Event event) {
+<span class="nc" id="L342">    }</span>
+
+    @Deprecated
+    public static class Event {
+<span class="nc" id="L346">        public enum Type { KILL, RAISE, WAKEUP }</span>
+        public final String description;
+        public final Type type;
+        public final IRubyObject exception;
+
+        public Event(String description, Type type) {
+<span class="nc" id="L352">            this(description, type, null);</span>
+<span class="nc" id="L353">        }</span>
+
+<span class="nc" id="L355">        public Event(String description, Type type, IRubyObject exception) {</span>
+<span class="nc" id="L356">            this.description = description;</span>
+<span class="nc" id="L357">            this.type = type;</span>
+<span class="nc" id="L358">            this.exception = exception;</span>
+<span class="nc" id="L359">        }</span>
+
+        public String toString() {
+<span class="nc bnc" id="L362" title="All 4 branches missed.">            switch (type) {</span>
+<span class="nc" id="L363">                case KILL: return description;</span>
+<span class="nc" id="L364">                case RAISE: return description + &quot;: &quot; + exception.getMetaClass().getRealClass();</span>
+<span class="nc" id="L365">                case WAKEUP: return description;</span>
+            }
+<span class="nc" id="L367">            return &quot;&quot;; // not reached</span>
+        }
+
+        @Deprecated
+        public static Event kill(RubyThread sender, RubyThread target, Type type) {
+<span class="nc" id="L372">            return new Event(sender.toString() + &quot; sent KILL to &quot; + target, type);</span>
+        }
+
+        @Deprecated
+        public static Event raise(RubyThread sender, RubyThread target, Type type, IRubyObject exception) {
+<span class="nc" id="L377">            return new Event(sender.toString() + &quot; sent KILL to &quot; + target, type, exception);</span>
+        }
+
+        @Deprecated
+        public static Event wakeup(RubyThread sender, RubyThread target, Type type) {
+<span class="nc" id="L382">            return new Event(sender.toString() + &quot; sent KILL to &quot; + target, type);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

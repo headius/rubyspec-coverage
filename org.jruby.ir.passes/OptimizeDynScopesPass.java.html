@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>OptimizeDynScopesPass.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.passes</a> &gt; <span class="el_source">OptimizeDynScopesPass.java</span></div><h1>OptimizeDynScopesPass.java</h1><pre class="source lang-java linenums">package org.jruby.ir.passes;
+
+import org.jruby.ir.IRScope;
+import org.jruby.ir.IRFlags;
+import org.jruby.ir.instructions.Instr;
+import org.jruby.ir.instructions.ResultInstr;
+import org.jruby.ir.instructions.LoadLocalVarInstr;
+import org.jruby.ir.instructions.StoreLocalVarInstr;
+import org.jruby.ir.operands.LocalVariable;
+import org.jruby.ir.operands.Operand;
+import org.jruby.ir.operands.Variable;
+import org.jruby.ir.representations.BasicBlock;
+
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.ListIterator;
+import java.util.Map;
+
+<span class="fc" id="L20">public class OptimizeDynScopesPass extends CompilerPass {</span>
+<span class="fc" id="L21">    public static List&lt;Class&lt;? extends CompilerPass&gt;&gt; DEPENDENCIES = Arrays.&lt;Class&lt;? extends CompilerPass&gt;&gt;asList(CFGBuilder.class);</span>
+
+    @Override
+    public String getLabel() {
+<span class="fc" id="L25">        return &quot;Optimize Dynamic Scopes&quot;;</span>
+    }
+
+    private void setupLocalVarReplacement(LocalVariable v, IRScope s, Map&lt;Operand, Operand&gt; varRenameMap) {
+<span class="fc bfc" id="L29" title="All 2 branches covered.">         if (varRenameMap.get(v) == null) varRenameMap.put(v, s.getNewTemporaryVariableFor(v));</span>
+<span class="fc" id="L30">    }</span>
+
+    private void decrementScopeDepth(LocalVariable v, IRScope s, Map&lt;Operand, Operand&gt; varRenameMap) {
+<span class="fc bfc" id="L33" title="All 2 branches covered.">         if (varRenameMap.get(v) == null) varRenameMap.put(v, v.cloneForDepth(v.getScopeDepth()-1));</span>
+<span class="fc" id="L34">    }</span>
+
+    public void eliminateLocalVars(IRScope s) {
+<span class="fc" id="L37">        Map&lt;Operand, Operand&gt; varRenameMap = new HashMap&lt;Operand, Operand&gt;();</span>
+        // Record the fact that we eliminated the scope
+<span class="fc" id="L39">        s.getFlags().add(IRFlags.DYNSCOPE_ELIMINATED);</span>
+
+        // Since the scope does not require a binding, no need to do
+        // any analysis. It is sufficient to rename all local var uses
+        // with a temporary variable.
+<span class="fc" id="L44">        boolean parentScopeNeeded = false;</span>
+<span class="fc bfc" id="L45" title="All 2 branches covered.">        for (BasicBlock b: s.getCFG().getBasicBlocks()) {</span>
+<span class="fc" id="L46">            ListIterator&lt;Instr&gt; instrs = b.getInstrs().listIterator();</span>
+<span class="fc bfc" id="L47" title="All 2 branches covered.">            while (instrs.hasNext()) {</span>
+<span class="fc" id="L48">                Instr i = instrs.next();</span>
+<span class="fc bfc" id="L49" title="All 2 branches covered.">                if (i instanceof ResultInstr) {</span>
+<span class="fc" id="L50">                    Variable v = ((ResultInstr) i).getResult();</span>
+                    // %self is local to every scope and never crosses scope boundaries and need not be spilled/refilled
+<span class="fc bfc" id="L52" title="All 4 branches covered.">                    if (v instanceof LocalVariable &amp;&amp; !v.isSelf()) {</span>
+<span class="fc" id="L53">                        LocalVariable lv = (LocalVariable)v;</span>
+<span class="fc bfc" id="L54" title="All 2 branches covered.">                        if (lv.getScopeDepth() == 0) {</span>
+                            // Make sure there is a replacement tmp-var allocated for lv
+<span class="fc" id="L56">                            setupLocalVarReplacement(lv, s, varRenameMap);</span>
+                        } else {
+<span class="fc" id="L58">                            parentScopeNeeded = true;</span>
+<span class="fc" id="L59">                            decrementScopeDepth(lv, s, varRenameMap);</span>
+                        }
+                    }
+                }
+
+<span class="fc bfc" id="L64" title="All 2 branches covered.">                for (Variable v : i.getUsedVariables()) {</span>
+<span class="fc bfc" id="L65" title="All 4 branches covered.">                    if (v instanceof LocalVariable &amp;&amp; !v.isSelf()) {</span>
+<span class="fc" id="L66">                        LocalVariable lv = (LocalVariable)v;</span>
+<span class="fc bfc" id="L67" title="All 2 branches covered.">                        if (lv.getScopeDepth() == 0) {</span>
+                            // SSS FIXME: Ugly/Dirty! Some abstraction is broken.
+                            // If we hit a load/store instr for a local-var and we
+                            // eliminated the dynscope for it, we no longer need the
+                            // load/store instr for it.
+<span class="pc bpc" id="L72" title="1 of 2 branches missed.">                            if (i instanceof LoadLocalVarInstr) {</span>
+<span class="nc" id="L73">                                LoadLocalVarInstr llvi = (LoadLocalVarInstr)i;</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">                                if (llvi.getLocalVar() == lv) {</span>
+<span class="nc" id="L75">                                    instrs.remove();</span>
+                                }
+<span class="pc bfc" id="L77" title="All 2 branches covered.">                            } else if (i instanceof StoreLocalVarInstr) {</span>
+<span class="fc" id="L78">                                StoreLocalVarInstr slvi = (StoreLocalVarInstr)i;</span>
+<span class="pc bpc" id="L79" title="1 of 2 branches missed.">                                if (slvi.getLocalVar() == lv) {</span>
+<span class="fc" id="L80">                                    instrs.remove();</span>
+                                }
+                            }
+
+                            // Make sure there is a replacement tmp-var allocated for lv
+<span class="fc" id="L85">                            setupLocalVarReplacement(lv, s, varRenameMap);</span>
+                        } else {
+                            // SSS FIXME: Ugly/Dirty! Some abstraction is broken.
+<span class="fc bfc" id="L88" title="All 2 branches covered.">                            if (i instanceof LoadLocalVarInstr) {</span>
+<span class="fc" id="L89">                                LoadLocalVarInstr llvi = (LoadLocalVarInstr)i;</span>
+<span class="pc bpc" id="L90" title="1 of 2 branches missed.">                                if (llvi.getLocalVar() == lv) {</span>
+<span class="fc" id="L91">                                    llvi.decrementLVarScopeDepth();</span>
+                                }
+<span class="fc bfc" id="L93" title="All 2 branches covered.">                            } else if (i instanceof StoreLocalVarInstr) {</span>
+<span class="fc" id="L94">                                StoreLocalVarInstr slvi = (StoreLocalVarInstr)i;</span>
+<span class="pc bpc" id="L95" title="1 of 2 branches missed.">                                if (slvi.getLocalVar() == lv) {</span>
+<span class="fc" id="L96">                                    slvi.decrementLVarScopeDepth();</span>
+                                }
+                            }
+
+<span class="fc" id="L100">                            parentScopeNeeded = true;</span>
+<span class="fc" id="L101">                            decrementScopeDepth(lv, s, varRenameMap);</span>
+                        }
+                    }
+<span class="fc" id="L104">                }</span>
+<span class="fc" id="L105">            }</span>
+<span class="fc" id="L106">        }</span>
+
+<span class="fc bfc" id="L108" title="All 2 branches covered.">        if (parentScopeNeeded) {</span>
+<span class="fc" id="L109">            s.getFlags().add(IRFlags.REUSE_PARENT_DYNSCOPE);</span>
+        }
+
+        // Rename all local var uses with their tmp-var stand-ins
+<span class="fc bfc" id="L113" title="All 2 branches covered.">        for (BasicBlock b: s.getCFG().getBasicBlocks()) {</span>
+<span class="fc bfc" id="L114" title="All 2 branches covered.">            for (Instr i: b.getInstrs()) i.renameVars(varRenameMap);</span>
+<span class="fc" id="L115">        }</span>
+
+        // LVA information is no longer valid after this pass
+        // FIXME: Grrr ... this seems broken to have to create a new object to invalidate
+<span class="fc" id="L119">        (new LiveVariableAnalysis()).invalidate(s);</span>
+<span class="fc" id="L120">    }</span>
+
+    @Override
+    public Object execute(IRScope scope, Object... data) {
+        // Make sure flags are computed
+<span class="fc" id="L125">        scope.computeScopeFlags();</span>
+
+        // Cannot run this on scopes that require dynamic scopes
+<span class="fc bfc" id="L128" title="All 2 branches covered.">        if (scope.getFlags().contains(IRFlags.REQUIRES_DYNSCOPE)) {</span>
+<span class="fc" id="L129">            return null;</span>
+        }
+
+<span class="fc" id="L132">        eliminateLocalVars(scope);</span>
+<span class="fc" id="L133">        return null;</span>
+    }
+
+    @Override
+    public boolean invalidate(IRScope scope) {
+        // No invalidation for this right now.
+        // But, if necessary, we can reverse this operation.
+<span class="nc" id="L140">        return false;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

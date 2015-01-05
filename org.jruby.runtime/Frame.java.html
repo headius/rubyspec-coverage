@@ -1,0 +1,340 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Frame.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime</a> &gt; <span class="el_source">Frame.java</span></div><h1>Frame.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2001-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002 Benoit Cerrina &lt;b.cerrina@wanadoo.fr&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2004-2007 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2006 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2006 Miguel Covarrubias &lt;mlcovarrubias@gmail.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.runtime;
+
+import org.jruby.RubyModule;
+import org.jruby.runtime.builtin.IRubyObject;
+
+/**
+ * A Frame holds per-call information that needs to persist outside the
+ * execution of a given method. Currently a frame holds the following:
+ * &lt;ul&gt;
+ * &lt;li&gt;The class against which this method is being invoked. This is usually
+ * (always?) the class of &quot;self&quot; within this call.&lt;/li&gt;
+ * &lt;li&gt;The current &quot;self&quot; for the call.&lt;/li&gt;
+ * &lt;li&gt;The name of the method being invoked during this frame, used for
+ * backtraces and &quot;super&quot; invocations.&lt;/li&gt;
+ * &lt;li&gt;The block passed to this invocation. If the given code body can't
+ * accept a block, it will be Block.NULL_BLOCK.&lt;/li&gt;
+ * &lt;li&gt;Whether this is the frame used for a binding-related call like eval. This
+ * is used to determine where to terminate evaled code's backtrace.&lt;/li&gt;
+ * &lt;li&gt;The current visibility for methods defined during this call. Starts out
+ * as PUBLIC by default (in most cases) and can be modified by appropriate
+ * Kernel.public/private/protected calls.&lt;/li&gt;
+ * &lt;li&gt;The jump target marker for non-local returns.&lt;/li&gt;
+ * &lt;/ul&gt;
+ * Frames are allocated for all Ruby methods (in compatibility mode, default)
+ * and for some core methods. In general, a frame is required for a method to
+ * show up in a backtrace, and so some methods only use frame for backtrace
+ * information (so-called &quot;backtrace frames&quot;).
+ * 
+ * @see ThreadContext
+ */
+<span class="pc bpc" id="L63" title="1 of 2 branches missed.">public final class Frame {</span>
+    /** The class against which this call is executing. */
+    private RubyModule klazz;
+    
+    /** The 'self' for this frame. */
+    private IRubyObject self;
+    
+    /** The name of the method being invoked in this frame. */
+    private String name;
+
+    /**
+     * The block that was passed in for this frame (as either a block or a &amp;amp;block argument).
+     * The frame captures the block for super/zsuper, but also for Proc.new (with no arguments)
+     * and also for block_given?.  Both of those methods needs access to the block of the 
+     * previous frame to work.
+     */ 
+<span class="fc" id="L79">    private Block block = Block.NULL_BLOCK;</span>
+
+    /** The current visibility for anything defined under this frame */
+<span class="fc" id="L82">    private Visibility visibility = Visibility.PUBLIC;</span>
+    
+    /** backref **/
+    private IRubyObject backRef;
+    
+    /** lastline **/
+    private IRubyObject lastLine;
+    
+    /** whether this frame has been captured into a binding **/
+    private boolean captured;
+    
+    /**
+     * Empty constructor, since Frame objects are pre-allocated and updated
+     * when needed.
+     */
+<span class="fc" id="L97">    public Frame() {</span>
+<span class="fc" id="L98">    }</span>
+    
+    /**
+     * Copy constructor, since Frame objects are pre-allocated and updated
+     * when needed.
+     */
+<span class="fc" id="L104">    private Frame(Frame frame) {</span>
+<span class="pc bpc" id="L105" title="3 of 4 branches missed.">        assert frame.block != null : &quot;Block uses null object pattern.  It should NEVER be null&quot;;</span>
+
+<span class="fc" id="L107">        this.self = frame.self;</span>
+<span class="fc" id="L108">        this.name = frame.name;</span>
+<span class="fc" id="L109">        this.klazz = frame.klazz;</span>
+<span class="fc" id="L110">        this.block = frame.block;</span>
+<span class="fc" id="L111">        this.visibility = frame.visibility;</span>
+<span class="fc" id="L112">    }</span>
+
+    /**
+     * Update the frame with just filename and line, used for top-level frames
+     * and method.
+     */
+    public void updateFrame() {
+<span class="nc" id="L119">        updateFrame(null, null, null, Block.NULL_BLOCK, 0);</span>
+<span class="nc" id="L120">    }</span>
+
+    /**
+     * Update the frame with caller information and method name, so it will
+     * show up correctly in call stacks.
+     * 
+     * @param name The name of the method being called
+     */
+    public void updateFrame(String name) {
+<span class="nc" id="L129">        this.name = name;</span>
+<span class="nc" id="L130">    }</span>
+
+    /**
+     * Update the frame based on information from another frame. Used for
+     * cloning frames (for blocks, usually) and when entering class bodies.
+     * 
+     * @param frame The frame whose data to duplicate in this frame
+     */
+    public void updateFrame(Frame frame) {
+<span class="nc bnc" id="L139" title="All 4 branches missed.">        assert frame.block != null : &quot;Block uses null object pattern.  It should NEVER be null&quot;;</span>
+
+<span class="nc" id="L141">        this.self = frame.self;</span>
+<span class="nc" id="L142">        this.name = frame.name;</span>
+<span class="nc" id="L143">        this.klazz = frame.klazz;</span>
+<span class="nc" id="L144">        this.block = frame.block;</span>
+<span class="nc" id="L145">        this.visibility = frame.visibility;</span>
+<span class="nc" id="L146">    }</span>
+
+    /**
+     * Update the frame based on the given values.
+     * 
+     * @param klazz The class against which the method is being called
+     * @param self The 'self' for the method
+     * @param name The name under which the method is being invoked
+     * @param block The block passed to the method
+     * @param jumpTarget The target for non-local jumps (return in block)
+     */
+    public void updateFrame(RubyModule klazz, IRubyObject self, String name,
+                 Block block, int jumpTarget) {
+<span class="pc bpc" id="L159" title="3 of 4 branches missed.">        assert block != null : &quot;Block uses null object pattern.  It should NEVER be null&quot;;</span>
+
+<span class="fc" id="L161">        this.self = self;</span>
+<span class="fc" id="L162">        this.name = name;</span>
+<span class="fc" id="L163">        this.klazz = klazz;</span>
+<span class="fc" id="L164">        this.block = block;</span>
+<span class="fc" id="L165">        this.visibility = Visibility.PUBLIC;</span>
+<span class="fc" id="L166">    }</span>
+
+    /**
+     * Update the frame based on the given values.
+     * 
+     * @param self The 'self' for the method
+     * @param jumpTarget The target for non-local jumps (return in block)
+     */
+    public void updateFrameForEval(IRubyObject self, int jumpTarget) {
+<span class="fc" id="L175">        this.self = self;</span>
+<span class="fc" id="L176">        this.name = null;</span>
+<span class="fc" id="L177">        this.visibility = Visibility.PRIVATE;</span>
+<span class="fc" id="L178">    }</span>
+
+    /**
+     * Clear the frame, as when the call completes. Clearing prevents cached
+     * frames from holding references after the call is done.
+     */
+    public Frame clear() {
+<span class="fc" id="L185">        this.self = null;</span>
+<span class="fc" id="L186">        this.klazz = null;</span>
+<span class="fc" id="L187">        this.block = Block.NULL_BLOCK;</span>
+<span class="fc" id="L188">        this.backRef = null;</span>
+<span class="fc" id="L189">        this.lastLine = null;</span>
+        
+<span class="fc" id="L191">        return this;</span>
+    }
+    
+    /**
+     * Clone this frame.
+     * 
+     * @return A new frame with duplicate information to the target frame
+     */
+    public Frame duplicate() {
+<span class="fc" id="L200">        return new Frame(this);</span>
+    }
+
+    /**
+     * Clone this frame for use in backtraces only (avoiding long-lived
+     * references to other elements.
+     *
+     * @return A new frame with identical backtrace information to this frame
+     */
+    public Frame duplicateForBacktrace() {
+<span class="nc" id="L210">        Frame backtraceFrame = new Frame();</span>
+<span class="nc" id="L211">        backtraceFrame.name = name;</span>
+<span class="nc" id="L212">        return backtraceFrame;</span>
+    }
+
+    /** 
+     * Return class that we are calling against
+     * 
+     * @return The class we are calling against
+     */
+    public RubyModule getKlazz() {
+<span class="fc" id="L221">        return klazz;</span>
+    }
+
+    /**
+     * Set the class we are calling against.
+     * 
+     * @param klazz the new class
+     */
+    public void setKlazz(RubyModule klazz) {
+<span class="fc" id="L230">        this.klazz = klazz;</span>
+<span class="fc" id="L231">    }</span>
+
+    /**
+     * Set the method name associated with this frame
+     * 
+     * @param name the new name
+     */
+    public void setName(String name) {
+<span class="fc" id="L239">        this.name = name;</span>
+<span class="fc" id="L240">    }</span>
+
+    /** 
+     * Get the method name associated with this frame
+     * 
+     * @return the method name
+     */
+    public String getName() {
+<span class="fc" id="L248">        return name;</span>
+    }
+
+    /**
+     * Get the self associated with this frame
+     * 
+     * @return The self for the frame
+     */
+    public IRubyObject getSelf() {
+<span class="fc" id="L257">        return self;</span>
+    }
+
+    /** 
+     * Set the self associated with this frame
+     * 
+     * @param self The new value of self
+     */
+    public void setSelf(IRubyObject self) {
+<span class="fc" id="L266">        this.self = self;</span>
+<span class="fc" id="L267">    }</span>
+    
+    /**
+     * Get the visibility at the time of this frame
+     * 
+     * @return The visibility
+     */
+    public Visibility getVisibility() {
+<span class="fc" id="L275">        return visibility;</span>
+    }
+    
+    /**
+     * Change the visibility associated with this frame
+     * 
+     * @param visibility The new visibility
+     */
+    public void setVisibility(Visibility visibility) {
+<span class="fc" id="L284">        this.visibility = visibility;</span>
+<span class="fc" id="L285">    }</span>
+    
+    /**
+     * Retrieve the block associated with this frame.
+     * 
+     * @return The block of this frame or NULL_BLOCK if no block given
+     */
+    public Block getBlock() {
+<span class="fc" id="L293">        return block;</span>
+    }
+    
+    public IRubyObject getBackRef(IRubyObject nil) {
+<span class="fc" id="L297">        IRubyObject backRef = this.backRef;</span>
+<span class="fc bfc" id="L298" title="All 2 branches covered.">        return backRef == null ? nil : backRef;</span>
+    }
+    
+    public IRubyObject setBackRef(IRubyObject backRef) {
+<span class="fc" id="L302">        return this.backRef = backRef;</span>
+    }
+    
+    public IRubyObject getLastLine(IRubyObject nil) {
+<span class="fc" id="L306">        IRubyObject lastLine = this.lastLine;</span>
+<span class="pc bpc" id="L307" title="1 of 2 branches missed.">        return lastLine == null ? nil : lastLine;</span>
+    }
+    
+    public IRubyObject setLastLine(IRubyObject lastLine) {
+<span class="fc" id="L311">        return this.lastLine = lastLine;</span>
+    }
+    
+    public void setCaptured(boolean captured) {
+<span class="nc" id="L315">        this.captured = captured;</span>
+<span class="nc" id="L316">    }</span>
+    
+    public Frame capture() {
+<span class="fc" id="L319">        captured = true;</span>
+<span class="fc" id="L320">        return this;</span>
+    }
+    
+    public boolean isCaptured() {
+<span class="fc" id="L324">        return captured;</span>
+    }
+
+    /* (non-Javadoc)
+     * @see java.lang.Object#toString()
+     */
+    @Override
+    public String toString() {
+<span class="nc" id="L332">        StringBuilder sb = new StringBuilder(50);</span>
+        
+<span class="nc" id="L334">        sb.append(klazz);</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">        if (name != null) sb.append(&quot; in &quot;).append(name);</span>
+
+<span class="nc" id="L337">        return sb.toString();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

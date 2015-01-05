@@ -1,0 +1,346 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PsychEmitter.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.psych</a> &gt; <span class="el_source">PsychEmitter.java</span></div><h1>PsychEmitter.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2010 Charles O Nutter &lt;headius@headius.com&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.ext.psych;
+
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.nio.charset.Charset;
+import java.util.HashMap;
+import java.util.Map;
+
+import org.jcodings.Encoding;
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyModule;
+import org.jruby.RubyObject;
+import org.jruby.RubyString;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.IOOutputStream;
+import org.yaml.snakeyaml.DumperOptions;
+import org.yaml.snakeyaml.emitter.Emitter;
+import org.yaml.snakeyaml.emitter.EmitterException;
+import org.yaml.snakeyaml.error.Mark;
+import org.yaml.snakeyaml.events.AliasEvent;
+import org.yaml.snakeyaml.events.DocumentEndEvent;
+import org.yaml.snakeyaml.events.DocumentStartEvent;
+import org.yaml.snakeyaml.events.Event;
+import org.yaml.snakeyaml.events.ImplicitTuple;
+import org.yaml.snakeyaml.events.MappingEndEvent;
+import org.yaml.snakeyaml.events.MappingStartEvent;
+import org.yaml.snakeyaml.events.ScalarEvent;
+import org.yaml.snakeyaml.events.SequenceEndEvent;
+import org.yaml.snakeyaml.events.SequenceStartEvent;
+import org.yaml.snakeyaml.events.StreamEndEvent;
+import org.yaml.snakeyaml.events.StreamStartEvent;
+
+import static org.jruby.runtime.Visibility.*;
+
+public class PsychEmitter extends RubyObject {
+    public static void initPsychEmitter(Ruby runtime, RubyModule psych) {
+<span class="nc" id="L70">        RubyClass psychHandler = runtime.defineClassUnder(&quot;Handler&quot;, runtime.getObject(), runtime.getObject().getAllocator(), psych);</span>
+<span class="nc" id="L71">        RubyClass psychEmitter = runtime.defineClassUnder(&quot;Emitter&quot;, psychHandler, new ObjectAllocator() {</span>
+            public IRubyObject allocate(Ruby runtime, RubyClass klazz) {
+<span class="nc" id="L73">                return new PsychEmitter(runtime, klazz);</span>
+            }
+        }, psych);
+
+<span class="nc" id="L77">        psychEmitter.defineAnnotatedMethods(PsychEmitter.class);</span>
+<span class="nc" id="L78">    }</span>
+
+    public PsychEmitter(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L81">        super(runtime, klass);</span>
+<span class="nc" id="L82">    }</span>
+
+    @JRubyMethod(visibility = PRIVATE)
+    public IRubyObject initialize(ThreadContext context, IRubyObject io) {
+<span class="nc" id="L86">        options = new DumperOptions();</span>
+<span class="nc" id="L87">        options.setIndent(2);</span>
+
+<span class="nc" id="L89">        this.io = io;</span>
+
+<span class="nc" id="L91">        return context.nil;</span>
+    }
+
+    @JRubyMethod(visibility = PRIVATE)
+    public IRubyObject initialize(ThreadContext context, IRubyObject io, IRubyObject rbOptions) {
+<span class="nc" id="L96">        IRubyObject width     = rbOptions.callMethod(context, &quot;line_width&quot;);</span>
+<span class="nc" id="L97">        IRubyObject canonical = rbOptions.callMethod(context, &quot;canonical&quot;);</span>
+<span class="nc" id="L98">        IRubyObject level     = rbOptions.callMethod(context, &quot;indentation&quot;);</span>
+
+<span class="nc" id="L100">        options = new DumperOptions();</span>
+
+<span class="nc" id="L102">        options.setCanonical(canonical.isTrue());</span>
+<span class="nc" id="L103">        options.setIndent((int)level.convertToInteger().getLongValue());</span>
+<span class="nc" id="L104">        options.setWidth((int)width.convertToInteger().getLongValue());</span>
+
+<span class="nc" id="L106">        this.io = io;</span>
+
+<span class="nc" id="L108">        return context.nil;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject start_stream(ThreadContext context, IRubyObject encoding) {
+<span class="nc bnc" id="L113" title="All 2 branches missed.">        if (!(encoding instanceof RubyFixnum)) {</span>
+<span class="nc" id="L114">            throw context.runtime.newTypeError(encoding, context.runtime.getFixnum());</span>
+        }
+
+<span class="nc" id="L117">        initEmitter(context, encoding);</span>
+
+<span class="nc" id="L119">        StreamStartEvent event = new StreamStartEvent(NULL_MARK, NULL_MARK);</span>
+
+<span class="nc" id="L121">        emit(context, event);</span>
+
+<span class="nc" id="L123">        return this;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject end_stream(ThreadContext context) {
+<span class="nc" id="L128">        StreamEndEvent event = new StreamEndEvent(NULL_MARK, NULL_MARK);</span>
+<span class="nc" id="L129">        emit(context, event);</span>
+<span class="nc" id="L130">        return this;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject start_document(ThreadContext context, IRubyObject _version, IRubyObject tags, IRubyObject implicit) {
+<span class="nc" id="L135">        DumperOptions.Version version = null;</span>
+<span class="nc" id="L136">        boolean implicitBool = implicit.isTrue();</span>
+<span class="nc" id="L137">        Map&lt;String, String&gt; tagsMap = null;</span>
+
+<span class="nc" id="L139">        RubyArray versionAry = _version.convertToArray();</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">        if (versionAry.size() == 2) {</span>
+<span class="nc" id="L141">            int versionInt0 = (int)versionAry.eltInternal(0).convertToInteger().getLongValue();</span>
+<span class="nc" id="L142">            int versionInt1 = (int)versionAry.eltInternal(1).convertToInteger().getLongValue();</span>
+
+<span class="nc bnc" id="L144" title="All 2 branches missed.">            if (versionInt0 == 1) {</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">                if (versionInt1 == 0) {</span>
+<span class="nc" id="L146">                    version = DumperOptions.Version.V1_0;</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">                } else if (versionInt1 == 1) {</span>
+<span class="nc" id="L148">                    version = DumperOptions.Version.V1_1;</span>
+                }
+            }
+<span class="nc bnc" id="L151" title="All 2 branches missed.">            if (version == null) {</span>
+<span class="nc" id="L152">                throw context.runtime.newArgumentError(&quot;invalid YAML version: &quot; + versionAry);</span>
+            }
+        }
+
+<span class="nc" id="L156">        RubyArray tagsAry = tags.convertToArray();</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        if (tagsAry.size() &gt; 0) {</span>
+<span class="nc" id="L158">            tagsMap = new HashMap&lt;String, String&gt;(tagsAry.size());</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">            for (int i = 0; i &lt; tagsAry.size(); i++) {</span>
+<span class="nc" id="L160">                RubyArray tagsTuple = tagsAry.eltInternal(i).convertToArray();</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                if (tagsTuple.size() != 2) {</span>
+<span class="nc" id="L162">                    throw context.runtime.newRuntimeError(&quot;tags tuple must be of length 2&quot;);</span>
+                }
+<span class="nc" id="L164">                IRubyObject key = tagsTuple.eltInternal(0);</span>
+<span class="nc" id="L165">                IRubyObject value = tagsTuple.eltInternal(1);</span>
+<span class="nc" id="L166">                tagsMap.put(</span>
+<span class="nc" id="L167">                        key.asJavaString(),</span>
+<span class="nc" id="L168">                        value.asJavaString());</span>
+            }
+        }
+
+<span class="nc bnc" id="L172" title="All 2 branches missed.">        DocumentStartEvent event = new DocumentStartEvent(NULL_MARK, NULL_MARK, !implicitBool, version, tagsMap);</span>
+<span class="nc" id="L173">        emit(context, event);</span>
+<span class="nc" id="L174">        return this;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject end_document(ThreadContext context, IRubyObject implicit) {
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        DocumentEndEvent event = new DocumentEndEvent(NULL_MARK, NULL_MARK, !implicit.isTrue());</span>
+<span class="nc" id="L180">        emit(context, event);</span>
+<span class="nc" id="L181">        return this;</span>
+    }
+
+    @JRubyMethod(required = 6)
+    public IRubyObject scalar(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L186">        IRubyObject value = args[0];</span>
+<span class="nc" id="L187">        IRubyObject anchor = args[1];</span>
+<span class="nc" id="L188">        IRubyObject tag = args[2];</span>
+<span class="nc" id="L189">        IRubyObject plain = args[3];</span>
+<span class="nc" id="L190">        IRubyObject quoted = args[4];</span>
+<span class="nc" id="L191">        IRubyObject style = args[5];</span>
+        
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        if (!(value instanceof RubyString)) {</span>
+<span class="nc" id="L194">            throw context.runtime.newTypeError(value, context.runtime.getString());</span>
+        }
+
+<span class="nc" id="L197">        ScalarEvent event = new ScalarEvent(</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                anchor.isNil() ? null : anchor.asJavaString(),</span>
+<span class="nc bnc" id="L199" title="All 2 branches missed.">                tag.isNil() ? null : tag.asJavaString(),</span>
+<span class="nc" id="L200">                new ImplicitTuple(plain.isTrue(),</span>
+<span class="nc" id="L201">                quoted.isTrue()),</span>
+<span class="nc" id="L202">                value.asJavaString(),</span>
+                NULL_MARK,
+                NULL_MARK,
+<span class="nc" id="L205">                SCALAR_STYLES[(int)style.convertToInteger().getLongValue()]);</span>
+<span class="nc" id="L206">        emit(context, event);</span>
+<span class="nc" id="L207">        return this;</span>
+    }
+
+    @JRubyMethod(required = 4)
+    public IRubyObject start_sequence(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L212">        IRubyObject anchor = args[0];</span>
+<span class="nc" id="L213">        IRubyObject tag = args[1];</span>
+<span class="nc" id="L214">        IRubyObject implicit = args[2];</span>
+<span class="nc" id="L215">        IRubyObject style = args[3];</span>
+
+<span class="nc" id="L217">        final int SEQUENCE_BLOCK = 1; // see psych/nodes/sequence.rb</span>
+
+<span class="nc" id="L219">        SequenceStartEvent event = new SequenceStartEvent(</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">                anchor.isNil() ? null : anchor.asJavaString(),</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">                tag.isNil() ? null : tag.asJavaString(),</span>
+<span class="nc" id="L222">                implicit.isTrue(),</span>
+                NULL_MARK,
+                NULL_MARK,
+<span class="nc bnc" id="L225" title="All 2 branches missed.">                SEQUENCE_BLOCK != style.convertToInteger().getLongValue());</span>
+<span class="nc" id="L226">        emit(context, event);</span>
+<span class="nc" id="L227">        return this;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject end_sequence(ThreadContext context) {
+<span class="nc" id="L232">        SequenceEndEvent event = new SequenceEndEvent(NULL_MARK, NULL_MARK);</span>
+<span class="nc" id="L233">        emit(context, event);</span>
+<span class="nc" id="L234">        return this;</span>
+    }
+
+    @JRubyMethod(required = 4)
+    public IRubyObject start_mapping(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L239">        IRubyObject anchor = args[0];</span>
+<span class="nc" id="L240">        IRubyObject tag = args[1];</span>
+<span class="nc" id="L241">        IRubyObject implicit = args[2];</span>
+<span class="nc" id="L242">        IRubyObject style = args[3];</span>
+
+<span class="nc" id="L244">        final int MAPPING_BLOCK = 1; // see psych/nodes/mapping.rb</span>
+
+<span class="nc" id="L246">        MappingStartEvent event = new MappingStartEvent(</span>
+<span class="nc bnc" id="L247" title="All 2 branches missed.">                anchor.isNil() ? null : anchor.asJavaString(),</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">                tag.isNil() ? null : tag.asJavaString(),</span>
+<span class="nc" id="L249">                implicit.isTrue(),</span>
+                NULL_MARK,
+                NULL_MARK,
+<span class="nc bnc" id="L252" title="All 2 branches missed.">                MAPPING_BLOCK != style.convertToInteger().getLongValue());</span>
+<span class="nc" id="L253">        emit(context, event);</span>
+<span class="nc" id="L254">        return this;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject end_mapping(ThreadContext context) {
+<span class="nc" id="L259">        MappingEndEvent event = new MappingEndEvent(NULL_MARK, NULL_MARK);</span>
+<span class="nc" id="L260">        emit(context, event);</span>
+<span class="nc" id="L261">        return this;</span>
+    }
+    
+    @JRubyMethod
+    public IRubyObject alias(ThreadContext context, IRubyObject anchor) {
+<span class="nc" id="L266">        AliasEvent event = new AliasEvent(anchor.asJavaString(), NULL_MARK, NULL_MARK);</span>
+<span class="nc" id="L267">        emit(context, event);</span>
+<span class="nc" id="L268">        return this;</span>
+    }
+
+    @JRubyMethod(name = &quot;canonical=&quot;)
+    public IRubyObject canonical_set(ThreadContext context, IRubyObject canonical) {
+        // TODO: unclear if this affects a running emitter
+<span class="nc" id="L274">        options.setCanonical(canonical.isTrue());</span>
+<span class="nc" id="L275">        return canonical;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject canonical(ThreadContext context) {
+        // TODO: unclear if this affects a running emitter
+<span class="nc" id="L281">        return context.runtime.newBoolean(options.isCanonical());</span>
+    }
+
+    @JRubyMethod(name = &quot;indentation=&quot;)
+    public IRubyObject indentation_set(ThreadContext context, IRubyObject level) {
+        // TODO: unclear if this affects a running emitter
+<span class="nc" id="L287">        options.setIndent((int)level.convertToInteger().getLongValue());</span>
+<span class="nc" id="L288">        return level;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject indentation(ThreadContext context) {
+        // TODO: unclear if this affects a running emitter
+<span class="nc" id="L294">        return context.runtime.newFixnum(options.getIndent());</span>
+    }
+
+    @JRubyMethod(name = &quot;line_width=&quot;)
+    public IRubyObject line_width_set(ThreadContext context, IRubyObject width) {
+<span class="nc" id="L299">        options.setWidth((int)width.convertToInteger().getLongValue());</span>
+<span class="nc" id="L300">        return width;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject line_width(ThreadContext context) {
+<span class="nc" id="L305">        return context.runtime.newFixnum(options.getWidth());</span>
+    }
+
+    private void emit(ThreadContext context, Event event) {
+        try {
+<span class="nc bnc" id="L310" title="All 2 branches missed.">            if (emitter == null) throw context.runtime.newRuntimeError(&quot;uninitialized emitter&quot;);</span>
+
+<span class="nc" id="L312">            emitter.emit(event);</span>
+<span class="nc" id="L313">        } catch (IOException ioe) {</span>
+<span class="nc" id="L314">            throw context.runtime.newIOErrorFromException(ioe);</span>
+<span class="nc" id="L315">        } catch (EmitterException ee) {</span>
+<span class="nc" id="L316">            throw context.runtime.newRuntimeError(ee.toString());</span>
+<span class="nc" id="L317">        }</span>
+<span class="nc" id="L318">    }</span>
+
+    private void initEmitter(ThreadContext context, IRubyObject _encoding) {
+<span class="nc bnc" id="L321" title="All 2 branches missed.">        if (emitter != null) throw context.runtime.newRuntimeError(&quot;already initialized emitter&quot;);</span>
+
+<span class="nc" id="L323">        Encoding encoding = PsychLibrary.YAMLEncoding.values()[(int)_encoding.convertToInteger().getLongValue()].encoding;</span>
+<span class="nc" id="L324">        Charset charset = context.runtime.getEncodingService().charsetForEncoding(encoding);</span>
+
+<span class="nc" id="L326">        emitter = new Emitter(new OutputStreamWriter(new IOOutputStream(io, encoding), charset), options);</span>
+<span class="nc" id="L327">    }</span>
+
+    Emitter emitter;
+<span class="nc" id="L330">    DumperOptions options = new DumperOptions();</span>
+    IRubyObject io;
+
+<span class="nc" id="L333">    private static final Mark NULL_MARK = new Mark(null, 0, 0, 0, null, 0);</span>
+
+    // Map style constants from Psych values (ANY = 0 ... FOLDED = 5)
+    // to SnakeYaml values; see psych/nodes/scalar.rb.
+<span class="nc" id="L337">    private static final Character[] SCALAR_STYLES = new Character[] {</span>
+        null, // ANY; we'll choose plain
+        null, // PLAIN
+<span class="nc" id="L340">        '\'', // SINGLE_QUOTED</span>
+<span class="nc" id="L341">        '&quot;',  // DOUBLE_QUOTED</span>
+<span class="nc" id="L342">        '|',  // LITERAL</span>
+<span class="nc" id="L343">        '&gt;',  // FOLDED</span>
+    };
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

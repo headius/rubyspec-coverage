@@ -1,0 +1,206 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IRManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir</a> &gt; <span class="el_source">IRManager.java</span></div><h1>IRManager.java</h1><pre class="source lang-java linenums">package org.jruby.ir;
+
+import org.jruby.RubyInstanceConfig;
+import org.jruby.ir.listeners.IRScopeListener;
+import org.jruby.ir.listeners.InstructionsListener;
+import org.jruby.ir.operands.Nil;
+import org.jruby.ir.operands.TemporaryLocalVariable;
+import org.jruby.ir.passes.BasicCompilerPassListener;
+import org.jruby.ir.passes.CompilerPass;
+import org.jruby.ir.passes.CompilerPassListener;
+import org.jruby.ir.passes.CompilerPassScheduler;
+
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Set;
+
+public class IRManager {
+    public static final String SAFE_COMPILER_PASSES = &quot;&quot;;
+    public static final String DEFAULT_COMPILER_PASSES = &quot;OptimizeTempVarsPass,LocalOptimizationPass&quot;;
+    public static final String DEFAULT_JIT_PASSES = &quot;DeadCodeElimination,AddLocalVarLoadStoreInstructions,OptimizeDynScopesPass,AddCallProtocolInstructions,EnsureTempsAssigned&quot;;
+    public static final String DEFAULT_INLINING_COMPILER_PASSES = &quot;LocalOptimizationPass&quot;;
+
+<span class="fc" id="L24">    private int dummyMetaClassCount = 0;</span>
+<span class="fc" id="L25">    private final IRModuleBody object = new IRClassBody(this, null, &quot;Object&quot;, &quot;&quot;, 0, null);</span>
+<span class="fc" id="L26">    private final Nil nil = new Nil();</span>
+<span class="fc" id="L27">    private final org.jruby.ir.operands.Boolean trueObject = new org.jruby.ir.operands.Boolean(true);</span>
+<span class="fc" id="L28">    private final org.jruby.ir.operands.Boolean falseObject = new org.jruby.ir.operands.Boolean(false);</span>
+    // Listeners for debugging and testing of IR
+<span class="fc" id="L30">    private Set&lt;CompilerPassListener&gt; passListeners = new HashSet&lt;CompilerPassListener&gt;();</span>
+<span class="fc" id="L31">    private CompilerPassListener defaultListener = new BasicCompilerPassListener();</span>
+
+<span class="fc" id="L33">    private InstructionsListener instrsListener = null;</span>
+<span class="fc" id="L34">    private IRScopeListener irScopeListener = null;</span>
+
+
+    // FIXME: Eventually make these attrs into either a) set b) part of state machine
+    private List&lt;CompilerPass&gt; compilerPasses;
+    private List&lt;CompilerPass&gt; inliningCompilerPasses;
+    private List&lt;CompilerPass&gt; jitPasses;
+    private List&lt;CompilerPass&gt; safePasses;
+
+    // If true then code will not execute (see ir/ast tool)
+<span class="fc" id="L44">    private boolean dryRun = false;</span>
+
+<span class="fc" id="L46">    public IRManager() {</span>
+<span class="fc" id="L47">        compilerPasses = CompilerPass.getPassesFromString(RubyInstanceConfig.IR_COMPILER_PASSES, DEFAULT_COMPILER_PASSES);</span>
+<span class="fc" id="L48">        inliningCompilerPasses = CompilerPass.getPassesFromString(RubyInstanceConfig.IR_COMPILER_PASSES, DEFAULT_INLINING_COMPILER_PASSES);</span>
+<span class="fc" id="L49">        jitPasses = CompilerPass.getPassesFromString(RubyInstanceConfig.IR_JIT_PASSES, DEFAULT_JIT_PASSES);</span>
+<span class="fc" id="L50">        safePasses = CompilerPass.getPassesFromString(null, SAFE_COMPILER_PASSES);</span>
+<span class="fc" id="L51">    }</span>
+
+    public boolean isDryRun() {
+<span class="fc" id="L54">        return dryRun;</span>
+    }
+
+    public void setDryRun(boolean value) {
+<span class="nc" id="L58">        this.dryRun = value;</span>
+<span class="nc" id="L59">    }</span>
+
+    public Nil getNil() {
+<span class="fc" id="L62">        return nil;</span>
+    }
+
+    public org.jruby.ir.operands.Boolean getTrue() {
+<span class="fc" id="L66">        return trueObject;</span>
+    }
+
+    public org.jruby.ir.operands.Boolean getFalse() {
+<span class="fc" id="L70">        return falseObject;</span>
+    }
+
+    public IRModuleBody getObject() {
+<span class="nc" id="L74">        return object;</span>
+    }
+
+    public CompilerPassScheduler schedulePasses() {
+<span class="nc" id="L78">        return schedulePasses(compilerPasses);</span>
+    }
+
+    public static CompilerPassScheduler schedulePasses(final List&lt;CompilerPass&gt; passes) {
+<span class="fc" id="L82">        CompilerPassScheduler scheduler = new CompilerPassScheduler() {</span>
+            private Iterator&lt;CompilerPass&gt; iterator;
+            {
+<span class="fc" id="L85">                this.iterator = passes.iterator();</span>
+<span class="fc" id="L86">            }</span>
+
+            @Override
+            public Iterator&lt;CompilerPass&gt; iterator() {
+<span class="fc" id="L90">                return this.iterator;</span>
+            }
+
+        };
+<span class="fc" id="L94">        return scheduler;</span>
+    }
+
+    public List&lt;CompilerPass&gt; getCompilerPasses(IRScope scope) {
+<span class="fc" id="L98">        return compilerPasses;</span>
+    }
+
+    public List&lt;CompilerPass&gt; getInliningCompilerPasses(IRScope scope) {
+<span class="nc" id="L102">        return inliningCompilerPasses;</span>
+    }
+
+    public List&lt;CompilerPass&gt; getJITPasses(IRScope scope) {
+<span class="fc" id="L106">        return jitPasses;</span>
+    }
+
+    public List&lt;CompilerPass&gt; getSafePasses(IRScope scope) {
+<span class="fc" id="L110">        return safePasses;</span>
+    }
+
+    public Set&lt;CompilerPassListener&gt; getListeners() {
+        // FIXME: This is ugly but we want to conditionalize output based on JRuby module setting/unsetting
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">        if (RubyInstanceConfig.IR_COMPILER_DEBUG) {</span>
+<span class="nc" id="L116">            addListener(defaultListener);</span>
+        } else {
+<span class="fc" id="L118">            removeListener(defaultListener);</span>
+        }
+
+<span class="fc" id="L121">        return passListeners;</span>
+    }
+
+    public InstructionsListener getInstructionsListener() {
+<span class="nc" id="L125">        return instrsListener;</span>
+    }
+
+    public IRScopeListener getIRScopeListener() {
+<span class="fc" id="L129">        return irScopeListener;</span>
+    }
+
+    public void addListener(CompilerPassListener listener) {
+<span class="nc" id="L133">        passListeners.add(listener);</span>
+<span class="nc" id="L134">    }</span>
+
+    public void removeListener(CompilerPassListener listener) {
+<span class="fc" id="L137">        passListeners.remove(listener);</span>
+<span class="fc" id="L138">    }</span>
+
+    public void addListener(InstructionsListener listener) {
+<span class="nc bnc" id="L141" title="All 4 branches missed.">        if (RubyInstanceConfig.IR_COMPILER_DEBUG || RubyInstanceConfig.IR_VISUALIZER) {</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">            if (instrsListener != null) {</span>
+<span class="nc" id="L143">                throw new RuntimeException(&quot;InstructionsListener is set and other are currently not allowed&quot;);</span>
+            }
+
+<span class="nc" id="L146">            instrsListener = listener;</span>
+        }
+<span class="nc" id="L148">    }</span>
+
+    public void removeListener(InstructionsListener listener) {
+<span class="nc bnc" id="L151" title="All 2 branches missed.">        if (instrsListener.equals(listener)) instrsListener = null;</span>
+<span class="nc" id="L152">    }</span>
+
+    public void addListener(IRScopeListener listener) {
+<span class="nc bnc" id="L155" title="All 4 branches missed.">        if (RubyInstanceConfig.IR_COMPILER_DEBUG || RubyInstanceConfig.IR_VISUALIZER) {</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">            if (irScopeListener != null) {</span>
+<span class="nc" id="L157">                throw new RuntimeException(&quot;IRScopeListener is set and other are currently not allowed&quot;);</span>
+            }
+
+<span class="nc" id="L160">            irScopeListener = listener;</span>
+        }
+<span class="nc" id="L162">    }</span>
+
+    public void removeListener(IRScopeListener listener) {
+<span class="nc bnc" id="L165" title="All 2 branches missed.">        if (irScopeListener.equals(listener)) irScopeListener = null;</span>
+<span class="nc" id="L166">    }</span>
+
+    public String getMetaClassName() {
+<span class="fc" id="L169">        return &quot;&lt;DUMMY_MC:&quot; + dummyMetaClassCount++ + &quot;&gt;&quot;;</span>
+    }
+
+<span class="fc" id="L172">    private TemporaryLocalVariable[] temporaryLocalVariables = new TemporaryLocalVariable[1600];</span>
+
+    protected TemporaryLocalVariable[] growTemporaryVariablePool(int index) {
+<span class="nc" id="L175">        int newLength = index * 2;</span>
+<span class="nc" id="L176">        TemporaryLocalVariable[] newPool = new TemporaryLocalVariable[newLength];</span>
+
+<span class="nc" id="L178">        System.arraycopy(temporaryLocalVariables, 0, newPool, 0, temporaryLocalVariables.length);</span>
+<span class="nc" id="L179">        temporaryLocalVariables = newPool;</span>
+<span class="nc" id="L180">        return newPool;</span>
+    }
+
+    // FIXME: Consider IRBuilder not using so many temporary variables for literal initialization.  This is the
+    // vast majority of high index temp variables.
+    /**
+     * Temporary local variables are immutable and always start from a low index value and increment up
+     * to a higher index value per scope.  So we can share these and store the ones in a simple list.  If
+     * hard pinning is ever an issue we can periodically evict the list and start over at the cost of more
+     * live objects but this list cache reduces a simple empty Rails app console from over 140K instances
+     * to about 1200 instances.
+     *
+     */
+    public TemporaryLocalVariable newTemporaryLocalVariable(int index) {
+<span class="pc bpc" id="L194" title="1 of 2 branches missed.">        if (index &gt;= temporaryLocalVariables.length-1) growTemporaryVariablePool(index);</span>
+
+<span class="fc" id="L196">        TemporaryLocalVariable tempVar = temporaryLocalVariables[index];</span>
+
+<span class="fc bfc" id="L198" title="All 2 branches covered.">        if (tempVar == null) {</span>
+<span class="fc" id="L199">            tempVar = new TemporaryLocalVariable(index);</span>
+<span class="fc" id="L200">            temporaryLocalVariables[index] = tempVar;</span>
+        }
+
+<span class="fc" id="L203">        return tempVar;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

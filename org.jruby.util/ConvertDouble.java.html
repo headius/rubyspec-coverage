@@ -1,0 +1,408 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ConvertDouble.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util</a> &gt; <span class="el_source">ConvertDouble.java</span></div><h1>ConvertDouble.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2010 Thomas E Enebo (tom.enebo@gmail.com)
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.util;
+
+<span class="nc" id="L30">public class ConvertDouble {</span>
+    /**
+     * Converts supplied ByteList into a double.  strict-mode will not like
+     * extra text non-numeric text or multiple sequention underscores.
+     */
+    public static double byteListToDouble(ByteList bytes, boolean strict) {
+<span class="fc" id="L36">        return new DoubleConverter().parse(bytes, strict, false);</span>
+    }
+
+    /**
+     * Converts supplied ByteList into a double.  This is almost exactly the
+     * same as byteListToDouble, but leading underscores are no longer skipped
+     * in 1.9 (e.g. __1 == 0.0 in 1.9 while 1.8 parses it as 1.0).
+     */
+    public static double byteListToDouble19(ByteList bytes, boolean strict) {
+<span class="fc" id="L45">        return new DoubleConverter().parse(bytes, strict, true);</span>
+    }
+
+<span class="nc" id="L48">    public static class DoubleConverter {</span>
+        private byte[] bytes;
+        private int index;
+        private int endIndex;
+        private boolean isStrict;
+        private boolean is19;
+        private char[] chars; // result string we use to parse.
+        private int charsIndex;
+        private int significantDigitsProcessed;
+        private int adjustExponent;
+        private boolean wroteExponent;
+        private double result;
+
+        // To match MRI so that we end up rounding on values greater than being storable in a 64
+        // bit value in the same fashion we are using 30.  Based on wikipedia a note recommends 
+        //17 + 3 (or 20), but I don't know why that is recommended and we would rather be compatible 
+        //behaviorally with MRI.
+        private final static int SIGNIFICANT_DIGITS_LIMIT = 30;
+        // Maximal exponent is +308, minimal -308, -324 with subnormal float
+        private final static int EXPONENT_DIGITS_LIMIT = 3;
+<span class="fc" id="L68">        private final static int MAX_EXPONENT = (int) (Math.pow(10, EXPONENT_DIGITS_LIMIT)) - 1;</span>
+        // Max length is '-' + significant_digits + '.' + 'E' + '-' + exponent_digits
+        // + 1 (first digit before point) + 1 (first decimal digit).
+        private final static int MAX_LENGTH = SIGNIFICANT_DIGITS_LIMIT + EXPONENT_DIGITS_LIMIT + 6;
+
+<span class="fc" id="L73">        public DoubleConverter() {}</span>
+
+        public void init(ByteList list, boolean isStrict, boolean is19) {
+<span class="fc" id="L76">            bytes = list.getUnsafeBytes();</span>
+<span class="fc" id="L77">            index = list.begin();</span>
+<span class="fc" id="L78">            endIndex = index + list.length();</span>
+<span class="fc" id="L79">            this.isStrict = isStrict;</span>
+<span class="fc" id="L80">            this.is19 = is19;</span>
+            // +2 for added exponent: E...
+            // The algorithm trades digits for inc/dec exponent.
+            // Worse case is adding E-1 when no exponent,
+            // it trades one digit for 3 chars.
+<span class="fc" id="L85">            chars = new char[Math.min(list.length()+2, MAX_LENGTH)];</span>
+<span class="fc" id="L86">            charsIndex = 0;</span>
+<span class="fc" id="L87">            significantDigitsProcessed = 0;</span>
+<span class="fc" id="L88">            adjustExponent = 0;</span>
+<span class="fc" id="L89">            wroteExponent = false;</span>
+<span class="fc" id="L90">            result = -1.0; // -1.0 is &quot;parse String&quot;</span>
+<span class="fc" id="L91">        }</span>
+
+        private byte next() {
+<span class="fc" id="L94">            return bytes[index++];</span>
+        }
+
+        /**
+         * Shift back to previous character in the incoming bytes
+         * @return false to indicate we are not in an EOS condition
+         */
+        private boolean previous() {
+<span class="fc" id="L102">            index--;</span>
+<span class="fc" id="L103">            return false;</span>
+        }
+
+        private boolean isEOS() {
+<span class="fc bfc" id="L107" title="All 2 branches covered.">            return index &gt;= endIndex;</span>
+        }
+
+        private boolean stopParsing() {
+<span class="fc" id="L111">            index = endIndex;</span>
+<span class="fc" id="L112">            return true;</span>
+        }
+
+        private boolean isDigit(byte b) {
+<span class="fc bfc" id="L116" title="All 4 branches covered.">            return b &gt;= '0' &amp;&amp; b &lt;= '9';</span>
+        }
+
+        private boolean isExponent(byte b) {
+<span class="fc bfc" id="L120" title="All 4 branches covered.">            return b == 'e' || b == 'E';</span>
+        }
+
+        private boolean isWhitespace(byte b) {
+<span class="pc bpc" id="L124" title="1 of 8 branches missed.">            return b == ' ' || (b &lt;= 13 &amp;&amp; b &gt;= 9 &amp;&amp; b != 11);</span>
+        }
+
+        private void addToResult(byte b) {
+<span class="fc" id="L128">            chars[charsIndex++] = (char) b;</span>
+<span class="fc" id="L129">        }</span>
+
+        private void addExponentToResult(int exponent) {
+<span class="fc" id="L132">            String exp = Integer.toString(exponent);</span>
+<span class="fc bfc" id="L133" title="All 2 branches covered.">            for (int i = 0; i &lt; exp.length(); i++) {</span>
+<span class="fc" id="L134">                addToResult((byte) exp.charAt(i));</span>
+            }
+<span class="fc" id="L136">        }</span>
+
+        private boolean eatUnderscores() {
+<span class="fc bfc" id="L139" title="All 2 branches covered.">            while (!isEOS()) {</span>
+<span class="fc" id="L140">                byte value = next();</span>
+
+<span class="pc bpc" id="L142" title="1 of 2 branches missed.">                if (value != '_') {</span>
+<span class="fc" id="L143">                    previous();</span>
+<span class="fc" id="L144">                    return isEOS();</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">                } else if (isStrict) {</span>
+<span class="nc" id="L146">                    strictError();</span>
+                }
+<span class="nc" id="L148">            }</span>
+
+<span class="fc" id="L150">            return true;</span>
+        }
+
+        private double completeCalculation() {
+<span class="fc bfc" id="L154" title="All 6 branches covered.">            if (charsIndex == 0 || (charsIndex == 1 &amp;&amp; chars[0] == '-')) { // &quot;&quot; or &quot;-&quot;</span>
+<span class="fc" id="L155">                strictError(); // Strict requires at least one digit.</span>
+<span class="fc" id="L156">                return 0.0; // Treated as 0.0 (not -0.0) in non-strict.</span>
+<span class="fc bfc" id="L157" title="All 2 branches covered.">            } else if (isExponent((byte) chars[charsIndex - 1])) { // Covers 12.0efrog</span>
+<span class="fc" id="L158">                strictError();</span>
+<span class="fc" id="L159">                addExponentToResult(adjustExponent);</span>
+<span class="pc bpc" id="L160" title="1 of 4 branches missed.">            } else if (isStrict &amp;&amp; !isEOS()) {</span>
+<span class="nc" id="L161">                strictError(); // We know it is not whitespace at this point</span>
+<span class="pc bpc" id="L162" title="1 of 4 branches missed.">            } else if (!wroteExponent &amp;&amp; adjustExponent != 0) {</span>
+<span class="nc" id="L163">                addToResult((byte) 'E');</span>
+<span class="nc" id="L164">                addExponentToResult(adjustExponent);</span>
+            }
+
+<span class="fc" id="L167">            return SafeDoubleParser.parseDouble(new String(chars, 0, charsIndex));</span>
+        }
+        
+        private boolean strictError() {
+<span class="fc bfc" id="L171" title="All 2 branches covered.">            if (isStrict) {</span>
+<span class="fc" id="L172">                throw new NumberFormatException(&quot;does not meet strict criteria&quot;);</span>
+            } else {
+<span class="fc" id="L174">                return true; // means EOS for non-strict</span>
+            }
+        }
+
+        public double parse(ByteList list, boolean strict, boolean is19) {
+<span class="fc" id="L179">            init(list, strict, is19);</span>
+
+<span class="pc bpc" id="L181" title="1 of 2 branches missed.">            if (skipWhitespace()) return completeCalculation();</span>
+<span class="fc bfc" id="L182" title="All 2 branches covered.">            if (parseOptionalSign()) return completeCalculation();</span>
+
+<span class="fc" id="L184">            parseDigits();</span>
+
+<span class="fc bfc" id="L186" title="All 2 branches covered.">            if (result != -1.0) { // abnormal result</span>
+<span class="fc" id="L187">                return result;</span>
+            }
+
+<span class="fc" id="L190">            return completeCalculation();</span>
+        }
+
+        /**
+         * Consume initial whitespace and underscores so that next character
+         * examined is not whitespace.  1.9 and strict do not allow leading
+         * underscores.  Returns whether next position is at the end of the
+         * string or not.
+         *
+         * Trivia: &quot; _ _ _ _ 1&quot;.to_f == 1.0 in Ruby 1.8
+         */
+        private boolean skipWhitespace() {
+<span class="fc bfc" id="L202" title="All 2 branches covered.">            while (!isEOS()) {</span>
+<span class="fc" id="L203">                byte value = next();</span>
+
+<span class="fc bfc" id="L205" title="All 2 branches covered.">                if (isWhitespace(value)) continue;</span>
+<span class="pc bpc" id="L206" title="1 of 6 branches missed.">                if (value != '_' || isStrict || is19) return previous();</span>
+<span class="nc" id="L207">            }</span>
+
+<span class="fc" id="L209">            return true;</span>
+        }
+
+        private boolean parseOptionalSign() {
+<span class="fc" id="L213">            byte sign = next();</span>
+
+<span class="fc bfc" id="L215" title="All 2 branches covered.">            if (sign == '-') {</span>
+<span class="fc" id="L216">                addToResult(sign);</span>
+<span class="fc bfc" id="L217" title="All 2 branches covered.">            } else if (sign != '+') {</span>
+<span class="fc" id="L218">                previous();  // backup...not a sign-char</span>
+            }
+
+<span class="fc" id="L221">            return isEOS();</span>
+        }
+
+        private boolean parseDigits() {
+<span class="pc bpc" id="L225" title="1 of 2 branches missed.">            if (!isEOS()) {</span>
+<span class="fc" id="L226">                byte value = next();</span>
+
+<span class="fc bfc" id="L228" title="All 2 branches covered.">                if (isDigit(value)) {</span>
+                    // Always add the first digit, in case it is the only digit
+<span class="fc bfc" id="L230" title="All 2 branches covered.">                    if (value != '0') {</span>
+<span class="fc" id="L231">                        significantDigitsProcessed++;</span>
+                    }
+<span class="fc" id="L233">                    addToResult(value);</span>
+<span class="fc bfc" id="L234" title="All 2 branches covered.">                } else if (value == '.') {</span>
+<span class="fc" id="L235">                    addToResult(value);</span>
+<span class="fc" id="L236">                    return parseDecimalDigits();</span>
+                } else {
+<span class="fc" id="L238">                    return isEOS();</span>
+                }
+<span class="fc" id="L240">            } else {</span>
+<span class="nc" id="L241">                strictError();</span>
+            }
+            
+<span class="fc bfc" id="L244" title="All 2 branches covered.">            while (!isEOS()) {</span>
+<span class="fc" id="L245">                byte value = next();</span>
+
+<span class="fc bfc" id="L247" title="All 2 branches covered.">                if (isDigit(value)) {</span>
+<span class="pc bpc" id="L248" title="1 of 2 branches missed.">                    if (significantDigitsProcessed &lt; SIGNIFICANT_DIGITS_LIMIT) {</span>
+                        // Ignore leading 0s
+<span class="pc bpc" id="L250" title="1 of 4 branches missed.">                        if (value != '0' || significantDigitsProcessed &gt; 0) {</span>
+<span class="fc" id="L251">                            significantDigitsProcessed++;</span>
+<span class="fc" id="L252">                            addToResult(value);</span>
+                        }
+                    } else {
+<span class="nc" id="L255">                        adjustExponent++;</span>
+                    }
+<span class="fc bfc" id="L257" title="All 2 branches covered.">                } else if (value == '.') {</span>
+<span class="fc" id="L258">                    addToResult(value);</span>
+<span class="fc" id="L259">                    return parseDecimalDigits();</span>
+<span class="fc bfc" id="L260" title="All 2 branches covered.">                } else if (value == '_') {</span>
+<span class="fc" id="L261">                    verifyNumberAfterUnderscore();</span>
+<span class="fc bfc" id="L262" title="All 2 branches covered.">                } else if (isExponent(value)) {</span>
+<span class="fc" id="L263">                    addToResult(value);</span>
+<span class="fc" id="L264">                    return parseExponent();</span>
+<span class="fc bfc" id="L265" title="All 2 branches covered.">                } else if (isWhitespace(value)) {</span>
+<span class="fc" id="L266">                    return skipWhitespace();</span>
+                } else {
+<span class="fc" id="L268">                    return strictError();</span>
+                }
+ 
+<span class="fc" id="L271">            }</span>
+
+<span class="fc" id="L273">            return true;</span>
+        }
+
+        private boolean parseDecimalDigits() {
+<span class="pc bpc" id="L277" title="1 of 2 branches missed.">            if (isEOS()) return strictError();</span>
+            
+<span class="fc" id="L279">            byte value = next();</span>
+
+            // Wonky, but 12._2e2 is 1200.0 and 12.__e2 is 12.0
+<span class="pc bpc" id="L282" title="1 of 2 branches missed.">            if (value == '_') {</span>
+<span class="nc" id="L283">                strictError();</span>
+<span class="nc bnc" id="L284" title="All 2 branches missed.">                if (isEOS()) return strictError();</span>
+<span class="nc" id="L285">                value = next();</span>
+            }
+
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">            if (isDigit(value)) {</span>
+<span class="pc bpc" id="L289" title="1 of 2 branches missed.">                if (significantDigitsProcessed &lt; SIGNIFICANT_DIGITS_LIMIT) {</span>
+<span class="pc bpc" id="L290" title="1 of 4 branches missed.">                    if (!(value == '0' &amp;&amp; significantDigitsProcessed == 0)) { // not a leading 0</span>
+<span class="fc" id="L291">                        significantDigitsProcessed++;</span>
+                    }
+                } else {
+<span class="nc" id="L294">                    value = '0';</span>
+                }
+                // Always add a digit after the .
+<span class="fc" id="L297">                addToResult(value);</span>
+            } else {
+<span class="nc" id="L299">                return strictError();</span>
+            } 
+
+<span class="fc bfc" id="L302" title="All 2 branches covered.">            while (!isEOS()) {</span>
+<span class="fc" id="L303">                value = next();</span>
+
+<span class="fc bfc" id="L305" title="All 2 branches covered.">                if (isDigit(value)) {</span>
+<span class="pc bpc" id="L306" title="1 of 2 branches missed.">                    if (significantDigitsProcessed &lt; SIGNIFICANT_DIGITS_LIMIT) {</span>
+<span class="pc bpc" id="L307" title="1 of 4 branches missed.">                        if (value == '0' &amp;&amp; significantDigitsProcessed == 0) { // leading 0</span>
+<span class="nc" id="L308">                            adjustExponent--;</span>
+                        } else {
+<span class="fc" id="L310">                            significantDigitsProcessed++;</span>
+<span class="fc" id="L311">                            addToResult(value);</span>
+                        }
+                    } // otherwise ignore it
+<span class="fc bfc" id="L314" title="All 2 branches covered.">                } else if (isExponent(value)) {</span>
+<span class="fc" id="L315">                    addToResult(value);</span>
+<span class="fc" id="L316">                    return parseExponent();</span>
+<span class="fc bfc" id="L317" title="All 2 branches covered.">                } else if (value == '_') {</span>
+<span class="fc" id="L318">                    verifyNumberAfterUnderscore();</span>
+<span class="fc bfc" id="L319" title="All 2 branches covered.">                } else if (isWhitespace(value)) {</span>
+<span class="fc" id="L320">                    return skipWhitespace();</span>
+                } else {
+<span class="fc" id="L322">                    return strictError();</span>
+                }
+            }
+
+<span class="fc" id="L326">            return true;</span>
+        }
+
+        private boolean parseExponent() {
+<span class="fc bfc" id="L330" title="All 2 branches covered.">            if (eatUnderscores()) return isEOS();</span>
+
+<span class="fc" id="L332">            byte value = next();</span>
+
+<span class="fc" id="L334">            int exponent = 0;</span>
+<span class="fc" id="L335">            int digits = 0;</span>
+<span class="fc" id="L336">            boolean negative = false;</span>
+
+<span class="fc bfc" id="L338" title="All 2 branches covered.">            if (value == '-') {</span>
+<span class="fc" id="L339">                negative = true;</span>
+<span class="fc bfc" id="L340" title="All 2 branches covered.">            } else if (value != '+') {</span>
+<span class="fc" id="L341">                previous(); // backup...not a sign-char</span>
+            }
+
+<span class="fc bfc" id="L344" title="All 2 branches covered.">            while (!isEOS()) {</span>
+<span class="fc" id="L345">                value = next();</span>
+
+<span class="fc bfc" id="L347" title="All 2 branches covered.">                if (isDigit(value)) {</span>
+<span class="fc bfc" id="L348" title="All 2 branches covered.">                    if (digits &lt; EXPONENT_DIGITS_LIMIT) {</span>
+                        // Ignore leading 0s
+<span class="pc bpc" id="L350" title="1 of 4 branches missed.">                        if (value != '0' || digits &gt; 0) {</span>
+<span class="fc" id="L351">                            digits++;</span>
+<span class="fc" id="L352">                            exponent = 10 * exponent + (value - '0');</span>
+                        }
+                    } else {
+<span class="pc bpc" id="L355" title="1 of 2 branches missed.">                        return tooLargeExponent(chars[0] == '-', negative);</span>
+                    }
+<span class="fc bfc" id="L357" title="All 2 branches covered.">                } else if (isWhitespace(value)) {</span>
+<span class="fc" id="L358">                    skipWhitespace();</span>
+<span class="fc" id="L359">                    break;</span>
+<span class="fc bfc" id="L360" title="All 2 branches covered.">                } else if (value == '_') {</span>
+<span class="fc" id="L361">                    verifyNumberAfterUnderscore();</span>
+                } else {
+<span class="fc" id="L363">                    strictError();</span>
+<span class="fc" id="L364">                    stopParsing();</span>
+<span class="fc" id="L365">                    break;</span>
+                }
+            } 
+
+<span class="fc bfc" id="L369" title="All 2 branches covered.">            if (negative) {</span>
+<span class="fc" id="L370">                exponent = -exponent;</span>
+            }
+
+<span class="fc" id="L373">            exponent += adjustExponent;</span>
+
+<span class="pc bpc" id="L375" title="2 of 4 branches missed.">            if (-MAX_EXPONENT &lt;= exponent &amp;&amp; exponent &lt;= MAX_EXPONENT) {</span>
+<span class="fc" id="L376">                addExponentToResult(exponent);</span>
+<span class="fc" id="L377">                wroteExponent = true;</span>
+<span class="fc" id="L378">                return isEOS(); // Exponent end of double...let's finish.</span>
+            } else {
+<span class="nc bnc" id="L380" title="All 2 branches missed.">                return tooLargeExponent(chars[0] == '-', negative);</span>
+            }
+        }
+
+        private boolean tooLargeExponent(boolean negativeFloat, boolean negativeExponent) {
+<span class="fc bfc" id="L385" title="All 2 branches covered.">            if (negativeExponent) {</span>
+<span class="pc bpc" id="L386" title="1 of 2 branches missed.">                if (negativeFloat) {</span>
+<span class="nc" id="L387">                    result = -0.0;</span>
+                } else {
+<span class="fc" id="L389">                    result = 0.0;</span>
+                }
+            } else {
+<span class="pc bpc" id="L392" title="1 of 2 branches missed.">                if (negativeFloat) {</span>
+<span class="nc" id="L393">                    result = Double.NEGATIVE_INFINITY;</span>
+                } else {
+<span class="fc" id="L395">                    result = Double.POSITIVE_INFINITY;</span>
+                }
+            }
+<span class="fc" id="L398">            return stopParsing();</span>
+        }
+
+        private void verifyNumberAfterUnderscore() {
+<span class="fc bfc" id="L402" title="All 6 branches covered.">            if (isStrict &amp;&amp; (isEOS() || !isDigit(bytes[index]))) {</span>
+<span class="nc" id="L403">                strictError();</span>
+            }
+<span class="fc" id="L405">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

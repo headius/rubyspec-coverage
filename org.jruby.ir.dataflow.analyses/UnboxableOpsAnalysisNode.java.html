@@ -1,0 +1,827 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>UnboxableOpsAnalysisNode.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.dataflow.analyses</a> &gt; <span class="el_source">UnboxableOpsAnalysisNode.java</span></div><h1>UnboxableOpsAnalysisNode.java</h1><pre class="source lang-java linenums">package org.jruby.ir.dataflow.analyses;
+
+import org.jruby.dirgra.Edge;
+import org.jruby.ir.IRClosure;
+import org.jruby.ir.Operation;
+import org.jruby.ir.dataflow.DataFlowConstants;
+import org.jruby.ir.dataflow.FlowGraphNode;
+import org.jruby.ir.instructions.*;
+import org.jruby.ir.instructions.boxing.*;
+import org.jruby.ir.operands.*;
+import org.jruby.ir.operands.Boolean;
+import org.jruby.ir.operands.Float;
+import org.jruby.ir.representations.BasicBlock;
+import org.jruby.ir.representations.CFG;
+
+import java.util.*;
+
+public class UnboxableOpsAnalysisNode extends FlowGraphNode&lt;UnboxableOpsAnalysisProblem, UnboxableOpsAnalysisNode&gt; {
+    private class UnboxState {
+        Map&lt;Variable, Class&gt; types;        // known types of variables
+        Map&lt;Variable, Class&gt; unboxedVars;  // variables that exist in unboxed form of a specific type
+        Set&lt;Variable&gt; unboxedDirtyVars;    // variables that exist in unboxed form and are dirty
+
+<span class="nc" id="L24">        public UnboxState() {</span>
+<span class="nc" id="L25">            types = new HashMap&lt;Variable, Class&gt;();</span>
+<span class="nc" id="L26">            unboxedVars = new HashMap&lt;Variable, Class&gt;();</span>
+<span class="nc" id="L27">            unboxedDirtyVars = new HashSet&lt;Variable&gt;();</span>
+<span class="nc" id="L28">        }</span>
+
+<span class="nc" id="L30">        public UnboxState(UnboxState init) {</span>
+<span class="nc" id="L31">            types = new HashMap&lt;Variable, Class&gt;(init.types);</span>
+<span class="nc" id="L32">            unboxedVars = new HashMap&lt;Variable, Class&gt;(init.unboxedVars);</span>
+<span class="nc" id="L33">            unboxedDirtyVars = new HashSet&lt;Variable&gt;(init.unboxedDirtyVars);</span>
+<span class="nc" id="L34">        }</span>
+
+        public void computeMEETForTypes(UnboxState other, boolean localVarsOnly) {
+<span class="nc" id="L37">            Map&lt;Variable, Class&gt; otherTypes = other.types;</span>
+<span class="nc bnc" id="L38" title="All 2 branches missed.">            for (Variable v: otherTypes.keySet()) {</span>
+<span class="nc bnc" id="L39" title="All 4 branches missed.">                if (!localVarsOnly || v instanceof LocalVariable) {</span>
+<span class="nc" id="L40">                    Class c1 = types.get(v);</span>
+<span class="nc" id="L41">                    Class c2 = otherTypes.get(v);</span>
+<span class="nc bnc" id="L42" title="All 2 branches missed.">                    if (c1 == null) {</span>
+<span class="nc" id="L43">                        types.put(v, c2);  // TOP --&gt; class</span>
+<span class="nc bnc" id="L44" title="All 2 branches missed.">                    } else if (c1 != c2) {</span>
+<span class="nc" id="L45">                        types.put(v, Object.class); // TOP/class --&gt; BOTTOM</span>
+                    }
+                }
+<span class="nc" id="L48">            }</span>
+<span class="nc" id="L49">        }</span>
+
+        public void computeMEETForUnboxedVars(UnboxState other) {
+            // * If the var is available in unboxed form along only one path,
+            //   it is assumed AVAILABLE unboxed on MEET.
+            // * If the var is availble in unboxed forms with different types along
+            //   each path, it is assumed UNAVAILABLE unboxed on MEET.
+<span class="nc" id="L56">            Map&lt;Variable, Class&gt; otherVars = other.unboxedVars;</span>
+<span class="nc bnc" id="L57" title="All 2 branches missed.">            for (Variable v: otherVars.keySet()) {</span>
+<span class="nc" id="L58">                Class c1 = unboxedVars.get(v);</span>
+<span class="nc" id="L59">                Class c2 = otherVars.get(v);</span>
+<span class="nc bnc" id="L60" title="All 2 branches missed.">                if (c1 == null) {</span>
+<span class="nc" id="L61">                    unboxedVars.put(v, c2);</span>
+<span class="nc bnc" id="L62" title="All 2 branches missed.">                } else if (c1 != c2) {</span>
+                    //
+<span class="nc" id="L64">                    unboxedVars.remove(v);</span>
+                }
+<span class="nc" id="L66">            }</span>
+<span class="nc" id="L67">        }</span>
+
+        public void computeMEET(UnboxState other) {
+<span class="nc" id="L70">            computeMEETForTypes(other, false);</span>
+<span class="nc" id="L71">            computeMEETForUnboxedVars(other);</span>
+<span class="nc" id="L72">            unboxedDirtyVars.addAll(other.unboxedDirtyVars);</span>
+<span class="nc" id="L73">        }</span>
+
+        public boolean equals(UnboxState other) {
+<span class="nc bnc" id="L76" title="All 2 branches missed.">            return types.equals(other.types) &amp;&amp;</span>
+<span class="nc bnc" id="L77" title="All 2 branches missed.">                unboxedVars.equals(other.unboxedVars) &amp;&amp;</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">                unboxedDirtyVars.equals(other.unboxedDirtyVars);</span>
+        }
+
+        public void debugOut() {
+<span class="nc" id="L82">            System.out.print(&quot;-- Known types:&quot;);</span>
+<span class="nc bnc" id="L83" title="All 2 branches missed.">            for (Variable v: types.keySet()) {</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                if (types.get(v) != Object.class) {</span>
+<span class="nc" id="L85">                    System.out.println(v + &quot;--&gt;&quot; + types.get(v));</span>
+                }
+<span class="nc" id="L87">            }</span>
+<span class="nc" id="L88">            System.out.print(&quot;-- Unboxed vars:&quot;);</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">            for (Variable v: unboxedVars.keySet()) {</span>
+<span class="nc" id="L90">                System.out.print(&quot; &quot; + v + &quot;--&gt;&quot; + unboxedVars.get(v));</span>
+<span class="nc" id="L91">            }</span>
+<span class="nc" id="L92">            System.out.println(&quot;------&quot;);</span>
+<span class="nc" id="L93">            System.out.print(&quot;-- Unboxed dirty vars:&quot;);</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">            for (Variable v: unboxedDirtyVars) {</span>
+<span class="nc" id="L95">                System.out.print(&quot; &quot; + v);</span>
+<span class="nc" id="L96">            }</span>
+<span class="nc" id="L97">            System.out.println(&quot;------&quot;);</span>
+<span class="nc" id="L98">        }</span>
+    }
+
+    public UnboxableOpsAnalysisNode(UnboxableOpsAnalysisProblem prob, BasicBlock n) {
+<span class="nc" id="L102">        super(prob, n);</span>
+<span class="nc" id="L103">    }</span>
+
+    @Override
+    public void init() {
+<span class="nc" id="L107">        outState = new UnboxState();</span>
+<span class="nc" id="L108">    }</span>
+
+    @Override
+    public void buildDataFlowVars(Instr i) {
+        // Nothing to do -- because we are going to simply use variables as our data flow variables
+        // rather than build a new data flow type for it
+<span class="nc" id="L114">    }</span>
+
+    @Override
+    public void applyPreMeetHandler() {
+<span class="nc bnc" id="L118" title="All 4 branches missed.">        if (problem.getScope() instanceof IRClosure &amp;&amp; basicBlock.isEntryBB()) {</span>
+            // If it is not null, it has already been initialized
+<span class="nc bnc" id="L120" title="All 2 branches missed.">            if (inState == null) {</span>
+<span class="nc" id="L121">                inState = new UnboxState();</span>
+            }
+        } else {
+<span class="nc" id="L124">            inState = new UnboxState();</span>
+        }
+<span class="nc" id="L126">    }</span>
+
+    @Override
+    public void compute_MEET(Edge e, UnboxableOpsAnalysisNode pred) {
+        // Ignore rescue entries -- everything is unboxed, as necessary.
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        if (!pred.basicBlock.isRescueEntry()) inState.computeMEET(pred.outState);</span>
+<span class="nc" id="L132">    }</span>
+
+    private Class getOperandType(UnboxState state, Operand o) {
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        if (o instanceof Float) {</span>
+<span class="nc" id="L136">            return Float.class;</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">        } else if (o instanceof Fixnum) {</span>
+<span class="nc" id="L138">            return Fixnum.class;</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        } else if (o instanceof Bignum) {</span>
+<span class="nc" id="L140">            return Bignum.class;</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">        } else if (o instanceof Variable) {</span>
+<span class="nc" id="L142">            return state.types.get((Variable) o);</span>
+        } else {
+<span class="nc" id="L144">            return null;</span>
+        }
+    }
+
+    private void setOperandType(UnboxState state, Variable v, Class newType) {
+<span class="nc bnc" id="L149" title="All 4 branches missed.">        if (v != null &amp;&amp; newType != null) {</span>
+<span class="nc" id="L150">            state.types.put(v, newType);</span>
+        }
+<span class="nc" id="L152">    }</span>
+
+    private void updateUnboxedVarsInfo(Instr i, UnboxState state, Variable dst, boolean hasRescuer, boolean isDFBarrier) {
+<span class="nc" id="L155">        HashSet&lt;Variable&gt; varsToBox = new HashSet&lt;Variable&gt;();</span>
+        // Special treatment for instructions that can raise exceptions
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        if (i.canRaiseException()) {</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">            if (hasRescuer) {</span>
+                // If we are going to be rescued,
+                // box all unboxed dirty vars before we execute the instr.
+<span class="nc" id="L161">                state.unboxedDirtyVars.clear();</span>
+            } else {
+                // We are going to exit if an exception is raised.
+                // So, only need to bother with dirty live local vars for closures
+<span class="nc bnc" id="L165" title="All 2 branches missed.">                if (problem.getScope() instanceof IRClosure) {</span>
+<span class="nc" id="L166">                    markLocalVariables(varsToBox, state.unboxedDirtyVars);</span>
+                }
+            }
+        }
+
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        if (isDFBarrier) {</span>
+            // All dirty unboxed local vars will get reboxed.
+<span class="nc" id="L173">            markLocalVariables(varsToBox, state.unboxedDirtyVars);</span>
+
+            // We have to re-unbox local variables as necessary since we don't
+            // know how they are going to change once we get past this instruction.
+<span class="nc" id="L177">            List&lt;Variable&gt; lvs = new ArrayList&lt;Variable&gt;();</span>
+<span class="nc" id="L178">            markLocalVariables(lvs, state.unboxedVars.keySet());</span>
+
+<span class="nc" id="L180">            state.unboxedVars.keySet().removeAll(lvs);</span>
+        }
+
+        // Update set of unboxed dirty vars
+<span class="nc" id="L184">        state.unboxedDirtyVars.removeAll(varsToBox);</span>
+
+        // FIXME: Also global variables .. see LVA / StoreLocalVar analysis.
+
+        // B_TRUE and B_FALSE have unboxed forms and their operands
+        // needn't get boxed back.
+<span class="nc" id="L190">        Operation op = i.getOperation();</span>
+<span class="nc bnc" id="L191" title="All 4 branches missed.">        if (op != Operation.B_TRUE &amp;&amp; op != Operation.B_FALSE) {</span>
+            // Vars used by this instruction that only exist in unboxed form
+            // will have to get boxed before it is executed
+<span class="nc" id="L194">            state.unboxedDirtyVars.removeAll(i.getUsedVariables());</span>
+        }
+
+        // If the instruction writes into 'dst', it will be in boxed form.
+<span class="nc bnc" id="L198" title="All 2 branches missed.">        if (dst != null) {</span>
+<span class="nc" id="L199">            state.unboxedVars.remove(dst);</span>
+<span class="nc" id="L200">            state.unboxedDirtyVars.remove(dst);</span>
+        }
+<span class="nc" id="L202">    }</span>
+
+    @Override
+    public void initSolution() {
+<span class="nc" id="L206">        tmpState = new UnboxState(inState);</span>
+<span class="nc" id="L207">    }</span>
+
+    @Override
+    public void applyTransferFunction(Instr i) {
+
+<span class="nc" id="L212">        Variable dst = null;</span>
+<span class="nc" id="L213">        boolean dirtied = false;</span>
+<span class="nc" id="L214">        boolean hitDFBarrier = false;</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">        if (i instanceof ResultInstr) {</span>
+<span class="nc" id="L216">            dst = ((ResultInstr)i).getResult();</span>
+        }
+
+<span class="nc bnc" id="L219" title="All 2 branches missed.">        if (i instanceof CopyInstr) {</span>
+            // Copies are easy
+<span class="nc" id="L221">            Operand src = ((CopyInstr)i).getSource();</span>
+<span class="nc" id="L222">            Class srcType = getOperandType(tmpState, src);</span>
+<span class="nc" id="L223">            setOperandType(tmpState, dst, srcType);</span>
+
+            // If we have an unboxed type for 'src', we can leave this unboxed.
+            //
+            // FIXME: However, if 'src' is a constant, this could unnecessarily
+            // leave 'src' unboxed and lead to a boxing instruction further down
+            // at the use site of 'dst'. This indicates that leaving this unboxed
+            // should ideally be done 'on-demand'. This indicates that this could
+            // be a backward-flow algo OR that this algo should be run on a
+            // dataflow graph / SSA graph.
+<span class="nc bnc" id="L233" title="All 2 branches missed.">            if (srcType == Float.class) {</span>
+<span class="nc" id="L234">                dirtied = true;</span>
+<span class="nc" id="L235">                tmpState.unboxedVars.put(dst, srcType);</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">            } else if (srcType == Fixnum.class) {</span>
+<span class="nc" id="L237">                dirtied = true;</span>
+<span class="nc" id="L238">                tmpState.unboxedVars.put(dst, srcType);</span>
+            }
+<span class="nc bnc" id="L240" title="All 2 branches missed.">        } else if (i instanceof ClosureAcceptingInstr) {</span>
+<span class="nc" id="L241">            Operand o = ((ClosureAcceptingInstr)i).getClosureArg();</span>
+            // Process calls specially -- these are what we want to optimize!
+<span class="nc bnc" id="L243" title="All 4 branches missed.">            if (i instanceof CallBase &amp;&amp; o == null) {</span>
+<span class="nc" id="L244">                CallBase c = (CallBase)i;</span>
+<span class="nc" id="L245">                String m = c.getName();</span>
+<span class="nc" id="L246">                Operand  r = c.getReceiver();</span>
+<span class="nc" id="L247">                Operand[] args = c.getCallArgs();</span>
+<span class="nc bnc" id="L248" title="All 6 branches missed.">                if (dst != null &amp;&amp; args.length == 1 &amp;&amp; resemblesALUOp(m)) {</span>
+<span class="nc" id="L249">                    Operand a = args[0];</span>
+<span class="nc" id="L250">                    Class receiverType = getOperandType(tmpState, r);</span>
+<span class="nc" id="L251">                    Class argType = getOperandType(tmpState, a);</span>
+                    // Optimistically assume that call is an ALU op
+<span class="nc bnc" id="L253" title="All 6 branches missed.">                    if (receiverType == Float.class ||</span>
+                        (receiverType == Fixnum.class &amp;&amp; argType == Float.class))
+                    {
+<span class="nc" id="L256">                        dirtied = true;</span>
+
+<span class="nc" id="L258">                        Class dstType = getUnboxedResultType(Float.class, m);</span>
+<span class="nc" id="L259">                        setOperandType(tmpState, dst, dstType);</span>
+<span class="nc" id="L260">                        tmpState.unboxedVars.put(dst, dstType);</span>
+
+                        // If 'r' and 'a' are not already in unboxed forms at this point,
+                        // they will get unboxed after this, because we want to opt. this call
+<span class="nc bnc" id="L264" title="All 2 branches missed.">                        if (r instanceof Variable) {</span>
+<span class="nc" id="L265">                            tmpState.unboxedVars.put((Variable)r, Float.class);</span>
+                        }
+<span class="nc bnc" id="L267" title="All 2 branches missed.">                        if (a instanceof Variable) {</span>
+<span class="nc" id="L268">                            tmpState.unboxedVars.put((Variable)a, Float.class);</span>
+                        }
+<span class="nc bnc" id="L270" title="All 6 branches missed.">                    } else if (receiverType == Float.class ||</span>
+                            (receiverType == Fixnum.class &amp;&amp; argType == Fixnum.class))
+                    {
+<span class="nc" id="L273">                        dirtied = true;</span>
+
+<span class="nc" id="L275">                        Class dstType = getUnboxedResultType(Fixnum.class, m);</span>
+<span class="nc" id="L276">                        setOperandType(tmpState, dst, dstType);</span>
+<span class="nc" id="L277">                        tmpState.unboxedVars.put(dst, dstType);</span>
+
+                        // If 'r' and 'a' are not already in unboxed forms at this point,
+                        // they will get unboxed after this, because we want to opt. this call
+<span class="nc bnc" id="L281" title="All 2 branches missed.">                        if (r instanceof Variable) {</span>
+<span class="nc" id="L282">                            tmpState.unboxedVars.put((Variable)r, Fixnum.class);</span>
+                        }
+<span class="nc bnc" id="L284" title="All 2 branches missed.">                        if (a instanceof Variable) {</span>
+<span class="nc" id="L285">                            tmpState.unboxedVars.put((Variable)a, Fixnum.class);</span>
+                        }
+<span class="nc" id="L287">                    } else {</span>
+<span class="nc bnc" id="L288" title="All 4 branches missed.">                        if (receiverType == Fixnum.class &amp;&amp; argType == Fixnum.class) {</span>
+<span class="nc" id="L289">                            setOperandType(tmpState, dst, Fixnum.class);</span>
+                        } else {
+<span class="nc" id="L291">                            setOperandType(tmpState, dst, Object.class);</span>
+                        }
+
+<span class="nc bnc" id="L294" title="All 2 branches missed.">                        if (c.targetRequiresCallersBinding()) {</span>
+<span class="nc" id="L295">                            hitDFBarrier = true;</span>
+                        }
+                    }
+<span class="nc" id="L298">                } else {</span>
+<span class="nc" id="L299">                    setOperandType(tmpState, dst, Object.class);</span>
+                }
+<span class="nc" id="L301">            } else {</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">                if (o instanceof WrappedIRClosure) {</span>
+                    // Fetch the nested unboxing-analysis problem, creating one if necessary
+<span class="nc" id="L304">                    IRClosure cl = ((WrappedIRClosure)o).getClosure();</span>
+<span class="nc" id="L305">                    UnboxableOpsAnalysisProblem subProblem = (UnboxableOpsAnalysisProblem)cl.getDataFlowSolution(DataFlowConstants.UNBOXING);</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">                    if (subProblem == null) {</span>
+<span class="nc" id="L307">                        subProblem = new UnboxableOpsAnalysisProblem();</span>
+<span class="nc" id="L308">                        subProblem.setup(cl);</span>
+<span class="nc" id="L309">                        cl.setDataFlowSolution(DataFlowConstants.UNBOXING, subProblem);</span>
+                    }
+
+<span class="nc" id="L312">                    UnboxableOpsAnalysisNode exitNode  = subProblem.getExitNode();</span>
+<span class="nc" id="L313">                    UnboxableOpsAnalysisNode entryNode = subProblem.getEntryNode();</span>
+
+                    // Init it to MEET(state-on-entry, state-on-exit).
+                    // The meet is required to account for participation of the closure in a loop.
+                    // Ex: f = 0.0; n.times { f += 10; }
+<span class="nc" id="L318">                    entryNode.inState = new UnboxState();</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">                    for (Variable v: tmpState.types.keySet()) {</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">                        if (v instanceof LocalVariable) {</span>
+<span class="nc" id="L321">                            entryNode.inState.types.put(v, tmpState.types.get(v));</span>
+                        }
+<span class="nc" id="L323">                    }</span>
+<span class="nc" id="L324">                    entryNode.inState.computeMEET(exitNode.outState);</span>
+
+                    // Compute solution
+<span class="nc" id="L327">                    subProblem.compute_MOP_Solution();</span>
+
+                    // Update types to MEET(new-state-on-exit, current-state)
+<span class="nc" id="L330">                    tmpState.computeMEETForTypes(exitNode.outState, true);</span>
+
+                    // As for unboxed var state, since binding can escape in
+                    // arbitrary ways in the general case, assume the worst for now.
+                    // If we are guaranteed that the closure binding is not used
+                    // outside the closure itself, we can avoid worst-case behavior
+                    // and only clear vars that are modified in the closure.
+<span class="nc" id="L337">                    hitDFBarrier = true;</span>
+<span class="nc" id="L338">                } else {</span>
+                    // Black hole -- cannot analyze
+<span class="nc" id="L340">                    hitDFBarrier = true;</span>
+                }
+            }
+<span class="nc" id="L343">        } else {</span>
+            // We dont know how to optimize this instruction.
+            // So, we assume we dont know type of the result.
+            // TOP/class --&gt; BOTTOM
+<span class="nc" id="L347">            setOperandType(tmpState, dst, Object.class);</span>
+        }
+
+<span class="nc bnc" id="L350" title="All 2 branches missed.">        if (dirtied) {</span>
+<span class="nc" id="L351">            tmpState.unboxedDirtyVars.add(dst);</span>
+        } else {
+            // Since the instruction didn't run in unboxed form,
+            // dirty unboxed vars will have to get boxed here.
+<span class="nc" id="L355">            updateUnboxedVarsInfo(i, tmpState, dst, hasExceptionsRescued(), hitDFBarrier);</span>
+        }
+<span class="nc" id="L357">    }</span>
+
+    @Override
+    public boolean solutionChanged() {
+<span class="nc bnc" id="L361" title="All 2 branches missed.">        return !tmpState.equals(outState);</span>
+    }
+
+    @Override
+    public void finalizeSolution() {
+<span class="nc" id="L366">        outState = tmpState;</span>
+<span class="nc" id="L367">    }</span>
+
+    private boolean matchingTypes(Class c, TemporaryVariableType t) {
+<span class="nc bnc" id="L370" title="All 4 branches missed.">        switch (t) {</span>
+<span class="nc bnc" id="L371" title="All 2 branches missed.">        case FLOAT: return c == Float.class;</span>
+<span class="nc bnc" id="L372" title="All 2 branches missed.">        case FIXNUM: return c == Fixnum.class;</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">        case BOOLEAN: return c == UnboxedBoolean.class;</span>
+<span class="nc bnc" id="L374" title="All 6 branches missed.">        default: return c != Float.class &amp;&amp; c != Boolean.class &amp;&amp; c != Fixnum.class;</span>
+        }
+    }
+
+    private TemporaryLocalVariable getUnboxedVar(Class reqdType, Map&lt;Variable, TemporaryLocalVariable&gt; unboxMap, Variable v, boolean createNew) {
+<span class="nc" id="L379">        TemporaryLocalVariable unboxedVar = unboxMap.get(v);</span>
+        // FIXME: This is a bit broken -- SSA will eliminate this need for type verification
+<span class="nc bnc" id="L381" title="All 6 branches missed.">        if ((unboxedVar == null &amp;&amp; createNew) || !matchingTypes(reqdType, unboxedVar.getType())) {</span>
+<span class="nc" id="L382">            unboxedVar = problem.getScope().getNewUnboxedVariable(reqdType);</span>
+<span class="nc" id="L383">            unboxMap.put(v, unboxedVar);</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">        } else if (unboxedVar == null) {</span>
+            // FIXME: throw an exception here
+<span class="nc" id="L386">            System.out.println(&quot;ERROR: No unboxed var for : &quot; + v);</span>
+        }
+<span class="nc" id="L388">        return unboxedVar;</span>
+    }
+
+    private TemporaryLocalVariable getUnboxedVar(Class reqdType, Map&lt;Variable, TemporaryLocalVariable&gt; unboxMap, Variable v) {
+<span class="nc" id="L392">        return getUnboxedVar(reqdType, unboxMap, v, true);</span>
+    }
+
+    public void boxVar(UnboxState state, Class reqdType, Map&lt;Variable, TemporaryLocalVariable&gt; unboxMap, Variable v, List&lt;Instr&gt; newInstrs) {
+<span class="nc" id="L396">        TemporaryLocalVariable unboxedV = getUnboxedVar(reqdType, unboxMap, v);</span>
+<span class="nc" id="L397">        TemporaryVariableType vType = unboxedV.getType();</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">        if (vType == TemporaryVariableType.BOOLEAN) {</span>
+            // boolean literals are lightweight enough that they dont need unboxed variants.
+<span class="nc" id="L400">            newInstrs.add(new BoxBooleanInstr(v, unboxedV));</span>
+<span class="nc bnc" id="L401" title="All 2 branches missed.">        } else if (vType == TemporaryVariableType.FLOAT) { // SSS FIXME: This is broken</span>
+<span class="nc" id="L402">            newInstrs.add(new BoxFloatInstr(v, unboxedV));</span>
+<span class="nc bnc" id="L403" title="All 2 branches missed.">        } else if (vType == TemporaryVariableType.FIXNUM) { // CON FIXME: So this is probably broken too</span>
+<span class="nc" id="L404">            newInstrs.add(new BoxFixnumInstr(v, unboxedV));</span>
+        }
+<span class="nc" id="L406">        state.unboxedDirtyVars.remove(v);</span>
+        // System.out.println(&quot;BOXING for &quot; + v);
+<span class="nc" id="L408">    }</span>
+
+    public void unboxVar(UnboxState state, Class reqdType, Map&lt;Variable, TemporaryLocalVariable&gt; unboxMap, Variable v, List&lt;Instr&gt; newInstrs) {
+<span class="nc" id="L411">        Variable unboxedV = getUnboxedVar(reqdType, unboxMap, v);</span>
+<span class="nc bnc" id="L412" title="All 2 branches missed.">        if (reqdType == UnboxedBoolean.class) {</span>
+            // boolean literals are lightweight enough that they dont need unboxed variants.
+<span class="nc" id="L414">            newInstrs.add(new UnboxBooleanInstr(unboxedV, v));</span>
+<span class="nc bnc" id="L415" title="All 2 branches missed.">        } else if (reqdType == Float.class) { // SSS FIXME: This is broken</span>
+<span class="nc" id="L416">            newInstrs.add(new UnboxFloatInstr(unboxedV, v));</span>
+<span class="nc bnc" id="L417" title="All 2 branches missed.">        } else if (reqdType == Fixnum.class) { // CON FIXME: So this is probably broken too</span>
+<span class="nc" id="L418">            newInstrs.add(new UnboxFixnumInstr(unboxedV, v));</span>
+        }
+<span class="nc" id="L420">        state.unboxedVars.put(v, reqdType);</span>
+        // System.out.println(&quot;UNBOXING for &quot; + v + &quot; with type &quot; + vType);
+<span class="nc" id="L422">    }</span>
+
+    private Operand unboxOperand(UnboxState state, Class reqdType, Map&lt;Variable, TemporaryLocalVariable&gt; unboxMap, Operand arg, List&lt;Instr&gt; newInstrs) {
+<span class="nc bnc" id="L425" title="All 2 branches missed.">        if (arg instanceof Variable) {</span>
+<span class="nc" id="L426">            Variable v = (Variable)arg;</span>
+<span class="nc bnc" id="L427" title="All 2 branches missed.">            boolean isUnboxed = state.unboxedVars.get(v) == reqdType;</span>
+            // Get a temp var for 'v' if we dont already have one
+<span class="nc" id="L429">            TemporaryLocalVariable unboxedVar = getUnboxedVar(reqdType, unboxMap, v);</span>
+            // Unbox if 'v' is not already unboxed
+<span class="nc bnc" id="L431" title="All 2 branches missed.">            if (!isUnboxed) {</span>
+<span class="nc" id="L432">                unboxVar(state, reqdType, unboxMap, v, newInstrs);</span>
+            }
+
+<span class="nc" id="L435">            return unboxedVar;</span>
+        } else {
+<span class="nc bnc" id="L437" title="All 2 branches missed.">            if (arg instanceof Float) {</span>
+<span class="nc" id="L438">                return new UnboxedFloat(((Float)arg).getValue());</span>
+<span class="nc bnc" id="L439" title="All 2 branches missed.">            } else if (arg instanceof Fixnum) {</span>
+<span class="nc" id="L440">                return new UnboxedFixnum(((Fixnum)arg).getValue());</span>
+<span class="nc bnc" id="L441" title="All 2 branches missed.">            } else if (arg instanceof org.jruby.ir.operands.Boolean) {</span>
+<span class="nc" id="L442">                return new UnboxedBoolean(((Boolean)arg).isTrue());</span>
+            }
+            // This has to be a known operand like (UnboxedBoolean, etc.)
+<span class="nc" id="L445">            return arg;</span>
+        }
+    }
+
+    private Operand getUnboxedOperand(UnboxState state, Map&lt;Variable, TemporaryLocalVariable&gt; unboxMap, Operand arg) {
+<span class="nc bnc" id="L450" title="All 2 branches missed.">        if (arg instanceof Variable) {</span>
+<span class="nc" id="L451">            Variable v = (Variable)arg;</span>
+<span class="nc" id="L452">            Class unboxedType = state.unboxedVars.get(v);</span>
+<span class="nc bnc" id="L453" title="All 2 branches missed.">            return unboxedType == null ? arg : getUnboxedVar(unboxedType, unboxMap, v);</span>
+        } else {
+<span class="nc bnc" id="L455" title="All 2 branches missed.">            if (arg instanceof Float) {</span>
+<span class="nc" id="L456">                return new UnboxedFloat(((Float)arg).getValue());</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">            } else if (arg instanceof Fixnum) {</span>
+<span class="nc" id="L458">                return new UnboxedFixnum(((Fixnum)arg).getValue());</span>
+<span class="nc bnc" id="L459" title="All 2 branches missed.">            } else if (arg instanceof Boolean) {</span>
+<span class="nc" id="L460">                return new UnboxedBoolean(((Boolean)arg).isTrue());</span>
+            }
+<span class="nc" id="L462">            return arg;</span>
+        }
+    }
+
+    private void markLocalVariables(Collection&lt;Variable&gt; varsToBox, Set&lt;Variable&gt; varsToCheck) {
+<span class="nc bnc" id="L467" title="All 2 branches missed.">        for (Variable v: varsToCheck) {</span>
+<span class="nc bnc" id="L468" title="All 2 branches missed.">            if (v instanceof LocalVariable) varsToBox.add(v);</span>
+<span class="nc" id="L469">        }</span>
+<span class="nc" id="L470">    }</span>
+
+    private void boxRequiredVars(Instr i, UnboxState state, Map&lt;Variable, TemporaryLocalVariable&gt; unboxMap, Variable dst, boolean hasRescuer, boolean isDFBarrier, List&lt;Instr&gt; newInstrs) {
+        // Special treatment for instructions that can raise exceptions
+<span class="nc" id="L474">        boolean isClosure = problem.getScope() instanceof IRClosure;</span>
+<span class="nc" id="L475">        HashSet&lt;Variable&gt; varsToBox = new HashSet&lt;Variable&gt;();</span>
+<span class="nc bnc" id="L476" title="All 2 branches missed.">        if (i.canRaiseException()) {</span>
+<span class="nc bnc" id="L477" title="All 2 branches missed.">            if (hasRescuer) {</span>
+                // If we are going to be rescued,
+                // box all unboxed dirty vars before we execute the instr
+<span class="nc" id="L480">                varsToBox.addAll(state.unboxedDirtyVars);</span>
+<span class="nc bnc" id="L481" title="All 2 branches missed.">            } else if (isClosure) {</span>
+                // We are going to exit if an exception is raised.
+                // So, only need to bother with dirty live local vars for closures
+<span class="nc" id="L484">                markLocalVariables(varsToBox, state.unboxedDirtyVars);</span>
+            }
+        }
+
+<span class="nc bnc" id="L488" title="All 6 branches missed.">        if (isClosure &amp;&amp; (i instanceof ReturnInstr || i instanceof BreakInstr)) {</span>
+<span class="nc" id="L489">            markLocalVariables(varsToBox, state.unboxedDirtyVars);</span>
+        }
+
+<span class="nc bnc" id="L492" title="All 2 branches missed.">        if (isDFBarrier) {</span>
+            // All dirty unboxed (local) vars will get reboxed.
+<span class="nc" id="L494">            markLocalVariables(varsToBox, state.unboxedDirtyVars);</span>
+
+            // We have to re-unbox local variables as necessary since we don't
+            // know how they are going to change once we get past this instruction.
+<span class="nc" id="L498">            List&lt;Variable&gt; lvs = new ArrayList&lt;Variable&gt;();</span>
+<span class="nc" id="L499">            markLocalVariables(lvs, state.unboxedVars.keySet());</span>
+
+<span class="nc" id="L501">            state.unboxedVars.keySet().removeAll(lvs);</span>
+        }
+
+        // B_TRUE and B_FALSE have unboxed forms and their operands
+        // needn't get boxed back.
+<span class="nc" id="L506">        Operation op = i.getOperation();</span>
+<span class="nc bnc" id="L507" title="All 4 branches missed.">        boolean isBranch = op == Operation.B_TRUE || op == Operation.B_FALSE;</span>
+<span class="nc bnc" id="L508" title="All 2 branches missed.">        if (!isBranch) {</span>
+            // Vars used by this instruction that only exist in unboxed form
+            // will have to get boxed before it is executed
+<span class="nc bnc" id="L511" title="All 2 branches missed.">            for (Variable v: i.getUsedVariables()) {</span>
+<span class="nc bnc" id="L512" title="All 2 branches missed.">                if (state.unboxedDirtyVars.contains(v)) {</span>
+<span class="nc" id="L513">                    varsToBox.add(v);</span>
+                }
+<span class="nc" id="L515">            }</span>
+        }
+
+        // Add boxing instrs.
+<span class="nc bnc" id="L519" title="All 2 branches missed.">        for (Variable v: varsToBox) {</span>
+<span class="nc" id="L520">            boxVar(state, state.unboxedVars.get(v), unboxMap, v, newInstrs);</span>
+<span class="nc" id="L521">        }</span>
+
+        // Add 'i' itself
+<span class="nc bnc" id="L524" title="All 2 branches missed.">        if (isBranch) {</span>
+<span class="nc" id="L525">            OneOperandBranchInstr bi = (OneOperandBranchInstr)i;</span>
+<span class="nc" id="L526">            Operand a = bi.getArg1();</span>
+<span class="nc" id="L527">            Operand ua = getUnboxedOperand(state, unboxMap, a);</span>
+<span class="nc bnc" id="L528" title="All 2 branches missed.">            if (ua == a) {</span>
+<span class="nc" id="L529">                newInstrs.add(i);</span>
+<span class="nc bnc" id="L530" title="All 2 branches missed.">            } else if (op == Operation.B_TRUE) {</span>
+<span class="nc" id="L531">                newInstrs.add(new BTrueInstr(Operation.B_TRUE, ua, bi.getJumpTarget()));</span>
+            } else {
+<span class="nc" id="L533">                newInstrs.add(new BFalseInstr(Operation.B_FALSE, ua, bi.getJumpTarget()));</span>
+            }
+<span class="nc" id="L535">        } else {</span>
+<span class="nc" id="L536">            newInstrs.add(i);</span>
+        }
+
+        // If the instruction writes into 'dst', it will be in boxed form.
+<span class="nc bnc" id="L540" title="All 2 branches missed.">        if (dst != null) {</span>
+<span class="nc" id="L541">            state.unboxedVars.remove(dst);</span>
+<span class="nc" id="L542">            state.unboxedDirtyVars.remove(dst);</span>
+        }
+<span class="nc" id="L544">    }</span>
+
+    public void unbox(Map&lt;Variable, TemporaryLocalVariable&gt; unboxMap) {
+        // System.out.println(&quot;BB : &quot; + basicBlock + &quot; in &quot; + problem.getScope().getName());
+        // System.out.println(&quot;-- known types on entry:&quot;);
+        // for (Variable v: inState.types.keySet()) {
+        //     if (inState.types.get(v) != Object.class) {
+        //         System.out.println(v + &quot;--&gt;&quot; + inState.types.get(v));
+        //     }
+        // }
+        // System.out.print(&quot;-- unboxed vars on entry:&quot;);
+        // for (Variable v: inState.unboxedVars) {
+        //     System.out.print(&quot; &quot; + v);
+        // }
+        // System.out.println(&quot;------&quot;);
+        // System.out.print(&quot;-- unboxed vars on exit:&quot;);
+        // for (Variable v: outState.unboxedVars) {
+        //     System.out.print(&quot; &quot; + v);
+        // }
+        // System.out.println(&quot;------&quot;);
+
+<span class="nc" id="L565">        CFG cfg = getCFG();</span>
+
+        // Compute UNION(unboxedVarsIn(all-successors)) - this.unboxedVarsOut
+        // All vars in this new set have to be unboxed on exit from this BB
+<span class="nc" id="L569">        HashMap&lt;Variable, Class&gt; succUnboxedVars = new HashMap&lt;Variable, Class&gt;();</span>
+<span class="nc bnc" id="L570" title="All 2 branches missed.">        for (BasicBlock b: cfg.getOutgoingDestinations(basicBlock)) {</span>
+<span class="nc bnc" id="L571" title="All 2 branches missed.">            if (b.isExitBB()) continue;</span>
+
+<span class="nc" id="L573">            Map&lt;Variable, Class&gt; xVars = problem.getFlowGraphNode(b).inState.unboxedVars;</span>
+<span class="nc bnc" id="L574" title="All 2 branches missed.">            for (Variable v2: xVars.keySet()) {</span>
+                // VERY IMPORTANT: Pay attention!
+                //
+                // Technically, the successors of this node may not all agree on what
+                // the unboxed type ought to be for 'v2'. For example, one successor might
+                // want 'v2' in Fixnum form and other might want it in Float form. If that
+                // happens, we have to add unboxing instructions for each of those expected
+                // types. However, for now, we are going to punt and assume that our successors
+                // agree on unboxed types for 'v2'.
+<span class="nc" id="L583">                succUnboxedVars.put(v2, xVars.get(v2));</span>
+<span class="nc" id="L584">            }</span>
+<span class="nc" id="L585">        }</span>
+
+        // Same caveat as above applies here
+<span class="nc bnc" id="L588" title="All 2 branches missed.">        for (Variable v3: outState.unboxedVars.keySet()) {</span>
+<span class="nc" id="L589">            succUnboxedVars.remove(v3);</span>
+<span class="nc" id="L590">        }</span>
+
+        // Only worry about vars live on exit from the BB
+<span class="nc" id="L593">        LiveVariablesProblem lvp = (LiveVariablesProblem)problem.getScope().getDataFlowSolution(DataFlowConstants.LVP_NAME);</span>
+<span class="nc" id="L594">        BitSet liveVarsSet = lvp.getFlowGraphNode(basicBlock).getLiveInBitSet();</span>
+
+<span class="nc" id="L596">        List&lt;Instr&gt; newInstrs = new ArrayList&lt;Instr&gt;();</span>
+<span class="nc" id="L597">        boolean unboxedLiveVars = false;</span>
+
+<span class="nc" id="L599">        initSolution();</span>
+
+<span class="nc bnc" id="L601" title="All 2 branches missed.">        for (Instr i : basicBlock.getInstrs()) {</span>
+<span class="nc" id="L602">            Variable dst = null;</span>
+<span class="nc" id="L603">            boolean dirtied = false;</span>
+<span class="nc" id="L604">            boolean hitDFBarrier = false;</span>
+            // System.out.println(&quot;ORIG: &quot; + i);
+<span class="nc bnc" id="L606" title="All 2 branches missed.">            if (i.getOperation().transfersControl()) {</span>
+                // Add unboxing instrs.
+<span class="nc bnc" id="L608" title="All 2 branches missed.">                for (Variable v: succUnboxedVars.keySet()) {</span>
+<span class="nc bnc" id="L609" title="All 2 branches missed.">                    if (liveVarsSet.get(lvp.getDFVar(v))) {</span>
+<span class="nc" id="L610">                        unboxVar(tmpState, succUnboxedVars.get(v), unboxMap, v, newInstrs);</span>
+                    }
+<span class="nc" id="L612">                }</span>
+<span class="nc" id="L613">                unboxedLiveVars = true;</span>
+            } else {
+<span class="nc bnc" id="L615" title="All 2 branches missed.">                if (i instanceof ResultInstr) {</span>
+<span class="nc" id="L616">                    dst = ((ResultInstr) i).getResult();</span>
+                }
+
+<span class="nc bnc" id="L619" title="All 2 branches missed.">                if (i instanceof CopyInstr) {</span>
+                    // Copies are easy
+<span class="nc" id="L621">                    Operand src = ((CopyInstr)i).getSource();</span>
+<span class="nc" id="L622">                    Class srcType = getOperandType(tmpState, src);</span>
+<span class="nc" id="L623">                    setOperandType(tmpState, dst, srcType);</span>
+
+                    // If we have an unboxed type for 'src', we can leave this unboxed.
+                    //
+                    // FIXME: However, if 'src' is a constant, this could unnecessarily
+                    // leave 'src' unboxed and lead to a boxing instruction further down
+                    // at the use site of 'dst'. This indicates that leaving this unboxed
+                    // should ideally be done 'on-demand'. This indicates that this could
+                    // be a backward-flow algo OR that this algo should be run on a
+                    // dataflow graph / SSA graph.
+<span class="nc bnc" id="L633" title="All 4 branches missed.">                    if (srcType == Float.class || srcType == Fixnum.class) {</span>
+<span class="nc bnc" id="L634" title="All 2 branches missed.">                        Operand unboxedSrc = src instanceof Variable ? getUnboxedVar(srcType, unboxMap, (Variable)src) : src;</span>
+<span class="nc" id="L635">                        TemporaryLocalVariable unboxedDst = getUnboxedVar(srcType, unboxMap, dst);</span>
+<span class="nc" id="L636">                        newInstrs.add(new CopyInstr(Operation.COPY, unboxedDst, unboxedSrc));</span>
+<span class="nc" id="L637">                        tmpState.unboxedVars.put(dst, srcType);</span>
+<span class="nc" id="L638">                        dirtied = true;</span>
+                    }
+<span class="nc bnc" id="L640" title="All 2 branches missed.">                } else if (i instanceof ClosureAcceptingInstr) {</span>
+<span class="nc" id="L641">                    Operand o = ((ClosureAcceptingInstr)i).getClosureArg();</span>
+<span class="nc bnc" id="L642" title="All 4 branches missed.">                    if (i instanceof CallBase &amp;&amp; o == null) {</span>
+<span class="nc" id="L643">                        CallBase c = (CallBase)i;</span>
+<span class="nc" id="L644">                        String m = c.getName();</span>
+<span class="nc" id="L645">                        Operand  r = c.getReceiver();</span>
+<span class="nc" id="L646">                        Operand[] args = c.getCallArgs();</span>
+<span class="nc bnc" id="L647" title="All 6 branches missed.">                        if (dst != null &amp;&amp; args.length == 1 &amp;&amp; resemblesALUOp(m)) {</span>
+<span class="nc" id="L648">                            Operand a = args[0];</span>
+<span class="nc" id="L649">                            Class receiverType = getOperandType(tmpState, r);</span>
+<span class="nc" id="L650">                            Class argType = getOperandType(tmpState, a);</span>
+                            // Optimistically assume that call is an ALU op
+                            Operation unboxedOp;
+<span class="nc bnc" id="L653" title="All 6 branches missed.">                            if ((receiverType == Float.class || (receiverType == Fixnum.class &amp;&amp; argType == Float.class)) &amp;&amp;</span>
+<span class="nc bnc" id="L654" title="All 2 branches missed.">                                (unboxedOp = getUnboxedOp(Float.class, m)) != null)</span>
+                            {
+<span class="nc" id="L656">                                dirtied = true;</span>
+
+<span class="nc" id="L658">                                Class dstType = getUnboxedResultType(Float.class, m);</span>
+<span class="nc" id="L659">                                setOperandType(tmpState, dst, dstType);</span>
+<span class="nc" id="L660">                                tmpState.unboxedVars.put(dst, dstType);</span>
+
+<span class="nc" id="L662">                                TemporaryLocalVariable unboxedDst = getUnboxedVar(dstType, unboxMap, dst);</span>
+<span class="nc" id="L663">                                r = unboxOperand(tmpState, Float.class, unboxMap, r, newInstrs);</span>
+<span class="nc" id="L664">                                a = unboxOperand(tmpState, Float.class, unboxMap, a, newInstrs);</span>
+<span class="nc" id="L665">                                newInstrs.add(new AluInstr(unboxedOp, unboxedDst, r, a));</span>
+<span class="nc bnc" id="L666" title="All 6 branches missed.">                            } else if ((receiverType == Float.class || (receiverType == Fixnum.class &amp;&amp; argType == Fixnum.class)) &amp;&amp;</span>
+<span class="nc bnc" id="L667" title="All 2 branches missed.">                                    (unboxedOp = getUnboxedOp(Fixnum.class, m)) != null)</span>
+                            {
+<span class="nc" id="L669">                                dirtied = true;</span>
+
+<span class="nc" id="L671">                                Class dstType = getUnboxedResultType(Fixnum.class, m);</span>
+<span class="nc" id="L672">                                setOperandType(tmpState, dst, dstType);</span>
+<span class="nc" id="L673">                                tmpState.unboxedVars.put(dst, dstType);</span>
+
+<span class="nc" id="L675">                                TemporaryLocalVariable unboxedDst = getUnboxedVar(dstType, unboxMap, dst);</span>
+<span class="nc" id="L676">                                r = unboxOperand(tmpState, Fixnum.class, unboxMap, r, newInstrs);</span>
+<span class="nc" id="L677">                                a = unboxOperand(tmpState, Fixnum.class, unboxMap, a, newInstrs);</span>
+<span class="nc" id="L678">                                newInstrs.add(new AluInstr(unboxedOp, unboxedDst, r, a));</span>
+<span class="nc" id="L679">                            } else {</span>
+<span class="nc bnc" id="L680" title="All 4 branches missed.">                                if (receiverType == Fixnum.class &amp;&amp; argType == Fixnum.class) {</span>
+<span class="nc" id="L681">                                    setOperandType(tmpState, dst, Fixnum.class);</span>
+                                } else {
+<span class="nc" id="L683">                                    setOperandType(tmpState, dst, Object.class);</span>
+                                }
+
+<span class="nc bnc" id="L686" title="All 2 branches missed.">                                if (c.targetRequiresCallersBinding()) {</span>
+<span class="nc" id="L687">                                    hitDFBarrier = true;</span>
+                                }
+                            }
+<span class="nc" id="L690">                        } else {</span>
+<span class="nc" id="L691">                            setOperandType(tmpState, dst, Object.class);</span>
+                        }
+<span class="nc" id="L693">                    } else {</span>
+<span class="nc bnc" id="L694" title="All 2 branches missed.">                        if (o instanceof WrappedIRClosure) {</span>
+                            // Since binding can escape in arbitrary ways in the general case,
+                            // assume the worst for now. If we are guaranteed that the closure binding
+                            // is not used outside the closure itself, we can avoid worst-case behavior.
+<span class="nc" id="L698">                            hitDFBarrier = true;</span>
+
+                            // Fetch the nested unboxing-analysis problem, creating one if necessary
+<span class="nc" id="L701">                            IRClosure cl = ((WrappedIRClosure)o).getClosure();</span>
+<span class="nc" id="L702">                            UnboxableOpsAnalysisProblem subProblem = (UnboxableOpsAnalysisProblem)cl.getDataFlowSolution(DataFlowConstants.UNBOXING);</span>
+<span class="nc" id="L703">                            UnboxableOpsAnalysisNode exitNode  = subProblem.getExitNode();</span>
+
+                            // Compute solution
+<span class="nc" id="L706">                            subProblem.unbox();</span>
+
+                            // Update types to MEET(new-state-on-exit, current-state)
+<span class="nc" id="L709">                            tmpState.computeMEETForTypes(exitNode.outState, true);</span>
+
+                            // As for unboxed var state, since binding can escape in
+                            // arbitrary ways in the general case, assume the worst for now.
+                            // If we are guaranteed that the closure binding is not used
+                            // outside the closure itself, we can avoid worst-case behavior
+                            // and only clear vars that are modified in the closure.
+<span class="nc" id="L716">                            hitDFBarrier = true;</span>
+<span class="nc" id="L717">                        } else {</span>
+                            // Cannot analyze
+<span class="nc" id="L719">                            hitDFBarrier = true;</span>
+                        }
+                    }
+<span class="nc" id="L722">                } else {</span>
+                    // We dont know how to optimize this instruction.
+                    // So, we assume we dont know type of the result.
+                    // TOP/class --&gt; BOTTOM
+<span class="nc" id="L726">                    setOperandType(tmpState, dst, Object.class);</span>
+                }
+            }
+
+<span class="nc bnc" id="L730" title="All 2 branches missed.">            if (dirtied) {</span>
+<span class="nc" id="L731">                tmpState.unboxedDirtyVars.add(dst);</span>
+            } else {
+                // Since the instruction didn't run in unboxed form,
+                // dirty unboxed vars will have to get boxed here.
+<span class="nc" id="L735">                boxRequiredVars(i, tmpState, unboxMap, dst, hasExceptionsRescued(), hitDFBarrier, newInstrs);</span>
+            }
+<span class="nc" id="L737">        }</span>
+
+        // Add unboxing instrs.
+<span class="nc bnc" id="L740" title="All 2 branches missed.">        if (!unboxedLiveVars) {</span>
+<span class="nc bnc" id="L741" title="All 2 branches missed.">            for (Variable v: succUnboxedVars.keySet()) {</span>
+<span class="nc bnc" id="L742" title="All 2 branches missed.">                if (liveVarsSet.get(lvp.getDFVar(v))) {</span>
+<span class="nc" id="L743">                    unboxVar(tmpState, succUnboxedVars.get(v), unboxMap, v, newInstrs);</span>
+                }
+<span class="nc" id="L745">            }</span>
+        }
+
+/*
+        System.out.println(&quot;------&quot;);
+        for (Instr i : newInstrs) {
+            System.out.println(&quot;NEW: &quot; + i);
+        }
+*/
+
+<span class="nc" id="L755">        basicBlock.replaceInstrs(newInstrs);</span>
+<span class="nc" id="L756">    }</span>
+
+    private boolean resemblesALUOp(String name) {
+<span class="nc bnc" id="L759" title="All 8 branches missed.">        return name.equals(&quot;+&quot;) || name.equals(&quot;-&quot;) || name.equals(&quot;*&quot;) || name.equals(&quot;/&quot;) ||</span>
+<span class="nc bnc" id="L760" title="All 8 branches missed.">                name.equals(&quot;|&quot;) || name.equals(&quot;&amp;&quot;) || name.equals(&quot;&gt;&gt;&quot;) || name.equals(&quot;&lt;&lt;&quot;) ||</span>
+<span class="nc bnc" id="L761" title="All 8 branches missed.">                name.equals(&quot;&gt;&quot;) || name.equals(&quot;&lt;&quot;) || name.equals(&quot;==&quot;) || name.equals(&quot;!=&quot;);</span>
+    }
+
+    private Class getUnboxedResultType(Class operandType, String name) {
+<span class="nc bnc" id="L765" title="All 2 branches missed.">        if (name.length() == 1) {</span>
+<span class="nc bnc" id="L766" title="All 3 branches missed.">            switch (name.charAt(0)) {</span>
+                case '+' :
+                case '-' :
+                case '*' :
+<span class="nc bnc" id="L770" title="All 4 branches missed.">                case '/' : return operandType == Float.class ? Float.class : operandType == Fixnum.class ? Fixnum.class : null;</span>
+                case '&gt;' :
+<span class="nc bnc" id="L772" title="All 4 branches missed.">                case '&lt;' : return operandType == Float.class || operandType == Fixnum.class ? UnboxedBoolean.class : null;</span>
+            }
+        }
+<span class="nc" id="L775">        return null;</span>
+    }
+
+    public Operation getUnboxedOp(Class unboxedType, String name) {
+<span class="nc bnc" id="L779" title="All 2 branches missed.">        if (unboxedType == Float.class) {</span>
+<span class="nc bnc" id="L780" title="All 2 branches missed.">            if (name.length() == 1) {</span>
+<span class="nc bnc" id="L781" title="All 7 branches missed.">                switch (name.charAt(0)) {</span>
+<span class="nc" id="L782">                    case '+' : return Operation.FADD;</span>
+<span class="nc" id="L783">                    case '-' : return Operation.FSUB;</span>
+<span class="nc" id="L784">                    case '*' : return Operation.FMUL;</span>
+<span class="nc" id="L785">                    case '/' : return Operation.FDIV;</span>
+<span class="nc" id="L786">                    case '&gt;' : return Operation.FGT;</span>
+<span class="nc" id="L787">                    case '&lt;' : return Operation.FLT;</span>
+                }
+<span class="nc bnc" id="L789" title="All 2 branches missed.">            } else if (name.length() == 2) {</span>
+<span class="nc bnc" id="L790" title="All 2 branches missed.">                if (name.equals(&quot;==&quot;)) return Operation.FEQ;</span>
+<span class="nc bnc" id="L791" title="All 2 branches missed.">            } else if (name.equals(&quot;===&quot;)) {</span>
+<span class="nc" id="L792">                return Operation.FEQ;</span>
+            }
+<span class="nc bnc" id="L794" title="All 2 branches missed.">        } else if (unboxedType == Fixnum.class) {</span>
+<span class="nc bnc" id="L795" title="All 2 branches missed.">            if (name.length() == 1) {</span>
+<span class="nc bnc" id="L796" title="All 10 branches missed.">                switch (name.charAt(0)) {</span>
+<span class="nc" id="L797">                    case '+' : return Operation.IADD;</span>
+<span class="nc" id="L798">                    case '-' : return Operation.ISUB;</span>
+<span class="nc" id="L799">                    case '*' : return Operation.IMUL;</span>
+<span class="nc" id="L800">                    case '/' : return Operation.IDIV;</span>
+<span class="nc" id="L801">                    case '&gt;' : return Operation.IGT;</span>
+<span class="nc" id="L802">                    case '&lt;' : return Operation.ILT;</span>
+<span class="nc" id="L803">                    case '|' : return Operation.IOR;</span>
+<span class="nc" id="L804">                    case '&amp;' : return Operation.IAND;</span>
+<span class="nc" id="L805">                    case '^' : return Operation.IXOR;</span>
+                }
+<span class="nc bnc" id="L807" title="All 2 branches missed.">            } else if (name.length() == 2) {</span>
+<span class="nc bnc" id="L808" title="All 2 branches missed.">                if (name.equals(&quot;&gt;&gt;&quot;)) return Operation.ISHR;</span>
+<span class="nc bnc" id="L809" title="All 2 branches missed.">                if (name.equals(&quot;&lt;&lt;&quot;)) return Operation.ISHL;</span>
+<span class="nc bnc" id="L810" title="All 2 branches missed.">                if (name.equals(&quot;==&quot;)) return Operation.IEQ;</span>
+<span class="nc bnc" id="L811" title="All 2 branches missed.">            } else if (name.equals(&quot;===&quot;)) {</span>
+<span class="nc" id="L812">                return Operation.IEQ;</span>
+            }
+        }
+<span class="nc" id="L815">        return null;</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="nc" id="L820">        return &quot;&quot;;</span>
+    }
+
+    UnboxState inState;
+    UnboxState outState;
+    UnboxState tmpState;
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

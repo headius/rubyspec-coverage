@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SplatCastNode.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.nodes.cast</a> &gt; <span class="el_source">SplatCastNode.java</span></div><h1>SplatCastNode.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2013, 2014 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.nodes.cast;
+
+import com.oracle.truffle.api.CompilerAsserts;
+import com.oracle.truffle.api.dsl.NodeChild;
+import com.oracle.truffle.api.dsl.Specialization;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.source.SourceSection;
+import org.jruby.truffle.nodes.RubyNode;
+import org.jruby.truffle.nodes.core.ArrayDupNode;
+import org.jruby.truffle.nodes.core.ArrayDupNodeFactory;
+import org.jruby.truffle.nodes.dispatch.Dispatch;
+import org.jruby.truffle.nodes.dispatch.DispatchHeadNode;
+import org.jruby.truffle.runtime.RubyContext;
+import org.jruby.truffle.runtime.control.RaiseException;
+import org.jruby.truffle.runtime.core.RubyArray;
+import org.jruby.truffle.runtime.core.RubyNilClass;
+
+/**
+ * Splat as used to cast a value to an array if it isn't already, as in {@code *value}.
+ */
+@NodeChild(&quot;child&quot;)
+public abstract class SplatCastNode extends RubyNode {
+
+<span class="nc" id="L33">    public static enum NilBehavior {</span>
+<span class="nc" id="L34">        EMPTY_ARRAY,</span>
+<span class="nc" id="L35">        ARRAY_WITH_NIL,</span>
+<span class="nc" id="L36">        NIL</span>
+    }
+
+    private final NilBehavior nilBehavior;
+    private final boolean useToAry;
+
+    @Child protected ArrayDupNode dup;
+    @Child protected DispatchHeadNode respondToToA;
+    @Child protected BooleanCastNode respondToCast;
+    @Child protected DispatchHeadNode toA;
+
+    public SplatCastNode(RubyContext context, SourceSection sourceSection, NilBehavior nilBehavior, boolean useToAry) {
+<span class="nc" id="L48">        super(context, sourceSection);</span>
+<span class="nc" id="L49">        this.nilBehavior = nilBehavior;</span>
+        // Calling private #to_a is allowed for the *splat operator.
+<span class="nc" id="L51">        dup = ArrayDupNodeFactory.create(context, sourceSection, null);</span>
+<span class="nc" id="L52">        respondToToA = new DispatchHeadNode(context, true, Dispatch.MissingBehavior.RETURN_MISSING);</span>
+<span class="nc" id="L53">        respondToCast = BooleanCastNodeFactory.create(context, sourceSection, null);</span>
+<span class="nc" id="L54">        toA = new DispatchHeadNode(context, true, Dispatch.MissingBehavior.RETURN_MISSING);</span>
+<span class="nc" id="L55">        this.useToAry = useToAry;</span>
+<span class="nc" id="L56">    }</span>
+
+    public SplatCastNode(SplatCastNode prev) {
+<span class="nc" id="L59">        super(prev);</span>
+<span class="nc" id="L60">        dup = prev.dup;</span>
+<span class="nc" id="L61">        nilBehavior = prev.nilBehavior;</span>
+<span class="nc" id="L62">        respondToToA = prev.respondToToA;</span>
+<span class="nc" id="L63">        respondToCast = prev.respondToCast;</span>
+<span class="nc" id="L64">        toA = prev.toA;</span>
+<span class="nc" id="L65">        useToAry = prev.useToAry;</span>
+<span class="nc" id="L66">    }</span>
+
+    protected abstract RubyNode getChild();
+
+    @Specialization
+    public RubyArray splat(RubyNilClass nil) {
+<span class="nc bnc" id="L72" title="All 3 branches missed.">        switch (nilBehavior) {</span>
+            case EMPTY_ARRAY:
+<span class="nc" id="L74">                return new RubyArray(getContext().getCoreLibrary().getArrayClass());</span>
+
+            case ARRAY_WITH_NIL:
+<span class="nc" id="L77">                return RubyArray.fromObject(getContext().getCoreLibrary().getArrayClass(), getContext().getCoreLibrary().getNilObject());</span>
+
+            default: {
+<span class="nc" id="L80">                CompilerAsserts.neverPartOfCompilation();</span>
+<span class="nc" id="L81">                throw new UnsupportedOperationException();</span>
+            }
+        }
+    }
+
+    @Specialization
+    public RubyArray splat(VirtualFrame frame, RubyArray array) {
+        // TODO(cs): is it necessary to dup here in all cases?
+        // It is needed at least for [*ary] (parsed as just a SplatNode) and b = *ary.
+<span class="nc" id="L90">        return dup.executeDup(frame, array);</span>
+    }
+
+    @Specialization(guards = {&quot;!isRubyNilClass&quot;, &quot;!isRubyArray&quot;})
+    public RubyArray splat(VirtualFrame frame, Object object) {
+<span class="nc" id="L95">        notDesignedForCompilation();</span>
+
+        final String method;
+
+<span class="nc bnc" id="L99" title="All 2 branches missed.">        if (useToAry) {</span>
+<span class="nc" id="L100">            method = &quot;to_ary&quot;;</span>
+        } else {
+<span class="nc" id="L102">            method = &quot;to_a&quot;;</span>
+        }
+
+        // MRI tries to call dynamic respond_to? here.
+<span class="nc" id="L106">        Object respondToResult = respondToToA.call(frame, object, &quot;respond_to?&quot;, null, getContext().makeString(method), true);</span>
+<span class="nc bnc" id="L107" title="All 4 branches missed.">        if (respondToResult != Dispatch.MISSING &amp;&amp; respondToCast.executeBoolean(frame, respondToResult)) {</span>
+<span class="nc" id="L108">            final Object array = toA.call(frame, object, method, null);</span>
+
+<span class="nc bnc" id="L110" title="All 2 branches missed.">            if (array instanceof RubyArray) {</span>
+<span class="nc" id="L111">                return (RubyArray) array;</span>
+<span class="nc bnc" id="L112" title="All 4 branches missed.">            } else if (array instanceof RubyNilClass || array == Dispatch.MISSING) {</span>
+<span class="nc" id="L113">                return RubyArray.fromObject(getContext().getCoreLibrary().getArrayClass(), object);</span>
+            } else {
+<span class="nc" id="L115">                throw new RaiseException(getContext().getCoreLibrary().typeErrorCantConvertTo(</span>
+<span class="nc" id="L116">                        getContext().getCoreLibrary().getLogicalClass(object).getName(),</span>
+                        &quot;Array&quot;,
+                        method,
+<span class="nc" id="L119">                        getContext().getCoreLibrary().getLogicalClass(array).getName(),</span>
+                        this)
+                );
+            }
+        }
+
+<span class="nc" id="L125">        return RubyArray.fromObject(getContext().getCoreLibrary().getArrayClass(), object);</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

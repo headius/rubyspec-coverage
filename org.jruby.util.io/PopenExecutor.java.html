@@ -1,0 +1,2095 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PopenExecutor.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util.io</a> &gt; <span class="el_source">PopenExecutor.java</span></div><h1>PopenExecutor.java</h1><pre class="source lang-java linenums">package org.jruby.util.io;
+
+import jnr.constants.platform.Errno;
+import jnr.constants.platform.OpenFlags;
+import jnr.posix.SpawnAttribute;
+import jnr.posix.SpawnFileAction;
+import org.jcodings.transcode.EConvFlags;
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyBasicObject;
+import org.jruby.RubyClass;
+import org.jruby.RubyFile;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyHash;
+import org.jruby.RubyIO;
+import org.jruby.RubyNumeric;
+import org.jruby.RubyProcess;
+import org.jruby.RubyString;
+import org.jruby.RubySymbol;
+import org.jruby.platform.Platform;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
+import org.jruby.util.SafePropertyAccessor;
+import org.jruby.util.ShellLauncher;
+import org.jruby.util.StringSupport;
+import org.jruby.util.TypeConverter;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.channels.Channel;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Port of MRI's popen+exec logic.
+ */
+<span class="fc" id="L45">public class PopenExecutor {</span>
+    // MRI: check_pipe_command
+    public static IRubyObject checkPipeCommand(ThreadContext context, IRubyObject filenameOrCommand) {
+<span class="fc" id="L48">        RubyString filenameStr = filenameOrCommand.convertToString();</span>
+<span class="fc" id="L49">        ByteList filenameByteList = filenameStr.getByteList();</span>
+<span class="fc" id="L50">        int[] chlen = {0};</span>
+
+<span class="fc bfc" id="L52" title="All 2 branches covered.">        if (EncodingUtils.encAscget(</span>
+<span class="fc" id="L53">                filenameByteList.getUnsafeBytes(),</span>
+<span class="fc" id="L54">                filenameByteList.getBegin(),</span>
+<span class="fc" id="L55">                filenameByteList.getBegin() + filenameByteList.getRealSize(),</span>
+                chlen,
+<span class="fc" id="L57">                filenameByteList.getEncoding()) == '|') {</span>
+<span class="fc" id="L58">            return filenameStr.makeShared19(context.runtime, chlen[0], filenameByteList.length() - 1).infectBy(filenameOrCommand);</span>
+        }
+<span class="fc" id="L60">        return context.nil;</span>
+    }
+
+    // MRI: rb_f_spawn
+    public static RubyFixnum spawn(ThreadContext context, IRubyObject[] argv) {
+<span class="fc" id="L65">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L66">        long pid = 0;</span>
+<span class="fc" id="L67">        String[] errmsg = { null };</span>
+        ExecArg eargp;
+        IRubyObject fail_str;
+
+<span class="fc" id="L71">        eargp = execargNew(context, argv, true);</span>
+<span class="fc" id="L72">        execargFixup(context, runtime, eargp);</span>
+<span class="pc bpc" id="L73" title="1 of 2 branches missed.">        fail_str = eargp.use_shell ? eargp.command_name : eargp.command_name;</span>
+
+<span class="fc" id="L75">        PopenExecutor executor = new PopenExecutor();</span>
+<span class="fc" id="L76">        pid = executor.spawnProcess(context, runtime, eargp, errmsg);</span>
+
+<span class="pc bpc" id="L78" title="1 of 2 branches missed.">        if (pid == -1) {</span>
+<span class="pc bpc" id="L79" title="1 of 2 branches missed.">            if (errmsg[0] == null) {</span>
+<span class="fc" id="L80">                throw runtime.newErrnoFromErrno(executor.errno, fail_str.toString());</span>
+            }
+<span class="nc" id="L82">            throw runtime.newErrnoFromErrno(executor.errno, errmsg[0]);</span>
+        }
+<span class="nc" id="L84">        return runtime.newFixnum(pid);</span>
+    }
+
+    // MRI: rb_spawn_internal
+    public long spawnInternal(ThreadContext context, IRubyObject[] argv, String[] errmsg) {
+        ExecArg eargp;
+        long ret;
+
+<span class="fc" id="L92">        eargp = execargNew(context, argv, true);</span>
+<span class="fc" id="L93">        execargFixup(context, context.runtime, eargp);</span>
+<span class="fc" id="L94">        ret = spawnProcess(context, context.runtime, eargp, errmsg);</span>
+<span class="fc" id="L95">        return ret;</span>
+    }
+
+    // MRI: rb_spawn_process
+    long spawnProcess(ThreadContext context, Ruby runtime, ExecArg eargp, String[] errmsg) {
+        long pid;
+        RubyString prog;
+<span class="fc" id="L102">        ExecArg sarg = new ExecArg();</span>
+
+<span class="fc bfc" id="L104" title="All 2 branches covered.">        prog = eargp.use_shell ? eargp.command_name : eargp.command_name;</span>
+
+<span class="pc bpc" id="L106" title="1 of 2 branches missed.">        if (eargp.chdir_given()) {</span>
+            // we can'd do chdir with posix_spawn, so we should be set to use_shell and now
+            // just need to add chdir to the cmd
+<span class="nc" id="L109">            prog = (RubyString)prog.strDup(runtime).prepend(context, RubyString.newString(runtime, &quot;cd '&quot; + eargp.chdir_dir + &quot;'; &quot;));</span>
+<span class="nc" id="L110">            eargp.chdir_dir = null;</span>
+<span class="nc" id="L111">            eargp.chdir_given_clear();</span>
+        }
+
+<span class="pc bpc" id="L114" title="1 of 2 branches missed.">        if (execargRunOptions(context, runtime, eargp, sarg, errmsg) &lt; 0) {</span>
+<span class="nc" id="L115">            return -1;</span>
+        }
+
+<span class="pc bpc" id="L118" title="1 of 4 branches missed.">        if (prog != null &amp;&amp; !eargp.use_shell) {</span>
+<span class="fc" id="L119">            String[] argv = eargp.argv_str.argv;</span>
+<span class="fc bfc" id="L120" title="All 2 branches covered.">            if (argv.length &gt; 0) {</span>
+<span class="fc" id="L121">                argv[0] = prog.toString();</span>
+            }
+        }
+<span class="fc bfc" id="L124" title="All 2 branches covered.">        if (eargp.use_shell) {</span>
+<span class="fc" id="L125">            pid = procSpawnSh(runtime, prog.toString(), eargp);</span>
+        }
+        else {
+<span class="fc" id="L128">            String[] argv = eargp.argv_str.argv;</span>
+<span class="fc" id="L129">            pid = procSpawnCmd(runtime, argv, prog.toString(), eargp);</span>
+        }
+<span class="fc bfc" id="L131" title="All 2 branches covered.">        if (pid == -1) {</span>
+<span class="fc" id="L132">            context.setLastExitStatus(new RubyProcess.RubyStatus(runtime, runtime.getProcStatus(), 0x7f &lt;&lt; 8, 0));</span>
+<span class="fc" id="L133">            errno = Errno.valueOf(runtime.getPosix().errno());</span>
+        }
+
+<span class="fc" id="L136">        execargRunOptions(context, runtime, sarg, null, errmsg);</span>
+
+<span class="fc" id="L138">        return pid;</span>
+    }
+
+    // TODO: win32
+//    #if defined(_WIN32)
+//    #define proc_spawn_cmd_internal(argv, prog) rb_w32_uaspawn(P_NOWAIT, (prog), (argv))
+//            #else
+    long procSpawnCmdInternal(Ruby runtime, String[] argv, String prog, ExecArg eargp) {
+        long status;
+
+<span class="pc bpc" id="L148" title="1 of 2 branches missed.">        if (prog == null)</span>
+<span class="nc" id="L149">            prog = argv[0];</span>
+<span class="fc" id="L150">        prog = dlnFindExeR(runtime, prog, null);</span>
+<span class="fc bfc" id="L151" title="All 2 branches covered.">        if (prog == null) {</span>
+<span class="fc" id="L152">            errno = Errno.ENOENT;</span>
+<span class="fc" id="L153">            return -1;</span>
+        }
+
+//        System.out.println(Arrays.asList(prog,
+//                eargp.fileActions,
+//                eargp.attributes,
+//                Arrays.asList(argv),
+//                eargp.envp_str == null ? Collections.EMPTY_LIST : Arrays.asList(eargp.envp_str)));
+        // MRI does not do this check, but posix_spawn does not reliably ENOENT for bad filenames like ''
+<span class="pc bpc" id="L162" title="2 of 4 branches missed.">        if (prog == null || prog.length() == 0) {</span>
+<span class="nc" id="L163">            errno = Errno.ENOENT;</span>
+<span class="nc" id="L164">            return -1;</span>
+        }
+<span class="fc" id="L166">        status = runtime.getPosix().posix_spawnp(</span>
+                prog,
+                eargp.fileActions,
+                eargp.attributes,
+<span class="pc bpc" id="L170" title="1 of 2 branches missed.">                Arrays.asList(argv),</span>
+<span class="fc" id="L171">                eargp.envp_str == null ? Collections.EMPTY_LIST : Arrays.asList(eargp.envp_str));</span>
+<span class="pc bpc" id="L172" title="1 of 2 branches missed.">        if (status == -1) {</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">            if (runtime.getPosix().errno() == Errno.ENOEXEC.intValue()) {</span>
+<span class="nc" id="L174">                String[] newArgv = new String[argv.length + 1];</span>
+<span class="nc" id="L175">                newArgv[1] = prog;</span>
+<span class="nc" id="L176">                newArgv[0] = &quot;sh&quot;;</span>
+<span class="nc" id="L177">                status = runtime.getPosix().posix_spawnp(</span>
+                        &quot;/bin/sh&quot;,
+                        eargp.fileActions,
+                        eargp.attributes,
+<span class="nc bnc" id="L181" title="All 2 branches missed.">                        Arrays.asList(argv),</span>
+<span class="nc" id="L182">                        eargp.envp_str == null ? Collections.EMPTY_LIST : Arrays.asList(eargp.envp_str));</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">                if (status == -1) errno = Errno.ENOEXEC;</span>
+<span class="nc" id="L184">            } else {</span>
+<span class="nc" id="L185">                errno = Errno.valueOf(runtime.getPosix().errno());</span>
+            }
+        }
+<span class="fc" id="L188">        return status;</span>
+    }
+
+
+    long procSpawnCmd(Ruby runtime, String[] argv, String prog, ExecArg eargp) {
+<span class="fc" id="L193">        long pid = -1;</span>
+
+<span class="pc bpc" id="L195" title="1 of 4 branches missed.">        if (argv.length &gt; 0 &amp;&amp; argv[0] != null) {</span>
+            // TODO: win32
+//            #if defined(_WIN32)
+//            DWORD flags = 0;
+//            if (eargp-&gt;new_pgroup_given &amp;&amp; eargp-&gt;new_pgroup_flag) {
+//                flags = CREATE_NEW_PROCESS_GROUP;
+//            }
+//            pid = rb_w32_uaspawn_flags(P_NOWAIT, prog ? RSTRING_PTR(prog) : 0, argv, flags);
+//            #else
+<span class="fc" id="L204">            pid = procSpawnCmdInternal(runtime, argv, prog, eargp);</span>
+        }
+<span class="fc" id="L206">        return pid;</span>
+    }
+
+    // TODO: win32 version
+//    #if defined(_WIN32)
+//    #define proc_spawn_sh(str) rb_w32_uspawn(P_NOWAIT, (str), 0)
+//            #else
+    long procSpawnSh(Ruby runtime, String str, ExecArg eargp) {
+        long status;
+
+<span class="fc" id="L216">        String shell = dlnFindExeR(runtime, &quot;sh&quot;, null);</span>
+
+//        System.out.println(&quot;before: &quot; + shell + &quot;, fa=&quot; + eargp.fileActions + &quot;, a=&quot; + eargp.attributes + &quot;, argv=&quot; + Arrays.asList(&quot;sh&quot;, &quot;-c&quot;, str));
+<span class="pc bpc" id="L219" title="1 of 2 branches missed.">        status = runtime.getPosix().posix_spawnp(</span>
+                shell != null ? shell : &quot;/bin/sh&quot;,
+                eargp.fileActions,
+                eargp.attributes,
+<span class="pc bpc" id="L223" title="1 of 2 branches missed.">                Arrays.asList(&quot;sh&quot;, &quot;-c&quot;, str),</span>
+<span class="fc" id="L224">                eargp.envp_str == null ? Collections.EMPTY_LIST : Arrays.asList(eargp.envp_str));</span>
+
+<span class="pc bpc" id="L226" title="1 of 2 branches missed.">        if (status == -1) errno = Errno.valueOf(runtime.getPosix().errno());</span>
+
+<span class="fc" id="L228">        return status;</span>
+    }
+
+    // pipe_open_s
+    public static IRubyObject pipeOpen(ThreadContext context, IRubyObject prog, String modestr, int fmode, IOEncodable convconfig) {
+<span class="fc" id="L233">        IRubyObject[] argv = {prog};</span>
+<span class="fc" id="L234">        ExecArg execArg = null;</span>
+
+<span class="pc bpc" id="L236" title="1 of 2 branches missed.">        if (!isPopenFork(context.runtime, (RubyString)prog))</span>
+<span class="fc" id="L237">            execArg = execargNew(context, argv, true);</span>
+<span class="fc" id="L238">        return new PopenExecutor().pipeOpen(context, execArg, modestr, fmode, convconfig);</span>
+    }
+
+    // rb_io_s_popen
+    public static IRubyObject popen(ThreadContext context, IRubyObject[] argv, RubyClass klass, Block block) {
+<span class="fc" id="L243">        Ruby runtime = context.runtime;</span>
+        String modestr;
+<span class="fc" id="L245">        IRubyObject pname, port, tmp, opt = context.nil, env = context.nil;</span>
+<span class="fc" id="L246">        Object pmode = EncodingUtils.vmodeVperm(null, null);</span>
+        ExecArg eargp;
+<span class="fc" id="L248">        int[] oflags_p = {0}, fmode_p = {0};</span>
+<span class="fc" id="L249">        IOEncodable.ConvConfig convconfig = new IOEncodable.ConvConfig();</span>
+<span class="fc" id="L250">        int argc = argv.length;</span>
+
+<span class="fc bfc" id="L252" title="All 4 branches covered.">        if (argc &gt; 1 &amp;&amp; !(opt = TypeConverter.checkHashType(runtime, argv[argc - 1])).isNil()) --argc;</span>
+<span class="fc bfc" id="L253" title="All 4 branches covered.">        if (argc &gt; 1 &amp;&amp; !(env = TypeConverter.checkHashType(runtime, argv[0])).isNil()) {</span>
+<span class="fc" id="L254">            --argc;</span>
+<span class="fc" id="L255">            argv = Arrays.copyOfRange(argv, 1, argc + 1);</span>
+        }
+<span class="pc bpc" id="L257" title="1 of 3 branches missed.">        switch (argc) {</span>
+            case 2:
+<span class="fc" id="L259">                EncodingUtils.vmode(pmode, argv[1]);</span>
+            case 1:
+<span class="fc" id="L261">                pname = argv[0];</span>
+<span class="fc" id="L262">                break;</span>
+            default: {
+<span class="nc bnc" id="L264" title="All 2 branches missed.">                int ex = opt.isNil() ? 0 : 1;</span>
+<span class="nc" id="L265">                Arity.raiseArgumentError(runtime, argc + ex, 1 + ex, 2 + ex);</span>
+<span class="nc" id="L266">                return null; // not reached</span>
+            }
+        }
+
+<span class="fc" id="L270">        tmp = TypeConverter.checkArrayType(runtime, pname);</span>
+<span class="fc bfc" id="L271" title="All 2 branches covered.">        if (!tmp.isNil()) {</span>
+//            int len = ((RubyArray)tmp).size();
+//            #if SIZEOF_LONG &gt; SIZEOF_INT
+//            if (len &gt; INT_MAX) {
+//                throw runtime.newArgumentError(&quot;too many arguments&quot;);
+//            }
+//            #endif
+<span class="fc" id="L278">            tmp = ((RubyArray)tmp).aryDup();</span>
+            //            RBASIC_CLEAR_CLASS(tmp);
+<span class="fc" id="L280">            eargp = execargNew(context, ((RubyArray)tmp).toJavaArray(), false);</span>
+<span class="fc" id="L281">            ((RubyArray)tmp).clear();</span>
+        } else {
+<span class="fc" id="L283">            pname = pname.convertToString();</span>
+<span class="fc" id="L284">            eargp = null;</span>
+<span class="pc bpc" id="L285" title="1 of 2 branches missed.">            if (!isPopenFork(runtime, (RubyString)pname)) {</span>
+<span class="fc" id="L286">                IRubyObject[] pname_p = {pname};</span>
+<span class="fc" id="L287">                eargp = execargNew(context, pname_p, true);</span>
+<span class="fc" id="L288">                pname = pname_p[0];</span>
+            }
+        }
+<span class="pc bpc" id="L291" title="1 of 2 branches missed.">        if (eargp != null) {</span>
+<span class="fc bfc" id="L292" title="All 2 branches covered.">            if (!opt.isNil())</span>
+<span class="fc" id="L293">                opt = execargExtractOptions(context, runtime, eargp, (RubyHash)opt);</span>
+<span class="fc bfc" id="L294" title="All 2 branches covered.">            if (!env.isNil())</span>
+<span class="fc" id="L295">                execargSetenv(context, runtime, eargp, env);</span>
+        }
+<span class="fc" id="L297">        EncodingUtils.extractModeEncoding(context, convconfig, pmode, opt, oflags_p, fmode_p);</span>
+<span class="fc" id="L298">        modestr = OpenFile.ioOflagsModestr(runtime, oflags_p[0]);</span>
+
+<span class="fc" id="L300">        port = new PopenExecutor().pipeOpen(context, eargp, modestr, fmode_p[0], convconfig);</span>
+//        This is cleanup for failure to exec in the child.
+//        if (port.isNil()) {
+//            /* child */
+//            if (rb_block_given_p()) {
+//                rb_yield(Qnil);
+//                rb_io_flush(rb_stdout);
+//                rb_io_flush(rb_stderr);
+//                _exit(0);
+//            }
+//            return Qnil;
+//        }
+<span class="fc" id="L312">        ((RubyBasicObject)port).setMetaClass(klass);</span>
+<span class="fc" id="L313">        return RubyIO.ensureYieldClose(context, port, block);</span>
+    }
+
+    static void execargSetenv(ThreadContext context, Ruby runtime, ExecArg eargp, IRubyObject env) {
+<span class="pc bpc" id="L317" title="1 of 2 branches missed.">        eargp.env_modification = !env.isNil() ? checkExecEnv(context, runtime, (RubyHash)env) : null;</span>
+<span class="fc" id="L318">    }</span>
+
+    static RubyArray checkExecEnv(ThreadContext context, Ruby runtime, RubyHash hash) {
+        RubyArray env;
+
+<span class="fc" id="L323">        env = runtime.newArray();</span>
+<span class="fc bfc" id="L324" title="All 2 branches covered.">        for (Map.Entry&lt;IRubyObject, IRubyObject&gt; entry : (Set&lt;Map.Entry&lt;IRubyObject, IRubyObject&gt;&gt;)hash.directEntrySet()) {</span>
+<span class="fc" id="L325">            IRubyObject key = entry.getKey();</span>
+<span class="fc" id="L326">            IRubyObject val = entry.getValue();</span>
+            String k;
+
+<span class="fc" id="L329">            k = StringSupport.checkEmbeddedNulls(runtime, key).toString();</span>
+<span class="pc bpc" id="L330" title="1 of 2 branches missed.">            if (k.indexOf('=') != -1)</span>
+<span class="nc" id="L331">                throw runtime.newArgumentError(&quot;environment name contains a equal : &quot; + k);</span>
+
+<span class="pc bpc" id="L333" title="1 of 2 branches missed.">            if (!val.isNil())</span>
+<span class="fc" id="L334">                val = StringSupport.checkEmbeddedNulls(runtime, val);</span>
+
+<span class="fc" id="L336">            key = key.convertToString().export(context);</span>
+<span class="pc bpc" id="L337" title="1 of 2 branches missed.">            if (!val.isNil()) val = val.convertToString().export(context);</span>
+
+<span class="fc" id="L339">            env.push(runtime.newArray(key, val));</span>
+<span class="fc" id="L340">        }</span>
+
+<span class="fc" id="L342">        return env;</span>
+    }
+
+    // MRI: execarg_extract_options
+    static IRubyObject execargExtractOptions(ThreadContext context, Ruby runtime, ExecArg eargp, RubyHash opthash) {
+<span class="fc" id="L347">        return handleOptionsCommon(context, runtime, eargp, opthash, false);</span>
+    }
+
+    // MRI: check_exec_options
+    static void checkExecOptions(ThreadContext context, Ruby runtime, RubyHash opthash, ExecArg eargp) {
+<span class="fc" id="L352">        handleOptionsCommon(context, runtime, eargp, opthash, true);</span>
+<span class="fc" id="L353">    }</span>
+
+    static IRubyObject handleOptionsCommon(ThreadContext context, Ruby runtime, ExecArg eargp, RubyHash opthash, boolean raise) {
+<span class="pc bpc" id="L356" title="1 of 2 branches missed.">        if (opthash.isEmpty())</span>
+<span class="nc" id="L357">            return null;</span>
+
+<span class="fc" id="L359">        RubyHash nonopts = null;</span>
+
+<span class="fc bfc" id="L361" title="All 2 branches covered.">        for (Map.Entry&lt;IRubyObject, IRubyObject&gt; entry : (Set&lt;Map.Entry&lt;IRubyObject, IRubyObject&gt;&gt;)opthash.directEntrySet()) {</span>
+<span class="fc" id="L362">            IRubyObject key = entry.getKey();</span>
+<span class="fc" id="L363">            IRubyObject val = entry.getValue();</span>
+
+<span class="fc bfc" id="L365" title="All 2 branches covered.">            if (execargAddopt(context, runtime, eargp, key, val) != ST_CONTINUE) {</span>
+<span class="pc bpc" id="L366" title="1 of 2 branches missed.">                if (raise) {</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">                    if (key instanceof RubySymbol)</span>
+<span class="nc" id="L368">                        throw runtime.newArgumentError(&quot;wrong exec option symbol: &quot; + key);</span>
+<span class="nc" id="L369">                    throw runtime.newArgumentError(&quot;wrong exec option&quot;);</span>
+                }
+
+<span class="fc bfc" id="L372" title="All 2 branches covered.">                if (nonopts == null) nonopts = RubyHash.newHash(runtime);</span>
+<span class="fc" id="L373">                nonopts.op_aset(context, key, val);</span>
+            }
+<span class="fc" id="L375">        }</span>
+<span class="fc bfc" id="L376" title="All 2 branches covered.">        return nonopts != null ? nonopts : context.nil;</span>
+    }
+
+    // MRI: is_popen_fork
+    static boolean isPopenFork(Ruby runtime, RubyString prog) {
+<span class="pc bpc" id="L381" title="3 of 4 branches missed.">        if (prog.size() == 1 &amp;&amp; prog.getByteList().get(0) == '-') {</span>
+<span class="nc" id="L382">            throw runtime.newNotImplementedError(&quot;fork() function is unimplemented on JRuby&quot;);</span>
+        }
+<span class="fc" id="L384">        return false;</span>
+    }
+
+    // MRI: DO_SPAWN macro in pipe_open
+    private long DO_SPAWN(Ruby runtime, ExecArg eargp, String cmd, String[] args, String[] envp) {
+<span class="fc bfc" id="L389" title="All 2 branches covered.">        if (eargp.use_shell) {</span>
+<span class="fc" id="L390">            return procSpawnSh(runtime, eargp, cmd, envp);</span>
+        }
+
+//        System.out.println(Arrays.asList(
+//                cmd,
+//                eargp.fileActions,
+//                eargp.attributes,
+//                args == null ? Collections.EMPTY_LIST : Arrays.asList(args),
+//                envp == null ? Collections.EMPTY_LIST : Arrays.asList(envp)));
+        // MRI does not do this check, but posix_spawn does not reliably ENOENT for bad filenames like ''
+<span class="pc bpc" id="L400" title="2 of 4 branches missed.">        if (cmd == null || cmd.length() == 0) {</span>
+<span class="nc" id="L401">            errno = Errno.ENOENT;</span>
+<span class="nc" id="L402">            return -1;</span>
+        }
+<span class="pc bpc" id="L404" title="1 of 2 branches missed.">        long ret = runtime.getPosix().posix_spawnp(</span>
+                cmd,
+                eargp.fileActions,
+                eargp.attributes,
+<span class="pc bpc" id="L408" title="1 of 2 branches missed.">                args == null ? Collections.EMPTY_LIST : Arrays.asList(args),</span>
+<span class="fc" id="L409">                envp == null ? Collections.EMPTY_LIST : Arrays.asList(envp));</span>
+
+<span class="pc bpc" id="L411" title="1 of 2 branches missed.">        if (ret == -1) {</span>
+<span class="nc" id="L412">            errno = Errno.valueOf(runtime.getPosix().errno());</span>
+        }
+
+<span class="fc" id="L415">        return ret;</span>
+    }
+
+    // MRI: Basically doing sh processing from proc_exec_sh but for non-fork path
+    private long procSpawnSh(Ruby runtime, ExecArg eargp, String str, String[] envp) {
+        char[] sChars;
+<span class="fc" id="L421">        int s = 0;</span>
+
+<span class="fc" id="L423">        sChars = str.toCharArray();</span>
+<span class="pc bpc" id="L424" title="4 of 8 branches missed.">        while (s &lt; sChars.length &amp;&amp; (sChars[s] == ' ' || sChars[s] == '\t' || sChars[s] == '\n'))</span>
+<span class="nc" id="L425">            s++;</span>
+
+<span class="pc bpc" id="L427" title="1 of 2 branches missed.">        if (s &gt;= sChars.length) {</span>
+<span class="nc" id="L428">            errno = Errno.ENOENT;</span>
+<span class="nc" id="L429">            return -1;</span>
+        }
+
+        // TODO: Windows
+<span class="pc bpc" id="L433" title="1 of 2 branches missed.">        if (Platform.IS_WINDOWS) { // #ifdef _WIN32</span>
+//            rb_w32_uspawn(P_OVERLAY, (char *)str, 0);
+<span class="nc" id="L435">            return -1;</span>
+        } else {
+//            #if defined(__CYGWIN32__) || defined(__EMX__)
+//            {
+//                char fbuf[MAXPATHLEN];
+//                char *shell = dln_find_exe_r(&quot;sh&quot;, 0, fbuf, sizeof(fbuf));
+//                int status = -1;
+//                if (shell)
+//                    execl(shell, &quot;sh&quot;, &quot;-c&quot;, str, (char *) NULL);
+//                else
+//                status = system(str);
+//                if (status != -1)
+//                    exit(status);
+//            }
+//            #else
+<span class="fc" id="L450">            long ret = runtime.getPosix().posix_spawnp(</span>
+                    &quot;/bin/sh&quot;,
+                    eargp.fileActions,
+                    eargp.attributes,
+<span class="pc bpc" id="L454" title="1 of 2 branches missed.">                    Arrays.asList(&quot;sh&quot;, &quot;-c&quot;, str),</span>
+<span class="fc" id="L455">                    envp == null ? Collections.EMPTY_LIST : Arrays.asList(envp));</span>
+
+<span class="pc bpc" id="L457" title="1 of 2 branches missed.">            if (ret == -1) {</span>
+<span class="nc" id="L458">                errno = Errno.valueOf(runtime.getPosix().errno());</span>
+            }
+
+<span class="fc" id="L461">            return ret;</span>
+        }
+    }
+
+<span class="nc" id="L465">    private static class PopenArg {</span>
+        ExecArg eargp;
+        int modef;
+    }
+
+    private static String[] ARGVSTR2ARGV(byte[][] argv_str) {
+<span class="nc" id="L471">        String[] argv = new String[argv_str.length];</span>
+<span class="nc bnc" id="L472" title="All 2 branches missed.">        for (int i = 0; i &lt; argv_str.length; i++) {</span>
+            // FIXME: probably should be using a specific encoding
+<span class="nc bnc" id="L474" title="All 2 branches missed.">            if (argv_str[i] == null) continue; // placeholder for /bin/sh, but unsure where it's supposed to be added</span>
+<span class="nc" id="L475">            argv[i] = new String(argv_str[i]);</span>
+        }
+<span class="nc" id="L477">        return argv;</span>
+    }
+
+<span class="fc" id="L480">    private Errno errno = null;</span>
+
+    // MRI: pipe_open
+    private IRubyObject pipeOpen(ThreadContext context, ExecArg eargp, String modestr, int fmode, IOEncodable convconfig) {
+<span class="fc" id="L484">        final Ruby runtime = context.runtime;</span>
+<span class="pc bpc" id="L485" title="1 of 4 branches missed.">        IRubyObject prog = eargp != null ? (eargp.use_shell ? eargp.command_name : eargp.command_name) : null;</span>
+<span class="fc" id="L486">        long pid = 0;</span>
+        OpenFile fptr;
+        IRubyObject port;
+        OpenFile write_fptr;
+        IRubyObject write_port;
+<span class="fc" id="L491">        PosixShim posix = new PosixShim(runtime.getPosix());</span>
+
+<span class="fc" id="L493">        Errno e = null;</span>
+
+<span class="fc" id="L495">        String[] args = null;</span>
+<span class="fc" id="L496">        String[] envp = null;</span>
+
+<span class="fc" id="L498">        ExecArg sargp = new ExecArg();</span>
+        Channel fd;
+<span class="fc" id="L500">        Channel write_fd = null;</span>
+<span class="fc" id="L501">        String cmd = null;</span>
+
+<span class="pc bpc" id="L503" title="1 of 2 branches missed.">        if (prog != null)</span>
+<span class="fc" id="L504">            cmd = StringSupport.checkEmbeddedNulls(runtime, prog).toString();</span>
+
+<span class="pc bpc" id="L506" title="1 of 2 branches missed.">        if (eargp.chdir_given()) {</span>
+            // we can'd do chdir with posix_spawn, so we should be set to use_shell and now
+            // just need to add chdir to the cmd
+<span class="nc" id="L509">            cmd = &quot;cd '&quot; + eargp.chdir_dir + &quot;'; &quot; + cmd;</span>
+<span class="nc" id="L510">            eargp.chdir_dir = null;</span>
+<span class="nc" id="L511">            eargp.chdir_given_clear();</span>
+        }
+
+<span class="pc bpc" id="L514" title="1 of 4 branches missed.">        if (eargp != null &amp;&amp; !eargp.use_shell) {</span>
+<span class="fc" id="L515">            args = eargp.argv_str.argv;</span>
+        }
+<span class="fc" id="L517">        Channel[] mainPipe = null, secondPipe = null;</span>
+<span class="pc bpc" id="L518" title="1 of 4 branches missed.">        switch (fmode &amp; (OpenFile.READABLE|OpenFile.WRITABLE)) {</span>
+            case OpenFile.READABLE | OpenFile.WRITABLE:
+<span class="pc bpc" id="L520" title="1 of 2 branches missed.">                if ((secondPipe = posix.pipe()) == null)</span>
+<span class="nc" id="L521">                    throw runtime.newErrnoFromErrno(posix.errno, prog.toString());</span>
+<span class="pc bpc" id="L522" title="1 of 2 branches missed.">                if ((mainPipe = posix.pipe()) == null) {</span>
+<span class="nc" id="L523">                    e = posix.errno;</span>
+<span class="nc" id="L524">                    try {secondPipe[1].close();} catch (IOException ioe) {}</span>
+<span class="nc" id="L525">                    try {secondPipe[0].close();} catch (IOException ioe) {}</span>
+<span class="nc" id="L526">                    posix.errno = e;</span>
+<span class="nc" id="L527">                    throw runtime.newErrnoFromErrno(posix.errno, prog.toString());</span>
+                }
+
+<span class="pc bpc" id="L530" title="1 of 2 branches missed.">                if (eargp != null) prepareStdioRedirects(runtime, mainPipe, secondPipe, eargp);</span>
+
+                break;
+            case OpenFile.READABLE:
+<span class="pc bpc" id="L534" title="1 of 2 branches missed.">                if ((mainPipe = posix.pipe()) == null)</span>
+<span class="nc" id="L535">                    throw runtime.newErrnoFromErrno(posix.errno, prog.toString());</span>
+
+<span class="pc bpc" id="L537" title="1 of 2 branches missed.">                if (eargp != null) prepareStdioRedirects(runtime, mainPipe, null, eargp);</span>
+
+                break;
+            case OpenFile.WRITABLE:
+<span class="pc bpc" id="L541" title="1 of 2 branches missed.">                if ((mainPipe = posix.pipe()) == null)</span>
+<span class="nc" id="L542">                    throw runtime.newErrnoFromErrno(posix.errno, prog.toString());</span>
+
+<span class="pc bpc" id="L544" title="1 of 2 branches missed.">                if (eargp != null) prepareStdioRedirects(runtime, null, mainPipe, eargp);</span>
+
+                break;
+            default:
+<span class="nc" id="L548">                throw runtime.newSystemCallError(prog.toString());</span>
+        }
+<span class="pc bpc" id="L550" title="1 of 2 branches missed.">        if (eargp != null) {</span>
+<span class="fc" id="L551">            execargFixup(context, runtime, eargp);</span>
+<span class="fc" id="L552">            execargRunOptions(context, runtime, eargp, sargp, null);</span>
+<span class="pc bpc" id="L553" title="1 of 2 branches missed.">            if (eargp.envp_str != null) envp = eargp.envp_str;</span>
+<span class="pc bpc" id="L554" title="1 of 2 branches missed.">            while ((pid = DO_SPAWN(runtime, eargp, cmd, args, envp)) == -1) {</span>
+	            /* exec failed */
+<span class="pc bnc" id="L556" title="All 2 branches missed.">                switch (e = errno) {</span>
+                    case EAGAIN:
+                    case EWOULDBLOCK:
+<span class="nc" id="L559">                        try {Thread.sleep(1000);} catch (InterruptedException ie) {}</span>
+<span class="nc" id="L560">                        continue;</span>
+                }
+<span class="nc" id="L562">                break;</span>
+            }
+            // We don't modify parent, so nothing to fix up
+//            if (eargp != null)
+//                execargRunOptions(context, runtime, sargp, null, null);
+        }
+        else {
+<span class="nc" id="L569">            throw runtime.newNotImplementedError(&quot;spawn without exec args (probably a bug)&quot;);</span>
+        }
+
+        /* parent */
+<span class="pc bpc" id="L573" title="1 of 2 branches missed.">        if (pid == -1) {</span>
+<span class="nc" id="L574">            try {mainPipe[1].close();} catch (IOException ioe) {}</span>
+<span class="nc" id="L575">            try {mainPipe[0].close();} catch (IOException ioe) {}</span>
+<span class="nc bnc" id="L576" title="All 2 branches missed.">            if ((fmode &amp; (OpenFile.READABLE|OpenFile.WRITABLE)) == (OpenFile.READABLE|OpenFile.WRITABLE)) {</span>
+<span class="nc" id="L577">                try {mainPipe[1].close();} catch (IOException ioe) {}</span>
+<span class="nc" id="L578">                try {mainPipe[0].close();} catch (IOException ioe) {}</span>
+            }
+<span class="nc" id="L580">            errno = e;</span>
+<span class="nc" id="L581">            throw runtime.newErrnoFromErrno(errno, prog.toString());</span>
+        }
+<span class="fc bfc" id="L583" title="All 4 branches covered.">        if ((fmode &amp; OpenFile.READABLE) != 0 &amp;&amp; (fmode &amp; OpenFile.WRITABLE) != 0) {</span>
+<span class="pc" id="L584">            try {mainPipe[1].close();} catch (IOException ioe) {}</span>
+<span class="fc" id="L585">            fd = mainPipe[0];</span>
+<span class="pc" id="L586">            try {secondPipe[0].close();} catch (IOException ioe) {}</span>
+<span class="fc" id="L587">            write_fd = secondPipe[1];</span>
+        }
+<span class="fc bfc" id="L589" title="All 2 branches covered.">        else if ((fmode &amp; OpenFile.READABLE) != 0) {</span>
+<span class="pc" id="L590">            try {mainPipe[1].close();} catch (IOException ioe) {}</span>
+<span class="fc" id="L591">            fd = mainPipe[0];</span>
+        }
+        else {
+<span class="pc" id="L594">            try {mainPipe[0].close();} catch (IOException ioe) {}</span>
+<span class="fc" id="L595">            fd = mainPipe[1];</span>
+        }
+
+<span class="fc" id="L598">        port = runtime.getIO().allocate();</span>
+<span class="fc" id="L599">        fptr = ((RubyIO)port).MakeOpenFile();</span>
+<span class="fc" id="L600">        fptr.setChannel(fd);</span>
+<span class="fc" id="L601">        fptr.setMode(fmode | (OpenFile.SYNC|OpenFile.DUPLEX));</span>
+<span class="fc bfc" id="L602" title="All 2 branches covered.">        if (convconfig != null) {</span>
+<span class="fc" id="L603">            fptr.encs.copy(convconfig);</span>
+<span class="pc bpc" id="L604" title="1 of 2 branches missed.">            if (Platform.IS_WINDOWS) { // #if defined(RUBY_TEST_CRLF_ENVIRONMENT) || defined(_WIN32)</span>
+<span class="nc bnc" id="L605" title="All 2 branches missed.">                if ((fptr.encs.ecflags &amp; EncodingUtils.ECONV_DEFAULT_NEWLINE_DECORATOR) != 0) {</span>
+<span class="nc" id="L606">                    fptr.encs.ecflags |= EConvFlags.UNIVERSAL_NEWLINE_DECORATOR;</span>
+                }
+            }
+        }
+        else {
+<span class="pc bpc" id="L611" title="1 of 2 branches missed.">            if (fptr.NEED_NEWLINE_DECORATOR_ON_READ()) {</span>
+<span class="fc" id="L612">                fptr.encs.ecflags |= EConvFlags.UNIVERSAL_NEWLINE_DECORATOR;</span>
+            }
+<span class="pc bpc" id="L614" title="1 of 2 branches missed.">            if (EncodingUtils.TEXTMODE_NEWLINE_DECORATOR_ON_WRITE != 0) {</span>
+<span class="nc bnc" id="L615" title="All 2 branches missed.">                if (fptr.NEED_NEWLINE_DECORATOR_ON_WRITE()) {</span>
+<span class="nc" id="L616">                    fptr.encs.ecflags |= EncodingUtils.TEXTMODE_NEWLINE_DECORATOR_ON_WRITE;</span>
+                }
+            }
+        }
+<span class="fc" id="L620">        final long finalPid = pid;</span>
+<span class="fc" id="L621">        fptr.setPid(pid);</span>
+<span class="fc" id="L622">        fptr.setProcess(new POSIXProcess(runtime, finalPid));</span>
+
+<span class="fc bfc" id="L624" title="All 2 branches covered.">        if (write_fd != null) {</span>
+<span class="fc" id="L625">            write_port = runtime.getIO().allocate();</span>
+<span class="fc" id="L626">            write_fptr = ((RubyIO)write_port).MakeOpenFile();</span>
+<span class="fc" id="L627">            write_fptr.setChannel(write_fd);</span>
+<span class="fc" id="L628">            write_fptr.setMode((fmode &amp; ~OpenFile.READABLE)| OpenFile.SYNC|OpenFile.DUPLEX);</span>
+<span class="fc" id="L629">            fptr.setMode(fptr.getMode() &amp; ~OpenFile.WRITABLE);</span>
+<span class="fc" id="L630">            fptr.tiedIOForWriting = (RubyIO)write_port;</span>
+<span class="fc" id="L631">            ((RubyIO)port).setInstanceVariable(&quot;@tied_io_for_writing&quot;, write_port);</span>
+        }
+
+//        fptr.setFinalizer(fptr.PIPE_FINALIZE);
+
+        // TODO?
+//        pipeAddFptr(fptr);
+<span class="fc" id="L638">        return port;</span>
+    }
+
+    private void prepareStdioRedirects(Ruby runtime, Channel[] readPipe, Channel[] writePipe, ExecArg eargp) {
+        // We insert these redirects directly into fd_dup2 so that chained redirection can be
+        // validated and set up properly by the execargFixup logic.
+        // The closes do not appear to be part of MRI's logic (they close the fd before exec/spawn),
+        // so rather than using execargAddopt we do them directly here.
+
+<span class="fc bfc" id="L647" title="All 2 branches covered.">        if (readPipe != null) {</span>
+            // dup our read pipe's write end into stdout
+<span class="fc" id="L649">            int readPipeWriteFD = FilenoUtil.filenoFrom(readPipe[1]);</span>
+<span class="fc" id="L650">            eargp.fd_dup2 = checkExecRedirect1(runtime, eargp.fd_dup2, runtime.newFixnum(1), runtime.newFixnum(readPipeWriteFD));</span>
+
+            // close the other end of the pipe in the child
+<span class="fc" id="L653">            int readPipeReadFD = FilenoUtil.filenoFrom(readPipe[0]);</span>
+<span class="fc" id="L654">            eargp.fileActions.add(SpawnFileAction.close(readPipeReadFD));</span>
+        }
+
+<span class="fc bfc" id="L657" title="All 2 branches covered.">        if (writePipe != null) {</span>
+            // dup our write pipe's read end into stdin
+<span class="fc" id="L659">            int writePipeReadFD = FilenoUtil.filenoFrom(writePipe[0]);</span>
+<span class="fc" id="L660">            eargp.fd_dup2 = checkExecRedirect1(runtime, eargp.fd_dup2, runtime.newFixnum(0), runtime.newFixnum(writePipeReadFD));</span>
+
+            // close the other end of the pipe in the child
+<span class="fc" id="L663">            int writePipeWriteFD = FilenoUtil.filenoFrom(writePipe[1]);</span>
+<span class="fc" id="L664">            eargp.fileActions.add(SpawnFileAction.close(writePipeWriteFD));</span>
+        }
+<span class="fc" id="L666">    }</span>
+
+    static int run_exec_pgroup(Ruby runtime, ExecArg eargp, ExecArg sargp, String[] errmsg) {
+        /*
+         * If FD_CLOEXEC is available, rb_fork waits the child's execve.
+         * So setpgid is done in the child when rb_fork is returned in the parent.
+         * No race condition, even without setpgid from the parent.
+         * (Is there an environment which has setpgid but no FD_CLOEXEC?)
+         */
+<span class="nc" id="L675">        int ret = 0;</span>
+        long pgroup;
+
+<span class="nc" id="L678">        pgroup = eargp.pgroup_pgid;</span>
+<span class="nc bnc" id="L679" title="All 2 branches missed.">        if (pgroup == -1)</span>
+<span class="nc" id="L680">            pgroup = runtime.getPosix().getpgrp();</span>
+
+<span class="nc bnc" id="L682" title="All 2 branches missed.">        if (pgroup == 0) {</span>
+            // not needed for posix_spawn
+<span class="nc" id="L684">            return ret;</span>
+//            pgroup = runtime.getPosix().getpid(); /* async-signal-safe */
+        }
+
+<span class="nc" id="L688">        eargp.attributes.add(SpawnAttribute.pgroup(pgroup));</span>
+        // we can't setpgid in the parent
+//        ret = setpgid(getpid(), pgroup); /* async-signal-safe */
+//        if (ret == -1) ERRMSG(&quot;setpgid&quot;);
+<span class="nc" id="L692">        return ret;</span>
+    }
+
+    static int run_exec_rlimit(Ruby runtime, RubyArray ary, ExecArg sargp, String[] errmsg) {
+<span class="nc" id="L696">        throw runtime.newNotImplementedError(&quot;changing rlimit in child is not supported&quot;);</span>
+        /* Not supported by posix_spawn
+        long i;
+        for (i = 0; i &lt; ary.size(); i++) {
+            IRubyObject elt = ary.eltOk(i);
+            int rtype = RubyNumeric.num2int(((RubyArray)elt).eltOk(0));
+
+            struct rlimit rlim;
+            if (sargp != null) {
+                IRubyObject tmp, newary;
+                if (runtime.getPosix().getrlimit(rtype, &amp;rlim) == -1) {
+                    if (errmsg != null) errmsg[0] = &quot;getrlimit&quot;;
+                    return -1;
+                }
+                tmp = runtime.newArray(((RubyArray)elt).eltOk(0),
+                        runtime.newFixnum(rlim.rlim_cur),
+                        runtime.newFixnum(rlim.rlim_max));
+                if (sargp.rlimit_limits == null)
+                    newary = sargp.rlimit_limits = runtime.newArray();
+                else
+                    newary = sargp.rlimit_limits;
+                ((RubyArray)newary).push(tmp);
+            }
+            rlim.rlim_cur = RubyNumeric.num2int(((RubyArray)elt).eltOk(1));
+            rlim.rlim_max = RubyNumeric.num2int(((RubyArray)elt).eltOk(2));
+            */
+
+            // we can't setrlimit in parent
+//            if (runtime.getPosix().setrlimit(rtype, &amp;rlim) == -1) { /* hopefully async-signal-safe */
+//                if (errmsg != null) errmsg[0] = &quot;setrlimit&quot;;
+//                return -1;
+//            }
+//        }
+//        return 0;
+    }
+
+    static void saveEnv(ThreadContext context, Ruby runtime, ExecArg sargp) {
+        // We don't need to save env in parent because we let posix_spawn set it up
+//        if (sargp == null)
+//            return;
+//        if (sargp.env_modification == null) {
+//            RubyHash env = runtime.getENV();
+//            if (!env.isNil()) {
+//                final RubyArray ary = runtime.newArray();
+//                BlockCallback SaveEnvBody = new BlockCallback() {
+//                    @Override
+//                    public IRubyObject call(ThreadContext context, IRubyObject[] args, Block block) {
+//                        ary.push(args[0].dup());
+//                        return context.nil;
+//                    }
+//                };
+//                env.each(context, CallBlock.newCallClosure(env, runtime.getHash(),
+//                        Arity.OPTIONAL, SaveEnvBody, context));
+//                sargp.env_modification = ary;
+//            }
+//            sargp.unsetenv_others_given_set();
+//            sargp.unsetenv_others_do_set();
+//        }
+<span class="nc" id="L754">    }</span>
+
+    static int run_exec_dup2(Ruby runtime, RubyArray ary, ExecArg eargp, ExecArg sargp, String[] errmsg) {
+        int n, i;
+        int ret;
+<span class="fc" id="L759">        int extra_fd = -1;</span>
+<span class="fc" id="L760">        run_exec_dup2_fd_pair[] pairs = eargp.dup2_tmpbuf;</span>
+
+<span class="fc" id="L762">        n = ary.size();</span>
+
+        /* initialize oldfd and newfd: O(n) */
+<span class="fc bfc" id="L765" title="All 2 branches covered.">        for (i = 0; i &lt; n; i++) {</span>
+<span class="fc" id="L766">            IRubyObject elt = ary.eltOk(i);</span>
+<span class="fc" id="L767">            pairs[i].oldfd = RubyNumeric.fix2int(((RubyArray)elt).eltOk(1));</span>
+<span class="fc" id="L768">            pairs[i].newfd = RubyNumeric.fix2int(((RubyArray)elt).eltOk(0)); /* unique */</span>
+<span class="fc" id="L769">            pairs[i].older_index = -1;</span>
+        }
+
+        /* sort the table by oldfd: O(n log n) */
+<span class="pc bpc" id="L773" title="1 of 2 branches missed.">        if (sargp == null)</span>
+<span class="nc" id="L774">            Arrays.sort(pairs, intcmp); /* hopefully async-signal-safe */</span>
+        else
+<span class="fc" id="L776">            Arrays.sort(pairs, intrcmp);</span>
+
+        /* initialize older_index and num_newer: O(n log n) */
+<span class="fc bfc" id="L779" title="All 2 branches covered.">        for (i = 0; i &lt; n; i++) {</span>
+<span class="fc" id="L780">            int newfd = pairs[i].newfd;</span>
+<span class="fc" id="L781">            run_exec_dup2_fd_pair key = new run_exec_dup2_fd_pair();</span>
+            int found;
+<span class="fc" id="L783">            key.oldfd = newfd;</span>
+<span class="fc" id="L784">            found = Arrays.binarySearch(pairs, key, intcmp); /* hopefully async-signal-safe */</span>
+<span class="fc" id="L785">            pairs[i].num_newer = 0;</span>
+<span class="pc bpc" id="L786" title="1 of 2 branches missed.">            if (found != -1) {</span>
+<span class="nc bnc" id="L787" title="All 4 branches missed.">                while (found &gt; 0 &amp;&amp; pairs[found-1].oldfd == newfd)</span>
+<span class="nc" id="L788">                    found--;</span>
+<span class="nc bnc" id="L789" title="All 4 branches missed.">                while (found &lt; n &amp;&amp; pairs[found].oldfd == newfd) {</span>
+<span class="nc" id="L790">                    pairs[i].num_newer++;</span>
+<span class="nc" id="L791">                    pairs[found].older_index = i;</span>
+<span class="nc" id="L792">                    found++;</span>
+                }
+            }
+        }
+
+        /* non-cyclic redirection: O(n) */
+<span class="fc bfc" id="L798" title="All 2 branches covered.">        for (i = 0; i &lt; n; i++) {</span>
+<span class="fc" id="L799">            int j = i;</span>
+<span class="pc bpc" id="L800" title="2 of 6 branches missed.">            while (j != -1 &amp;&amp; pairs[j].oldfd != -1 &amp;&amp; pairs[j].num_newer == 0) {</span>
+<span class="pc bpc" id="L801" title="1 of 2 branches missed.">                if (saveRedirectFd(runtime, pairs[j].newfd, sargp, errmsg) &lt; 0) /* async-signal-safe */</span>
+<span class="nc" id="L802">                    return -1;</span>
+
+                // This always succeeds because we just defer it to posix_spawn.
+<span class="fc" id="L805">                redirectDup2(eargp, pairs[j].oldfd, pairs[j].newfd); /* async-signal-safe */</span>
+<span class="fc" id="L806">                pairs[j].oldfd = -1;</span>
+<span class="fc" id="L807">                j = (int)pairs[j].older_index;</span>
+<span class="pc bpc" id="L808" title="1 of 2 branches missed.">                if (j != -1)</span>
+<span class="nc" id="L809">                    pairs[j].num_newer--;</span>
+            }
+        }
+
+        /* cyclic redirection: O(n) */
+<span class="fc bfc" id="L814" title="All 2 branches covered.">        for (i = 0; i &lt; n; i++) {</span>
+            int j;
+<span class="pc bpc" id="L816" title="1 of 2 branches missed.">            if (pairs[i].oldfd == -1)</span>
+<span class="fc" id="L817">                continue;</span>
+            // We can't support this logic because it makes fcntl changes in parent
+<span class="nc" id="L819">            throw runtime.newNotImplementedError(&quot;cyclic redirects in child are not supported&quot;);</span>
+//            if (pairs[i].oldfd == pairs[i].newfd) { /* self cycle */
+//                int fd = pairs[i].oldfd;
+//                ret = runtime.getPosix().fcntl(fd, Fcntl.F_GETFD); /* async-signal-safe */
+//                if (ret == -1) {
+//                    if (errmsg != null) errmsg[0] = &quot;fcntl(F_GETFD)&quot;;
+//                    return -1;
+//                }
+//                if ((ret &amp; FcntlLibrary.FD_CLOEXEC) != 0) {
+//                    ret &amp;= ~FcntlLibrary.FD_CLOEXEC;
+//                    ret = runtime.getPosix().fcntl(fd, Fcntl.F_SETFD, ret); /* async-signal-safe */
+//                    if (ret == -1) {
+//                        if (errmsg != null) errmsg[0] = &quot;fcntl(F_SETFD)&quot;;
+//                        return -1;
+//                    }
+//                }
+//                pairs[i].oldfd = -1;
+//                continue;
+//            }
+//            if (extra_fd == -1) {
+//                extra_fd = redirectDup(runtime, pairs[i].oldfd); /* async-signal-safe */
+//                if (extra_fd == -1) {
+//                    if (errmsg != null) errmsg[0] = &quot;dup&quot;;
+//                    return -1;
+//                }
+////                rb_update_max_fd(extra_fd);
+//            }
+//            else {
+//                // This always succeeds because we just defer it to posix_spawn.
+//                redirectDup2(eargp, pairs[i].oldfd, extra_fd); /* async-signal-safe */
+//            }
+//            pairs[i].oldfd = extra_fd;
+//            j = pairs[i].older_index;
+//            pairs[i].older_index = -1;
+//            while (j != -1) {
+//                // This always succeeds because we just defer it to posix_spawn.
+//                redirectDup2(eargp, pairs[j].oldfd, pairs[j].newfd); /* async-signal-safe */
+//                pairs[j].oldfd = -1;
+//                j = pairs[j].older_index;
+//            }
+        }
+<span class="pc bpc" id="L860" title="1 of 2 branches missed.">        if (extra_fd != -1) {</span>
+<span class="nc bnc" id="L861" title="All 2 branches missed.">            ret = redirectClose(runtime, eargp, extra_fd, sargp != null); /* async-signal-safe */</span>
+<span class="nc bnc" id="L862" title="All 2 branches missed.">            if (ret == -1) {</span>
+<span class="nc bnc" id="L863" title="All 2 branches missed.">                if (errmsg != null) errmsg[0] = &quot;close&quot;;</span>
+<span class="nc" id="L864">                return -1;</span>
+            }
+        }
+
+<span class="fc" id="L868">        return 0;</span>
+    }
+
+    static int redirectDup(Ruby runtime, int oldfd)
+    {
+        int ret;
+<span class="nc" id="L874">        ret = runtime.getPosix().dup(oldfd);</span>
+//        ttyprintf(&quot;dup(%d) =&gt; %d\n&quot;, oldfd, ret);
+<span class="nc" id="L876">        return ret;</span>
+    }
+
+    static void redirectDup2(ExecArg eargp, int oldfd, int newfd)
+    {
+<span class="fc" id="L881">        eargp.fileActions.add(SpawnFileAction.dup(oldfd, newfd));</span>
+<span class="fc" id="L882">    }</span>
+
+    static int redirectClose(Ruby runtime, ExecArg eargp, int fd, boolean forChild)
+    {
+<span class="nc bnc" id="L886" title="All 2 branches missed.">        if (forChild) {</span>
+<span class="nc" id="L887">            eargp.fileActions.add(SpawnFileAction.close(fd));</span>
+<span class="nc" id="L888">            return 0;</span>
+        } else {
+<span class="nc" id="L890">            return runtime.getPosix().close(fd);</span>
+        }
+    }
+
+    static void redirectOpen(ExecArg eargp, int fd, String pathname, int flags, int perm)
+    {
+<span class="nc" id="L896">        eargp.fileActions.add(SpawnFileAction.open(pathname, fd, flags, perm));</span>
+<span class="nc" id="L897">    }</span>
+
+    static int saveRedirectFd(Ruby runtime, int fd, ExecArg sargp, String[] errmsg) {
+        // This logic is to restore the parent's fd. Since we let posix_spawn do dup2 for us in the
+        // child, it's not necessary for us to fix up the parent.
+
+        if (false &amp;&amp; sargp != null) {
+            IRubyObject newary;
+            int save_fd = redirectDup(runtime, fd);
+            if (save_fd == -1) {
+                if (runtime.getPosix().errno() == Errno.EBADF.intValue())
+                    return 0;
+                if (errmsg != null) errmsg[0] = &quot;dup&quot;;
+                return -1;
+            }
+//            rb_update_max_fd(save_fd);
+
+            newary = sargp.fd_dup2;
+            if (newary == null) {
+                newary = runtime.newArray();
+                sargp.fd_dup2 = newary;
+            }
+            ((RubyArray)newary).push(runtime.newArray(runtime.newFixnum(fd), runtime.newFixnum(save_fd)));
+
+            newary = sargp.fd_close;
+            if (newary == null) {
+                newary = runtime.newArray();
+                sargp.fd_close = newary;
+            }
+            ((RubyArray)newary).push(runtime.newArray(runtime.newFixnum(save_fd), runtime.getNil()));
+        }
+
+<span class="fc" id="L929">        return 0;</span>
+    }
+
+    int execargRunOptions(ThreadContext context, Ruby runtime, ExecArg eargp, ExecArg sargp, String[] errmsg) {
+        IRubyObject obj;
+
+<span class="fc bfc" id="L935" title="All 2 branches covered.">        if (sargp != null) {</span>
+            /* assume that sargp is always NULL on fork-able environments */
+<span class="fc" id="L937">            sargp.redirect_fds = context.nil;</span>
+        }
+
+//        #ifdef HAVE_SETPGID
+<span class="pc bpc" id="L941" title="1 of 2 branches missed.">        if (eargp.pgroup_given()) {</span>
+<span class="nc bnc" id="L942" title="All 2 branches missed.">            if (run_exec_pgroup(runtime, eargp, sargp, errmsg) == -1) /* async-signal-safe */</span>
+<span class="nc" id="L943">                return -1;</span>
+        }
+//        #endif
+
+//        #if defined(HAVE_SETRLIMIT) &amp;&amp; defined(RLIM2NUM)
+<span class="fc" id="L948">        obj = eargp.rlimit_limits;</span>
+<span class="pc bpc" id="L949" title="1 of 2 branches missed.">        if (obj != null) {</span>
+<span class="nc" id="L950">            throw runtime.newNotImplementedError(&quot;setting rlimit in child is unsupported&quot;);</span>
+//            if (run_exec_rlimit(runtime, (RubyArray)obj, sargp, errmsg) == -1) /* hopefully async-signal-safe */
+//                return -1;
+        }
+//        #endif
+
+//        #if !defined(HAVE_FORK)
+<span class="fc" id="L957">        boolean clearEnv = false;</span>
+<span class="pc bpc" id="L958" title="3 of 4 branches missed.">        if (eargp.unsetenv_others_given() &amp;&amp; eargp.unsetenv_others_do()) {</span>
+            // only way to do this is manually build a list of env assignments that clear all parent values
+<span class="nc" id="L960">            throw runtime.newNotImplementedError(&quot;clearing env in child is not supported&quot;);</span>
+//            saveEnv(context, runtime, sargp);
+
+            // we can't clear env in parent process
+//            runtime.getENV().clear();
+        }
+
+<span class="fc" id="L967">        RubyArray env = eargp.env_modification;</span>
+<span class="fc bfc" id="L968" title="All 2 branches covered.">        if (env != null) {</span>
+<span class="fc" id="L969">            eargp.envp_str = ShellLauncher.getModifiedEnv(runtime, env, clearEnv);</span>
+        }
+//        #endif
+
+<span class="pc bpc" id="L973" title="1 of 2 branches missed.">        if (eargp.umask_given()) {</span>
+<span class="nc" id="L974">            throw runtime.newNotImplementedError(&quot;setting umask in child is unsupported&quot;);</span>
+//            int mask = eargp.umask_mask;
+//            SpawnAttribute.
+//            int oldmask = runtime.getPosix().umask(mask); /* never fail */ /* async-signal-safe */
+//            if (sargp != null) {
+//                sargp.umask_given_set();
+//                sargp.umask_mask = oldmask;
+//            }
+        }
+
+<span class="fc" id="L984">        obj = eargp.fd_dup2;</span>
+<span class="fc bfc" id="L985" title="All 2 branches covered.">        if (obj != null) {</span>
+<span class="pc bpc" id="L986" title="1 of 2 branches missed.">            if (run_exec_dup2(runtime, (RubyArray)obj, eargp, sargp, errmsg) == -1) /* hopefully async-signal-safe */</span>
+<span class="nc" id="L987">                return -1;</span>
+        }
+
+<span class="fc" id="L990">        obj = eargp.fd_close;</span>
+<span class="pc bpc" id="L991" title="1 of 2 branches missed.">        if (obj != null) {</span>
+<span class="nc bnc" id="L992" title="All 2 branches missed.">            if (sargp != null)</span>
+<span class="nc" id="L993">                runtime.getWarnings().warn(&quot;cannot close fd before spawn&quot;);</span>
+            else {
+<span class="nc bnc" id="L995" title="All 2 branches missed.">                if (run_exec_close(runtime, (RubyArray)obj, eargp, errmsg) == -1) /* async-signal-safe */</span>
+<span class="nc" id="L996">                    return -1;</span>
+            }
+        }
+
+<span class="fc" id="L1000">        obj = eargp.fd_open;</span>
+<span class="pc bpc" id="L1001" title="1 of 2 branches missed.">        if (obj != null) {</span>
+<span class="nc bnc" id="L1002" title="All 2 branches missed.">            if (run_exec_open(runtime, (RubyArray)obj, eargp, sargp, errmsg) == -1) /* async-signal-safe */</span>
+<span class="nc" id="L1003">                return -1;</span>
+        }
+
+<span class="fc" id="L1006">        obj = eargp.fd_dup2_child;</span>
+<span class="fc bfc" id="L1007" title="All 2 branches covered.">        if (obj != null) {</span>
+<span class="pc bpc" id="L1008" title="1 of 2 branches missed.">            if (run_exec_dup2_child(runtime, (RubyArray)obj, eargp, sargp, errmsg) == -1) /* async-signal-safe */</span>
+<span class="nc" id="L1009">                return -1;</span>
+        }
+
+<span class="pc bpc" id="L1012" title="1 of 2 branches missed.">        if (eargp.chdir_given()) {</span>
+            // should have been set up in pipe_open, so we just raise here
+<span class="nc" id="L1014">            throw new RuntimeException(&quot;BUG: chdir not supported in posix_spawn; should have been made into chdir&quot;);</span>
+            // we can't chdir in the parent
+//            if (sargp != null) {
+//                String cwd = runtime.getCurrentDirectory();
+//                sargp.chdir_given_set();
+//                sargp.chdir_dir = cwd;
+//            }
+//            if (chdir(RSTRING_PTR(eargp.chdir_dir)) == -1) { /* async-signal-safe */
+//                ERRMSG(&quot;chdir&quot;);
+//                return -1;
+//            }
+        }
+
+//        #ifdef HAVE_SETGID
+<span class="pc bpc" id="L1028" title="1 of 2 branches missed.">        if (eargp.gid_given()) {</span>
+<span class="nc" id="L1029">            throw runtime.newNotImplementedError(&quot;setgid in the child is not supported&quot;);</span>
+            // we can't setgid in the parent
+//            if (setgid(eargp.gid) &lt; 0) {
+//                ERRMSG(&quot;setgid&quot;);
+//                return -1;
+//            }
+        }
+//        #endif
+//        #ifdef HAVE_SETUID
+<span class="pc bpc" id="L1038" title="1 of 2 branches missed.">        if (eargp.uid_given()) {</span>
+<span class="nc" id="L1039">            throw runtime.newNotImplementedError(&quot;setuid in the child is not supported&quot;);</span>
+            // we can't setuid in the parent
+//            if (setuid(eargp.uid) &lt; 0) {
+//                ERRMSG(&quot;setuid&quot;);
+//                return -1;
+//            }
+        }
+//        #endif
+
+//        if (sargp != null) {
+//            IRubyObject ary = sargp.fd_dup2;
+//            if (ary != null) {
+//                int len = runExecDup2TmpbufSize(((RubyArray)ary).size());
+//                run_exec_dup2_fd_pair[] tmpbuf = new run_exec_dup2_fd_pair[len];
+//                for (int i = 0; i &lt; tmpbuf.length; i++) tmpbuf[i] = new run_exec_dup2_fd_pair();
+//                sargp.dup2_tmpbuf = tmpbuf;
+//            }
+//        }
+
+<span class="fc" id="L1058">        return 0;</span>
+    }
+
+    /* This function should be async-signal-safe.  Actually it is. */
+    static int run_exec_close(Ruby runtime, RubyArray ary, ExecArg eargp, String[] errmsg) {
+        long i;
+        int ret;
+
+<span class="nc bnc" id="L1066" title="All 2 branches missed.">        for (i = 0; i &lt; ary.size(); i++) {</span>
+<span class="nc" id="L1067">            RubyArray elt = (RubyArray)ary.eltOk(i);</span>
+<span class="nc" id="L1068">            int fd = RubyNumeric.fix2int(elt.eltOk(0));</span>
+<span class="nc" id="L1069">            ret = redirectClose(runtime, eargp, fd, true); /* async-signal-safe */</span>
+<span class="nc bnc" id="L1070" title="All 2 branches missed.">            if (ret == -1) {</span>
+<span class="nc bnc" id="L1071" title="All 2 branches missed.">                if (errmsg != null) errmsg[0] = &quot;close&quot;;</span>
+<span class="nc" id="L1072">                return -1;</span>
+            }
+        }
+<span class="nc" id="L1075">        return 0;</span>
+    }
+
+    /* This function should be async-signal-safe when sargp is NULL.  Actually it is. */
+    static int run_exec_open(Ruby runtime, RubyArray ary, ExecArg eargp, ExecArg sargp, String[] errmsg) {
+        int i;
+        int ret;
+
+<span class="nc bnc" id="L1083" title="All 2 branches missed.">        for (i = 0; i &lt; ary.size();) {</span>
+<span class="nc" id="L1084">            RubyArray elt = (RubyArray)ary.eltOk(i);</span>
+            int fd;
+<span class="nc" id="L1086">            RubyArray param = (RubyArray)elt.eltOk(1);</span>
+<span class="nc" id="L1087">            String path = param.eltOk(0).toString();</span>
+<span class="nc" id="L1088">            int flags = RubyNumeric.num2int(param.eltOk(1));</span>
+<span class="nc" id="L1089">            int perm = RubyNumeric.num2int(param.eltOk(2));</span>
+<span class="nc" id="L1090">            boolean need_close = true;</span>
+            // This always succeeds because we defer to posix_spawn
+<span class="nc" id="L1092">            elt = (RubyArray)ary.eltOk(i);</span>
+<span class="nc" id="L1093">            fd = RubyNumeric.fix2int(elt.eltOk(0));</span>
+<span class="nc" id="L1094">            redirectOpen(eargp, fd, path, flags, perm); /* async-signal-safe */</span>
+
+            // The rest of this logic is for closing the opened file in parent and preserving
+            // the file descriptors modified. Since we defer to posix_spawn, this is not needed.
+
+//            rb_update_max_fd(fd2);
+//            while (i &lt; ary.size() &amp;&amp;
+//                    elt.eltOk(1) == param) {
+//                elt = (RubyArray)ary.eltOk(i);
+//                fd = RubyNumeric.fix2int(elt.eltOk(0));
+//                if (fd == fd2) {
+//                    need_close = false;
+//                }
+//                else {
+//                    if (saveRedirectFd(runtime, fd, sargp, errmsg) &lt; 0) /* async-signal-safe */
+//                        return -1;
+//                    ret = redirectDup2(eargp, fd2, fd); /* async-signal-safe */
+//                    if (ret == -1) {
+//                        if (errmsg != null) errmsg[0] = &quot;dup2&quot;;
+//                        return -1;
+//                    }
+////                    rb_update_max_fd(fd);
+//                }
+//                i++;
+//            }
+//            if (need_close) {
+//                ret = redirectClose(eargp, fd2); /* async-signal-safe */
+//                if (ret == -1) {
+//                    if (errmsg != null) errmsg[0] = &quot;close&quot;;
+//                    return -1;
+//                }
+//            }
+<span class="nc" id="L1126">        }</span>
+<span class="nc" id="L1127">        return 0;</span>
+    }
+
+    /* This function should be async-signal-safe when sargp is NULL.  Actually it is. */
+    static int run_exec_dup2_child(Ruby runtime, RubyArray ary, ExecArg eargp, ExecArg sargp, String[] errmsg) {
+        long i;
+        int ret;
+
+<span class="fc bfc" id="L1135" title="All 2 branches covered.">        for (i = 0; i &lt; ary.size(); i++) {</span>
+<span class="fc" id="L1136">            RubyArray elt = (RubyArray)ary.eltOk(i);</span>
+<span class="fc" id="L1137">            int newfd = RubyNumeric.fix2int(elt.eltOk(0));</span>
+<span class="fc" id="L1138">            int oldfd = RubyNumeric.fix2int(elt.eltOk(1));</span>
+
+            // Don't have to save in parent, since we let posix_spawn dup2
+//            if (saveRedirectFd(runtime, newfd, sargp, errmsg) &lt; 0) /* async-signal-safe */
+//                return -1;
+
+            // This always succeeds
+<span class="fc" id="L1145">            redirectDup2(eargp, oldfd, newfd); /* async-signal-safe */</span>
+//            rb_update_max_fd(newfd);
+        }
+<span class="fc" id="L1148">        return 0;</span>
+    }
+
+<span class="fc" id="L1151">    private static class run_exec_dup2_fd_pair {</span>
+        int oldfd;
+        int newfd;
+        int older_index;
+        int num_newer;
+    };
+
+    static int runExecDup2TmpbufSize(int n) {
+<span class="fc" id="L1159">        return n;</span>
+    }
+
+    static void execargFixup(ThreadContext context, Ruby runtime, ExecArg eargp) {
+        boolean unsetenv_others;
+        RubyArray envopts;
+        IRubyObject ary;
+
+<span class="fc" id="L1167">        eargp.redirect_fds = checkExecFds(context, runtime, eargp);</span>
+
+<span class="fc" id="L1169">        ary = eargp.fd_dup2;</span>
+<span class="fc bfc" id="L1170" title="All 2 branches covered.">        if (ary != null) {</span>
+<span class="fc" id="L1171">            int len = runExecDup2TmpbufSize(((RubyArray)ary).size());</span>
+<span class="fc" id="L1172">            run_exec_dup2_fd_pair[] tmpbuf = new run_exec_dup2_fd_pair[len];</span>
+<span class="fc bfc" id="L1173" title="All 2 branches covered.">            for (int i = 0; i &lt; tmpbuf.length; i++) tmpbuf[i] = new run_exec_dup2_fd_pair();</span>
+<span class="fc" id="L1174">            eargp.dup2_tmpbuf = tmpbuf;</span>
+        }
+
+        IRubyObject envtbl;
+<span class="pc bpc" id="L1178" title="3 of 4 branches missed.">        unsetenv_others = eargp.unsetenv_others_given() &amp;&amp; eargp.unsetenv_others_do();</span>
+<span class="fc" id="L1179">        envopts = eargp.env_modification;</span>
+<span class="pc bpc" id="L1180" title="1 of 4 branches missed.">        if (unsetenv_others || envopts != null) {</span>
+<span class="pc bpc" id="L1181" title="1 of 2 branches missed.">            if (unsetenv_others) {</span>
+<span class="nc" id="L1182">                envtbl = RubyHash.newHash(runtime);</span>
+            }
+            else {
+<span class="fc" id="L1185">                envtbl = runtime.getObject().getConstant(&quot;ENV&quot;);</span>
+<span class="fc" id="L1186">                envtbl = TypeConverter.convertToType(envtbl, runtime.getHash(), &quot;to_hash&quot;);</span>
+            }
+<span class="pc bpc" id="L1188" title="1 of 2 branches missed.">            if (envopts != null) {</span>
+<span class="fc" id="L1189">                RubyHash stenv = (RubyHash)envtbl;</span>
+                long i;
+<span class="fc bfc" id="L1191" title="All 2 branches covered.">                for (i = 0; i &lt; envopts.size(); i++) {</span>
+<span class="fc" id="L1192">                    IRubyObject pair = envopts.eltOk(i);</span>
+<span class="fc" id="L1193">                    IRubyObject key = ((RubyArray)pair).eltOk(0);</span>
+<span class="fc" id="L1194">                    IRubyObject val = ((RubyArray)pair).eltOk(1);</span>
+<span class="pc bpc" id="L1195" title="1 of 2 branches missed.">                    if (val.isNil()) {</span>
+<span class="nc" id="L1196">                        IRubyObject stkey = key;</span>
+<span class="nc" id="L1197">                        stenv.fastDelete(stkey);</span>
+<span class="nc" id="L1198">                    }</span>
+                    else {
+<span class="fc" id="L1200">                        stenv.op_aset(context, key, val);</span>
+                    }
+                }
+<span class="fc" id="L1203">            }</span>
+        } else {
+            // In MRI, they use the current env as the baseline because they fork+exec. We can't do that,
+            // and posix_spawn needs a full env, so we pass even unmodified env through.
+<span class="fc" id="L1207">            envtbl = runtime.getObject().getConstant(&quot;ENV&quot;);</span>
+<span class="fc" id="L1208">            envtbl = TypeConverter.convertToType(envtbl, runtime.getHash(), &quot;to_hash&quot;);</span>
+        }
+<span class="fc" id="L1210">        buildEnvp(runtime, eargp, envtbl);</span>
+//        RB_GC_GUARD(execarg_obj);
+<span class="fc" id="L1212">    }</span>
+
+    private static void buildEnvp(Ruby runtime, ExecArg eargp, IRubyObject envtbl) {
+        String[] envp_str;
+        List&lt;String&gt; envp_buf;
+<span class="fc" id="L1217">        envp_buf = new ArrayList();</span>
+<span class="fc bfc" id="L1218" title="All 2 branches covered.">        for (Map.Entry&lt;IRubyObject, IRubyObject&gt; entry : (Set&lt;Map.Entry&lt;IRubyObject, IRubyObject&gt;&gt;)((RubyHash)envtbl).directEntrySet()) {</span>
+<span class="fc" id="L1219">            IRubyObject key = entry.getKey();</span>
+<span class="fc" id="L1220">            IRubyObject val = entry.getValue();</span>
+
+<span class="fc" id="L1222">            envp_buf.add(StringSupport.checkEmbeddedNulls(runtime, key).toString()</span>
+                    + &quot;=&quot;
+<span class="fc" id="L1224">                    + StringSupport.checkEmbeddedNulls(runtime, val));</span>
+<span class="fc" id="L1225">        }</span>
+<span class="fc" id="L1226">        envp_str = new String[envp_buf.size()];</span>
+<span class="fc" id="L1227">        envp_buf.toArray(envp_str);</span>
+<span class="fc" id="L1228">        eargp.envp_str = envp_str;</span>
+<span class="fc" id="L1229">        eargp.envp_buf = envp_buf;</span>
+<span class="fc" id="L1230">    }</span>
+
+    static int checkExecFds1(ThreadContext context, Ruby runtime, ExecArg eargp, RubyHash h, int maxhint, IRubyObject ary) {
+        long i;
+
+<span class="fc bfc" id="L1235" title="All 2 branches covered.">        if (ary != null) {</span>
+<span class="fc bfc" id="L1236" title="All 2 branches covered.">            for (i = 0; i &lt; ((RubyArray)ary).size(); i++) {</span>
+<span class="fc" id="L1237">                IRubyObject elt = ((RubyArray)ary).eltOk(i);</span>
+<span class="fc" id="L1238">                int fd = RubyNumeric.fix2int(((RubyArray)elt).eltOk(0));</span>
+<span class="pc bpc" id="L1239" title="1 of 2 branches missed.">                if (h.fastARef(runtime.newFixnum(fd)) != null) {</span>
+<span class="nc" id="L1240">                    throw runtime.newArgumentError(&quot;fd &quot; + fd + &quot; specified twice&quot;);</span>
+                }
+<span class="pc bpc" id="L1242" title="1 of 4 branches missed.">                if (ary == eargp.fd_open || ary == eargp.fd_dup2)</span>
+<span class="fc" id="L1243">                    h.op_aset(context, runtime.newFixnum(fd), runtime.getTrue());</span>
+<span class="pc bpc" id="L1244" title="1 of 2 branches missed.">                else if (ary == eargp.fd_dup2_child)</span>
+<span class="fc" id="L1245">                    h.op_aset(context, runtime.newFixnum(fd), ((RubyArray)elt).eltOk(1));</span>
+                else /* ary == eargp.fd_close */
+<span class="nc" id="L1247">                    h.op_aset(context, runtime.newFixnum(fd), runtime.newFixnum(-1));</span>
+<span class="fc bfc" id="L1248" title="All 2 branches covered.">                if (maxhint &lt; fd)</span>
+<span class="fc" id="L1249">                    maxhint = fd;</span>
+<span class="pc bpc" id="L1250" title="1 of 4 branches missed.">                if (ary == eargp.fd_dup2 || ary == eargp.fd_dup2_child) {</span>
+<span class="fc" id="L1251">                    fd = RubyNumeric.fix2int(((RubyArray)elt).eltOk(1));</span>
+<span class="fc bfc" id="L1252" title="All 2 branches covered.">                    if (maxhint &lt; fd)</span>
+<span class="fc" id="L1253">                        maxhint = fd;</span>
+                }
+            }
+        }
+<span class="fc" id="L1257">        return maxhint;</span>
+    }
+
+    static IRubyObject checkExecFds(ThreadContext context, Ruby runtime, ExecArg eargp) {
+<span class="fc" id="L1261">        RubyHash h = RubyHash.newHash(runtime);</span>
+        IRubyObject ary;
+<span class="fc" id="L1263">        int maxhint = -1;</span>
+        long i;
+
+<span class="fc" id="L1266">        maxhint = checkExecFds1(context, runtime, eargp, h, maxhint, eargp.fd_dup2);</span>
+<span class="fc" id="L1267">        maxhint = checkExecFds1(context, runtime, eargp, h, maxhint, eargp.fd_close);</span>
+<span class="fc" id="L1268">        maxhint = checkExecFds1(context, runtime, eargp, h, maxhint, eargp.fd_open);</span>
+<span class="fc" id="L1269">        maxhint = checkExecFds1(context, runtime, eargp, h, maxhint, eargp.fd_dup2_child);</span>
+
+<span class="fc bfc" id="L1271" title="All 2 branches covered.">        if (eargp.fd_dup2_child != null) {</span>
+<span class="fc" id="L1272">            ary = eargp.fd_dup2_child;</span>
+<span class="fc bfc" id="L1273" title="All 2 branches covered.">            for (i = 0; i &lt; ((RubyArray)ary).size(); i++) {</span>
+<span class="fc" id="L1274">                IRubyObject elt = ((RubyArray)ary).eltOk(i);</span>
+<span class="fc" id="L1275">                int newfd = RubyNumeric.fix2int(((RubyArray)elt).eltOk(0));</span>
+<span class="fc" id="L1276">                int oldfd = RubyNumeric.fix2int(((RubyArray)elt).eltOk(1));</span>
+<span class="fc" id="L1277">                int lastfd = oldfd;</span>
+<span class="fc" id="L1278">                IRubyObject val = h.fastARef(runtime.newFixnum(lastfd));</span>
+<span class="fc" id="L1279">                long depth = 0;</span>
+<span class="pc bpc" id="L1280" title="3 of 4 branches missed.">                while (val instanceof RubyFixnum &amp;&amp; 0 &lt;= ((RubyFixnum)val).getIntValue()) {</span>
+<span class="nc" id="L1281">                    lastfd = RubyNumeric.fix2int(val);</span>
+<span class="nc" id="L1282">                    val = h.fastARef(val);</span>
+<span class="nc bnc" id="L1283" title="All 2 branches missed.">                    if (((RubyArray)ary).size() &lt; depth)</span>
+<span class="nc" id="L1284">                        throw runtime.newArgumentError(&quot;cyclic child fd redirection from &quot; + oldfd);</span>
+<span class="nc" id="L1285">                    depth++;</span>
+                }
+<span class="pc bpc" id="L1287" title="1 of 2 branches missed.">                if (val != runtime.getTrue())</span>
+<span class="nc" id="L1288">                    throw runtime.newArgumentError(&quot;child fd &quot; + oldfd + &quot; is not redirected&quot;);</span>
+<span class="pc bpc" id="L1289" title="1 of 2 branches missed.">                if (oldfd != lastfd) {</span>
+                    IRubyObject val2;
+<span class="nc" id="L1291">                    ((RubyArray)elt).store(1, runtime.newFixnum(lastfd));</span>
+<span class="nc" id="L1292">                    h.op_aset(context, runtime.newFixnum(newfd), runtime.newFixnum(lastfd));</span>
+<span class="nc" id="L1293">                    val = runtime.newFixnum(oldfd);</span>
+<span class="nc bnc" id="L1294" title="All 2 branches missed.">                    while ((val2 = h.fastARef(val)) instanceof RubyFixnum) {</span>
+<span class="nc" id="L1295">                        h.op_aset(context, val, runtime.newFixnum(lastfd));</span>
+<span class="nc" id="L1296">                        val = val2;</span>
+                    }
+                }
+            }
+        }
+
+<span class="fc" id="L1302">        eargp.close_others_maxhint = maxhint;</span>
+<span class="fc" id="L1303">        return h;</span>
+    }
+
+    static int execargAddopt(ThreadContext context, Ruby runtime, ExecArg eargp, IRubyObject key, IRubyObject val) {
+        String id;
+//        #if defined(HAVE_SETRLIMIT) &amp;&amp; defined(NUM2RLIM)
+        int rtype;
+//        #endif
+
+//        rb_secure(2);
+
+<span class="fc" id="L1314">        boolean redirect = false;</span>
+<span class="pc bpc" id="L1315" title="2 of 3 branches missed.">        switch (key.getMetaClass().getRealClass().getClassIndex()) {</span>
+            case SYMBOL:
+<span class="fc" id="L1317">                id = key.toString();</span>
+//                #ifdef HAVE_SETPGID
+<span class="pc bpc" id="L1319" title="1 of 2 branches missed.">                if (id.equals(&quot;pgroup&quot;)) {</span>
+                    long pgroup;
+<span class="nc bnc" id="L1321" title="All 2 branches missed.">                    if (eargp.pgroup_given()) {</span>
+<span class="nc" id="L1322">                        throw runtime.newArgumentError(&quot;pgroup option specified twice&quot;);</span>
+                    }
+<span class="nc bnc" id="L1324" title="All 4 branches missed.">                    if (val == null || val.isNil())</span>
+<span class="nc" id="L1325">                        pgroup = -1; /* asis(-1) means &quot;don't call setpgid()&quot;. */</span>
+<span class="nc bnc" id="L1326" title="All 2 branches missed.">                    else if (val == runtime.getTrue())</span>
+<span class="nc" id="L1327">                        pgroup = 0; /* new process group. */</span>
+                    else {
+<span class="nc" id="L1329">                        pgroup = val.convertToInteger().getLongValue();</span>
+<span class="nc bnc" id="L1330" title="All 2 branches missed.">                        if (pgroup &lt; 0) {</span>
+<span class="nc" id="L1331">                            throw runtime.newArgumentError(&quot;negative process group ID : &quot; + pgroup);</span>
+                        }
+                    }
+<span class="nc" id="L1334">                    eargp.pgroup_given_set();</span>
+<span class="nc" id="L1335">                    eargp.pgroup_pgid = pgroup;</span>
+<span class="nc" id="L1336">                }</span>
+                else
+//                #ifdef _WIN32
+//                if (id.equals(&quot;new_pgroup&quot;)) {
+//                    if (eargp.new_pgroup_given) {
+//                        throw runtime.newArgumentError(&quot;new_pgroup option specified twice&quot;);
+//                    }
+//                    eargp.new_pgroup_given = 1;
+//                    eargp.new_pgroup_flag = RTEST(val) ? 1 : 0;
+//                }
+//                else
+//                #endif
+//                #if defined(HAVE_SETRLIMIT) &amp;&amp; defined(NUM2RLIM)
+<span class="pc bpc" id="L1349" title="1 of 2 branches missed.">                if (id.startsWith(&quot;rlimit_&quot;) &amp;&amp;  // TODO</span>
+                        false) {
+//                        (rtype = rlimitTypeByLname(id.substring(7)) != -1)) {
+                    IRubyObject ary = eargp.rlimit_limits;
+                    IRubyObject tmp, softlim, hardlim;
+                    if (eargp.rlimit_limits == null)
+                        ary = eargp.rlimit_limits = runtime.newArray();
+                    else
+                        ary = eargp.rlimit_limits;
+                    tmp = TypeConverter.checkArrayType(runtime, val);
+                    if (!tmp.isNil()) {
+                        if (((RubyArray)tmp).size() == 1)
+                            softlim = hardlim = ((RubyArray)tmp).eltOk(0).convertToInteger();
+                        else if (((RubyArray)tmp).size() == 2) {
+                            softlim = ((RubyArray)tmp).eltOk(0).convertToInteger();
+                            hardlim = ((RubyArray)tmp).eltOk(1).convertToInteger();
+                        }
+                        else {
+                            throw runtime.newArgumentError(&quot;wrong exec rlimit option&quot;);
+                        }
+                    }
+                    else {
+                        softlim = hardlim = val.convertToInteger();
+                    }
+                    tmp = runtime.newArray(runtime.newFixnum(rtype), softlim, hardlim);
+                    ((RubyArray)ary).push(tmp);
+                }
+                else
+//                #endif
+<span class="pc bpc" id="L1378" title="1 of 2 branches missed.">                if (id.equals(&quot;unsetenv_others&quot;)) {</span>
+<span class="nc bnc" id="L1379" title="All 2 branches missed.">                    if (eargp.unsetenv_others_given()) {</span>
+<span class="nc" id="L1380">                        throw runtime.newArgumentError(&quot;unsetenv_others option specified twice&quot;);</span>
+                    }
+<span class="nc" id="L1382">                    eargp.unsetenv_others_given_set();</span>
+<span class="nc bnc" id="L1383" title="All 2 branches missed.">                    if (!val.isNil()) {</span>
+<span class="nc" id="L1384">                        eargp.unsetenv_others_do_set();</span>
+                    } else {
+<span class="nc" id="L1386">                        eargp.unsetenv_others_do_clear();</span>
+                    }
+                }
+<span class="pc bpc" id="L1389" title="1 of 2 branches missed.">                else if (id.equals(&quot;chdir&quot;)) {</span>
+<span class="nc bnc" id="L1390" title="All 2 branches missed.">                    if (eargp.chdir_given()) {</span>
+<span class="nc" id="L1391">                        throw runtime.newArgumentError(&quot;chdir option specified twice&quot;);</span>
+                    }
+<span class="nc" id="L1393">                    RubyString valTmp = RubyFile.get_path(context, val);</span>
+<span class="nc" id="L1394">                    eargp.chdir_given_set();</span>
+<span class="nc" id="L1395">                    eargp.chdir_dir = valTmp.toString();</span>
+<span class="nc" id="L1396">                }</span>
+<span class="pc bpc" id="L1397" title="1 of 2 branches missed.">                else if (id.equals(&quot;umask&quot;)) {</span>
+<span class="nc" id="L1398">                    int cmask = val.convertToInteger().getIntValue();</span>
+<span class="nc bnc" id="L1399" title="All 2 branches missed.">                    if (eargp.umask_given()) {</span>
+<span class="nc" id="L1400">                        throw runtime.newArgumentError(&quot;umask option specified twice&quot;);</span>
+                    }
+<span class="nc" id="L1402">                    eargp.umask_given_set();</span>
+<span class="nc" id="L1403">                    eargp.umask_mask = cmask;</span>
+<span class="nc" id="L1404">                }</span>
+<span class="pc bpc" id="L1405" title="1 of 2 branches missed.">                else if (id.equals(&quot;close_others&quot;)) {</span>
+<span class="nc bnc" id="L1406" title="All 2 branches missed.">                    if (eargp.close_others_given()) {</span>
+<span class="nc" id="L1407">                        throw runtime.newArgumentError(&quot;close_others option specified twice&quot;);</span>
+                    }
+<span class="nc" id="L1409">                    eargp.close_others_given_set();</span>
+<span class="nc bnc" id="L1410" title="All 2 branches missed.">                    if (!val.isNil()) {</span>
+<span class="nc" id="L1411">                        eargp.close_others_do_set();</span>
+                    } else {
+<span class="nc" id="L1413">                        eargp.close_others_do_clear();</span>
+                    }
+                }
+<span class="pc bpc" id="L1416" title="1 of 2 branches missed.">                else if (id.equals(&quot;in&quot;)) {</span>
+<span class="nc" id="L1417">                    key = RubyFixnum.zero(runtime);</span>
+<span class="nc" id="L1418">                    checkExecRedirect(context, runtime, key, val, eargp);</span>
+                }
+<span class="pc bpc" id="L1420" title="1 of 2 branches missed.">                else if (id.equals(&quot;out&quot;)) {</span>
+<span class="nc" id="L1421">                    key = RubyFixnum.one(runtime);</span>
+<span class="nc" id="L1422">                    checkExecRedirect(context, runtime, key, val, eargp);</span>
+                }
+<span class="fc bfc" id="L1424" title="All 2 branches covered.">                else if (id.equals(&quot;err&quot;)) {</span>
+<span class="fc" id="L1425">                    key = RubyFixnum.two(runtime);</span>
+<span class="fc" id="L1426">                    checkExecRedirect(context, runtime, key, val, eargp);</span>
+                }
+<span class="pc bpc" id="L1428" title="1 of 2 branches missed.">                else if (id.equals(&quot;uid&quot;) &amp;&amp; false) { // TODO</span>
+//                    #ifdef HAVE_SETUID
+                    if (eargp.uid_given()) {
+                        throw runtime.newArgumentError(&quot;uid option specified twice&quot;);
+                    }
+//                    checkUidSwitch();
+                    {
+//                        PREPARE_GETPWNAM;
+                        eargp.uid = val.convertToInteger().getIntValue();
+                        eargp.uid_given_set();
+                    }
+//                    #else
+//                    rb_raise(rb_eNotImpError,
+//                            &quot;uid option is unimplemented on this machine&quot;);
+//                    #endif
+                }
+<span class="pc bpc" id="L1444" title="1 of 2 branches missed.">                else if (id.equals(&quot;gid&quot;) &amp;&amp; false) { // TODO</span>
+//                    #ifdef HAVE_SETGID
+                    if (eargp.gid_given()) {
+                        throw runtime.newArgumentError(&quot;gid option specified twice&quot;);
+                    }
+//                    checkGidSwitch();
+                    {
+//                        PREPARE_GETGRNAM;
+                        eargp.gid = val.convertToInteger().getIntValue();
+                        eargp.gid_given_set();
+                    }
+//                    #else
+//                    rb_raise(rb_eNotImpError,
+//                            &quot;gid option is unimplemented on this machine&quot;);
+//                    #endif
+                }
+                else {
+<span class="fc" id="L1461">                    return ST_STOP;</span>
+                }
+                break;
+
+            case FIXNUM:
+            case FILE:
+            case IO:
+            case ARRAY:
+<span class="nc" id="L1469">                checkExecRedirect(context, runtime, key, val, eargp);</span>
+<span class="nc" id="L1470">                break;</span>
+
+            default:
+<span class="nc" id="L1473">                return ST_STOP;</span>
+        }
+
+<span class="fc" id="L1476">        return ST_CONTINUE;</span>
+    }
+
+    // MRI: check_exec_redirect
+    static void checkExecRedirect(ThreadContext context, Ruby runtime, IRubyObject key, IRubyObject val, ExecArg eargp) {
+        IRubyObject param;
+        IRubyObject path, flags, perm;
+        IRubyObject tmp;
+        String id;
+
+<span class="pc bpc" id="L1486" title="5 of 6 branches missed.">        switch (val.getMetaClass().getRealClass().getClassIndex()) {</span>
+            case SYMBOL:
+<span class="nc" id="L1488">                id = val.toString();</span>
+<span class="nc bnc" id="L1489" title="All 2 branches missed.">                if (id.equals(&quot;close&quot;)) {</span>
+<span class="nc" id="L1490">                    param = context.nil;</span>
+<span class="nc" id="L1491">                    eargp.fd_close = checkExecRedirect1(runtime, eargp.fd_close, key, param);</span>
+                }
+<span class="nc bnc" id="L1493" title="All 2 branches missed.">                else if (id.equals(&quot;in&quot;)) {</span>
+<span class="nc" id="L1494">                    param = runtime.newFixnum(0);</span>
+<span class="nc" id="L1495">                    eargp.fd_dup2 = checkExecRedirect1(runtime, eargp.fd_dup2, key, param);</span>
+                }
+<span class="nc bnc" id="L1497" title="All 2 branches missed.">                else if (id.equals(&quot;out&quot;)) {</span>
+<span class="nc" id="L1498">                    param = runtime.newFixnum(1);</span>
+<span class="nc" id="L1499">                    eargp.fd_dup2 = checkExecRedirect1(runtime, eargp.fd_dup2, key, param);</span>
+                }
+<span class="nc bnc" id="L1501" title="All 2 branches missed.">                else if (id.equals(&quot;err&quot;)) {</span>
+<span class="nc" id="L1502">                    param = runtime.newFixnum(2);</span>
+<span class="nc" id="L1503">                    eargp.fd_dup2 = checkExecRedirect1(runtime, eargp.fd_dup2, key, param);</span>
+                }
+                else {
+<span class="nc" id="L1506">                    throw runtime.newArgumentError(&quot;wrong exec redirect symbol: &quot; + id);</span>
+                }
+                break;
+
+            case FILE:
+            case IO:
+<span class="nc" id="L1512">                val = checkExecRedirectFd(runtime, val, false);</span>
+                /* fall through */
+            case FIXNUM:
+<span class="nc" id="L1515">                param = val;</span>
+<span class="nc" id="L1516">                eargp.fd_dup2 = checkExecRedirect1(runtime, eargp.fd_dup2, key, param);</span>
+<span class="nc" id="L1517">                break;</span>
+
+            case ARRAY:
+<span class="fc" id="L1520">                path = ((RubyArray)val).eltOk(0);</span>
+<span class="pc bpc" id="L1521" title="2 of 4 branches missed.">                if (((RubyArray)val).size() == 2 &amp;&amp; path instanceof RubySymbol &amp;&amp;</span>
+<span class="pc bpc" id="L1522" title="1 of 2 branches missed.">                        path.toString().equals(&quot;child&quot;)) {</span>
+<span class="fc" id="L1523">                    param = checkExecRedirectFd(runtime, ((RubyArray)val).eltOk(1), false);</span>
+<span class="fc" id="L1524">                    eargp.fd_dup2_child = checkExecRedirect1(runtime, eargp.fd_dup2_child, key, param);</span>
+                }
+                else {
+<span class="nc" id="L1527">                    path = RubyFile.get_path(context, path);</span>
+<span class="nc" id="L1528">                    flags = ((RubyArray)val).eltOk(1);</span>
+                    int intFlags;
+<span class="nc bnc" id="L1530" title="All 2 branches missed.">                    if (flags.isNil())</span>
+<span class="nc" id="L1531">                        intFlags = OpenFlags.O_RDONLY.intValue();</span>
+<span class="nc bnc" id="L1532" title="All 2 branches missed.">                    else if (flags instanceof RubyString)</span>
+<span class="nc" id="L1533">                        intFlags = OpenFile.ioModestrOflags(runtime, flags.toString());</span>
+                    else
+<span class="nc" id="L1535">                        intFlags = flags.convertToInteger().getIntValue();</span>
+<span class="nc" id="L1536">                    flags = runtime.newFixnum(intFlags);</span>
+<span class="nc" id="L1537">                    perm = ((RubyArray)val).eltOk(2);</span>
+<span class="nc bnc" id="L1538" title="All 2 branches missed.">                    perm = perm.isNil() ? runtime.newFixnum(0644) : perm.convertToInteger();</span>
+<span class="nc" id="L1539">                    param = runtime.newArray(((RubyString)path).strDup(runtime).export(context),</span>
+                            flags, perm);
+<span class="nc" id="L1541">                    eargp.fd_open = checkExecRedirect1(runtime, eargp.fd_open, key, param);</span>
+                }
+<span class="nc" id="L1543">                break;</span>
+
+            case STRING:
+<span class="nc" id="L1546">                path = val;</span>
+<span class="nc" id="L1547">                path = RubyFile.get_path(context, path);</span>
+<span class="nc bnc" id="L1548" title="All 2 branches missed.">                if (key instanceof RubyIO)</span>
+<span class="nc" id="L1549">                    key = checkExecRedirectFd(runtime, key, true);</span>
+<span class="nc bnc" id="L1550" title="All 6 branches missed.">                if (key instanceof RubyFixnum &amp;&amp; (((RubyFixnum)key).getIntValue() == 1 || ((RubyFixnum)key).getIntValue() == 2))</span>
+<span class="nc" id="L1551">                    flags = runtime.newFixnum(OpenFlags.O_WRONLY.intValue()|OpenFlags.O_CREAT.intValue()|OpenFlags.O_TRUNC.intValue());</span>
+                else
+<span class="nc" id="L1553">                    flags = runtime.newFixnum(OpenFlags.O_RDONLY.intValue());</span>
+<span class="nc" id="L1554">                perm = runtime.newFixnum(0644);</span>
+<span class="nc" id="L1555">                param = runtime.newArray(((RubyString)path).strDup(runtime).export(context),</span>
+                        flags, perm);
+<span class="nc" id="L1557">                eargp.fd_open = checkExecRedirect1(runtime, eargp.fd_open, key, param);</span>
+<span class="nc" id="L1558">                break;</span>
+
+            default:
+<span class="nc" id="L1561">                tmp = val;</span>
+<span class="nc" id="L1562">                val = TypeConverter.ioCheckIO(runtime, tmp);</span>
+<span class="nc bnc" id="L1563" title="All 2 branches missed.">                if (!val.isNil()) {</span>
+<span class="nc" id="L1564">                    val = checkExecRedirectFd(runtime, val, false);</span>
+<span class="nc" id="L1565">                    param = val;</span>
+<span class="nc" id="L1566">                    eargp.fd_dup2 = checkExecRedirect1(runtime, eargp.fd_dup2, key, param);</span>
+                }
+<span class="nc" id="L1568">                throw runtime.newArgumentError(&quot;wrong exec redirect action&quot;);</span>
+        }
+
+<span class="fc" id="L1571">    }</span>
+
+    // MRI: check_exec_redirect_fd
+    static IRubyObject checkExecRedirectFd(Ruby runtime, IRubyObject v, boolean iskey) {
+        IRubyObject tmp;
+        int fd;
+<span class="fc bfc" id="L1577" title="All 2 branches covered.">        if (v instanceof RubyFixnum) {</span>
+<span class="fc" id="L1578">            fd = RubyNumeric.fix2int(v);</span>
+        }
+<span class="pc bpc" id="L1580" title="1 of 2 branches missed.">        else if (v instanceof RubySymbol) {</span>
+<span class="fc" id="L1581">            String id = v.toString();</span>
+<span class="pc bpc" id="L1582" title="1 of 2 branches missed.">            if (id.equals(&quot;in&quot;))</span>
+<span class="nc" id="L1583">                fd = 0;</span>
+<span class="pc bpc" id="L1584" title="1 of 2 branches missed.">            else if (id.equals(&quot;out&quot;))</span>
+<span class="fc" id="L1585">                fd = 1;</span>
+<span class="nc bnc" id="L1586" title="All 2 branches missed.">            else if (id.equals(&quot;err&quot;))</span>
+<span class="nc" id="L1587">                fd = 2;</span>
+            else
+<span class="nc" id="L1589">                throw runtime.newArgumentError(&quot;wrong exec redirect&quot;);</span>
+<span class="fc" id="L1590">        }</span>
+<span class="nc bnc" id="L1591" title="All 2 branches missed.">        else if (!(tmp = TypeConverter.convertToTypeWithCheck(v, runtime.getIO(), &quot;to_io&quot;)).isNil()) {</span>
+            OpenFile fptr;
+<span class="nc" id="L1593">            fptr = ((RubyIO)tmp).getOpenFileChecked();</span>
+<span class="nc bnc" id="L1594" title="All 2 branches missed.">            if (fptr.tiedIOForWriting != null)</span>
+<span class="nc" id="L1595">                throw runtime.newArgumentError(&quot;duplex IO redirection&quot;);</span>
+<span class="nc" id="L1596">            fd = fptr.fd().bestFileno();</span>
+<span class="nc" id="L1597">        }</span>
+        else {
+<span class="nc" id="L1599">            throw runtime.newArgumentError(&quot;wrong exec redirect&quot;);</span>
+        }
+<span class="pc bpc" id="L1601" title="1 of 2 branches missed.">        if (fd &lt; 0) {</span>
+<span class="nc" id="L1602">            throw runtime.newArgumentError(&quot;negative file descriptor&quot;);</span>
+        }
+<span class="pc bpc" id="L1604" title="5 of 6 branches missed.">        else if (Platform.IS_WINDOWS &amp;&amp; fd &gt;= 3 &amp;&amp; iskey) {</span>
+<span class="nc" id="L1605">            throw runtime.newArgumentError(&quot;wrong file descriptor (&quot; + fd + &quot;)&quot;);</span>
+        }
+<span class="fc" id="L1607">        return runtime.newFixnum(fd);</span>
+    }
+
+    // MRI: check_exec_redirect1
+    static IRubyObject checkExecRedirect1(Ruby runtime, IRubyObject ary, IRubyObject key, IRubyObject param) {
+<span class="fc bfc" id="L1612" title="All 2 branches covered.">        if (ary == null) {</span>
+<span class="fc" id="L1613">            ary = runtime.newArray();</span>
+        }
+<span class="pc bpc" id="L1615" title="1 of 2 branches missed.">        if (!(key instanceof RubyArray)) {</span>
+<span class="pc bpc" id="L1616" title="1 of 2 branches missed.">            IRubyObject fd = checkExecRedirectFd(runtime, key, !param.isNil());</span>
+<span class="fc" id="L1617">            ((RubyArray)ary).push(runtime.newArray(fd, param));</span>
+<span class="fc" id="L1618">        }</span>
+        else {
+<span class="nc" id="L1620">            int i, n=0;</span>
+<span class="nc bnc" id="L1621" title="All 2 branches missed.">            for (i = 0 ; i &lt; ((RubyArray)key).size(); i++) {</span>
+<span class="nc" id="L1622">                IRubyObject v = ((RubyArray)key).eltOk(i);</span>
+<span class="nc bnc" id="L1623" title="All 2 branches missed.">                IRubyObject fd = checkExecRedirectFd(runtime, v, !param.isNil());</span>
+<span class="nc" id="L1624">                ((RubyArray)ary).push(runtime.newArray(fd, param));</span>
+<span class="nc" id="L1625">                n++;</span>
+            }
+        }
+<span class="fc" id="L1628">        return ary;</span>
+    }
+
+    private static final int ST_CONTINUE = 0;
+    private static final int ST_STOP = 1;
+
+    // rb_execarg_new
+    public static ExecArg execargNew(ThreadContext context, IRubyObject[] argv, boolean accept_shell) {
+<span class="fc" id="L1636">        ExecArg eargp = new ExecArg();</span>
+<span class="fc" id="L1637">        execargInit(context, argv, accept_shell, eargp);</span>
+<span class="fc" id="L1638">        return eargp;</span>
+    }
+
+    // rb_execarg_init
+    private static RubyString execargInit(ThreadContext context, IRubyObject[] argv, boolean accept_shell, ExecArg eargp) {
+        RubyString prog, ret;
+<span class="fc" id="L1644">        IRubyObject[] env_opt = {context.nil, context.nil};</span>
+<span class="fc" id="L1645">        IRubyObject[][] argv_p = {argv};</span>
+<span class="fc" id="L1646">        prog = execGetargs(context, argv_p, accept_shell, env_opt);</span>
+<span class="fc" id="L1647">        execFillarg(context, prog, argv_p[0], env_opt[0], env_opt[1], eargp);</span>
+<span class="fc bfc" id="L1648" title="All 2 branches covered.">        ret = eargp.use_shell ? eargp.command_name : eargp.command_name;</span>
+<span class="fc" id="L1649">        return ret;</span>
+    }
+
+    // rb_exec_getargs
+    private static RubyString execGetargs(ThreadContext context, IRubyObject[][] argv_p, boolean accept_shell, IRubyObject[] env_opt) {
+<span class="fc" id="L1654">        Ruby runtime = context.runtime;</span>
+        IRubyObject hash;
+        RubyString prog;
+<span class="fc" id="L1657">        int beg = 0;</span>
+<span class="fc" id="L1658">        int end = argv_p[0].length;</span>
+
+<span class="fc bfc" id="L1660" title="All 2 branches covered.">        if (end &gt;= 1) {</span>
+<span class="fc" id="L1661">            hash = TypeConverter.checkHashType(runtime, argv_p[0][end - 1]);</span>
+<span class="fc bfc" id="L1662" title="All 2 branches covered.">            if (!hash.isNil()) {</span>
+<span class="fc" id="L1663">                env_opt[1] = hash;</span>
+<span class="fc" id="L1664">                end--;</span>
+            }
+        }
+
+<span class="fc bfc" id="L1668" title="All 2 branches covered.">        if (end &gt;= 1) {</span>
+<span class="fc" id="L1669">            hash = TypeConverter.checkHashType(runtime, argv_p[0][0]);</span>
+<span class="fc bfc" id="L1670" title="All 2 branches covered.">            if (!hash.isNil()) {</span>
+<span class="fc" id="L1671">                env_opt[0] = hash;</span>
+<span class="fc" id="L1672">                beg++;</span>
+            }
+        }
+<span class="fc" id="L1675">        argv_p[0] = Arrays.copyOfRange(argv_p[0], beg, end);</span>
+<span class="fc" id="L1676">        prog = checkArgv(context, argv_p[0]);</span>
+<span class="fc bfc" id="L1677" title="All 2 branches covered.">        if (prog == null) {</span>
+<span class="fc" id="L1678">            prog = (RubyString)argv_p[0][0];</span>
+<span class="fc bfc" id="L1679" title="All 4 branches covered.">            if (accept_shell &amp;&amp; (end - beg) == 1) {</span>
+<span class="fc" id="L1680">                argv_p[0] = IRubyObject.NULL_ARRAY;</span>
+            }
+        }
+<span class="fc" id="L1683">        return prog;</span>
+    }
+
+    // rb_check_argv
+    public static RubyString checkArgv(ThreadContext context, IRubyObject[] argv) {
+<span class="fc" id="L1688">        Ruby runtime = context.runtime;</span>
+        IRubyObject tmp;
+        RubyString prog;
+        int i;
+
+<span class="fc" id="L1693">        Arity.checkArgumentCount(runtime, argv, 1, Integer.MAX_VALUE);</span>
+
+<span class="fc" id="L1695">        prog = null;</span>
+<span class="fc" id="L1696">        tmp = TypeConverter.checkArrayType(runtime, argv[0]);</span>
+<span class="fc bfc" id="L1697" title="All 2 branches covered.">        if (!tmp.isNil()) {</span>
+<span class="fc bfc" id="L1698" title="All 2 branches covered.">            if (((RubyArray)tmp).size() != 2) {</span>
+<span class="fc" id="L1699">                throw runtime.newArgumentError(&quot;wrong first argument&quot;);</span>
+            }
+<span class="fc" id="L1701">            prog = ((RubyArray)tmp).eltOk(0).convertToString();</span>
+<span class="fc" id="L1702">            argv[0] = ((RubyArray)tmp).eltOk(1);</span>
+<span class="fc" id="L1703">            StringSupport.checkEmbeddedNulls(runtime, prog);</span>
+<span class="fc" id="L1704">            prog = prog.strDup(runtime);</span>
+<span class="fc" id="L1705">            prog.setFrozen(true);</span>
+        }
+<span class="fc bfc" id="L1707" title="All 2 branches covered.">        for (i = 0; i &lt; argv.length; i++) {</span>
+<span class="fc" id="L1708">            argv[i] = argv[i].convertToString();</span>
+<span class="fc" id="L1709">            argv[i] = ((RubyString)argv[i]).newFrozen();</span>
+<span class="fc" id="L1710">            StringSupport.checkEmbeddedNulls(runtime, argv[i]);</span>
+        }
+        //        security(name ? name : RSTRING_PTR(argv[0]));
+<span class="fc" id="L1713">        return prog;</span>
+    }
+
+<span class="fc" id="L1716">    private static final String posix_sh_cmds[] = {</span>
+            &quot;!&quot;,		/* reserved */
+            &quot;.&quot;,		/* special built-in */
+            &quot;:&quot;,		/* special built-in */
+            &quot;break&quot;,		/* special built-in */
+            &quot;case&quot;,		/* reserved */
+            &quot;continue&quot;,		/* special built-in */
+            &quot;do&quot;,		/* reserved */
+            &quot;done&quot;,		/* reserved */
+            &quot;elif&quot;,		/* reserved */
+            &quot;else&quot;,		/* reserved */
+            &quot;esac&quot;,		/* reserved */
+            &quot;eval&quot;,		/* special built-in */
+            &quot;exec&quot;,		/* special built-in */
+            &quot;exit&quot;,		/* special built-in */
+            &quot;export&quot;,		/* special built-in */
+            &quot;fi&quot;,		/* reserved */
+            &quot;for&quot;,		/* reserved */
+            &quot;if&quot;,		/* reserved */
+            &quot;in&quot;,		/* reserved */
+            &quot;readonly&quot;,		/* special built-in */
+            &quot;return&quot;,		/* special built-in */
+            &quot;set&quot;,		/* special built-in */
+            &quot;shift&quot;,		/* special built-in */
+            &quot;then&quot;,		/* reserved */
+            &quot;times&quot;,		/* special built-in */
+            &quot;trap&quot;,		/* special built-in */
+            &quot;unset&quot;,		/* special built-in */
+            &quot;until&quot;,		/* reserved */
+            &quot;while&quot;,		/* reserved */
+    };
+
+<span class="fc" id="L1748">    private static final byte[] DUMMY_ARRAY = {};</span>
+    private static void execFillarg(ThreadContext context, RubyString prog, IRubyObject[] argv, IRubyObject env, IRubyObject opthash, ExecArg eargp) {
+<span class="fc" id="L1750">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L1751">        int argc = argv.length;</span>
+
+<span class="fc bfc" id="L1753" title="All 2 branches covered.">        if (!opthash.isNil()) {</span>
+<span class="fc" id="L1754">            checkExecOptions(context, runtime, (RubyHash)opthash, eargp);</span>
+        }
+
+        // add chdir if necessary
+<span class="pc bpc" id="L1758" title="1 of 2 branches missed.">        if (!runtime.getCurrentDirectory().equals(runtime.getPosix().getcwd())) {</span>
+<span class="nc bnc" id="L1759" title="All 2 branches missed.">            if (!eargp.chdir_given()) { // only if :chdir is not specified</span>
+<span class="nc" id="L1760">                eargp.chdir_given_set();</span>
+<span class="nc" id="L1761">                eargp.chdir_dir = runtime.getCurrentDirectory();</span>
+            }
+        }
+
+        // restructure command as a single string if chdir and has args
+<span class="pc bpc" id="L1766" title="3 of 4 branches missed.">        if (eargp.chdir_given() &amp;&amp; argc &gt; 1) {</span>
+<span class="nc" id="L1767">            RubyArray array = RubyArray.newArrayNoCopy(runtime, argv);</span>
+<span class="nc" id="L1768">            prog = (RubyString)array.join(context, RubyString.newString(runtime, &quot; &quot;));</span>
+        }
+
+<span class="fc bfc" id="L1771" title="All 2 branches covered.">        if (!env.isNil()) {</span>
+<span class="fc" id="L1772">            eargp.env_modification = RubyIO.checkExecEnv(context, (RubyHash)env);</span>
+        }
+
+<span class="fc" id="L1775">        prog = prog.export(context);</span>
+        // need to use shell
+<span class="pc bpc" id="L1777" title="1 of 4 branches missed.">        eargp.use_shell = argc == 0 || eargp.chdir_given();</span>
+<span class="fc bfc" id="L1778" title="All 2 branches covered.">        if (eargp.use_shell)</span>
+<span class="fc" id="L1779">            eargp.command_name = prog;</span>
+        else
+<span class="fc" id="L1781">            eargp.command_name = prog;</span>
+
+<span class="pc bpc" id="L1783" title="1 of 2 branches missed.">        if (!Platform.IS_WINDOWS) {</span>
+<span class="fc bfc" id="L1784" title="All 2 branches covered.">            if (eargp.use_shell) {</span>
+                byte[] pBytes;
+                int p;
+<span class="fc" id="L1787">                ByteList first = new ByteList(DUMMY_ARRAY, false);</span>
+<span class="fc" id="L1788">                boolean has_meta = false;</span>
+                /*
+                 * meta characters:
+                 *
+                 * *    Pathname Expansion
+                 * ?    Pathname Expansion
+                 * {}   Grouping Commands
+                 * []   Pathname Expansion
+                 * &lt;&gt;   Redirection
+                 * ()   Grouping Commands
+                 * ~    Tilde Expansion
+                 * &amp;    AND Lists, Asynchronous Lists
+                 * |    OR Lists, Pipelines
+                 * \    Escape Character
+                 * $    Parameter Expansion
+                 * ;    Sequential Lists
+                 * '    Single-Quotes
+                 * `    Command Substitution
+                 * &quot;    Double-Quotes
+                 * \n   Lists
+                 *
+                 * #    Comment
+                 * =    Assignment preceding command name
+                 * %    (used in Parameter Expansion)
+                 */
+<span class="fc" id="L1813">                ByteList progByteList = prog.getByteList();</span>
+<span class="fc" id="L1814">                pBytes = progByteList.unsafeBytes();</span>
+<span class="fc bfc" id="L1815" title="All 2 branches covered.">                for (p = 0; p &lt; progByteList.length(); p++){</span>
+<span class="pc bpc" id="L1816" title="1 of 4 branches missed.">                    if (progByteList.get(p) == ' ' || progByteList.get(p) == '\t'){</span>
+<span class="pc bpc" id="L1817" title="1 of 4 branches missed.">                        if (first.unsafeBytes() != DUMMY_ARRAY &amp;&amp; first.length() == 0) first.setRealSize(p - first.begin());</span>
+                    }
+                    else{
+<span class="fc bfc" id="L1820" title="All 2 branches covered.">                        if (first.unsafeBytes() == DUMMY_ARRAY) { first.setUnsafeBytes(pBytes); first.setBegin(p + progByteList.begin()); }</span>
+                    }
+<span class="pc bpc" id="L1822" title="1 of 4 branches missed.">                    if (!has_meta &amp;&amp; &quot;*?{}[]&lt;&gt;()~&amp;|\\$;'`\&quot;\n#&quot;.indexOf(progByteList.get(p) &amp; 0xFF) != -1)</span>
+<span class="fc" id="L1823">                        has_meta = true;</span>
+<span class="fc bfc" id="L1824" title="All 2 branches covered.">                    if (first.length() == 0) {</span>
+<span class="pc bpc" id="L1825" title="1 of 2 branches missed.">                        if (progByteList.get(p) == '='){</span>
+<span class="nc" id="L1826">                            has_meta = true;</span>
+                        }
+<span class="fc bfc" id="L1828" title="All 2 branches covered.">                        else if (progByteList.get(p) == '/'){</span>
+<span class="fc" id="L1829">                            first.setRealSize(0x100); /* longer than any posix_sh_cmds */</span>
+                        }
+                    }
+<span class="fc bfc" id="L1832" title="All 2 branches covered.">                    if (has_meta)</span>
+<span class="fc" id="L1833">                        break;</span>
+                }
+<span class="fc bfc" id="L1835" title="All 4 branches covered.">                if (!has_meta &amp;&amp; first.getUnsafeBytes() != DUMMY_ARRAY) {</span>
+<span class="fc bfc" id="L1836" title="All 2 branches covered.">                    if (first.length() == 0) first.setRealSize(p - first.getBegin());</span>
+<span class="pc bpc" id="L1837" title="2 of 4 branches missed.">                    if (first.length() &gt; 0 &amp;&amp; first.length() &lt;= posix_sh_cmds[0].length() &amp;&amp;</span>
+<span class="nc bnc" id="L1838" title="All 2 branches missed.">                            Arrays.binarySearch(posix_sh_cmds, first.toString(), new Comparator&lt;String&gt;() {</span>
+                                @Override
+                                public int compare(String o1, String o2) {
+<span class="nc" id="L1841">                                    int ret = o1.compareTo(o2);</span>
+<span class="nc bnc" id="L1842" title="All 4 branches missed.">                                    if (ret == 0 &amp;&amp; o1.length() &gt; o2.length()) return -1;</span>
+<span class="nc" id="L1843">                                    return ret;</span>
+                                }
+                            }) != -1)
+<span class="nc" id="L1846">                        has_meta = true;</span>
+                }
+<span class="pc bpc" id="L1848" title="1 of 4 branches missed.">                if (!has_meta &amp;&amp; !eargp.chdir_given()) {</span>
+                    /* avoid shell since no shell meta character found and no chdir needed. */
+<span class="fc" id="L1850">                    eargp.use_shell = false;</span>
+                }
+<span class="fc bfc" id="L1852" title="All 2 branches covered.">                if (!eargp.use_shell) {</span>
+<span class="fc" id="L1853">                    List&lt;byte[]&gt; argv_buf = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L1854">                    pBytes = prog.getByteList().unsafeBytes();</span>
+<span class="fc" id="L1855">                    p = prog.getByteList().begin();</span>
+<span class="fc" id="L1856">                    int pEnd = prog.getByteList().length() + p;</span>
+<span class="fc bfc" id="L1857" title="All 2 branches covered.">                    while (p &lt; pEnd){</span>
+<span class="pc bpc" id="L1858" title="2 of 6 branches missed.">                        while (p &lt; pEnd &amp;&amp; (pBytes[p] == ' ' || pBytes[p] == '\t'))</span>
+<span class="fc" id="L1859">                            p++;</span>
+<span class="pc bpc" id="L1860" title="1 of 2 branches missed.">                        if (p &lt; pEnd){</span>
+<span class="fc" id="L1861">                            int w = p;</span>
+<span class="pc bpc" id="L1862" title="1 of 6 branches missed.">                            while (p &lt; pEnd &amp;&amp; pBytes[p] != ' ' &amp;&amp; pBytes[p] != '\t')</span>
+<span class="fc" id="L1863">                                p++;</span>
+<span class="fc" id="L1864">                            argv_buf.add(Arrays.copyOfRange(pBytes, w, p));</span>
+<span class="fc" id="L1865">                            eargp.argv_buf = argv_buf;</span>
+<span class="fc" id="L1866">                        }</span>
+                    }
+<span class="fc bfc" id="L1868" title="All 2 branches covered.">                    if (argv_buf.size() &gt; 0) {</span>
+<span class="fc" id="L1869">                        eargp.command_name = RubyString.newStringNoCopy(runtime, argv_buf.get(0));</span>
+                    } else {
+<span class="fc" id="L1871">                        eargp.command_name = RubyString.newEmptyString(runtime); // empty command will get caught below shortly</span>
+                    }
+                }
+            }
+        }
+
+<span class="fc bfc" id="L1877" title="All 2 branches covered.">        if (!eargp.use_shell) {</span>
+            String abspath;
+<span class="fc" id="L1879">            abspath = dlnFindExeR(runtime, eargp.command_name.toString(), null);</span>
+<span class="fc bfc" id="L1880" title="All 2 branches covered.">            if (abspath != null)</span>
+<span class="fc" id="L1881">                eargp.command_abspath = StringSupport.checkEmbeddedNulls(runtime, RubyString.newString(runtime, abspath));</span>
+            else
+<span class="fc" id="L1883">                eargp.command_abspath = null;</span>
+        }
+
+<span class="fc bfc" id="L1886" title="All 4 branches covered.">        if (!eargp.use_shell &amp;&amp; eargp.argv_buf == null) {</span>
+            int i;
+            List&lt;byte[]&gt; argv_buf;
+<span class="fc" id="L1889">            argv_buf = new ArrayList();</span>
+<span class="fc bfc" id="L1890" title="All 2 branches covered.">            for (i = 0; i &lt; argc; i++) {</span>
+<span class="fc" id="L1891">                IRubyObject arg = argv[i];</span>
+<span class="fc" id="L1892">                RubyString argStr = StringSupport.checkEmbeddedNulls(runtime, arg);</span>
+<span class="fc" id="L1893">                argStr = argStr.export(context);</span>
+<span class="fc" id="L1894">                argv_buf.add(argStr.getBytes());</span>
+            }
+<span class="fc" id="L1896">            eargp.argv_buf = argv_buf;</span>
+        }
+
+<span class="fc bfc" id="L1899" title="All 2 branches covered.">        if (!eargp.use_shell) {</span>
+<span class="fc" id="L1900">            ArgvStr argv_str = new ArgvStr();</span>
+<span class="fc" id="L1901">            argv_str.argv = new String[eargp.argv_buf.size()];</span>
+<span class="fc" id="L1902">            int i = 0;</span>
+<span class="fc bfc" id="L1903" title="All 2 branches covered.">            for (byte[] bytes : eargp.argv_buf) {</span>
+<span class="fc" id="L1904">                argv_str.argv[i++] = new String(bytes);</span>
+<span class="fc" id="L1905">            }</span>
+<span class="fc" id="L1906">            eargp.argv_str = argv_str;</span>
+        }
+<span class="fc" id="L1908">    }</span>
+
+    private static String dlnFindExeR(Ruby runtime, String fname, String path) {
+<span class="pc bpc" id="L1911" title="1 of 2 branches missed.">        if (path != null) throw new RuntimeException(&quot;BUG: dln_find_exe_r with path is not supported yet&quot;);</span>
+        // FIXME: need to reencode path as same
+<span class="fc" id="L1913">        File exePath = ShellLauncher.findPathExecutable(runtime, fname);</span>
+<span class="fc bfc" id="L1914" title="All 2 branches covered.">        return exePath != null ? exePath.getAbsolutePath() : null;</span>
+    }
+
+<span class="fc" id="L1917">    private static class ArgvStr {</span>
+        String[] argv;
+    }
+
+<span class="fc" id="L1921">    public static class ExecArg {</span>
+        boolean use_shell;
+        RubyString command_name;
+        RubyString command_abspath; /* full path string or nil */
+        ArgvStr argv_str;
+        List&lt;byte[]&gt; argv_buf;
+        IRubyObject redirect_fds;
+        String[] envp_str;
+        List&lt;String&gt; envp_buf;
+        run_exec_dup2_fd_pair[] dup2_tmpbuf;
+        int flags;
+<span class="fc" id="L1932">        long pgroup_pgid = -1; /* asis(-1), new pgroup(0), specified pgroup (0&lt;V). */</span>
+        IRubyObject rlimit_limits; /* null or [[rtype, softlim, hardlim], ...] */
+        int umask_mask;
+        int uid;
+        int gid;
+        IRubyObject fd_dup2;
+        IRubyObject fd_close;
+        IRubyObject fd_open;
+        IRubyObject fd_dup2_child;
+        int close_others_maxhint;
+        RubyArray env_modification; /* null or [[k1,v1], ...] */
+        String chdir_dir;
+<span class="fc" id="L1944">        List&lt;SpawnFileAction&gt; fileActions = new ArrayList();</span>
+<span class="fc" id="L1945">        List&lt;SpawnAttribute&gt; attributes = new ArrayList();</span>
+
+        boolean pgroup_given() {
+<span class="pc bpc" id="L1948" title="1 of 2 branches missed.">            return (flags &amp; 0x1) != 0;</span>
+        }
+
+        boolean umask_given() {
+<span class="pc bpc" id="L1952" title="1 of 2 branches missed.">            return (flags &amp; 0x2) != 0;</span>
+        }
+
+        boolean unsetenv_others_given() {
+<span class="pc bpc" id="L1956" title="1 of 2 branches missed.">            return (flags &amp; 0x4) != 0;</span>
+        }
+
+        boolean unsetenv_others_do() {
+<span class="nc bnc" id="L1960" title="All 2 branches missed.">            return (flags &amp; 0x8) != 0;</span>
+        }
+
+        boolean close_others_given() {
+<span class="nc bnc" id="L1964" title="All 2 branches missed.">            return (flags &amp; 0x10) != 0;</span>
+        }
+
+        boolean close_others_do() {
+<span class="nc bnc" id="L1968" title="All 2 branches missed.">            return (flags &amp; 0x20) != 0;</span>
+        }
+
+        boolean chdir_given() {
+<span class="pc bpc" id="L1972" title="1 of 2 branches missed.">            return (flags &amp; 0x40) != 0;</span>
+        }
+
+        boolean new_pgroup_given() {
+<span class="nc bnc" id="L1976" title="All 2 branches missed.">            return (flags &amp; 0x80) != 0;</span>
+        }
+
+        boolean new_pgroup_flag() {
+<span class="nc bnc" id="L1980" title="All 2 branches missed.">            return (flags &amp; 0x100) != 0;</span>
+        }
+
+        boolean uid_given() {
+<span class="pc bpc" id="L1984" title="1 of 2 branches missed.">            return (flags &amp; 0x200) != 0;</span>
+        }
+
+        boolean gid_given() {
+<span class="pc bpc" id="L1988" title="1 of 2 branches missed.">            return (flags &amp; 0x400) != 0;</span>
+        }
+
+        void pgroup_given_set() {
+<span class="nc" id="L1992">            flags |= 0x1;</span>
+<span class="nc" id="L1993">        }</span>
+
+        void umask_given_set() {
+<span class="nc" id="L1996">            flags |= 0x2;</span>
+<span class="nc" id="L1997">        }</span>
+
+        void unsetenv_others_given_set() {
+<span class="nc" id="L2000">            flags |= 0x4;</span>
+<span class="nc" id="L2001">        }</span>
+
+        void unsetenv_others_do_set() {
+<span class="nc" id="L2004">            flags |= 0x8;</span>
+<span class="nc" id="L2005">        }</span>
+
+        void close_others_given_set() {
+<span class="nc" id="L2008">            flags |= 0x10;</span>
+<span class="nc" id="L2009">        }</span>
+
+        void close_others_do_set() {
+<span class="nc" id="L2012">            flags |= 0x20;</span>
+<span class="nc" id="L2013">        }</span>
+
+        void chdir_given_set() {
+<span class="nc" id="L2016">            flags |= 0x40;</span>
+<span class="nc" id="L2017">        }</span>
+
+        void new_pgroup_given_set() {
+<span class="nc" id="L2020">            flags |= 0x80;</span>
+<span class="nc" id="L2021">        }</span>
+
+        void new_pgroup_flag_set() {
+<span class="nc" id="L2024">            flags |= 0x100;</span>
+<span class="nc" id="L2025">        }</span>
+
+        void uid_given_set() {
+<span class="nc" id="L2028">            flags |= 0x200;</span>
+<span class="nc" id="L2029">        }</span>
+
+        void gid_given_set() {
+<span class="nc" id="L2032">            flags |= 0x400;</span>
+<span class="nc" id="L2033">        }</span>
+
+        void pgroup_given_clear() {
+<span class="nc" id="L2036">            flags &amp;= ~0x1;</span>
+<span class="nc" id="L2037">        }</span>
+
+        void umask_given_clear() {
+<span class="nc" id="L2040">            flags &amp;= ~0x2;</span>
+<span class="nc" id="L2041">        }</span>
+
+        void unsetenv_others_given_clear() {
+<span class="nc" id="L2044">            flags &amp;= ~0x4;</span>
+<span class="nc" id="L2045">        }</span>
+
+        void unsetenv_others_do_clear() {
+<span class="nc" id="L2048">            flags &amp;= ~0x8;</span>
+<span class="nc" id="L2049">        }</span>
+
+        void close_others_given_clear() {
+<span class="nc" id="L2052">            flags &amp;= ~0x10;</span>
+<span class="nc" id="L2053">        }</span>
+
+        void close_others_do_clear() {
+<span class="nc" id="L2056">            flags &amp;= ~0x20;</span>
+<span class="nc" id="L2057">        }</span>
+
+        void chdir_given_clear() {
+<span class="nc" id="L2060">            flags &amp;= ~0x40;</span>
+<span class="nc" id="L2061">        }</span>
+
+        void new_pgroup_given_clear() {
+<span class="nc" id="L2064">            flags &amp;= ~0x80;</span>
+<span class="nc" id="L2065">        }</span>
+
+        void new_pgroup_flag_clear() {
+<span class="nc" id="L2068">            flags &amp;= ~0x100;</span>
+<span class="nc" id="L2069">        }</span>
+
+        void uid_given_clear() {
+<span class="nc" id="L2072">            flags &amp;= ~0x200;</span>
+<span class="nc" id="L2073">        }</span>
+
+        void gid_given_clear() {
+<span class="nc" id="L2076">            flags &amp;= ~0x400;</span>
+<span class="nc" id="L2077">        }</span>
+    }
+
+<span class="fc" id="L2080">    private static final Comparator&lt;run_exec_dup2_fd_pair&gt; intcmp = new Comparator&lt;run_exec_dup2_fd_pair&gt;() {</span>
+        @Override
+        public int compare(run_exec_dup2_fd_pair o1, run_exec_dup2_fd_pair o2) {
+<span class="fc" id="L2083">            return Integer.compare(o1.oldfd, o2.oldfd);</span>
+        }
+    };
+
+<span class="fc" id="L2087">    private static final Comparator&lt;run_exec_dup2_fd_pair&gt; intrcmp = new Comparator&lt;run_exec_dup2_fd_pair&gt;() {</span>
+        @Override
+        public int compare(run_exec_dup2_fd_pair o1, run_exec_dup2_fd_pair o2) {
+<span class="fc" id="L2090">            return Integer.compare(o2.oldfd, o1.oldfd);</span>
+        }
+    };
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

@@ -1,0 +1,741 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ArgumentProcessor.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util.cli</a> &gt; <span class="el_source">ArgumentProcessor.java</span></div><h1>ArgumentProcessor.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2007-2011 Nick Sieger &lt;nicksieger@gmail.com&gt;
+ * Copyright (C) 2009 Joseph LaFata &lt;joe@quibb.org&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.util.cli;
+
+import org.jruby.Ruby;
+import org.jruby.RubyInstanceConfig;
+import org.jruby.exceptions.MainExitException;
+import org.jruby.runtime.profile.builtin.ProfileOutput;
+import org.jruby.util.JRubyFile;
+import org.jruby.util.KCode;
+import org.jruby.util.SafePropertyAccessor;
+
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Set;
+import java.util.HashSet;
+
+/**
+ * Encapsulated logic for processing JRuby's command-line arguments.
+ * 
+ * This class holds the processing logic for JRuby's non-JVM command-line arguments.
+ * All standard Ruby options are processed here, as well as nonstandard JRuby-
+ * specific options.
+ * 
+ * Options passed directly to the JVM are processed separately, by either a launch
+ * script or by a native executable.
+ */
+public class ArgumentProcessor {
+    private final class Argument {
+        public final String originalValue;
+        public final String dashedValue;
+<span class="fc" id="L62">        public Argument(String value, boolean dashed) {</span>
+<span class="fc" id="L63">            this.originalValue = value;</span>
+<span class="pc bpc" id="L64" title="3 of 4 branches missed.">            this.dashedValue = dashed &amp;&amp; !value.startsWith(&quot;-&quot;) ? &quot;-&quot; + value : value;</span>
+<span class="fc" id="L65">        }</span>
+
+        public String toString() {
+<span class="nc" id="L68">            return dashedValue;</span>
+        }
+    }
+
+    private List&lt;Argument&gt; arguments;
+<span class="fc" id="L73">    private int argumentIndex = 0;</span>
+    private boolean processArgv;
+    private final boolean rubyOpts;
+    RubyInstanceConfig config;
+<span class="fc" id="L77">    private boolean endOfArguments = false;</span>
+<span class="fc" id="L78">    private int characterIndex = 0;</span>
+
+    public ArgumentProcessor(String[] arguments, RubyInstanceConfig config) {
+<span class="fc" id="L81">        this(arguments, true, false, false, config);</span>
+<span class="fc" id="L82">    }</span>
+
+<span class="fc" id="L84">    public ArgumentProcessor(String[] arguments, boolean processArgv, boolean dashed, boolean rubyOpts, RubyInstanceConfig config) {</span>
+<span class="fc" id="L85">        this.config = config;</span>
+<span class="fc" id="L86">        this.arguments = new ArrayList&lt;Argument&gt;();</span>
+<span class="pc bpc" id="L87" title="1 of 4 branches missed.">        if (arguments != null &amp;&amp; arguments.length &gt; 0) {</span>
+<span class="fc bfc" id="L88" title="All 2 branches covered.">            for (String argument : arguments) {</span>
+<span class="fc" id="L89">                this.arguments.add(new Argument(argument, dashed));</span>
+            }
+        }
+<span class="fc" id="L92">        this.processArgv = processArgv;</span>
+<span class="fc" id="L93">        this.rubyOpts = rubyOpts;</span>
+<span class="fc" id="L94">    }</span>
+
+    public void processArguments() {
+<span class="fc" id="L97">        processArguments(true);</span>
+<span class="fc" id="L98">    }</span>
+
+    public void processArguments(boolean inline) {
+<span class="fc" id="L101">        checkProperties();</span>
+
+<span class="fc bfc" id="L103" title="All 4 branches covered.">        while (argumentIndex &lt; arguments.size() &amp;&amp; isInterpreterArgument(arguments.get(argumentIndex).originalValue)) {</span>
+<span class="fc" id="L104">            processArgument();</span>
+<span class="fc" id="L105">            argumentIndex++;</span>
+        }
+<span class="pc bpc" id="L107" title="2 of 8 branches missed.">        if (inline &amp;&amp; !config.isInlineScript() &amp;&amp; config.getScriptFileName() == null &amp;&amp; !config.isForceStdin()) {</span>
+<span class="pc bpc" id="L108" title="1 of 2 branches missed.">            if (argumentIndex &lt; arguments.size()) {</span>
+<span class="fc" id="L109">                config.setScriptFileName(arguments.get(argumentIndex).originalValue); //consume the file name</span>
+<span class="fc" id="L110">                argumentIndex++;</span>
+            }
+        }
+<span class="pc bpc" id="L113" title="1 of 2 branches missed.">        if (processArgv) {</span>
+<span class="fc" id="L114">            processArgv();</span>
+        }
+<span class="fc" id="L116">    }</span>
+
+    private void processArgv() {
+<span class="fc" id="L119">        List&lt;String&gt; arglist = new ArrayList&lt;String&gt;();</span>
+<span class="fc bfc" id="L120" title="All 2 branches covered.">        for (; argumentIndex &lt; arguments.size(); argumentIndex++) {</span>
+<span class="fc" id="L121">            String arg = arguments.get(argumentIndex).originalValue;</span>
+<span class="fc bfc" id="L122" title="All 4 branches covered.">            if (config.isArgvGlobalsOn() &amp;&amp; arg.startsWith(&quot;-&quot;)) {</span>
+<span class="fc" id="L123">                arg = arg.substring(1);</span>
+<span class="fc bfc" id="L124" title="All 2 branches covered.">                if (arg.indexOf('=') &gt; 0) {</span>
+<span class="fc" id="L125">                    String[] keyvalue = arg.split(&quot;=&quot;, 2);</span>
+
+                    // argv globals getService their dashes replaced with underscores
+<span class="fc" id="L128">                    String globalName = keyvalue[0].replaceAll(&quot;-&quot;, &quot;_&quot;);</span>
+<span class="fc" id="L129">                    config.getOptionGlobals().put(globalName, keyvalue[1]);</span>
+<span class="fc" id="L130">                } else {</span>
+<span class="fc" id="L131">                    config.getOptionGlobals().put(arg, null);</span>
+                }
+            } else {
+<span class="fc" id="L134">                config.setArgvGlobalsOn(false);</span>
+<span class="fc" id="L135">                arglist.add(arg);</span>
+            }
+        }
+        // Remaining arguments are for the script itself
+<span class="fc" id="L139">        arglist.addAll(Arrays.asList(config.getArgv()));</span>
+<span class="fc" id="L140">        config.setArgv(arglist.toArray(new String[arglist.size()]));</span>
+<span class="fc" id="L141">    }</span>
+
+    private boolean isInterpreterArgument(String argument) {
+<span class="pc bpc" id="L144" title="2 of 8 branches missed.">        return argument.length() &gt; 0 &amp;&amp; (argument.charAt(0) == '-' || argument.charAt(0) == '+') &amp;&amp; !endOfArguments;</span>
+    }
+
+    private String getArgumentError(String additionalError) {
+<span class="fc" id="L148">        return &quot;jruby: invalid argument\n&quot; + additionalError + &quot;\n&quot;;</span>
+    }
+
+    private void processArgument() {
+<span class="fc" id="L152">        String argument = arguments.get(argumentIndex).dashedValue;</span>
+
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">        if (argument.length() == 1) {</span>
+            // sole &quot;-&quot; means read from stdin and pass remaining args as ARGV
+<span class="nc" id="L156">            endOfArguments = true;</span>
+<span class="nc" id="L157">            config.setForceStdin(true);</span>
+<span class="nc" id="L158">            return;</span>
+        }
+
+        FOR:
+<span class="fc bfc" id="L162" title="All 2 branches covered.">        for (characterIndex = 1; characterIndex &lt; argument.length(); characterIndex++) {</span>
+<span class="pc bpc" id="L163" title="11 of 30 branches missed.">            switch (argument.charAt(characterIndex)) {</span>
+                case '0':
+                    {
+<span class="nc" id="L166">                        disallowedInRubyOpts(argument);</span>
+<span class="nc" id="L167">                        String temp = grabOptionalValue();</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">                        if (null == temp) {</span>
+<span class="nc" id="L169">                            config.setRecordSeparator(&quot;\u0000&quot;);</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">                        } else if (temp.equals(&quot;0&quot;)) {</span>
+<span class="nc" id="L171">                            config.setRecordSeparator(&quot;\n\n&quot;);</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">                        } else if (temp.equals(&quot;777&quot;)) {</span>
+<span class="nc" id="L173">                            config.setRecordSeparator(&quot;\uffff&quot;); // Specify something that can't separate</span>
+                        } else {
+                            try {
+<span class="nc" id="L176">                                int val = Integer.parseInt(temp, 8);</span>
+<span class="nc" id="L177">                                config.setRecordSeparator(&quot;&quot; + (char) val);</span>
+<span class="nc" id="L178">                            } catch (Exception e) {</span>
+<span class="nc" id="L179">                                MainExitException mee = new MainExitException(1, getArgumentError(&quot; -0 must be followed by either 0, 777, or a valid octal value&quot;));</span>
+<span class="nc" id="L180">                                mee.setUsageError(true);</span>
+<span class="nc" id="L181">                                throw mee;</span>
+<span class="nc" id="L182">                            }</span>
+                        }
+                        break FOR;
+                    }
+                case 'a':
+<span class="fc" id="L187">                    disallowedInRubyOpts(argument);</span>
+<span class="fc" id="L188">                    config.setSplit(true);</span>
+<span class="fc" id="L189">                    break;</span>
+                case 'c':
+<span class="fc" id="L191">                    disallowedInRubyOpts(argument);</span>
+<span class="fc" id="L192">                    config.setShouldCheckSyntax(true);</span>
+<span class="fc" id="L193">                    break;</span>
+                case 'C':
+<span class="fc" id="L195">                    disallowedInRubyOpts(argument);</span>
+                    try {
+<span class="fc" id="L197">                        String saved = grabValue(getArgumentError(&quot; -C must be followed by a directory expression&quot;));</span>
+<span class="fc" id="L198">                        File base = new File(config.getCurrentDirectory());</span>
+<span class="fc" id="L199">                        File newDir = new File(saved);</span>
+<span class="pc bpc" id="L200" title="1 of 2 branches missed.">                        if (newDir.isAbsolute()) {</span>
+<span class="fc" id="L201">                            config.setCurrentDirectory(newDir.getCanonicalPath());</span>
+                        } else {
+<span class="nc" id="L203">                            config.setCurrentDirectory(new File(base, newDir.getPath()).getCanonicalPath());</span>
+                        }
+<span class="pc bpc" id="L205" title="1 of 2 branches missed.">                        if (!(new File(config.getCurrentDirectory()).isDirectory())) {</span>
+<span class="nc" id="L206">                            MainExitException mee = new MainExitException(1, &quot;jruby: Can't chdir to &quot; + saved + &quot; (fatal)&quot;);</span>
+<span class="nc" id="L207">                            throw mee;</span>
+                        }
+<span class="nc" id="L209">                    } catch (IOException e) {</span>
+<span class="nc" id="L210">                        MainExitException mee = new MainExitException(1, getArgumentError(&quot; -C must be followed by a valid directory&quot;));</span>
+<span class="nc" id="L211">                        throw mee;</span>
+<span class="fc" id="L212">                    }</span>
+                    break FOR;
+                case 'd':
+<span class="fc" id="L215">                    config.setDebug(true);</span>
+<span class="fc" id="L216">                    config.setVerbosity(RubyInstanceConfig.Verbosity.TRUE);</span>
+<span class="fc" id="L217">                    break;</span>
+                case 'e':
+<span class="fc" id="L219">                    disallowedInRubyOpts(argument);</span>
+<span class="fc" id="L220">                    config.getInlineScript().append(grabValue(getArgumentError(&quot; -e must be followed by an expression to report&quot;)));</span>
+<span class="fc" id="L221">                    config.getInlineScript().append('\n');</span>
+<span class="fc" id="L222">                    config.setHasInlineScript(true);</span>
+<span class="fc" id="L223">                    break FOR;</span>
+                case 'E':
+<span class="fc" id="L225">                    processEncodingOption(grabValue(getArgumentError(&quot;unknown encoding name&quot;)));</span>
+<span class="fc" id="L226">                    break FOR;</span>
+                case 'F':
+<span class="fc" id="L228">                    disallowedInRubyOpts(argument);</span>
+<span class="fc" id="L229">                    config.setInputFieldSeparator(grabValue(getArgumentError(&quot; -F must be followed by a pattern for input field separation&quot;)));</span>
+<span class="fc" id="L230">                    break FOR;</span>
+                case 'h':
+<span class="nc" id="L232">                    disallowedInRubyOpts(argument);</span>
+<span class="nc" id="L233">                    config.setShouldPrintUsage(true);</span>
+<span class="nc" id="L234">                    config.setShouldRunInterpreter(false);</span>
+<span class="nc" id="L235">                    break;</span>
+                case 'i':
+<span class="fc" id="L237">                    disallowedInRubyOpts(argument);</span>
+<span class="fc" id="L238">                    config.setInPlaceBackupExtension(grabOptionalValue());</span>
+<span class="fc bfc" id="L239" title="All 2 branches covered.">                    if (config.getInPlaceBackupExtension() == null) {</span>
+<span class="fc" id="L240">                        config.setInPlaceBackupExtension(&quot;&quot;);</span>
+                    }
+                    break FOR;
+                case 'I':
+<span class="fc" id="L244">                    String s = grabValue(getArgumentError(&quot;-I must be followed by a directory name to add to lib path&quot;));</span>
+<span class="fc" id="L245">                    String[] ls = s.split(java.io.File.pathSeparator);</span>
+<span class="fc" id="L246">                    config.getLoadPaths().addAll(Arrays.asList(ls));</span>
+<span class="fc" id="L247">                    break FOR;</span>
+                case 'J':
+<span class="nc" id="L249">                    grabOptionalValue();</span>
+<span class="nc" id="L250">                    config.getError().println(&quot;warning: &quot; + argument + &quot; argument ignored (launched in same VM?)&quot;);</span>
+<span class="nc" id="L251">                    break FOR;</span>
+                case 'K':
+                    // FIXME: No argument seems to work for -K in MRI plus this should not
+                    // siphon off additional args 'jruby -K ~/scripts/foo'.  Also better error
+                    // processing.
+<span class="fc" id="L256">                    String eArg = grabValue(getArgumentError(&quot;provide a value for -K&quot;));</span>
+
+<span class="fc" id="L258">                    config.setKCode(KCode.create(null, eArg));</span>
+
+                    // source encoding
+<span class="fc" id="L261">                    config.setSourceEncoding(config.getKCode().getEncoding().toString());</span>
+
+                    // set external encoding if not already specified
+<span class="pc bpc" id="L264" title="1 of 2 branches missed.">                    if (config.getExternalEncoding() == null) {</span>
+<span class="fc" id="L265">                        config.setExternalEncoding(config.getKCode().getEncoding().toString());</span>
+                    }
+
+                    break;
+                case 'l':
+<span class="nc" id="L270">                    disallowedInRubyOpts(argument);</span>
+<span class="nc" id="L271">                    config.setProcessLineEnds(true);</span>
+<span class="nc" id="L272">                    break;</span>
+                case 'n':
+<span class="fc" id="L274">                    disallowedInRubyOpts(argument);</span>
+<span class="fc" id="L275">                    config.setAssumeLoop(true);</span>
+<span class="fc" id="L276">                    config.setKernelGsubDefined(true);</span>
+<span class="fc" id="L277">                    break;</span>
+                case 'p':
+<span class="fc" id="L279">                    disallowedInRubyOpts(argument);</span>
+<span class="fc" id="L280">                    config.setAssumePrinting(true);</span>
+<span class="fc" id="L281">                    config.setAssumeLoop(true);</span>
+<span class="fc" id="L282">                    config.setKernelGsubDefined(true);</span>
+<span class="fc" id="L283">                    break;</span>
+                case 'r':
+<span class="fc" id="L285">                    config.getRequiredLibraries().add(grabValue(getArgumentError(&quot;-r must be followed by a package to require&quot;)));</span>
+<span class="fc" id="L286">                    break FOR;</span>
+                case 's':
+<span class="fc" id="L288">                    disallowedInRubyOpts(argument);</span>
+<span class="fc" id="L289">                    config.setArgvGlobalsOn(true);</span>
+<span class="fc" id="L290">                    break;</span>
+                case 'G':
+<span class="nc" id="L292">                    config.setLoadGemfile(true);</span>
+<span class="nc" id="L293">                    break;</span>
+                case 'S':
+<span class="nc" id="L295">                    disallowedInRubyOpts(argument);</span>
+<span class="nc" id="L296">                    runBinScript();</span>
+<span class="nc" id="L297">                    break FOR;</span>
+                case 'T':
+                    {
+<span class="nc" id="L300">                        String temp = grabOptionalValue();</span>
+<span class="nc" id="L301">                        break FOR;</span>
+                    }
+                case 'U':
+<span class="fc" id="L304">                    config.setInternalEncoding(&quot;UTF-8&quot;);</span>
+<span class="fc" id="L305">                    break;</span>
+                case 'v':
+<span class="fc" id="L307">                    config.setVerbosity(RubyInstanceConfig.Verbosity.TRUE);</span>
+<span class="fc" id="L308">                    config.setShowVersion(true);</span>
+<span class="fc" id="L309">                    break;</span>
+                case 'w':
+<span class="fc" id="L311">                    config.setVerbosity(RubyInstanceConfig.Verbosity.TRUE);</span>
+<span class="fc" id="L312">                    break;</span>
+                case 'W':
+                    {
+<span class="fc" id="L315">                        String temp = grabOptionalValue();</span>
+<span class="pc bpc" id="L316" title="1 of 2 branches missed.">                        if (temp == null) {</span>
+<span class="nc" id="L317">                            config.setVerbosity(RubyInstanceConfig.Verbosity.TRUE);</span>
+                        } else {
+<span class="fc bfc" id="L319" title="All 2 branches covered.">                            if (temp.equals(&quot;0&quot;)) {</span>
+<span class="fc" id="L320">                                config.setVerbosity(RubyInstanceConfig.Verbosity.NIL);</span>
+<span class="fc bfc" id="L321" title="All 2 branches covered.">                            } else if (temp.equals(&quot;1&quot;)) {</span>
+<span class="fc" id="L322">                                config.setVerbosity(RubyInstanceConfig.Verbosity.FALSE);</span>
+<span class="pc bpc" id="L323" title="1 of 2 branches missed.">                            } else if (temp.equals(&quot;2&quot;)) {</span>
+<span class="fc" id="L324">                                config.setVerbosity(RubyInstanceConfig.Verbosity.TRUE);</span>
+                            } else {
+<span class="nc" id="L326">                                MainExitException mee = new MainExitException(1, getArgumentError(&quot; -W must be followed by either 0, 1, 2 or nothing&quot;));</span>
+<span class="nc" id="L327">                                mee.setUsageError(true);</span>
+<span class="nc" id="L328">                                throw mee;</span>
+                            }
+                        }
+                        break FOR;
+                    }
+                case 'x':
+<span class="nc" id="L334">                    disallowedInRubyOpts(argument);</span>
+                    try {
+<span class="nc" id="L336">                        String saved = grabOptionalValue();</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">                        if (saved != null) {</span>
+<span class="nc" id="L338">                            File base = new File(config.getCurrentDirectory());</span>
+<span class="nc" id="L339">                            File newDir = new File(saved);</span>
+<span class="nc bnc" id="L340" title="All 2 branches missed.">                            if (newDir.isAbsolute()) {</span>
+<span class="nc" id="L341">                                config.setCurrentDirectory(newDir.getCanonicalPath());</span>
+                            } else {
+<span class="nc" id="L343">                                config.setCurrentDirectory(new File(base, newDir.getPath()).getCanonicalPath());</span>
+                            }
+<span class="nc bnc" id="L345" title="All 2 branches missed.">                            if (!(new File(config.getCurrentDirectory()).isDirectory())) {</span>
+<span class="nc" id="L346">                                MainExitException mee = new MainExitException(1, &quot;jruby: Can't chdir to &quot; + saved + &quot; (fatal)&quot;);</span>
+<span class="nc" id="L347">                                throw mee;</span>
+                            }
+                        }
+<span class="nc" id="L350">                        config.setXFlag(true);</span>
+<span class="nc" id="L351">                    } catch (IOException e) {</span>
+<span class="nc" id="L352">                        MainExitException mee = new MainExitException(1, getArgumentError(&quot; -x must be followed by a valid directory&quot;));</span>
+<span class="nc" id="L353">                        throw mee;</span>
+<span class="nc" id="L354">                    }</span>
+                    break FOR;
+                case 'X':
+<span class="nc" id="L357">                    disallowedInRubyOpts(argument);</span>
+<span class="nc" id="L358">                    String extendedOption = grabOptionalValue();</span>
+<span class="nc bnc" id="L359" title="All 2 branches missed.">                    if (extendedOption == null) {</span>
+<span class="nc bnc" id="L360" title="All 2 branches missed.">                        if (SafePropertyAccessor.getBoolean(&quot;jruby.launcher.nopreamble&quot;, false)) {</span>
+<span class="nc" id="L361">                            throw new MainExitException(0, OutputStrings.getExtendedHelp());</span>
+                        } else {
+<span class="nc" id="L363">                            throw new MainExitException(0, &quot;jruby: missing argument\n&quot; + OutputStrings.getExtendedHelp());</span>
+                        }
+<span class="nc bnc" id="L365" title="All 2 branches missed.">                    } else if (extendedOption.equals(&quot;-O&quot;)) {</span>
+<span class="nc" id="L366">                        config.setObjectSpaceEnabled(false);</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">                    } else if (extendedOption.equals(&quot;+O&quot;)) {</span>
+<span class="nc" id="L368">                        config.setObjectSpaceEnabled(true);</span>
+<span class="nc bnc" id="L369" title="All 4 branches missed.">                    } else if (extendedOption.equals(&quot;-C&quot;) || extendedOption.equals(&quot;-CIR&quot;)) {</span>
+<span class="nc" id="L370">                        config.setCompileMode(RubyInstanceConfig.CompileMode.OFF);</span>
+<span class="nc bnc" id="L371" title="All 4 branches missed.">                    } else if (extendedOption.equals(&quot;+C&quot;) || extendedOption.equals(&quot;+CIR&quot;)) {</span>
+<span class="nc" id="L372">                        config.setCompileMode(RubyInstanceConfig.CompileMode.FORCE);</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">                    } else if (extendedOption.equals(&quot;+T&quot;)) {</span>
+<span class="nc" id="L374">                        checkGraalVersion();</span>
+<span class="nc" id="L375">                        config.setCompileMode(RubyInstanceConfig.CompileMode.TRUFFLE);</span>
+<span class="nc" id="L376">                        config.setDisableGems(true);</span>
+<span class="nc" id="L377">                        Options.PARSER_DETAILED_SOURCE_POSITIONS.force(Boolean.toString(true));</span>
+<span class="nc bnc" id="L378" title="All 2 branches missed.">                    } else if (extendedOption.endsWith(&quot;...&quot;)) {</span>
+<span class="nc" id="L379">                        Options.listPrefix(extendedOption.substring(0, extendedOption.length() - &quot;...&quot;.length()));</span>
+<span class="nc" id="L380">                        config.setShouldRunInterpreter(false);</span>
+<span class="nc bnc" id="L381" title="All 2 branches missed.">                    } else if (extendedOption.endsWith(&quot;?&quot;)) {</span>
+<span class="nc" id="L382">                        Options.listContains(extendedOption.substring(0, extendedOption.length() - 1));</span>
+<span class="nc" id="L383">                        config.setShouldRunInterpreter(false);</span>
+                    } else {
+<span class="nc" id="L385">                        MainExitException mee = new MainExitException(1, &quot;jruby: invalid extended option &quot; + extendedOption + &quot; (-X will list valid options)\n&quot;);</span>
+<span class="nc" id="L386">                        mee.setUsageError(true);</span>
+<span class="nc" id="L387">                        throw mee;</span>
+                    }
+                    break FOR;
+                case 'y':
+<span class="nc" id="L391">                    disallowedInRubyOpts(argument);</span>
+<span class="nc" id="L392">                    config.setParserDebug(true);</span>
+<span class="nc" id="L393">                    break FOR;</span>
+                case '-':
+<span class="pc bpc" id="L395" title="2 of 4 branches missed.">                    if (argument.equals(&quot;--command&quot;) || argument.equals(&quot;--bin&quot;)) {</span>
+<span class="nc" id="L396">                        characterIndex = argument.length();</span>
+<span class="nc" id="L397">                        runBinScript();</span>
+<span class="nc" id="L398">                        break;</span>
+<span class="pc bpc" id="L399" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--compat&quot;)) {</span>
+<span class="nc" id="L400">                        characterIndex = argument.length();</span>
+<span class="nc" id="L401">                        grabValue(getArgumentError(&quot;--compat takes an argument, but will be ignored&quot;));</span>
+<span class="nc" id="L402">                        config.getError().println(&quot;warning: &quot; + argument + &quot; ignored&quot;);</span>
+<span class="nc" id="L403">                        break FOR;</span>
+<span class="pc bpc" id="L404" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--copyright&quot;)) {</span>
+<span class="nc" id="L405">                        disallowedInRubyOpts(argument);</span>
+<span class="nc" id="L406">                        config.setShowCopyright(true);</span>
+<span class="nc" id="L407">                        config.setShouldRunInterpreter(false);</span>
+<span class="nc" id="L408">                        break FOR;</span>
+<span class="pc bpc" id="L409" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--debug&quot;)) {</span>
+<span class="nc" id="L410">                        disallowedInRubyOpts(argument);</span>
+<span class="nc" id="L411">                        RubyInstanceConfig.FULL_TRACE_ENABLED = true;</span>
+<span class="nc" id="L412">                        config.setCompileMode(RubyInstanceConfig.CompileMode.OFF);</span>
+<span class="nc" id="L413">                        break FOR;</span>
+<span class="pc bpc" id="L414" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--jdb&quot;)) {</span>
+<span class="nc" id="L415">                        config.setDebug(true);</span>
+<span class="nc" id="L416">                        config.setVerbosity(RubyInstanceConfig.Verbosity.TRUE);</span>
+<span class="nc" id="L417">                        break;</span>
+<span class="pc bpc" id="L418" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--help&quot;)) {</span>
+<span class="nc" id="L419">                        disallowedInRubyOpts(argument);</span>
+<span class="nc" id="L420">                        config.setShouldPrintUsage(true);</span>
+<span class="nc" id="L421">                        config.setShouldRunInterpreter(false);</span>
+<span class="nc" id="L422">                        break;</span>
+<span class="pc bpc" id="L423" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--properties&quot;)) {</span>
+<span class="nc" id="L424">                        config.setShouldPrintProperties(true);</span>
+<span class="nc" id="L425">                        config.setShouldRunInterpreter(false);</span>
+<span class="nc" id="L426">                        break;</span>
+<span class="pc bpc" id="L427" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--version&quot;)) {</span>
+<span class="nc" id="L428">                        disallowedInRubyOpts(argument);</span>
+<span class="nc" id="L429">                        config.setShowVersion(true);</span>
+<span class="nc" id="L430">                        config.setShouldRunInterpreter(false);</span>
+<span class="nc" id="L431">                        break FOR;</span>
+<span class="pc bpc" id="L432" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--bytecode&quot;)) {</span>
+<span class="nc" id="L433">                        config.setShowBytecode(true);</span>
+<span class="nc" id="L434">                        break FOR;</span>
+<span class="pc bpc" id="L435" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--fast&quot;)) {</span>
+<span class="nc" id="L436">                        config.setCompileMode(RubyInstanceConfig.CompileMode.FORCE);</span>
+<span class="nc" id="L437">                        break FOR;</span>
+<span class="pc bpc" id="L438" title="1 of 2 branches missed.">                    } else if (argument.startsWith(&quot;--profile&quot;)) {</span>
+<span class="nc" id="L439">                        characterIndex = argument.length();</span>
+<span class="nc" id="L440">                        int dotIndex = argument.indexOf(&quot;.&quot;);</span>
+                        
+<span class="nc bnc" id="L442" title="All 2 branches missed.">                        if (dotIndex == -1) {</span>
+<span class="nc" id="L443">                            config.setProfilingMode(RubyInstanceConfig.ProfilingMode.FLAT);</span>
+                            
+                        } else {
+<span class="nc" id="L446">                            String profilingMode = argument.substring(dotIndex + 1, argument.length());</span>
+                            
+<span class="nc bnc" id="L448" title="All 2 branches missed.">                            if (profilingMode.equals(&quot;out&quot;)) {</span>
+                                // output file for profiling results
+<span class="nc" id="L450">                                String outputFile = grabValue(getArgumentError(&quot;--profile.out requires an output file argument&quot;));</span>
+                                
+                                try {
+<span class="nc" id="L453">                                    config.setProfileOutput(new ProfileOutput(new File(outputFile)));</span>
+<span class="nc" id="L454">                                } catch (FileNotFoundException e) {</span>
+<span class="nc" id="L455">                                    throw new MainExitException(1, String.format(&quot;jruby: %s&quot;, e.getMessage()));</span>
+<span class="nc" id="L456">                                }</span>
+
+<span class="nc bnc" id="L458" title="All 2 branches missed.">                            } else if (profilingMode.equals(&quot;service&quot;)) {</span>
+                                // service class name
+<span class="nc" id="L460">                                String service = grabValue(getArgumentError(&quot;--profile.service requires an class name argument&quot;));</span>
+
+<span class="nc" id="L462">                                config.setProfilingMode( RubyInstanceConfig.ProfilingMode.SERVICE);</span>
+<span class="nc" id="L463">                                config.setProfilingService(service);</span>
+
+<span class="nc" id="L465">                            } else {</span>
+                                try {
+<span class="nc" id="L467">                                    config.setProfilingMode(RubyInstanceConfig.ProfilingMode.valueOf(profilingMode.toUpperCase()));</span>
+<span class="nc" id="L468">                                } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L469">                                    throw new MainExitException(1, String.format(&quot;jruby: unknown profiler mode \&quot;%s\&quot;&quot;, profilingMode));</span>
+<span class="nc" id="L470">                                }</span>
+                            }
+                        }
+                        
+<span class="nc" id="L474">                        break FOR;</span>
+<span class="pc bpc" id="L475" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--1.8&quot;)) {</span>
+<span class="nc" id="L476">                        config.getError().println(&quot;warning: &quot; + argument + &quot; ignored&quot;);</span>
+<span class="nc" id="L477">                        break FOR;</span>
+<span class="pc bpc" id="L478" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--1.9&quot;)) {</span>
+<span class="nc" id="L479">                        config.getError().println(&quot;warning: &quot; + argument + &quot; ignored&quot;);</span>
+<span class="nc" id="L480">                        break FOR;</span>
+<span class="pc bpc" id="L481" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--2.0&quot;)) {</span>
+<span class="nc" id="L482">                        config.getError().println(&quot;warning: &quot; + argument + &quot; ignored&quot;);</span>
+<span class="nc" id="L483">                        break FOR;</span>
+<span class="pc bpc" id="L484" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--2.1&quot;)) {</span>
+                        // keep the switch for consistency 
+<span class="nc" id="L486">                        break FOR;</span>
+<span class="pc bpc" id="L487" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--disable-gems&quot;)) {</span>
+<span class="nc" id="L488">                        config.setDisableGems(true);</span>
+<span class="nc" id="L489">                        break FOR;</span>
+<span class="pc bpc" id="L490" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--disable&quot;)) {</span>
+<span class="nc" id="L491">                        errorMissingDisable();</span>
+<span class="pc bpc" id="L492" title="1 of 2 branches missed.">                    } else if (argument.startsWith(&quot;--disable=&quot;)) {</span>
+<span class="nc" id="L493">                        String disablesStr = argument.substring(&quot;--disable=&quot;.length());</span>
+<span class="nc" id="L494">                        String[] disables = disablesStr.split(&quot;,&quot;);</span>
+
+<span class="nc bnc" id="L496" title="All 2 branches missed.">                        if (disables.length == 0) errorMissingDisable();</span>
+
+<span class="nc bnc" id="L498" title="All 2 branches missed.">                        for (String disable : disables) {</span>
+<span class="nc" id="L499">                            boolean all = disable.equals(&quot;all&quot;);</span>
+<span class="nc bnc" id="L500" title="All 4 branches missed.">                            if (disable.equals(&quot;gems&quot;) || all) {</span>
+<span class="nc" id="L501">                                config.setDisableGems(true);</span>
+<span class="nc" id="L502">                                continue;</span>
+                            }
+<span class="nc bnc" id="L504" title="All 4 branches missed.">                            if (disable.equals(&quot;rubyopt&quot;) || all) {</span>
+<span class="nc" id="L505">                                config.setDisableRUBYOPT(true);</span>
+<span class="nc" id="L506">                                continue;</span>
+                            }
+
+<span class="nc" id="L509">                            config.getError().println(&quot;warning: unknown argument for --disable: `&quot; + disable + &quot;'&quot;);</span>
+                        }
+<span class="nc" id="L511">                        break FOR;</span>
+<span class="pc bpc" id="L512" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--gemfile&quot;)) {</span>
+<span class="nc" id="L513">                        config.setLoadGemfile(true);</span>
+<span class="nc" id="L514">                        break FOR;</span>
+<span class="pc bpc" id="L515" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--dump&quot;)) {</span>
+<span class="nc" id="L516">                        characterIndex = argument.length();</span>
+<span class="nc" id="L517">                        String error = &quot;--dump only supports [version, copyright, usage, yydebug, syntax, insns] on JRuby&quot;;</span>
+<span class="nc" id="L518">                        String dumpArg = grabValue(getArgumentError(error));</span>
+<span class="nc bnc" id="L519" title="All 2 branches missed.">                        if (dumpArg.equals(&quot;version&quot;)) {</span>
+<span class="nc" id="L520">                            config.setShowVersion(true);</span>
+<span class="nc" id="L521">                            config.setShouldRunInterpreter(false);</span>
+<span class="nc" id="L522">                            break FOR;</span>
+<span class="nc bnc" id="L523" title="All 2 branches missed.">                        } else if (dumpArg.equals(&quot;copyright&quot;)) {</span>
+<span class="nc" id="L524">                            config.setShowCopyright(true);</span>
+<span class="nc" id="L525">                            config.setShouldRunInterpreter(false);</span>
+<span class="nc" id="L526">                            break FOR;</span>
+<span class="nc bnc" id="L527" title="All 2 branches missed.">                        } else if (dumpArg.equals(&quot;usage&quot;)) {</span>
+<span class="nc" id="L528">                            config.setShouldPrintUsage(true);</span>
+<span class="nc" id="L529">                            config.setShouldRunInterpreter(false);</span>
+<span class="nc" id="L530">                            break FOR;</span>
+<span class="nc bnc" id="L531" title="All 2 branches missed.">                        } else if (dumpArg.equals(&quot;yydebug&quot;)) {</span>
+<span class="nc" id="L532">                            config.setParserDebug(true);</span>
+<span class="nc" id="L533">                            break FOR;</span>
+<span class="nc bnc" id="L534" title="All 2 branches missed.">                        } else if (dumpArg.equals(&quot;syntax&quot;)) {</span>
+<span class="nc" id="L535">                            config.setShouldCheckSyntax(true);</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">                        } else if (dumpArg.equals(&quot;insns&quot;)) {</span>
+<span class="nc" id="L537">                            config.setShowBytecode(true);</span>
+                        } else {
+<span class="nc" id="L539">                            MainExitException mee = new MainExitException(1, error);</span>
+<span class="nc" id="L540">                            mee.setUsageError(true);</span>
+<span class="nc" id="L541">                            throw mee;</span>
+                        }
+                        break;
+<span class="pc bpc" id="L544" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--dev&quot;)) {</span>
+                        // most we can do after JVM boot
+<span class="nc" id="L546">                        Options.COMPILE_INVOKEDYNAMIC.force(&quot;false&quot;);</span>
+<span class="nc" id="L547">                        config.setCompileMode(RubyInstanceConfig.CompileMode.OFF);</span>
+<span class="nc" id="L548">                        break FOR;</span>
+<span class="pc bpc" id="L549" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--server&quot;)) {</span>
+                        // ignore this...can't do anything with it after boot
+<span class="nc" id="L551">                        break FOR;</span>
+<span class="pc bpc" id="L552" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--client&quot;)) {</span>
+                        // ignore this...can't do anything with it after boot
+<span class="nc" id="L554">                        break FOR;</span>
+<span class="pc bpc" id="L555" title="1 of 2 branches missed.">                    } else if (argument.equals(&quot;--yydebug&quot;)) {</span>
+<span class="nc" id="L556">                        disallowedInRubyOpts(argument);</span>
+<span class="nc" id="L557">                        config.setParserDebug(true);</span>
+                    } else {
+<span class="pc bpc" id="L559" title="1 of 2 branches missed.">                        if (argument.equals(&quot;--&quot;)) {</span>
+                            // ruby interpreter compatibilty
+                            // Usage: ruby [switches] [--] [programfile] [arguments])
+<span class="fc" id="L562">                            endOfArguments = true;</span>
+<span class="fc" id="L563">                            break;</span>
+                        }
+                    }
+                default:
+<span class="nc" id="L567">                    throw new MainExitException(1, &quot;jruby: unknown option &quot; + argument);</span>
+            }
+        }
+<span class="fc" id="L570">    }</span>
+
+    private void disallowedInRubyOpts(String option) {
+<span class="pc bpc" id="L573" title="1 of 2 branches missed.">        if (rubyOpts) {</span>
+<span class="nc" id="L574">            throw new MainExitException(1, &quot;jruby: invalid switch in RUBYOPT: &quot; + option + &quot; (RuntimeError)&quot;);</span>
+        }
+<span class="fc" id="L576">    }</span>
+
+    private void errorMissingDisable() {
+        MainExitException mee;
+<span class="nc" id="L580">        mee = new MainExitException(1, &quot;missing argument for --disable\n&quot;);</span>
+<span class="nc" id="L581">        mee.setUsageError(true);</span>
+<span class="nc" id="L582">        throw mee;</span>
+    }
+
+    private void processEncodingOption(String value) {
+<span class="fc" id="L586">        String[] encodings = value.split(&quot;:&quot;, 3);</span>
+<span class="pc bpc" id="L587" title="2 of 4 branches missed.">        switch (encodings.length) {</span>
+            case 3:
+<span class="nc" id="L589">                throw new MainExitException(1, &quot;extra argument for -E: &quot; + encodings[2]);</span>
+            case 2:
+<span class="fc" id="L591">                config.setInternalEncoding(encodings[1]);</span>
+            case 1:
+<span class="fc" id="L593">                config.setExternalEncoding(encodings[0]);</span>
+                // Zero is impossible
+        }
+<span class="fc" id="L596">    }</span>
+
+    private void runBinScript() {
+<span class="nc" id="L599">        String scriptName = grabValue(&quot;jruby: provide a bin script to execute&quot;);</span>
+<span class="nc bnc" id="L600" title="All 2 branches missed.">        if (scriptName.equals(&quot;irb&quot;)) {</span>
+<span class="nc" id="L601">            scriptName = &quot;jirb&quot;;</span>
+        }
+<span class="nc" id="L603">        config.setScriptFileName(resolveScript(scriptName));</span>
+        // run as a command if we couldn't find a script
+<span class="nc bnc" id="L605" title="All 2 branches missed.">        if (config.getScriptFileName() == null) {</span>
+<span class="nc" id="L606">            config.setScriptFileName(scriptName);</span>
+<span class="nc" id="L607">            config.getRequiredLibraries().add(&quot;jruby/commands&quot;);</span>
+<span class="nc" id="L608">            config.getInlineScript().append(&quot;JRuby::Commands.&quot;).append(scriptName);</span>
+<span class="nc" id="L609">            config.getInlineScript().append(&quot;\n&quot;);</span>
+<span class="nc" id="L610">            config.setHasInlineScript(true);</span>
+        }
+<span class="nc" id="L612">        endOfArguments = true;</span>
+<span class="nc" id="L613">    }</span>
+
+    private String resolveScript(String scriptName) {
+        // These try/catches are to allow failing over to the &quot;commands&quot; logic
+        // when running from within a jruby-complete jar file, which has
+        // jruby.home = a jar file URL that does not resolve correctly with
+        // JRubyFile.create.
+<span class="nc" id="L620">        File fullName = null;</span>
+        try {
+            // try cwd first
+<span class="nc" id="L623">            fullName = JRubyFile.create(config.getCurrentDirectory(), scriptName);</span>
+<span class="nc bnc" id="L624" title="All 4 branches missed.">            if (fullName.exists() &amp;&amp; fullName.isFile()) {</span>
+<span class="nc" id="L625">                logScriptResolutionSuccess(fullName.getAbsolutePath());</span>
+<span class="nc" id="L626">                return scriptName;</span>
+            } else {
+<span class="nc" id="L628">                logScriptResolutionFailure(config.getCurrentDirectory());</span>
+            }
+<span class="nc" id="L630">        } catch (Exception e) {</span>
+            // keep going, try bin/#{scriptName}
+<span class="nc" id="L632">        }</span>
+        try {
+<span class="nc" id="L634">            fullName = JRubyFile.create(config.getJRubyHome(), &quot;bin/&quot; + scriptName);</span>
+<span class="nc bnc" id="L635" title="All 4 branches missed.">            if (fullName.exists() &amp;&amp; fullName.isFile()) {</span>
+<span class="nc" id="L636">                logScriptResolutionSuccess(fullName.getAbsolutePath());</span>
+<span class="nc" id="L637">                return fullName.getAbsolutePath();</span>
+            } else {
+<span class="nc" id="L639">                logScriptResolutionFailure(config.getJRubyHome() + &quot;/bin&quot;);</span>
+            }
+<span class="nc" id="L641">        } catch (Exception e) {</span>
+            // keep going, try PATH
+<span class="nc" id="L643">        }</span>
+<span class="nc bnc" id="L644" title="All 2 branches missed.">        if(Ruby.getClassLoader().getResourceAsStream(&quot;bin/&quot; + scriptName) != null){</span>
+<span class="nc" id="L645">            return &quot;classpath:bin/&quot; + scriptName;</span>
+        }
+        try {
+<span class="nc" id="L648">            Object pathObj = config.getEnvironment().get(&quot;PATH&quot;);</span>
+<span class="nc" id="L649">            String path = pathObj.toString();</span>
+<span class="nc bnc" id="L650" title="All 2 branches missed.">            if (path != null) {</span>
+<span class="nc" id="L651">                String[] paths = path.split(System.getProperty(&quot;path.separator&quot;));</span>
+<span class="nc bnc" id="L652" title="All 2 branches missed.">                for (int i = 0; i &lt; paths.length; i++) {</span>
+<span class="nc" id="L653">                    fullName = JRubyFile.create(new File(paths[i]).getAbsolutePath(), scriptName);</span>
+<span class="nc bnc" id="L654" title="All 4 branches missed.">                    if (fullName.exists() &amp;&amp; fullName.isFile()) {</span>
+<span class="nc" id="L655">                        logScriptResolutionSuccess(fullName.getAbsolutePath());</span>
+<span class="nc" id="L656">                        return fullName.getAbsolutePath();</span>
+                    }
+                }
+<span class="nc" id="L659">                logScriptResolutionFailure(&quot;PATH=&quot; + path);</span>
+            }
+<span class="nc" id="L661">        } catch (Exception e) {</span>
+            // will fall back to JRuby::Commands
+<span class="nc" id="L663">        }</span>
+<span class="nc bnc" id="L664" title="All 4 branches missed.">        if (config.isDebug() || RubyInstanceConfig.DEBUG_SCRIPT_RESOLUTION) {</span>
+<span class="nc" id="L665">            config.getError().println(&quot;warning: could not resolve -S script on filesystem: &quot; + scriptName);</span>
+        }
+<span class="nc" id="L667">        return null;</span>
+    }
+
+    private String grabValue(String errorMessage) {
+<span class="fc" id="L671">        String optValue = grabOptionalValue();</span>
+<span class="fc bfc" id="L672" title="All 2 branches covered.">        if (optValue != null) {</span>
+<span class="fc" id="L673">            return optValue;</span>
+        }
+<span class="fc" id="L675">        argumentIndex++;</span>
+<span class="pc bpc" id="L676" title="1 of 2 branches missed.">        if (argumentIndex &lt; arguments.size()) {</span>
+<span class="fc" id="L677">            return arguments.get(argumentIndex).originalValue;</span>
+        }
+<span class="nc" id="L679">        MainExitException mee = new MainExitException(1, errorMessage);</span>
+<span class="nc" id="L680">        mee.setUsageError(true);</span>
+<span class="nc" id="L681">        throw mee;</span>
+    }
+
+    private String grabOptionalValue() {
+<span class="fc" id="L685">        characterIndex++;</span>
+<span class="fc" id="L686">        String argValue = arguments.get(argumentIndex).originalValue;</span>
+<span class="fc bfc" id="L687" title="All 2 branches covered.">        if (characterIndex &lt; argValue.length()) {</span>
+<span class="fc" id="L688">            return argValue.substring(characterIndex);</span>
+        }
+<span class="fc" id="L690">        return null;</span>
+    }
+
+    private void logScriptResolutionSuccess(String path) {
+<span class="nc bnc" id="L694" title="All 2 branches missed.">        if (RubyInstanceConfig.DEBUG_SCRIPT_RESOLUTION) {</span>
+<span class="nc" id="L695">            config.getError().println(&quot;Found: &quot; + path);</span>
+        }
+<span class="nc" id="L697">    }</span>
+
+    private void logScriptResolutionFailure(String path) {
+<span class="nc bnc" id="L700" title="All 2 branches missed.">        if (RubyInstanceConfig.DEBUG_SCRIPT_RESOLUTION) {</span>
+<span class="nc" id="L701">            config.getError().println(&quot;Searched: &quot; + path);</span>
+        }
+<span class="nc" id="L703">    }</span>
+
+    public static void checkGraalVersion() {
+<span class="nc bnc" id="L706" title="All 2 branches missed.">        if (Options.TRUFFLE_RUNTIME_VERSION_CHECK.load()) {</span>
+<span class="nc" id="L707">            final String graalVersion = System.getProperty(&quot;graal.version&quot;, &quot;unknown&quot;);</span>
+<span class="nc" id="L708">            final String expectedGraalVersion = &quot;0.6&quot;;</span>
+
+<span class="nc bnc" id="L710" title="All 2 branches missed.">            if (graalVersion.equals(&quot;unknown&quot;)) {</span>
+<span class="nc" id="L711">                return;</span>
+<span class="nc bnc" id="L712" title="All 2 branches missed.">            } else if (!graalVersion.equals(expectedGraalVersion)) {</span>
+<span class="nc" id="L713">                throw new RuntimeException(&quot;This version of JRuby is built against Graal &quot; + expectedGraalVersion + &quot; but you are using it with version &quot; + graalVersion + &quot; - either update Graal or use with (-J)-original to disable Graal and ignore this error&quot;);</span>
+            }
+        }
+<span class="nc" id="L716">    }</span>
+
+    private void checkProperties() {
+<span class="fc" id="L719">        final Set&lt;String&gt; propertyNames = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L720">        propertyNames.addAll(Options.getPropertyNames());</span>
+<span class="fc" id="L721">        propertyNames.add(&quot;jruby.home&quot;);</span>
+<span class="fc" id="L722">        propertyNames.add(&quot;jruby.script&quot;);</span>
+<span class="fc" id="L723">        propertyNames.add(&quot;jruby.shell&quot;);</span>
+<span class="fc" id="L724">        propertyNames.add(&quot;jruby.lib&quot;);</span>
+<span class="fc" id="L725">        propertyNames.add(&quot;jruby.bindir&quot;);</span>
+<span class="fc" id="L726">        propertyNames.add(&quot;jruby.jar&quot;);</span>
+<span class="fc" id="L727">        propertyNames.add(&quot;jruby.compat.version&quot;);</span>
+<span class="fc" id="L728">        propertyNames.add(&quot;jruby.reflection&quot;);</span>
+<span class="fc" id="L729">        propertyNames.add(&quot;jruby.thread.pool.enabled&quot;);</span>
+
+<span class="fc bfc" id="L731" title="All 2 branches covered.">        for (String propertyName : System.getProperties().stringPropertyNames()) {</span>
+<span class="fc bfc" id="L732" title="All 2 branches covered.">            if (propertyName.startsWith(&quot;jruby.&quot;)) {</span>
+<span class="pc bpc" id="L733" title="1 of 2 branches missed.">                if (!propertyNames.contains(propertyName)) {</span>
+<span class="nc" id="L734">                    System.err.println(&quot;jruby: warning: unknown property &quot; + propertyName);</span>
+                }
+            }
+<span class="fc" id="L737">        }</span>
+<span class="fc" id="L738">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

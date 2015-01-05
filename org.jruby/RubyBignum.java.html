@@ -1,0 +1,941 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyBignum.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyBignum.java</span></div><h1>RubyBignum.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2001 Alan Moore &lt;alan_moore@gmx.net&gt;
+ * Copyright (C) 2001-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002 Benoit Cerrina &lt;b.cerrina@wanadoo.fr&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2002-2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004-2005 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.common.IRubyWarnings.ID;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.marshal.MarshalStream;
+import org.jruby.runtime.marshal.UnmarshalStream;
+
+/**
+ *
+ * @author  jpetersen
+ */
+@JRubyClass(name=&quot;Bignum&quot;, parent=&quot;Integer&quot;)
+public class RubyBignum extends RubyInteger {
+    public static RubyClass createBignumClass(Ruby runtime) {
+<span class="fc" id="L56">        RubyClass bignum = runtime.defineClass(&quot;Bignum&quot;, runtime.getInteger(),</span>
+                ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);
+<span class="fc" id="L58">        runtime.setBignum(bignum);</span>
+
+<span class="fc" id="L60">        bignum.setClassIndex(ClassIndex.BIGNUM);</span>
+<span class="fc" id="L61">        bignum.setReifiedClass(RubyBignum.class);</span>
+
+<span class="fc" id="L63">        bignum.defineAnnotatedMethods(RubyBignum.class);</span>
+
+<span class="fc" id="L65">        return bignum;</span>
+    }
+
+    private static final int BIT_SIZE = 64;
+    private static final long MAX = (1L &lt;&lt; (BIT_SIZE - 1)) - 1;
+<span class="fc" id="L70">    public static final BigInteger LONG_MAX = BigInteger.valueOf(MAX);</span>
+<span class="fc" id="L71">    public static final BigInteger LONG_MIN = BigInteger.valueOf(-MAX - 1);</span>
+<span class="fc" id="L72">    public static final BigInteger ULONG_MAX = BigInteger.valueOf(1).shiftLeft(BIT_SIZE).subtract(BigInteger.valueOf(1));</span>
+
+    private final BigInteger value;
+
+    public RubyBignum(Ruby runtime, BigInteger value) {
+<span class="fc" id="L77">        super(runtime, runtime.getBignum());</span>
+<span class="fc" id="L78">        this.value = value;</span>
+<span class="fc" id="L79">    }</span>
+
+    @Override
+    public ClassIndex getNativeClassIndex() {
+<span class="fc" id="L83">        return ClassIndex.BIGNUM;</span>
+    }
+
+    @Override
+    public Class&lt;?&gt; getJavaClass() {
+<span class="nc" id="L88">        return BigInteger.class;</span>
+    }
+
+    public static RubyBignum newBignum(Ruby runtime, long value) {
+<span class="fc" id="L92">        return newBignum(runtime, BigInteger.valueOf(value));</span>
+    }
+
+    public static RubyBignum newBignum(Ruby runtime, double value) {
+<span class="fc" id="L96">        return newBignum(runtime, new BigDecimal(value).toBigInteger());</span>
+    }
+
+    public static RubyBignum newBignum(Ruby runtime, BigInteger value) {
+<span class="fc" id="L100">        return new RubyBignum(runtime, value);</span>
+    }
+
+    public static RubyBignum newBignum(Ruby runtime, String value) {
+<span class="fc" id="L104">        return new RubyBignum(runtime, new BigInteger(value));</span>
+    }
+
+    @Override
+    public double getDoubleValue() {
+<span class="fc" id="L109">        return big2dbl(this);</span>
+    }
+
+    @Override
+    public long getLongValue() {
+<span class="nc" id="L114">        return big2long(this);</span>
+    }
+
+    @Override
+    public int getIntValue() {
+<span class="nc" id="L119">        return (int)big2long(this);</span>
+    }
+
+    @Override
+    public BigInteger getBigIntegerValue() {
+<span class="fc" id="L124">        return value;</span>
+    }
+
+    @Override
+    public RubyClass getSingletonClass() {
+<span class="fc" id="L129">        throw getRuntime().newTypeError(&quot;can't define singleton&quot;);</span>
+    }
+
+    /** Getter for property value.
+     * @return Value of property value.
+     */
+    public BigInteger getValue() {
+<span class="fc" id="L136">        return value;</span>
+    }
+
+    /*  ================
+     *  Utility Methods
+     *  ================
+     */
+
+    /* If the value will fit in a Fixnum, return one of those. */
+    /** rb_big_norm
+     *
+     */
+    public static RubyInteger bignorm(Ruby runtime, BigInteger bi) {
+<span class="fc bfc" id="L149" title="All 4 branches covered.">        if (bi.compareTo(LONG_MIN) &lt; 0 || bi.compareTo(LONG_MAX) &gt; 0) {</span>
+<span class="fc" id="L150">            return newBignum(runtime, bi);</span>
+        }
+<span class="fc" id="L152">        return runtime.newFixnum(bi.longValue());</span>
+    }
+
+    /** rb_big2long
+     *
+     */
+    public static long big2long(RubyBignum value) {
+<span class="fc" id="L159">        BigInteger big = value.getValue();</span>
+
+<span class="pc bpc" id="L161" title="2 of 4 branches missed.">        if (big.compareTo(LONG_MIN) &lt; 0 || big.compareTo(LONG_MAX) &gt; 0) {</span>
+<span class="fc" id="L162">            throw value.getRuntime().newRangeError(&quot;bignum too big to convert into `long'&quot;);</span>
+        }
+<span class="nc" id="L164">        return big.longValue();</span>
+    }
+
+    /** rb_big2ulong
+     * This is here because for C extensions ulong can hold different values without throwing a RangeError
+     */
+    public static long big2ulong(RubyBignum value) {
+<span class="nc" id="L171">        BigInteger big = value.getValue();</span>
+
+<span class="nc bnc" id="L173" title="All 4 branches missed.">        if (big.compareTo(LONG_MIN) &lt;= 0 || big.compareTo(ULONG_MAX) &gt; 0) {</span>
+<span class="nc" id="L174">            throw value.getRuntime().newRangeError(&quot;bignum too big to convert into `ulong'&quot;);</span>
+        }
+<span class="nc" id="L176">        return value.getValue().longValue();</span>
+    }
+
+    /** rb_big2dbl
+     *
+     */
+    public static double big2dbl(RubyBignum value) {
+<span class="fc" id="L183">        BigInteger big = value.getValue();</span>
+<span class="fc" id="L184">        double dbl = convertToDouble(big);</span>
+<span class="pc bpc" id="L185" title="1 of 4 branches missed.">        if (dbl == Double.NEGATIVE_INFINITY || dbl == Double.POSITIVE_INFINITY) {</span>
+<span class="fc" id="L186">            value.getRuntime().getWarnings().warn(ID.BIGNUM_FROM_FLOAT_RANGE, &quot;Bignum out of Float range&quot;);</span>
+    }
+<span class="fc" id="L188">        return dbl;</span>
+    }
+
+    private IRubyObject checkShiftDown(RubyBignum other) {
+<span class="pc bpc" id="L192" title="1 of 2 branches missed.">        if (other.value.signum() == 0) return RubyFixnum.zero(getRuntime());</span>
+<span class="pc bpc" id="L193" title="2 of 4 branches missed.">        if (value.compareTo(LONG_MIN) &lt; 0 || value.compareTo(LONG_MAX) &gt; 0) {</span>
+<span class="pc bpc" id="L194" title="1 of 2 branches missed.">            return other.value.signum() &gt;= 0 ? RubyFixnum.zero(getRuntime()) : RubyFixnum.minus_one(getRuntime());</span>
+        }
+<span class="nc" id="L196">        return getRuntime().getNil();</span>
+    }
+
+    /**
+     * BigInteger#doubleValue is _really_ slow currently.
+     * This is faster, and mostly correct (?)
+     */
+    static double convertToDouble(BigInteger bigint) {
+<span class="fc bfc" id="L204" title="All 2 branches covered.">        long signum = (bigint.signum() == -1) ? 1l &lt;&lt; 63 : 0;</span>
+<span class="fc" id="L205">        bigint = bigint.abs();</span>
+<span class="fc" id="L206">        int len = bigint.bitLength();</span>
+<span class="pc bpc" id="L207" title="1 of 2 branches missed.">        if (len == 0) return 0d;</span>
+<span class="fc" id="L208">        long exp = len + 1022; // 1023 (bias) - 1 (sign)</span>
+<span class="fc" id="L209">        long frac = 0;</span>
+<span class="fc bfc" id="L210" title="All 2 branches covered.">        if (exp &gt; 0x7ff) exp = 0x7ff; // inf, frac = 0;</span>
+        else {
+            // Deep breath...
+            // Shift bigint to get 52 significant bits, adjusting for sign bit
+            // (-52 -1), but * 2, add 1, then / 2 to round correctly
+<span class="fc" id="L215">            frac = ((bigint.shiftRight(len - 54).longValue() + 1l) &gt;&gt; 1);</span>
+<span class="pc bpc" id="L216" title="1 of 2 branches missed.">            if (frac == 0x20000000000000l) { // corner case: rounding overflowed</span>
+<span class="nc" id="L217">                exp += 1l;</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">                if (exp &gt; 0x7ff) exp = 0x7ff;</span>
+            }
+        }
+<span class="fc" id="L221">        return Double.longBitsToDouble(signum | (exp &lt;&lt; 52) | frac &amp; 0xfffffffffffffl);</span>
+    }
+
+
+    /** rb_int2big
+     *
+     */
+    public static BigInteger fix2big(RubyFixnum arg) {
+<span class="fc" id="L229">        return long2big(arg.getLongValue());</span>
+    }
+
+    public static BigInteger long2big(long arg) {
+<span class="fc" id="L233">        return BigInteger.valueOf(arg);</span>
+    }
+
+    /*  ================
+     *  Instance Methods
+     *  ================
+     */
+
+    /** rb_big_to_s
+     *
+     */
+    public IRubyObject to_s(IRubyObject[] args) {
+<span class="nc bnc" id="L245" title="All 3 branches missed.">        switch (args.length) {</span>
+        case 0:
+<span class="nc" id="L247">            return to_s();</span>
+        case 1:
+<span class="nc" id="L249">            return to_s(args[0]);</span>
+        default:
+<span class="nc" id="L251">            throw getRuntime().newArgumentError(args.length, 1);</span>
+        }
+    }
+
+    @JRubyMethod(name = &quot;to_s&quot;, alias = &quot;inspect&quot;)
+    @Override
+    public IRubyObject to_s() {
+<span class="fc" id="L258">        int base = 10;</span>
+<span class="fc" id="L259">        return RubyString.newUSASCIIString(getRuntime(), getValue().toString(base));</span>
+    }
+
+    @JRubyMethod(name = &quot;to_s&quot;)
+    public IRubyObject to_s(IRubyObject arg0) {
+<span class="fc" id="L264">        int base = num2int(arg0);</span>
+<span class="pc bpc" id="L265" title="2 of 4 branches missed.">        if (base &lt; 2 || base &gt; 36) {</span>
+<span class="nc" id="L266">            throw getRuntime().newArgumentError(&quot;illegal radix &quot; + base);</span>
+        }
+<span class="fc" id="L268">        return RubyString.newUSASCIIString(getRuntime(), getValue().toString(base));</span>
+    }
+
+    /** rb_big_coerce
+     *
+     */
+    @JRubyMethod(name = &quot;coerce&quot;, required = 1)
+    @Override
+    public IRubyObject coerce(IRubyObject other) {
+<span class="fc bfc" id="L277" title="All 2 branches covered.">        if (other instanceof RubyFixnum) {</span>
+<span class="fc" id="L278">            return getRuntime().newArray(newBignum(getRuntime(), ((RubyFixnum) other).getLongValue()), this);</span>
+<span class="fc bfc" id="L279" title="All 2 branches covered.">        } else if (other instanceof RubyBignum) {</span>
+<span class="fc" id="L280">            return getRuntime().newArray(newBignum(getRuntime(), ((RubyBignum) other).getValue()), this);</span>
+    }
+
+<span class="fc" id="L283">        throw getRuntime().newTypeError(&quot;Can't coerce &quot; + other.getMetaClass().getName() + &quot; to Bignum&quot;);</span>
+    }
+
+    /** rb_big_uminus
+     *
+     */
+    @JRubyMethod(name = &quot;-@&quot;)
+    public IRubyObject op_uminus() {
+<span class="fc" id="L291">        return bignorm(getRuntime(), value.negate());</span>
+    }
+
+    /** rb_big_plus
+     *
+     */
+    @JRubyMethod(name = &quot;+&quot;, required = 1)
+    public IRubyObject op_plus(ThreadContext context, IRubyObject other) {
+<span class="fc bfc" id="L299" title="All 2 branches covered.">        if (other instanceof RubyFixnum) {</span>
+<span class="fc" id="L300">            return addFixnum(((RubyFixnum)other).getLongValue());</span>
+<span class="fc bfc" id="L301" title="All 2 branches covered.">        } else if (other instanceof RubyBignum) {</span>
+<span class="fc" id="L302">            return addBignum(((RubyBignum)other).value);</span>
+<span class="pc bpc" id="L303" title="1 of 2 branches missed.">        } else if (other instanceof RubyFloat) {</span>
+<span class="fc" id="L304">            return addFloat((RubyFloat)other);</span>
+        }
+<span class="nc" id="L306">        return addOther(context, other);</span>
+    }
+
+    public IRubyObject op_plus(ThreadContext context, long other) {
+<span class="fc" id="L310">        return addFixnum(other);</span>
+    }
+
+    private IRubyObject addFixnum(long other) {
+<span class="fc" id="L314">        BigInteger result = value.add(BigInteger.valueOf(other));</span>
+<span class="fc bfc" id="L315" title="All 4 branches covered.">        if (other &gt; 0 &amp;&amp; value.signum() &gt; 0) return new RubyBignum(getRuntime(), result);</span>
+<span class="fc" id="L316">        return bignorm(getRuntime(), result);</span>
+    }
+
+    private IRubyObject addBignum(BigInteger other) {
+<span class="fc" id="L320">        BigInteger result = value.add(other);</span>
+<span class="fc bfc" id="L321" title="All 4 branches covered.">        if (value.signum() &gt; 0 &amp;&amp; other.signum() &gt; 0) return new RubyBignum(getRuntime(), result);</span>
+<span class="fc" id="L322">        return bignorm(getRuntime(), result);</span>
+    }
+
+    private IRubyObject addFloat(RubyFloat other) {
+<span class="fc" id="L326">        return RubyFloat.newFloat(getRuntime(), big2dbl(this) + other.getDoubleValue());</span>
+    }
+
+    private IRubyObject addOther(ThreadContext context, IRubyObject other) {
+<span class="nc" id="L330">        return coerceBin(context, &quot;+&quot;, other);</span>
+    }
+
+    /** rb_big_minus
+     *
+     */
+    @JRubyMethod(name = &quot;-&quot;, required = 1)
+    public IRubyObject op_minus(ThreadContext context, IRubyObject other) {
+<span class="fc bfc" id="L338" title="All 2 branches covered.">        if (other instanceof RubyFixnum) {</span>
+<span class="fc" id="L339">            return subtractFixnum(((RubyFixnum)other).getLongValue());</span>
+<span class="fc bfc" id="L340" title="All 2 branches covered.">        } else if (other instanceof RubyBignum) {</span>
+<span class="fc" id="L341">            return subtractBignum(((RubyBignum)other).value);</span>
+<span class="pc bpc" id="L342" title="1 of 2 branches missed.">        } else if (other instanceof RubyFloat) {</span>
+<span class="fc" id="L343">            return subtractFloat((RubyFloat)other);</span>
+        }
+<span class="nc" id="L345">        return subtractOther(context, other);</span>
+    }
+
+    public IRubyObject op_minus(ThreadContext context, long other) {
+<span class="fc" id="L349">        return subtractFixnum(other);</span>
+    }
+
+    private IRubyObject subtractFixnum(long other) {
+<span class="fc" id="L353">        BigInteger result = value.subtract(BigInteger.valueOf(other));</span>
+<span class="pc bpc" id="L354" title="1 of 4 branches missed.">        if (value.signum() &lt; 0 &amp;&amp; other &gt; 0) return new RubyBignum(getRuntime(), result);</span>
+<span class="fc" id="L355">        return bignorm(getRuntime(), result);</span>
+    }
+
+    private IRubyObject subtractBignum(BigInteger other) {
+<span class="fc" id="L359">        BigInteger result = value.subtract(other);</span>
+<span class="pc bpc" id="L360" title="1 of 4 branches missed.">        if (value.signum() &lt; 0 &amp;&amp; other.signum() &gt; 0) return new RubyBignum(getRuntime(), result);</span>
+<span class="fc" id="L361">        return bignorm(getRuntime(), result);</span>
+    }
+
+    private IRubyObject subtractFloat(RubyFloat other) {
+<span class="fc" id="L365">        return RubyFloat.newFloat(getRuntime(), big2dbl(this) - other.getDoubleValue());</span>
+    }
+
+    private IRubyObject subtractOther(ThreadContext context, IRubyObject other) {
+<span class="nc" id="L369">        return coerceBin(context, &quot;-&quot;, other);</span>
+    }
+
+    /** rb_big_mul
+     *
+     */
+    public IRubyObject op_mul(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L376">        return op_mul19(context, other);</span>
+    }
+
+    @JRubyMethod(name = &quot;*&quot;, required = 1)
+    public IRubyObject op_mul19(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L381">        Ruby runtime = context.runtime;</span>
+<span class="fc bfc" id="L382" title="All 2 branches covered.">        if (other instanceof RubyFixnum) {</span>
+<span class="fc" id="L383">            return bignorm(runtime, value.multiply(fix2big(((RubyFixnum) other))));</span>
+<span class="fc bfc" id="L384" title="All 2 branches covered.">        } else if (other instanceof RubyBignum) {</span>
+<span class="fc" id="L385">            return bignorm(runtime, value.multiply(((RubyBignum)other).value));</span>
+<span class="fc" id="L386">        } else return opMulOther(context, other);</span>
+    }
+
+    public IRubyObject op_mul(ThreadContext context, long other) {
+<span class="fc" id="L390">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L391">        BigInteger result = value.multiply(long2big(other));</span>
+<span class="pc bpc" id="L392" title="1 of 2 branches missed.">        return result.signum() == 0 ? RubyFixnum.zero(runtime) : new RubyBignum(runtime, result);</span>
+    }
+
+    public IRubyObject opMulOther(ThreadContext context, IRubyObject other) {
+<span class="pc bpc" id="L396" title="1 of 2 branches missed.">        if (other instanceof RubyFloat) {</span>
+<span class="fc" id="L397">            return RubyFloat.newFloat(getRuntime(), big2dbl(this) * ((RubyFloat) other).getDoubleValue());</span>
+        }
+<span class="nc" id="L399">        return coerceBin(context, &quot;*&quot;, other);</span>
+    }
+
+    /**
+     * rb_big_divide. Shared part for both &quot;/&quot; and &quot;div&quot; operations.
+     */
+    private IRubyObject op_divide(ThreadContext context, IRubyObject other, boolean slash) {
+<span class="fc" id="L406">        Ruby runtime = context.runtime;</span>
+        final BigInteger otherValue;
+<span class="fc bfc" id="L408" title="All 2 branches covered.">        if (other instanceof RubyFixnum) {</span>
+<span class="fc" id="L409">            otherValue = fix2big((RubyFixnum) other);</span>
+<span class="fc bfc" id="L410" title="All 2 branches covered.">        } else if (other instanceof RubyBignum) {</span>
+<span class="fc" id="L411">            otherValue = ((RubyBignum) other).value;</span>
+<span class="fc bfc" id="L412" title="All 2 branches covered.">        } else if (other instanceof RubyFloat) {</span>
+<span class="fc" id="L413">            double otherFloatValue = ((RubyFloat) other).getDoubleValue();</span>
+<span class="fc bfc" id="L414" title="All 2 branches covered.">            if (!slash) {</span>
+<span class="fc bfc" id="L415" title="All 2 branches covered.">                if (otherFloatValue == 0.0) throw runtime.newZeroDivisionError();</span>
+            }
+<span class="fc" id="L417">            double div = big2dbl(this) / otherFloatValue;</span>
+<span class="fc bfc" id="L418" title="All 2 branches covered.">            if (slash) {</span>
+<span class="fc" id="L419">                return RubyFloat.newFloat(runtime, div);</span>
+            } else {
+<span class="fc" id="L421">                return RubyNumeric.dbl2num(runtime, div);</span>
+            }
+        } else {
+<span class="pc bfc" id="L424" title="All 2 branches covered.">            return coerceBin(context, slash ? &quot;/&quot; : &quot;div&quot;, other);</span>
+        }
+
+<span class="fc bfc" id="L427" title="All 2 branches covered.">        if (otherValue.signum() == 0) throw runtime.newZeroDivisionError();</span>
+
+        final BigInteger result;
+<span class="fc bfc" id="L430" title="All 2 branches covered.">        if (value.signum() * otherValue.signum() == -1) {</span>
+<span class="fc" id="L431">            BigInteger[] results = value.divideAndRemainder(otherValue);</span>
+<span class="fc bfc" id="L432" title="All 2 branches covered.">            result = results[1].signum() != 0 ? results[0].subtract(BigInteger.ONE) : results[0];</span>
+<span class="fc" id="L433">        } else {</span>
+<span class="fc" id="L434">            result = value.divide(otherValue);</span>
+        }
+<span class="fc" id="L436">        return bignorm(getRuntime(), result);</span>
+    }
+
+    /** rb_big_div
+     *
+     */
+    @JRubyMethod(name = {&quot;/&quot;}, required = 1)
+    public IRubyObject op_div(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L444">        return op_divide(context, other, true);</span>
+    }
+
+    /** rb_big_idiv
+     *
+     */
+    @JRubyMethod(name = {&quot;div&quot;}, required = 1)
+    public IRubyObject op_idiv(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L452">        return op_divide(context, other, false);</span>
+    }
+
+    /** rb_big_divmod
+     *
+     */
+    @Override
+    public IRubyObject divmod(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L460">        Ruby runtime = context.runtime;</span>
+        final BigInteger otherValue;
+<span class="fc bfc" id="L462" title="All 2 branches covered.">        if (other instanceof RubyFixnum) {</span>
+<span class="fc" id="L463">            otherValue = fix2big((RubyFixnum) other);</span>
+<span class="fc bfc" id="L464" title="All 2 branches covered.">        } else if (other instanceof RubyBignum) {</span>
+<span class="fc" id="L465">            otherValue = ((RubyBignum) other).value;</span>
+        } else {
+<span class="fc" id="L467">            return coerceBin(context, &quot;divmod&quot;, other);</span>
+        }
+
+<span class="fc bfc" id="L470" title="All 2 branches covered.">        if (otherValue.signum() == 0) throw runtime.newZeroDivisionError();</span>
+
+<span class="fc" id="L472">        BigInteger[] results = value.divideAndRemainder(otherValue);</span>
+<span class="pc bpc" id="L473" title="1 of 4 branches missed.">        if ((value.signum() * otherValue.signum()) == -1 &amp;&amp; results[1].signum() != 0) {</span>
+<span class="fc" id="L474">            results[0] = results[0].subtract(BigInteger.ONE);</span>
+<span class="fc" id="L475">            results[1] = otherValue.add(results[1]);</span>
+        }
+<span class="fc" id="L477">        return RubyArray.newArray(runtime, bignorm(runtime, results[0]), bignorm(runtime, results[1]));</span>
+    }
+
+    @JRubyMethod(name = &quot;divmod&quot;, required = 1)
+    public IRubyObject divmod19(ThreadContext context, IRubyObject other) {
+<span class="pc bpc" id="L482" title="1 of 4 branches missed.">        if (!other.isNil() &amp;&amp; other instanceof RubyFloat</span>
+<span class="fc bfc" id="L483" title="All 2 branches covered.">                &amp;&amp; ((RubyFloat)other).getDoubleValue() == 0) {</span>
+<span class="fc" id="L484">            throw context.runtime.newZeroDivisionError();</span>
+        }
+<span class="fc" id="L486">        return divmod(context, other);</span>
+    }
+
+    /** rb_big_modulo
+     *
+     */
+    public IRubyObject op_mod(ThreadContext context, IRubyObject other) {
+        final BigInteger otherValue;
+<span class="fc bfc" id="L494" title="All 2 branches covered.">        if (other instanceof RubyFixnum) {</span>
+<span class="fc" id="L495">            otherValue = fix2big((RubyFixnum) other);</span>
+<span class="fc bfc" id="L496" title="All 2 branches covered.">        } else if (other instanceof RubyBignum) {</span>
+<span class="fc" id="L497">            otherValue = ((RubyBignum) other).value;</span>
+        } else {
+<span class="fc" id="L499">            return coerceBin(context, &quot;%&quot;, other);</span>
+        }
+<span class="fc" id="L501">        Ruby runtime = context.runtime;</span>
+<span class="fc bfc" id="L502" title="All 2 branches covered.">        if (otherValue.signum() == 0) throw runtime.newZeroDivisionError();</span>
+
+<span class="fc" id="L504">        BigInteger result = value.mod(otherValue.abs());</span>
+<span class="pc bpc" id="L505" title="1 of 4 branches missed.">        if (otherValue.signum() == -1 &amp;&amp; result.signum() != 0) result = otherValue.add(result);</span>
+<span class="fc" id="L506">        return bignorm(runtime, result);</span>
+    }
+
+    /** rb_big_modulo
+     *
+     */
+    @JRubyMethod(name = {&quot;%&quot;, &quot;modulo&quot;}, required = 1)
+    public IRubyObject op_mod19(ThreadContext context, IRubyObject other) {
+<span class="pc bpc" id="L514" title="1 of 4 branches missed.">        if (!other.isNil() &amp;&amp; other instanceof RubyFloat</span>
+<span class="fc bfc" id="L515" title="All 2 branches covered.">                &amp;&amp; ((RubyFloat)other).getDoubleValue() == 0) {</span>
+<span class="fc" id="L516">            throw context.runtime.newZeroDivisionError();</span>
+        }
+<span class="fc" id="L518">        return op_mod(context, other);</span>
+    }
+
+    /** rb_big_remainder
+     *
+     */
+    @Override
+    public IRubyObject remainder(ThreadContext context, IRubyObject other) {
+        final BigInteger otherValue;
+<span class="fc bfc" id="L527" title="All 2 branches covered.">        if (other instanceof RubyFixnum) {</span>
+<span class="fc" id="L528">            otherValue = fix2big(((RubyFixnum) other));</span>
+<span class="fc bfc" id="L529" title="All 2 branches covered.">        } else if (other instanceof RubyBignum) {</span>
+<span class="fc" id="L530">            otherValue = ((RubyBignum) other).value;</span>
+        } else {
+<span class="fc" id="L532">            return coerceBin(context, &quot;remainder&quot;, other);</span>
+        }
+<span class="fc" id="L534">        Ruby runtime = context.runtime;</span>
+<span class="fc bfc" id="L535" title="All 2 branches covered.">        if (otherValue.signum() == 0) throw runtime.newZeroDivisionError();</span>
+<span class="fc" id="L536">        return bignorm(runtime, value.remainder(otherValue));</span>
+    }
+
+    @JRubyMethod(name = &quot;remainder&quot;, required = 1)
+    public IRubyObject remainder19(ThreadContext context, IRubyObject other) {
+<span class="fc bfc" id="L541" title="All 4 branches covered.">        if (other instanceof RubyFloat &amp;&amp; ((RubyFloat) other).getDoubleValue() == 0) {</span>
+<span class="fc" id="L542">            throw context.runtime.newZeroDivisionError();</span>
+        }
+<span class="fc" id="L544">        return remainder(context, other);</span>
+    }
+
+    /** rb_big_quo
+
+     *
+     */
+    @Override
+    public IRubyObject quo(ThreadContext context, IRubyObject other) {
+<span class="nc bnc" id="L553" title="All 2 branches missed.">        if (other instanceof RubyNumeric) {</span>
+<span class="nc" id="L554">            return RubyFloat.newFloat(getRuntime(), big2dbl(this) / ((RubyNumeric) other).getDoubleValue());</span>
+        } else {
+<span class="nc" id="L556">            return coerceBin(context, &quot;quo&quot;, other);</span>
+        }
+    }
+
+    @JRubyMethod(name = &quot;quo&quot;, required = 1)
+    public IRubyObject quo19(ThreadContext context, IRubyObject other) {
+<span class="pc bpc" id="L562" title="2 of 4 branches missed.">        if (other instanceof RubyInteger &amp;&amp; ((RubyInteger) other).getDoubleValue() == 0) {</span>
+<span class="fc" id="L563">            throw context.runtime.newZeroDivisionError();</span>
+        }
+<span class="nc" id="L565">        return quo(context, other);</span>
+    }
+
+    /** rb_big_pow
+     *
+     */
+    public IRubyObject op_pow(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L572">        return op_pow19(context, other);</span>
+    }
+
+    public IRubyObject op_pow(ThreadContext context, long other) {
+        // MRI issuses warning here on (RBIGNUM(x)-&gt;len * SIZEOF_BDIGITS * yy &gt; 1024*1024)
+<span class="nc bnc" id="L577" title="All 2 branches missed.">        if (((value.bitLength() + 7) / 8) * 4 * Math.abs(other) &gt; 1024 * 1024) {</span>
+<span class="nc" id="L578">            getRuntime().getWarnings().warn(ID.MAY_BE_TOO_BIG, &quot;in a**b, b may be too big&quot;);</span>
+        }
+<span class="nc bnc" id="L580" title="All 2 branches missed.">        if (other &gt;= 0) {</span>
+<span class="nc" id="L581">            return bignorm(getRuntime(), value.pow((int) other)); // num2int is also implemented</span>
+        } else {
+<span class="nc" id="L583">            return RubyFloat.newFloat(getRuntime(), Math.pow(big2dbl(this), (double)other));</span>
+        }
+    }
+
+    /** rb_big_pow
+     *
+     */
+    @JRubyMethod(name = {&quot;**&quot;, &quot;power&quot;}, required = 1)
+    public IRubyObject op_pow19(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L592">        Ruby runtime = context.runtime;</span>
+<span class="pc bpc" id="L593" title="1 of 2 branches missed.">        if (other == RubyFixnum.zero(runtime)) return RubyFixnum.one(runtime);</span>
+        double d;
+<span class="fc bfc" id="L595" title="All 2 branches covered.">        if (other instanceof RubyFixnum) {</span>
+<span class="fc" id="L596">            RubyFixnum fix = (RubyFixnum) other;</span>
+<span class="fc" id="L597">            long fixValue = fix.getLongValue();</span>
+
+<span class="pc bpc" id="L599" title="1 of 2 branches missed.">            if (fixValue &lt; 0) {</span>
+<span class="nc" id="L600">                return RubyRational.newRationalRaw(runtime, this).callMethod(context, &quot;**&quot;, other);</span>
+            }
+            // MRI issuses warning here on (RBIGNUM(x)-&gt;len * SIZEOF_BDIGITS * yy &gt; 1024*1024)
+<span class="fc bfc" id="L603" title="All 2 branches covered.">            if (((value.bitLength() + 7) / 8) * 4 * Math.abs(fixValue) &gt; 1024 * 1024) {</span>
+<span class="fc" id="L604">                getRuntime().getWarnings().warn(ID.MAY_BE_TOO_BIG, &quot;in a**b, b may be too big&quot;);</span>
+            }
+<span class="pc bpc" id="L606" title="1 of 2 branches missed.">            if (fixValue &gt;= 0) {</span>
+<span class="fc" id="L607">                return bignorm(runtime, value.pow((int) fixValue)); // num2int is also implemented</span>
+            } else {
+<span class="nc" id="L609">                return RubyFloat.newFloat(runtime, Math.pow(big2dbl(this), (double)fixValue));</span>
+            }
+<span class="fc bfc" id="L611" title="All 2 branches covered.">        } else if (other instanceof RubyBignum) {</span>
+<span class="fc" id="L612">            d = ((RubyBignum) other).getDoubleValue();</span>
+<span class="fc" id="L613">            getRuntime().getWarnings().warn(ID.MAY_BE_TOO_BIG, &quot;in a**b, b may be too big&quot;);</span>
+<span class="fc bfc" id="L614" title="All 2 branches covered.">        } else if (other instanceof RubyFloat) {</span>
+<span class="fc" id="L615">            d = ((RubyFloat) other).getDoubleValue();</span>
+<span class="fc bfc" id="L616" title="All 2 branches covered.">            if (this.compareTo(RubyFixnum.zero(runtime)) == -1</span>
+<span class="pc bpc" id="L617" title="1 of 2 branches missed.">                    &amp;&amp;  d != Math.round(d)) {</span>
+<span class="fc" id="L618">                return RubyComplex.newComplexRaw(getRuntime(), this).callMethod(context, &quot;**&quot;, other);</span>
+            }
+        } else {
+<span class="fc" id="L621">            return coerceBin(context, &quot;**&quot;, other);</span>
+
+        }
+<span class="fc" id="L624">        double pow = Math.pow(big2dbl(this), d);</span>
+<span class="fc bfc" id="L625" title="All 2 branches covered.">        if (Double.isInfinite(pow)) {</span>
+<span class="fc" id="L626">            return RubyFloat.newFloat(runtime, pow);</span>
+        }
+<span class="fc" id="L628">        return RubyNumeric.dbl2num(runtime, pow);</span>
+    }
+
+    /** rb_big_and
+     *
+     */
+    public IRubyObject op_and(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L635">        other = other.convertToInteger();</span>
+<span class="fc bfc" id="L636" title="All 2 branches covered.">        if (other instanceof RubyBignum) {</span>
+<span class="fc" id="L637">            return bignorm(getRuntime(), value.and(((RubyBignum) other).value));</span>
+<span class="pc bpc" id="L638" title="1 of 2 branches missed.">        } else if (other instanceof RubyFixnum) {</span>
+<span class="fc" id="L639">            return bignorm(getRuntime(), value.and(fix2big((RubyFixnum)other)));</span>
+        }
+<span class="nc" id="L641">        return coerceBin(context, &quot;&amp;&quot;, other);</span>
+    }
+
+    @JRubyMethod(name = &quot;&amp;&quot;, required = 1)
+    public IRubyObject op_and19(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L646">        return op_and(context, convertToInteger(context, other));</span>
+    }
+
+    /** rb_big_or
+     *
+     */
+    public IRubyObject op_or(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L653">        other = other.convertToInteger();</span>
+<span class="fc bfc" id="L654" title="All 2 branches covered.">        if (other instanceof RubyBignum) {</span>
+<span class="fc" id="L655">            return bignorm(getRuntime(), value.or(((RubyBignum) other).value));</span>
+        }
+<span class="pc bpc" id="L657" title="1 of 2 branches missed.">        if (other instanceof RubyFixnum) { // no bignorm here needed</span>
+<span class="fc" id="L658">            return bignorm(getRuntime(), value.or(fix2big((RubyFixnum)other)));</span>
+        }
+<span class="nc" id="L660">        return coerceBin(context, &quot;|&quot;, other);</span>
+    }
+
+    @JRubyMethod(name = &quot;|&quot;, required = 1)
+    public IRubyObject op_or19(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L665">        return op_or(context, convertToInteger(context, other));</span>
+    }
+
+    /** rb_big_xor
+     *
+     */
+    public IRubyObject op_xor(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L672">        other = other.convertToInteger();</span>
+<span class="fc bfc" id="L673" title="All 2 branches covered.">        if (other instanceof RubyBignum) {</span>
+<span class="fc" id="L674">            return bignorm(getRuntime(), value.xor(((RubyBignum) other).value));</span>
+        }
+<span class="pc bpc" id="L676" title="1 of 2 branches missed.">        if (other instanceof RubyFixnum) {</span>
+<span class="fc" id="L677">            return bignorm(getRuntime(), value.xor(BigInteger.valueOf(((RubyFixnum) other).getLongValue())));</span>
+        }
+<span class="nc" id="L679">        return coerceBin(context, &quot;^&quot;, other);</span>
+    }
+    
+    @JRubyMethod(name = &quot;^&quot;, required = 1)
+    public IRubyObject op_xor19(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L684">        return op_xor(context, convertToInteger(context, other));</span>
+    }
+
+    private IRubyObject convertToInteger(ThreadContext context, IRubyObject other) {
+<span class="fc bfc" id="L688" title="All 2 branches covered.">        if (other instanceof RubyFloat) {</span>
+<span class="fc" id="L689">            throw context.runtime.newTypeError(&quot;can't convert Float into Integer&quot;);</span>
+        }
+<span class="fc" id="L691">        return other.convertToInteger();</span>
+    }
+
+    /** rb_big_neg
+     *
+     */
+    @JRubyMethod(name = &quot;~&quot;)
+    public IRubyObject op_neg() {
+<span class="fc" id="L699">        return RubyBignum.newBignum(getRuntime(), value.not());</span>
+    }
+
+    /** rb_big_lshift
+     *
+     */
+    @JRubyMethod(name = &quot;&lt;&lt;&quot;, required = 1)
+    public IRubyObject op_lshift(IRubyObject other) {
+        long shift;
+<span class="fc" id="L708">        boolean neg = false;</span>
+
+        for (;;) {
+<span class="fc bfc" id="L711" title="All 2 branches covered.">            if (other instanceof RubyFixnum) {</span>
+<span class="fc" id="L712">                shift = ((RubyFixnum)other).getLongValue();</span>
+<span class="fc bfc" id="L713" title="All 2 branches covered.">                if (shift &lt; 0) {</span>
+<span class="fc" id="L714">                    neg = true;</span>
+<span class="fc" id="L715">                    shift = -shift;</span>
+                }
+                break;
+<span class="pc bpc" id="L718" title="1 of 2 branches missed.">            } else if (other instanceof RubyBignum) {</span>
+<span class="nc" id="L719">                RubyBignum otherBignum = (RubyBignum)other;</span>
+<span class="nc bnc" id="L720" title="All 2 branches missed.">                if (otherBignum.value.signum() &lt; 0) {</span>
+<span class="nc" id="L721">                    IRubyObject tmp = otherBignum.checkShiftDown(this);</span>
+<span class="nc bnc" id="L722" title="All 2 branches missed.">                    if (!tmp.isNil()) return tmp;</span>
+<span class="nc" id="L723">                    neg = true;</span>
+                }
+<span class="nc" id="L725">                shift = big2long(otherBignum);</span>
+<span class="nc" id="L726">                break;</span>
+            }
+<span class="fc" id="L728">            other = other.convertToInteger();</span>
+        }
+
+<span class="fc bfc" id="L731" title="All 2 branches covered.">        return bignorm(getRuntime(), neg ? value.shiftRight((int)shift) : value.shiftLeft((int)shift));</span>
+    }
+
+    /** rb_big_rshift
+     *
+     */
+    @JRubyMethod(name = &quot;&gt;&gt;&quot;, required = 1)
+    public IRubyObject op_rshift(IRubyObject other) {
+        long shift;
+<span class="fc" id="L740">        boolean neg = false;</span>
+
+        for (;;) {
+<span class="fc bfc" id="L743" title="All 2 branches covered.">            if (other instanceof RubyFixnum) {</span>
+<span class="fc" id="L744">                shift = ((RubyFixnum)other).getLongValue();</span>
+<span class="fc bfc" id="L745" title="All 2 branches covered.">                if (shift &lt; 0) {</span>
+<span class="fc" id="L746">                    neg = true;</span>
+<span class="fc" id="L747">                    shift = -shift;</span>
+                }
+                break;
+<span class="fc bfc" id="L750" title="All 2 branches covered.">            } else if (other instanceof RubyBignum) {</span>
+<span class="fc" id="L751">                RubyBignum otherBignum = (RubyBignum)other;</span>
+<span class="pc bpc" id="L752" title="1 of 2 branches missed.">                if (otherBignum.value.signum() &gt;= 0) {</span>
+<span class="fc" id="L753">                    IRubyObject tmp = otherBignum.checkShiftDown(this);</span>
+<span class="pc bpc" id="L754" title="1 of 2 branches missed.">                    if (!tmp.isNil()) return tmp;</span>
+<span class="nc" id="L755">                } else {</span>
+<span class="nc" id="L756">                    neg = true;</span>
+                }
+<span class="nc" id="L758">                shift = big2long(otherBignum);</span>
+<span class="nc" id="L759">                break;</span>
+            }
+<span class="fc" id="L761">            other = other.convertToInteger();</span>
+        }
+<span class="fc bfc" id="L763" title="All 2 branches covered.">        return bignorm(getRuntime(), neg ? value.shiftLeft((int)shift) : value.shiftRight((int)shift));</span>
+    }
+
+    /** rb_big_aref
+     *
+     */
+    @JRubyMethod(name = &quot;[]&quot;, required = 1)
+    public RubyFixnum op_aref(IRubyObject other) {
+<span class="pc bpc" id="L771" title="1 of 2 branches missed.">        if (other instanceof RubyBignum) {</span>
+            // Need to normalize first
+<span class="nc" id="L773">            other = bignorm(getRuntime(), ((RubyBignum) other).value);</span>
+<span class="nc bnc" id="L774" title="All 2 branches missed.">            if (other instanceof RubyBignum) {</span>
+                // '!=' for negative value
+<span class="nc bnc" id="L776" title="All 6 branches missed.">                if ((((RubyBignum) other).value.signum() &gt;= 0) != (value.signum() == -1)) {</span>
+<span class="nc" id="L777">                    return RubyFixnum.zero(getRuntime());</span>
+                }
+<span class="nc" id="L779">                return RubyFixnum.one(getRuntime());</span>
+            }
+        }
+<span class="fc" id="L782">        long position = num2long(other);</span>
+<span class="fc bfc" id="L783" title="All 4 branches covered.">        if (position &lt; 0 || position &gt; Integer.MAX_VALUE) {</span>
+<span class="fc" id="L784">            return RubyFixnum.zero(getRuntime());</span>
+        }
+
+<span class="fc bfc" id="L787" title="All 2 branches covered.">        return value.testBit((int)position) ? RubyFixnum.one(getRuntime()) : RubyFixnum.zero(getRuntime());</span>
+    }
+
+    @Override
+    public final int compareTo(IRubyObject other) {
+<span class="pc bpc" id="L792" title="1 of 2 branches missed.">        if (other instanceof RubyBignum) {</span>
+<span class="nc" id="L793">            return value.compareTo(((RubyBignum)other).value);</span>
+        }
+<span class="fc" id="L795">        return (int)coerceCmp(getRuntime().getCurrentContext(), &quot;&lt;=&gt;&quot;, other).convertToInteger().getLongValue();</span>
+    }
+
+    /** rb_big_cmp
+     *
+     */
+    @JRubyMethod(name = &quot;&lt;=&gt;&quot;, required = 1)
+    public IRubyObject op_cmp(ThreadContext context, IRubyObject other) {
+        final BigInteger otherValue;
+<span class="fc bfc" id="L804" title="All 2 branches covered.">        if (other instanceof RubyFixnum) {</span>
+<span class="fc" id="L805">            otherValue = fix2big((RubyFixnum) other);</span>
+<span class="fc bfc" id="L806" title="All 2 branches covered.">        } else if (other instanceof RubyBignum) {</span>
+<span class="fc" id="L807">            otherValue = ((RubyBignum) other).value;</span>
+<span class="fc bfc" id="L808" title="All 2 branches covered.">        } else if (other instanceof RubyFloat) {</span>
+<span class="fc" id="L809">            RubyFloat flt = (RubyFloat)other;</span>
+<span class="fc bfc" id="L810" title="All 2 branches covered.">            if (flt.infinite_p().isTrue()) {</span>
+<span class="fc bfc" id="L811" title="All 2 branches covered.">                if (flt.getDoubleValue() &gt; 0.0) return RubyFixnum.minus_one(getRuntime());</span>
+<span class="fc" id="L812">                return RubyFixnum.one(getRuntime());</span>
+            }
+<span class="fc" id="L814">            return dbl_cmp(getRuntime(), big2dbl(this), flt.getDoubleValue());</span>
+        } else {
+<span class="fc" id="L816">            return coerceCmp(context, &quot;&lt;=&gt;&quot;, other);</span>
+        }
+
+        // wow, the only time we can use the java protocol ;)
+<span class="fc" id="L820">        return RubyFixnum.newFixnum(getRuntime(), value.compareTo(otherValue));</span>
+    }
+
+    /** rb_big_eq
+     *
+     */
+    @JRubyMethod(name = &quot;==&quot;, required = 1)
+    public IRubyObject op_equal(IRubyObject other) {
+        final BigInteger otherValue;
+<span class="fc bfc" id="L829" title="All 2 branches covered.">        if (other instanceof RubyFixnum) {</span>
+<span class="fc" id="L830">            otherValue = fix2big((RubyFixnum) other);</span>
+<span class="fc bfc" id="L831" title="All 2 branches covered.">        } else if (other instanceof RubyBignum) {</span>
+<span class="fc" id="L832">            otherValue = ((RubyBignum) other).value;</span>
+<span class="fc bfc" id="L833" title="All 2 branches covered.">        } else if (other instanceof RubyFloat) {</span>
+<span class="fc" id="L834">            double a = ((RubyFloat) other).getDoubleValue();</span>
+<span class="pc bpc" id="L835" title="1 of 2 branches missed.">            if (Double.isNaN(a)) {</span>
+<span class="nc" id="L836">                return getRuntime().getFalse();</span>
+            }
+<span class="fc bfc" id="L838" title="All 2 branches covered.">            return RubyBoolean.newBoolean(getRuntime(), a == big2dbl(this));</span>
+        } else {
+<span class="fc" id="L840">            return other.op_eqq(getRuntime().getCurrentContext(), this);</span>
+        }
+<span class="fc bfc" id="L842" title="All 2 branches covered.">        return RubyBoolean.newBoolean(getRuntime(), value.compareTo(otherValue) == 0);</span>
+    }
+
+    /** rb_big_eql
+     *
+     */
+    @Override
+    public IRubyObject eql_p(IRubyObject other) {
+<span class="nc" id="L850">        return eql_p19(other);</span>
+    }
+
+    /**
+     * In ruby 1.9, '==' and '===' are the same, but they differ from 'eql?'.
+     */
+    @JRubyMethod(name = {&quot;===&quot;}, required = 1)
+    public IRubyObject eql_p19(IRubyObject other) {
+<span class="fc" id="L858">        return op_equal(other);</span>
+    }
+
+    /** rb_big_hash
+     *
+     */
+    @JRubyMethod(name = &quot;hash&quot;)
+    @Override
+    public RubyFixnum hash() {
+<span class="fc" id="L867">        return getRuntime().newFixnum(value.hashCode());</span>
+    }
+
+    /** rb_big_to_f
+     *
+     */
+    @JRubyMethod(name = &quot;to_f&quot;)
+    public IRubyObject to_f() {
+<span class="fc" id="L875">        return RubyFloat.newFloat(getRuntime(), getDoubleValue());</span>
+    }
+
+    /** rb_big_abs
+     *
+     */
+    @JRubyMethod(name = &quot;abs&quot;)
+    public IRubyObject abs() {
+<span class="fc" id="L883">        return RubyBignum.newBignum(getRuntime(), value.abs());</span>
+    }
+
+    /** rb_big_size
+     *
+     */
+    @JRubyMethod(name = &quot;size&quot;)
+    public IRubyObject size() {
+<span class="fc" id="L891">        return getRuntime().newFixnum((value.bitLength() + 7) / 8);</span>
+    }
+
+    public static void marshalTo(RubyBignum bignum, MarshalStream output) throws IOException {
+<span class="fc" id="L895">        output.registerLinkTarget(bignum);</span>
+
+<span class="fc bfc" id="L897" title="All 2 branches covered.">        output.write(bignum.value.signum() &gt;= 0 ? '+' : '-');</span>
+
+<span class="fc" id="L899">        BigInteger absValue = bignum.value.abs();</span>
+
+<span class="fc" id="L901">        byte[] digits = absValue.toByteArray();</span>
+
+<span class="fc bfc" id="L903" title="All 4 branches covered.">        boolean oddLengthNonzeroStart = (digits.length % 2 != 0 &amp;&amp; digits[0] != 0);</span>
+<span class="fc" id="L904">        int shortLength = digits.length / 2;</span>
+<span class="fc bfc" id="L905" title="All 2 branches covered.">        if (oddLengthNonzeroStart) {</span>
+<span class="fc" id="L906">            shortLength++;</span>
+        }
+<span class="fc" id="L908">        output.writeInt(shortLength);</span>
+
+<span class="fc bfc" id="L910" title="All 4 branches covered.">        for (int i = 1; i &lt;= shortLength * 2 &amp;&amp; i &lt;= digits.length; i++) {</span>
+<span class="fc" id="L911">            output.write(digits[digits.length - i]);</span>
+        }
+
+<span class="fc bfc" id="L914" title="All 2 branches covered.">        if (oddLengthNonzeroStart) {</span>
+            // Pad with a 0
+<span class="fc" id="L916">            output.write(0);</span>
+        }
+<span class="fc" id="L918">    }</span>
+
+    public static RubyNumeric unmarshalFrom(UnmarshalStream input) throws IOException {
+<span class="fc bfc" id="L921" title="All 2 branches covered.">        boolean positive = input.readUnsignedByte() == '+';</span>
+<span class="fc" id="L922">        int shortLength = input.unmarshalInt();</span>
+
+        // BigInteger required a sign byte in incoming array
+<span class="fc" id="L925">        byte[] digits = new byte[shortLength * 2 + 1];</span>
+
+<span class="fc bfc" id="L927" title="All 2 branches covered.">        for (int i = digits.length - 1; i &gt;= 1; i--) {</span>
+<span class="fc" id="L928">                digits[i] = input.readSignedByte();</span>
+        }
+
+<span class="fc" id="L931">        BigInteger value = new BigInteger(digits);</span>
+<span class="fc bfc" id="L932" title="All 2 branches covered.">        if (!positive) {</span>
+<span class="fc" id="L933">            value = value.negate();</span>
+        }
+
+<span class="fc" id="L936">        RubyNumeric result = bignorm(input.getRuntime(), value);</span>
+<span class="fc" id="L937">        input.registerLinkTarget(result);</span>
+<span class="fc" id="L938">        return result;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

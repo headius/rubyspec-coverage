@@ -1,0 +1,266 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>InterpretedIRMethod.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.internal.runtime.methods</a> &gt; <span class="el_source">InterpretedIRMethod.java</span></div><h1>InterpretedIRMethod.java</h1><pre class="source lang-java linenums">package org.jruby.internal.runtime.methods;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import org.jruby.MetaClass;
+import org.jruby.Ruby;
+import org.jruby.RubyClass;
+import org.jruby.RubyModule;
+import org.jruby.ir.*;
+import org.jruby.ir.representations.CFG;
+import org.jruby.ir.interpreter.Interpreter;
+import org.jruby.ir.interpreter.InterpreterContext;
+import org.jruby.ir.runtime.IRRuntimeHelpers;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.PositionAware;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.Visibility;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.cli.Options;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+
+public class InterpretedIRMethod extends DynamicMethod implements IRMethodArgs, PositionAware {
+<span class="fc" id="L28">    private static final Logger LOG = LoggerFactory.getLogger(&quot;InterpretedIRMethod&quot;);</span>
+
+    private Arity arity;
+<span class="fc" id="L31">    private boolean displayedCFG = false; // FIXME: Remove when we find nicer way of logging CFG</span>
+
+    protected final IRScope method;
+
+    // For synthetic methods and for module/class bodies we do not want these added to
+    // our backtraces.
+    private boolean isSynthetic;
+
+<span class="fc" id="L39">    protected static class DynamicMethodBox {</span>
+        public DynamicMethod actualMethod;
+<span class="fc" id="L41">        public int callCount = 0;</span>
+    }
+
+<span class="fc" id="L44">    protected DynamicMethodBox box = new DynamicMethodBox();</span>
+
+    public InterpretedIRMethod(IRScope method, Visibility visibility, RubyModule implementationClass) {
+<span class="fc" id="L47">        super(implementationClass, visibility, CallConfiguration.FrameNoneScopeNone, method.getName());</span>
+<span class="fc" id="L48">        this.method = method;</span>
+<span class="fc" id="L49">        this.method.getStaticScope().determineModule();</span>
+<span class="fc" id="L50">        this.arity = calculateArity();</span>
+
+        // disable JIT for anything that's not an IRMethod, or if JIT is turned off
+        // FIXME: kinda hacky, but I use IRMethod data in JITCompiler, and module/class/script bodies generally only run once
+<span class="fc bfc" id="L54" title="All 2 branches covered.">        if (!(method instanceof IRMethod) ||</span>
+<span class="pc bpc" id="L55" title="1 of 2 branches missed.">                !implementationClass.getRuntime().getInstanceConfig().getCompileMode().shouldJIT()) {</span>
+<span class="fc" id="L56">            this.box.callCount = -1;</span>
+        }
+
+<span class="fc" id="L59">        isSynthetic = method instanceof IRModuleBody;</span>
+<span class="fc" id="L60">    }</span>
+
+    public boolean isSynthetic() {
+<span class="fc" id="L63">        return isSynthetic;</span>
+    }
+
+    public IRScope getIRMethod() {
+<span class="fc" id="L67">        return method;</span>
+    }
+
+    public DynamicMethod getActualMethod() {
+<span class="nc" id="L71">        return box.actualMethod;</span>
+    }
+
+    public void setCallCount(int callCount) {
+<span class="fc" id="L75">        box.callCount = callCount;</span>
+<span class="fc" id="L76">    }</span>
+
+    public StaticScope getStaticScope() {
+<span class="nc" id="L79">        return method.getStaticScope();</span>
+    }
+
+    public List&lt;String[]&gt; getParameterList() {
+<span class="fc" id="L83">        method.prepareForInterpretation(); // We might not have parsed the method yet.</span>
+<span class="pc bpc" id="L84" title="1 of 2 branches missed.">        return (method instanceof IRMethod) ? ((IRMethod)method).getArgDesc() : new ArrayList&lt;String[]&gt;();</span>
+    }
+
+    private Arity calculateArity() {
+<span class="fc" id="L88">        StaticScope s = method.getStaticScope();</span>
+<span class="fc bfc" id="L89" title="All 4 branches covered.">        if (s.getOptionalArgs() &gt; 0 || s.getRestArg() &gt;= 0) return Arity.required(s.getRequiredArgs());</span>
+
+<span class="fc" id="L91">        return Arity.createArity(s.getRequiredArgs());</span>
+    }
+
+    @Override
+    public Arity getArity() {
+<span class="fc" id="L96">        return this.arity;</span>
+    }
+
+    public InterpreterContext ensureInstrsReady() {
+        // Try unsync access first before calling more expensive method for getting IC
+<span class="fc" id="L101">        InterpreterContext ic = method.getInterpreterContext();</span>
+
+<span class="fc bfc" id="L103" title="All 2 branches covered.">        return ic == null ? method.prepareForInterpretation() : ic;</span>
+    }
+
+    @Override
+    public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule clazz, String name, IRubyObject[] args, Block block) {
+<span class="pc bpc" id="L108" title="1 of 2 branches missed.">        if (IRRuntimeHelpers.isDebug()) doDebug();</span>
+
+<span class="fc" id="L110">        DynamicMethodBox box = this.box;</span>
+<span class="fc bfc" id="L111" title="All 2 branches covered.">        if (box.callCount &gt;= 0) tryJit(context, box);</span>
+<span class="fc" id="L112">        DynamicMethod jittedMethod = box.actualMethod;</span>
+
+<span class="fc bfc" id="L114" title="All 2 branches covered.">        if (jittedMethod != null) {</span>
+<span class="fc" id="L115">            return jittedMethod.call(context, self, clazz, name, args, block);</span>
+        } else {
+<span class="fc" id="L117">            return Interpreter.INTERPRET_METHOD(context, this, self, name, args, block);</span>
+        }
+    }
+
+    @Override
+    public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule clazz, String name, Block block) {
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">        if (IRRuntimeHelpers.isDebug()) doDebug();</span>
+
+<span class="fc" id="L125">        DynamicMethodBox box = this.box;</span>
+<span class="fc bfc" id="L126" title="All 2 branches covered.">        if (box.callCount &gt;= 0) tryJit(context, box);</span>
+<span class="fc" id="L127">        DynamicMethod jittedMethod = box.actualMethod;</span>
+
+<span class="fc bfc" id="L129" title="All 2 branches covered.">        if (jittedMethod != null) {</span>
+<span class="fc" id="L130">            return jittedMethod.call(context, self, clazz, name, block);</span>
+        } else {
+<span class="fc" id="L132">            return Interpreter.INTERPRET_METHOD(context, this, self, name, IRubyObject.NULL_ARRAY, block);</span>
+        }
+    }
+
+    @Override
+    public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule clazz, String name, IRubyObject arg0, Block block) {
+<span class="pc bpc" id="L138" title="1 of 2 branches missed.">        if (IRRuntimeHelpers.isDebug()) doDebug();</span>
+
+<span class="fc" id="L140">        DynamicMethodBox box = this.box;</span>
+<span class="fc bfc" id="L141" title="All 2 branches covered.">        if (box.callCount &gt;= 0) tryJit(context, box);</span>
+<span class="fc" id="L142">        DynamicMethod jittedMethod = box.actualMethod;</span>
+
+<span class="fc bfc" id="L144" title="All 2 branches covered.">        if (jittedMethod != null) {</span>
+<span class="fc" id="L145">            return jittedMethod.call(context, self, clazz, name, arg0, block);</span>
+        } else {
+<span class="fc" id="L147">            return Interpreter.INTERPRET_METHOD(context, this, self, name, Helpers.arrayOf(arg0), block);</span>
+        }
+    }
+
+    @Override
+    public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule clazz, String name, IRubyObject arg0, IRubyObject arg1, Block block) {
+<span class="pc bpc" id="L153" title="1 of 2 branches missed.">        if (IRRuntimeHelpers.isDebug()) doDebug();</span>
+
+<span class="fc" id="L155">        DynamicMethodBox box = this.box;</span>
+<span class="fc bfc" id="L156" title="All 2 branches covered.">        if (box.callCount &gt;= 0) tryJit(context, box);</span>
+<span class="fc" id="L157">        DynamicMethod jittedMethod = box.actualMethod;</span>
+
+<span class="fc bfc" id="L159" title="All 2 branches covered.">        if (jittedMethod != null) {</span>
+<span class="fc" id="L160">            return jittedMethod.call(context, self, clazz, name, arg0, arg1, block);</span>
+        } else {
+<span class="fc" id="L162">            return Interpreter.INTERPRET_METHOD(context, this, self, name, Helpers.arrayOf(arg0, arg1), block);</span>
+        }
+    }
+
+    @Override
+    public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule clazz, String name, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="pc bpc" id="L168" title="1 of 2 branches missed.">        if (IRRuntimeHelpers.isDebug()) doDebug();</span>
+
+<span class="fc" id="L170">        DynamicMethodBox box = this.box;</span>
+<span class="fc bfc" id="L171" title="All 2 branches covered.">        if (box.callCount &gt;= 0) tryJit(context, box);</span>
+<span class="fc" id="L172">        DynamicMethod jittedMethod = box.actualMethod;</span>
+
+<span class="fc bfc" id="L174" title="All 2 branches covered.">        if (jittedMethod != null) {</span>
+<span class="fc" id="L175">            return jittedMethod.call(context, self, clazz, name, arg0, arg1, arg2, block);</span>
+        } else {
+<span class="fc" id="L177">            return Interpreter.INTERPRET_METHOD(context, this, self, name, Helpers.arrayOf(arg0, arg1, arg2), block);</span>
+        }
+    }
+
+    protected void doDebug() {
+        // FIXME: This is printing out IRScope CFG but JIT may be active and it might not reflect
+        // currently executing.  Move into JIT and into interp since they will be getting CFG from
+        // different sources
+        // FIXME: This is only printing out CFG once.  If we keep applying more passes then we
+        // will want to print out after those new passes.
+<span class="nc" id="L187">        ensureInstrsReady();</span>
+<span class="nc" id="L188">        LOG.info(&quot;Executing '&quot; + method.getName() + &quot;'&quot;);</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">        if (!displayedCFG) {</span>
+<span class="nc" id="L190">            CFG cfg = method.getCFG();</span>
+<span class="nc" id="L191">            LOG.info(&quot;Graph:\n&quot; + cfg.toStringGraph());</span>
+<span class="nc" id="L192">            LOG.info(&quot;CFG:\n&quot; + cfg.toStringInstrs());</span>
+<span class="nc" id="L193">            displayedCFG = true;</span>
+        }
+<span class="nc" id="L195">    }</span>
+
+    public DynamicMethod getMethodForCaching() {
+<span class="nc" id="L198">        DynamicMethod method = box.actualMethod;</span>
+<span class="nc bnc" id="L199" title="All 2 branches missed.">        if (method instanceof CompiledIRMethod) {</span>
+<span class="nc" id="L200">            return method;</span>
+        }
+<span class="nc" id="L202">        return this;</span>
+    }
+
+    public void switchToJitted(CompiledIRMethod newMethod) {
+<span class="fc" id="L206">        this.box.actualMethod = newMethod;</span>
+<span class="fc" id="L207">        this.box.actualMethod.serialNumber = this.serialNumber;</span>
+<span class="fc" id="L208">        this.box.callCount = -1;</span>
+<span class="fc" id="L209">        getImplementationClass().invalidateCacheDescendants();</span>
+<span class="fc" id="L210">    }</span>
+
+
+    protected void tryJit(ThreadContext context, DynamicMethodBox box) {
+<span class="fc" id="L214">        Ruby runtime = context.runtime;</span>
+
+        // don't JIT during runtime boot
+<span class="fc bfc" id="L217" title="All 2 branches covered.">        if (runtime.isBooting()) return;</span>
+
+        String className;
+<span class="fc bfc" id="L220" title="All 2 branches covered.">        if (implementationClass.isSingleton()) {</span>
+<span class="fc" id="L221">            MetaClass metaClass = (MetaClass)implementationClass;</span>
+<span class="fc" id="L222">            RubyClass realClass = metaClass.getRealClass();</span>
+            // if real class is Class
+<span class="fc bfc" id="L224" title="All 2 branches covered.">            if (realClass == context.runtime.getClassClass()) {</span>
+                // use the attached class's name
+<span class="fc" id="L226">                className = ((RubyClass)metaClass.getAttached()).getName();</span>
+            } else {
+                // use the real class name
+<span class="fc" id="L229">                className = realClass.getName();</span>
+            }
+<span class="fc" id="L231">        } else {</span>
+            // use the class name
+<span class="fc" id="L233">            className = implementationClass.getName();</span>
+        }
+
+
+<span class="fc bfc" id="L237" title="All 2 branches covered.">        if (box.callCount++ &gt;= Options.JIT_THRESHOLD.load()) {</span>
+<span class="fc" id="L238">            context.runtime.getJITCompiler().jitThresholdReached(this, context.runtime.getInstanceConfig(), context, className, name);</span>
+        }
+<span class="fc" id="L240">    }</span>
+
+    public void setActualMethod(CompiledIRMethod method) {
+<span class="nc" id="L243">        this.box.actualMethod = method;</span>
+<span class="nc" id="L244">    }</span>
+
+    protected void dupBox(InterpretedIRMethod orig) {
+<span class="nc" id="L247">        this.box = orig.box;</span>
+<span class="nc" id="L248">    }</span>
+
+    @Override
+    public DynamicMethod dup() {
+<span class="fc" id="L252">        InterpretedIRMethod x = new InterpretedIRMethod(method, visibility, implementationClass);</span>
+<span class="fc" id="L253">        x.box = box;</span>
+
+<span class="fc" id="L255">        return x;</span>
+    }
+
+    public String getFile() {
+<span class="fc" id="L259">        return method.getFileName();</span>
+    }
+
+    public int getLine() {
+<span class="fc" id="L263">        return method.getLineNumber();</span>
+   }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

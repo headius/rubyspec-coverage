@@ -1,0 +1,1934 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyFile.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyFile.java</span></div><h1>RubyFile.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002 Benoit Cerrina &lt;b.cerrina@wanadoo.fr&gt;
+ * Copyright (C) 2002-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2003 Joey Gibson &lt;joey@joeygibson.com&gt;
+ * Copyright (C) 2004-2007 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004-2007 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2006 Miguel Covarrubias &lt;mlcovarrubias@gmail.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import jnr.constants.platform.OpenFlags;
+import jnr.posix.POSIX;
+import org.jcodings.Encoding;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.Reader;
+import java.io.UnsupportedEncodingException;
+import java.net.URI;
+import java.net.URL;
+import java.nio.channels.Channels;
+import java.nio.file.FileSystem;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.attribute.FileTime;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.util.ArrayList;
+import java.util.Enumeration;
+import java.util.concurrent.TimeUnit;
+import java.util.jar.JarFile;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import jnr.posix.FileStat;
+import jnr.posix.util.Platform;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import static org.jruby.runtime.Visibility.*;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.encoding.EncodingCapable;
+import org.jruby.util.ByteList;
+import org.jruby.util.FileResource;
+import org.jruby.util.JRubyFile;
+import org.jruby.util.TypeConverter;
+import org.jruby.util.io.EncodingUtils;
+import org.jruby.util.io.IOEncodable;
+import org.jruby.util.io.ModeFlags;
+import org.jruby.util.io.OpenFile;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.encoding.EncodingService;
+import org.jruby.util.io.PosixShim;
+
+import static org.jruby.util.io.EncodingUtils.vmode;
+import static org.jruby.util.io.EncodingUtils.vperm;
+
+/**
+ * Ruby File class equivalent in java.
+ **/
+@JRubyClass(name=&quot;File&quot;, parent=&quot;IO&quot;, include=&quot;FileTest&quot;)
+public class RubyFile extends RubyIO implements EncodingCapable {
+    public static RubyClass createFileClass(Ruby runtime) {
+<span class="fc" id="L97">        ThreadContext context = runtime.getCurrentContext();</span>
+
+<span class="fc" id="L99">        RubyClass fileClass = runtime.defineClass(&quot;File&quot;, runtime.getIO(), FILE_ALLOCATOR);</span>
+
+<span class="fc" id="L101">        runtime.setFile(fileClass);</span>
+
+<span class="fc" id="L103">        fileClass.defineAnnotatedMethods(RubyFile.class);</span>
+
+<span class="fc" id="L105">        fileClass.setClassIndex(ClassIndex.FILE);</span>
+<span class="fc" id="L106">        fileClass.setReifiedClass(RubyFile.class);</span>
+
+<span class="fc" id="L108">        fileClass.kindOf = new RubyModule.JavaClassKindOf(RubyFile.class);</span>
+
+        // file separator constants
+<span class="fc" id="L111">        RubyString separator = runtime.newString(&quot;/&quot;);</span>
+<span class="fc" id="L112">        separator.freeze(context);</span>
+<span class="fc" id="L113">        fileClass.defineConstant(&quot;SEPARATOR&quot;, separator);</span>
+<span class="fc" id="L114">        fileClass.defineConstant(&quot;Separator&quot;, separator);</span>
+
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">        if (File.separatorChar == '\\') {</span>
+<span class="nc" id="L117">            RubyString altSeparator = runtime.newString(&quot;\\&quot;);</span>
+<span class="nc" id="L118">            altSeparator.freeze(context);</span>
+<span class="nc" id="L119">            fileClass.defineConstant(&quot;ALT_SEPARATOR&quot;, altSeparator);</span>
+<span class="nc" id="L120">        } else {</span>
+<span class="fc" id="L121">            fileClass.defineConstant(&quot;ALT_SEPARATOR&quot;, runtime.getNil());</span>
+        }
+
+        // path separator
+<span class="fc" id="L125">        RubyString pathSeparator = runtime.newString(File.pathSeparator);</span>
+<span class="fc" id="L126">        pathSeparator.freeze(context);</span>
+<span class="fc" id="L127">        fileClass.defineConstant(&quot;PATH_SEPARATOR&quot;, pathSeparator);</span>
+
+        // For JRUBY-5276, physically define FileTest methods on File's singleton
+<span class="fc" id="L130">        fileClass.getSingletonClass().defineAnnotatedMethods(RubyFileTest.FileTestFileMethods.class);</span>
+
+        // Create Constants class
+<span class="fc" id="L133">        RubyModule constants = fileClass.defineModuleUnder(&quot;Constants&quot;);</span>
+
+        // open flags
+        /* open for reading only */
+<span class="fc" id="L137">        constants.setConstant(&quot;RDONLY&quot;, runtime.newFixnum(OpenFlags.O_RDONLY.intValue()));</span>
+        /* open for writing only */
+<span class="fc" id="L139">        constants.setConstant(&quot;WRONLY&quot;, runtime.newFixnum(OpenFlags.O_WRONLY.intValue()));</span>
+        /* open for reading and writing */
+<span class="fc" id="L141">        constants.setConstant(&quot;RDWR&quot;, runtime.newFixnum(OpenFlags.O_RDWR.intValue()));</span>
+        /* append on each write */
+<span class="fc" id="L143">        constants.setConstant(&quot;APPEND&quot;, runtime.newFixnum(OpenFlags.O_APPEND.intValue()));</span>
+        /* create file if it does not exist */
+<span class="fc" id="L145">        constants.setConstant(&quot;CREAT&quot;, runtime.newFixnum(OpenFlags.O_CREAT.intValue()));</span>
+        /* error if CREAT and the file exists */
+<span class="fc" id="L147">        constants.setConstant(&quot;EXCL&quot;, runtime.newFixnum(OpenFlags.O_EXCL.intValue()));</span>
+<span class="fc" id="L148">        if (    // O_NDELAY not defined in OpenFlags</span>
+                //OpenFlags.O_NDELAY.defined() ||
+<span class="pc bpc" id="L150" title="1 of 2 branches missed.">                OpenFlags.O_NONBLOCK.defined()) {</span>
+<span class="pc bpc" id="L151" title="1 of 2 branches missed.">            if (!OpenFlags.O_NONBLOCK.defined()) {</span>
+//                #   define O_NONBLOCK O_NDELAY
+            }
+            /* do not block on open or for data to become available */
+<span class="fc" id="L155">            constants.setConstant(&quot;NONBLOCK&quot;, runtime.newFixnum(OpenFlags.O_NONBLOCK.intValue()));</span>
+        }
+        /* truncate size to 0 */
+<span class="fc" id="L158">        constants.setConstant(&quot;TRUNC&quot;, runtime.newFixnum(OpenFlags.O_TRUNC.intValue()));</span>
+        // FIXME: NOCTTY is showing up as undefined on Linux, but it should be defined.
+//        if (OpenFlags.O_NOCTTY.defined()) {
+            /* not to make opened IO the controlling terminal device */
+<span class="fc" id="L162">            constants.setConstant(&quot;NOCTTY&quot;, runtime.newFixnum(OpenFlags.O_NOCTTY.intValue()));</span>
+//        }
+<span class="pc bpc" id="L164" title="1 of 2 branches missed.">        if (!OpenFlags.O_BINARY.defined()) {</span>
+<span class="fc" id="L165">            constants.setConstant(&quot;BINARY&quot;, runtime.newFixnum(0));</span>
+        } else {
+            /* disable line code conversion */
+<span class="nc" id="L168">            constants.setConstant(&quot;BINARY&quot;, runtime.newFixnum(OpenFlags.O_BINARY.intValue()));</span>
+        }
+<span class="pc bpc" id="L170" title="1 of 2 branches missed.">        if (OpenFlags.O_SYNC.defined()) {</span>
+            /* any write operation perform synchronously */
+<span class="fc" id="L172">            constants.setConstant(&quot;SYNC&quot;, runtime.newFixnum(OpenFlags.O_SYNC.intValue()));</span>
+        }
+        // O_DSYNC and O_RSYNC are not in OpenFlags
+//        #ifdef O_DSYNC
+//        /* any write operation perform synchronously except some meta data */
+//        constants.setConstant(&quot;DSYNC&quot;, runtime.newFixnum(OpenFlags.O_DSYNC.intValue()));
+//        #endif
+//        #ifdef O_RSYNC
+//        /* any read operation perform synchronously. used with SYNC or DSYNC. */
+//        constants.setConstant(&quot;RSYNC&quot;, runtime.newFixnum(OpenFlags.O_RSYNC.intValue()));
+//        #endif
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">        if (OpenFlags.O_NOFOLLOW.defined()) {</span>
+            /* do not follow symlinks */
+<span class="fc" id="L185">            constants.setConstant(&quot;NOFOLLOW&quot;, runtime.newFixnum(OpenFlags.O_NOFOLLOW.intValue()));     /* FreeBSD, Linux */</span>
+        }
+        // O_NOATIME and O_DIRECT are not in OpenFlags
+//        #ifdef O_NOATIME
+//        /* do not change atime */
+//        constants.setConstant(&quot;NOATIME&quot;, runtime.newFixnum(OpenFlags.O_NOATIME.intValue()));     /* Linux */
+//        #endif
+//        #ifdef O_DIRECT
+//        /*  Try to minimize cache effects of the I/O to and from this file. */
+//        constants.setConstant(&quot;DIRECT&quot;, runtime.newFixnum(OpenFlags.O_DIRECT.intValue()));
+//        #endif
+
+        // case handling, escaping, path and dot matching
+<span class="fc" id="L198">        constants.setConstant(&quot;FNM_NOESCAPE&quot;, runtime.newFixnum(FNM_NOESCAPE));</span>
+<span class="fc" id="L199">        constants.setConstant(&quot;FNM_CASEFOLD&quot;, runtime.newFixnum(FNM_CASEFOLD));</span>
+<span class="fc" id="L200">        constants.setConstant(&quot;FNM_SYSCASE&quot;, runtime.newFixnum(FNM_SYSCASE));</span>
+<span class="fc" id="L201">        constants.setConstant(&quot;FNM_DOTMATCH&quot;, runtime.newFixnum(FNM_DOTMATCH));</span>
+<span class="fc" id="L202">        constants.setConstant(&quot;FNM_PATHNAME&quot;, runtime.newFixnum(FNM_PATHNAME));</span>
+<span class="fc" id="L203">        constants.setConstant(&quot;FNM_EXTGLOB&quot;, runtime.newFixnum(FNM_EXTGLOB));</span>
+
+        // flock operations
+<span class="fc" id="L206">        constants.setConstant(&quot;LOCK_SH&quot;, runtime.newFixnum(RubyFile.LOCK_SH));</span>
+<span class="fc" id="L207">        constants.setConstant(&quot;LOCK_EX&quot;, runtime.newFixnum(RubyFile.LOCK_EX));</span>
+<span class="fc" id="L208">        constants.setConstant(&quot;LOCK_NB&quot;, runtime.newFixnum(RubyFile.LOCK_NB));</span>
+<span class="fc" id="L209">        constants.setConstant(&quot;LOCK_UN&quot;, runtime.newFixnum(RubyFile.LOCK_UN));</span>
+        
+        // NULL device
+<span class="fc" id="L212">        constants.setConstant(&quot;NULL&quot;, runtime.newString(getNullDevice()));</span>
+
+        // File::Constants module is included in IO.
+<span class="fc" id="L215">        runtime.getIO().includeModule(constants);</span>
+
+<span class="fc" id="L217">        return fileClass;</span>
+    }
+
+<span class="fc" id="L220">    private static ObjectAllocator FILE_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L223">            RubyFile instance = new RubyFile(runtime, klass);</span>
+
+<span class="fc" id="L225">            instance.setMetaClass(klass);</span>
+
+<span class="fc" id="L227">            return instance;</span>
+        }
+    };
+
+    private static String getNullDevice() {
+        // FIXME: MRI defines special null device for Amiga and VMS, but currently
+        // we lack ability to detect these platforms
+        String null_device;
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">        if (Platform.IS_WINDOWS) {</span>
+<span class="nc" id="L236">            null_device = &quot;NUL&quot;;</span>
+        } else {
+<span class="fc" id="L238">            null_device = &quot;/dev/null&quot;;</span>
+        }
+<span class="fc" id="L240">        return null_device;</span>
+    }
+
+    public RubyFile(Ruby runtime, RubyClass type) {
+<span class="fc" id="L244">        super(runtime, type);</span>
+<span class="fc" id="L245">    }</span>
+
+    // XXX This constructor is a hack to implement the __END__ syntax.
+    //     Converting a reader back into an InputStream doesn't generally work.
+    public RubyFile(Ruby runtime, String path, final Reader reader) {
+<span class="nc" id="L250">        this(runtime, path, new InputStream() {</span>
+            @Override
+            public int read() throws IOException {
+<span class="nc" id="L253">                return reader.read();</span>
+            }
+        });
+<span class="nc" id="L256">    }</span>
+
+    public RubyFile(Ruby runtime, String path, InputStream in) {
+<span class="nc" id="L259">        super(runtime, runtime.getFile(), Channels.newChannel(in));</span>
+<span class="nc" id="L260">        this.setPath(path);</span>
+<span class="nc" id="L261">    }</span>
+    
+    @Override
+    protected IRubyObject rbIoClose(Ruby runtime) {
+        // Make sure any existing lock is released before we try and close the file
+<span class="pc bpc" id="L266" title="1 of 2 branches missed.">        if (openFile.currentLock != null) {</span>
+            try {
+<span class="nc" id="L268">                openFile.currentLock.release();</span>
+<span class="nc" id="L269">            } catch (IOException e) {</span>
+<span class="nc" id="L270">                throw getRuntime().newIOError(e.getMessage());</span>
+<span class="nc" id="L271">            }</span>
+        }
+<span class="fc" id="L273">        return super.rbIoClose(runtime);</span>
+    }
+
+    @JRubyMethod(required = 1)
+    public IRubyObject flock(ThreadContext context, IRubyObject operation) {
+<span class="fc" id="L278">        Ruby runtime = context.runtime;</span>
+        OpenFile fptr;
+//        int[] op = {0,0};
+        int op1;
+//        struct timeval time;
+
+//        rb_secure(2);
+<span class="fc" id="L285">        op1 = RubyNumeric.num2int(operation);</span>
+<span class="fc" id="L286">        fptr = getOpenFileChecked();</span>
+
+<span class="fc bfc" id="L288" title="All 2 branches covered.">        if (fptr.isWritable()) {</span>
+<span class="fc" id="L289">            flushRaw(context, false);</span>
+        }
+
+        // MRI's logic differs here. For a nonblocking flock that produces EAGAIN, EACCES, or EWOULBLOCK, MRI
+        // just returns false immediately. For the same errnos in blocking mode, MRI waits for 0.1s and then
+        // attempts the lock again, indefinitely.
+<span class="fc bfc" id="L295" title="All 2 branches covered.">        while (fptr.threadFlock(context, op1) &lt; 0) {</span>
+<span class="pc bpc" id="L296" title="2 of 3 branches missed.">            switch (fptr.errno()) {</span>
+                case EAGAIN:
+                case EACCES:
+                case EWOULDBLOCK:
+<span class="pc bpc" id="L300" title="1 of 2 branches missed.">                    if ((op1 &amp; LOCK_NB) != 0) return runtime.getFalse();</span>
+
+                    try {
+<span class="nc" id="L303">                        context.getThread().sleep(100);</span>
+<span class="nc" id="L304">                    } catch (InterruptedException ie) {</span>
+<span class="nc" id="L305">                        context.pollThreadEvents();</span>
+<span class="nc" id="L306">                    }</span>
+<span class="nc" id="L307">                    fptr.checkClosed();</span>
+<span class="nc" id="L308">                    continue;</span>
+
+                case EINTR:
+<span class="nc" id="L311">                    break;</span>
+
+                default:
+<span class="nc" id="L314">                    throw runtime.newErrnoFromErrno(fptr.errno(), fptr.getPath());</span>
+            }
+        }
+<span class="fc" id="L317">        return RubyFixnum.zero(context.runtime);</span>
+    }
+
+    // rb_file_initialize
+    @JRubyMethod(name = &quot;initialize&quot;, required = 1, optional = 2, visibility = PRIVATE)
+    public IRubyObject initialize(ThreadContext context, IRubyObject[] args, Block block) {
+<span class="pc bpc" id="L323" title="1 of 2 branches missed.">        if (openFile != null) {</span>
+<span class="nc" id="L324">            throw context.runtime.newRuntimeError(&quot;reinitializing File&quot;);</span>
+        }
+
+<span class="pc bpc" id="L327" title="2 of 4 branches missed.">        if (args.length &gt; 0 &amp;&amp; args.length &lt;= 3) {</span>
+<span class="fc" id="L328">            IRubyObject fd = TypeConverter.convertToTypeWithCheck(args[0], context.runtime.getFixnum(), &quot;to_int&quot;);</span>
+<span class="fc bfc" id="L329" title="All 2 branches covered.">            if (!fd.isNil()) {</span>
+<span class="pc bpc" id="L330" title="1 of 2 branches missed.">                if (args.length == 1) {</span>
+<span class="fc" id="L331">                    return super.initialize(context, fd, block);</span>
+<span class="nc bnc" id="L332" title="All 2 branches missed.">                } else if (args.length == 2) {</span>
+<span class="nc" id="L333">                    return super.initialize(context, fd, args[1], block);</span>
+                }
+<span class="nc" id="L335">                return super.initialize(context, fd, args[1], args[2], block);</span>
+            }
+        }
+
+<span class="fc" id="L339">        return openFile(context, args);</span>
+    }
+
+    @JRubyMethod(required = 1)
+    public IRubyObject chmod(ThreadContext context, IRubyObject arg) {
+<span class="fc" id="L344">        checkClosed(context);</span>
+<span class="fc" id="L345">        int mode = (int) arg.convertToInteger().getLongValue();</span>
+
+<span class="pc bpc" id="L347" title="1 of 2 branches missed.">        if (!new File(getPath()).exists()) {</span>
+<span class="nc" id="L348">            throw context.runtime.newErrnoENOENTError(getPath());</span>
+        }
+
+<span class="fc" id="L351">        return context.runtime.newFixnum(context.runtime.getPosix().chmod(getPath(), mode));</span>
+    }
+
+    @JRubyMethod(required = 2)
+    public IRubyObject chown(ThreadContext context, IRubyObject arg1, IRubyObject arg2) {
+<span class="fc" id="L356">        checkClosed(context);</span>
+<span class="fc" id="L357">        int owner = -1;</span>
+<span class="pc bpc" id="L358" title="1 of 2 branches missed.">        if (!arg1.isNil()) {</span>
+<span class="nc" id="L359">            owner = RubyNumeric.num2int(arg1);</span>
+        }
+
+<span class="fc" id="L362">        int group = -1;</span>
+<span class="pc bpc" id="L363" title="1 of 2 branches missed.">        if (!arg2.isNil()) {</span>
+<span class="nc" id="L364">            group = RubyNumeric.num2int(arg2);</span>
+        }
+
+<span class="pc bpc" id="L367" title="1 of 2 branches missed.">        if (!new File(getPath()).exists()) {</span>
+<span class="nc" id="L368">            throw context.runtime.newErrnoENOENTError(getPath());</span>
+        }
+
+<span class="fc" id="L371">        return context.runtime.newFixnum(context.runtime.getPosix().chown(getPath(), owner, group));</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject atime(ThreadContext context) {
+<span class="fc" id="L376">        checkClosed(context);</span>
+<span class="fc" id="L377">        return context.runtime.newFileStat(getPath(), false).atime();</span>
+    }
+
+    @JRubyMethod(name = &quot;ctime&quot;)
+    public IRubyObject ctime(ThreadContext context) {
+<span class="fc" id="L382">        checkClosed(context);</span>
+<span class="fc" id="L383">        return context.runtime.newFileStat(getPath(), false).ctime();</span>
+    }
+
+    @JRubyMethod(name = &quot;birthtime&quot;)
+    public IRubyObject birthtime(ThreadContext context) {
+<span class="nc" id="L388">        checkClosed(context);</span>
+
+<span class="nc" id="L390">        FileTime btime = getBirthtimeWithNIO(getPath());</span>
+<span class="nc bnc" id="L391" title="All 2 branches missed.">        if (btime != null) return context.runtime.newTime(btime.toMillis()); // btime comes in nanos</span>
+<span class="nc" id="L392">        return ctime(context);</span>
+    }
+
+    public static final FileTime getBirthtimeWithNIO(String pathString) {
+        // FIXME: birthtime is in stat, so we should use that if platform supports it (#2152)
+        // TODO: This requires Java 7 APIs and may not work on Android
+<span class="nc" id="L398">        Path path = Paths.get(pathString);</span>
+<span class="nc" id="L399">        PosixFileAttributeView view = Files.getFileAttributeView(path, PosixFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);</span>
+        try {
+<span class="nc bnc" id="L401" title="All 2 branches missed.">            if (view != null) {</span>
+<span class="nc" id="L402">                return view.readAttributes().creationTime();</span>
+            }
+<span class="nc" id="L404">        } catch (IOException ioe) {</span>
+            // ignore, just fall back on ctime
+<span class="nc" id="L406">        }</span>
+<span class="nc" id="L407">        return null;</span>
+    }
+
+    @JRubyMethod(required = 1)
+    public IRubyObject lchmod(ThreadContext context, IRubyObject arg) {
+<span class="nc" id="L412">        int mode = (int) arg.convertToInteger().getLongValue();</span>
+
+<span class="nc bnc" id="L414" title="All 2 branches missed.">        if (!new File(getPath()).exists()) {</span>
+<span class="nc" id="L415">            throw context.runtime.newErrnoENOENTError(getPath());</span>
+        }
+
+<span class="nc" id="L418">        return context.runtime.newFixnum(context.runtime.getPosix().lchmod(getPath(), mode));</span>
+    }
+
+    // TODO: this method is not present in MRI!
+    @JRubyMethod(required = 2)
+    public IRubyObject lchown(ThreadContext context, IRubyObject arg1, IRubyObject arg2) {
+<span class="nc" id="L424">        int owner = -1;</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">        if (!arg1.isNil()) {</span>
+<span class="nc" id="L426">            owner = RubyNumeric.num2int(arg1);</span>
+        }
+
+<span class="nc" id="L429">        int group = -1;</span>
+<span class="nc bnc" id="L430" title="All 2 branches missed.">        if (!arg2.isNil()) {</span>
+<span class="nc" id="L431">            group = RubyNumeric.num2int(arg2);</span>
+        }
+
+<span class="nc bnc" id="L434" title="All 2 branches missed.">        if (!new File(getPath()).exists()) {</span>
+<span class="nc" id="L435">            throw context.runtime.newErrnoENOENTError(getPath());</span>
+        }
+
+<span class="nc" id="L438">        return context.runtime.newFixnum(context.runtime.getPosix().lchown(getPath(), owner, group));</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject lstat(ThreadContext context) {
+<span class="fc" id="L443">        checkClosed(context);</span>
+<span class="fc" id="L444">        return context.runtime.newFileStat(getPath(), true);</span>
+    }
+    
+    @JRubyMethod
+    public IRubyObject mtime(ThreadContext context) {
+<span class="fc" id="L449">        checkClosed(context);</span>
+<span class="fc" id="L450">        return context.runtime.newFileStat(getPath(), false).mtime();</span>
+    }
+
+    @JRubyMethod(meta = true)
+    public static IRubyObject path(ThreadContext context, IRubyObject self, IRubyObject str) {
+<span class="fc" id="L455">        return get_path(context, str);</span>
+    }
+
+    @JRubyMethod(name = {&quot;path&quot;, &quot;to_path&quot;})
+    public IRubyObject path(ThreadContext context) {
+<span class="fc" id="L460">        IRubyObject newPath = context.runtime.getNil();</span>
+<span class="pc bpc" id="L461" title="1 of 2 branches missed.">        if (getPath() != null) {</span>
+<span class="fc" id="L462">            newPath = context.runtime.newString(getPath());</span>
+<span class="fc" id="L463">            newPath.setTaint(true);</span>
+        }
+<span class="fc" id="L465">        return newPath;</span>
+    }
+
+    @JRubyMethod(required = 1)
+    public IRubyObject truncate(ThreadContext context, IRubyObject len) {
+<span class="fc" id="L470">        Ruby runtime = context.runtime;</span>
+        OpenFile fptr;
+        long pos;
+
+<span class="fc" id="L474">        pos = RubyNumeric.num2int(len);</span>
+<span class="fc" id="L475">        fptr = getOpenFileChecked();</span>
+<span class="fc bfc" id="L476" title="All 2 branches covered.">        if (!fptr.isWritable()) {</span>
+<span class="fc" id="L477">            throw runtime.newIOError(&quot;not opened for writing&quot;);</span>
+        }
+<span class="fc" id="L479">        flushRaw(context, false);</span>
+
+<span class="fc bfc" id="L481" title="All 2 branches covered.">        if (pos &lt; 0) {</span>
+<span class="fc" id="L482">            throw runtime.newErrnoEINVALError(openFile.getPath());</span>
+        }
+
+<span class="pc bpc" id="L485" title="1 of 2 branches missed.">        if (fptr.posix.ftruncate(fptr.fd(), pos) &lt; 0) {</span>
+<span class="nc" id="L486">            throw runtime.newErrnoFromErrno(fptr.posix.errno, fptr.getPath());</span>
+        }
+
+<span class="fc" id="L489">        return RubyFixnum.zero(runtime);</span>
+    }
+
+    @JRubyMethod
+    @Override
+    public IRubyObject inspect() {
+<span class="fc" id="L495">        StringBuilder val = new StringBuilder();</span>
+<span class="fc" id="L496">        val.append(&quot;#&lt;File:&quot;).append(getPath());</span>
+<span class="pc bpc" id="L497" title="1 of 2 branches missed.">        if(!openFile.isOpen()) {</span>
+<span class="nc" id="L498">            val.append(&quot; (closed)&quot;);</span>
+        }
+<span class="fc" id="L500">        val.append(&quot;&gt;&quot;);</span>
+<span class="fc" id="L501">        return getRuntime().newString(val.toString());</span>
+    }
+    
+    /* File class methods */
+    
+    @JRubyMethod(required = 1, optional = 1, meta = true)
+    public static IRubyObject basename(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L508">        Ruby runtime = context.runtime;</span>
+
+<span class="fc" id="L510">        RubyString origString = get_path(context,args[0]);</span>
+<span class="fc" id="L511">        Encoding origEncoding = origString.getEncoding();</span>
+<span class="fc" id="L512">        String name = origString.toString();</span>
+
+        // MRI-compatible basename handling for windows drive letter paths
+<span class="pc bpc" id="L515" title="1 of 2 branches missed.">        if (Platform.IS_WINDOWS) {</span>
+<span class="nc bnc" id="L516" title="All 6 branches missed.">            if (name.length() &gt; 1 &amp;&amp; name.charAt(1) == ':' &amp;&amp; Character.isLetter(name.charAt(0))) {</span>
+<span class="nc bnc" id="L517" title="All 3 branches missed.">                switch (name.length()) {</span>
+                case 2:
+<span class="nc" id="L519">                    return RubyString.newEmptyString(runtime, origString.getEncoding()).infectBy(args[0]);</span>
+                case 3:
+<span class="nc bnc" id="L521" title="All 2 branches missed.">                    if (origEncoding.getCharset() != null) {</span>
+                        try {
+<span class="nc" id="L523">                            return RubyString.newString(runtime, new ByteList(name.substring(2).getBytes(origEncoding.getCharsetName()), origString.getEncoding())).infectBy(args[0]);</span>
+<span class="nc" id="L524">                        } catch (UnsupportedEncodingException uee) {</span>
+                            // fall through to UTF-8 logic
+                        }
+                    }
+
+<span class="nc" id="L529">                    return RubyString.newString(runtime, name.substring(2)).infectBy(args[0]);</span>
+                default:
+<span class="nc bnc" id="L531" title="All 2 branches missed.">                    switch (name.charAt(2)) {</span>
+                    case '/':
+                    case '\\':
+<span class="nc" id="L534">                        break;</span>
+                    default:
+                        // strip c: away from relative-pathed name
+<span class="nc" id="L537">                        name = name.substring(2);</span>
+                        break;
+                    }
+                    break;
+                }
+            }
+        }
+
+<span class="fc bfc" id="L545" title="All 4 branches covered.">        while (name.length() &gt; 1 &amp;&amp; name.charAt(name.length() - 1) == '/') {</span>
+<span class="fc" id="L546">            name = name.substring(0, name.length() - 1);</span>
+        }
+        
+        // Paths which end in &quot;/&quot; or &quot;\\&quot; must be stripped off.
+<span class="fc" id="L550">        int slashCount = 0;</span>
+<span class="fc" id="L551">        int length = name.length();</span>
+<span class="fc bfc" id="L552" title="All 2 branches covered.">        for (int i = length - 1; i &gt;= 0; i--) {</span>
+<span class="fc" id="L553">            char c = name.charAt(i);</span>
+<span class="pc bpc" id="L554" title="1 of 4 branches missed.">            if (c != '/' &amp;&amp; c != '\\') {</span>
+<span class="fc" id="L555">                break;</span>
+            }
+<span class="fc" id="L557">            slashCount++;</span>
+        }
+<span class="pc bpc" id="L559" title="1 of 4 branches missed.">        if (slashCount &gt; 0 &amp;&amp; length &gt; 1) {</span>
+<span class="nc" id="L560">            name = name.substring(0, name.length() - slashCount);</span>
+        }
+        
+<span class="fc" id="L563">        int index = name.lastIndexOf('/');</span>
+<span class="fc bfc" id="L564" title="All 2 branches covered.">        if (index == -1) {</span>
+            // XXX actually only on windows...
+<span class="fc" id="L566">            index = name.lastIndexOf('\\');</span>
+        }
+        
+<span class="fc bfc" id="L569" title="All 4 branches covered.">        if (!name.equals(&quot;/&quot;) &amp;&amp; index != -1) {</span>
+<span class="fc" id="L570">            name = name.substring(index + 1);</span>
+        }
+        
+<span class="fc bfc" id="L573" title="All 2 branches covered.">        if (args.length == 2) {</span>
+<span class="fc" id="L574">            String ext = RubyString.stringValue(args[1]).toString();</span>
+<span class="fc bfc" id="L575" title="All 2 branches covered.">            if (&quot;.*&quot;.equals(ext)) {</span>
+<span class="fc" id="L576">                index = name.lastIndexOf('.');</span>
+<span class="fc bfc" id="L577" title="All 2 branches covered.">                if (index &gt; 0) {  // -1 no match; 0 it is dot file not extension</span>
+<span class="fc" id="L578">                    name = name.substring(0, index);</span>
+                }
+<span class="fc bfc" id="L580" title="All 2 branches covered.">            } else if (name.endsWith(ext)) {</span>
+<span class="fc" id="L581">                name = name.substring(0, name.length() - ext.length());</span>
+            }
+        }
+<span class="pc bpc" id="L584" title="1 of 2 branches missed.">        if (origEncoding.getCharset() != null) {</span>
+            try {
+<span class="fc" id="L586">                return RubyString.newString(runtime, new ByteList(name.getBytes(origEncoding.getCharsetName()), origString.getEncoding())).infectBy(args[0]);</span>
+<span class="nc" id="L587">            } catch (UnsupportedEncodingException uee) {</span>
+                // fall through to UTF-8 logic
+            }
+        }
+
+<span class="nc" id="L592">        return RubyString.newString(runtime, name).infectBy(args[0]);</span>
+    }
+
+    @JRubyMethod(required = 2, rest = true, meta = true)
+    public static IRubyObject chmod(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L597">        Ruby runtime = context.runtime;</span>
+        
+<span class="fc" id="L599">        int count = 0;</span>
+<span class="fc" id="L600">        RubyInteger mode = args[0].convertToInteger();</span>
+<span class="fc bfc" id="L601" title="All 2 branches covered.">        for (int i = 1; i &lt; args.length; i++) {</span>
+<span class="fc" id="L602">            JRubyFile filename = file(args[i]);</span>
+            
+<span class="fc bfc" id="L604" title="All 2 branches covered.">            if (!filename.exists()) {</span>
+<span class="fc" id="L605">                throw runtime.newErrnoENOENTError(filename.toString());</span>
+            }
+            
+<span class="pc bpc" id="L608" title="1 of 2 branches missed.">            if (0 != runtime.getPosix().chmod(filename.getAbsolutePath(), (int)mode.getLongValue())) {</span>
+<span class="nc" id="L609">                throw runtime.newErrnoFromLastPOSIXErrno();</span>
+            } else {
+<span class="fc" id="L611">                count++;</span>
+            }
+        }
+        
+<span class="fc" id="L615">        return runtime.newFixnum(count);</span>
+    }
+    
+    @JRubyMethod(required = 3, rest = true, meta = true)
+    public static IRubyObject chown(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L620">        Ruby runtime = context.runtime;</span>
+
+<span class="fc" id="L622">        int count = 0;</span>
+<span class="fc" id="L623">        int owner = -1;</span>
+<span class="pc bpc" id="L624" title="1 of 2 branches missed.">        if (!args[0].isNil()) {</span>
+<span class="nc" id="L625">            owner = RubyNumeric.num2int(args[0]);</span>
+        }
+
+<span class="fc" id="L628">        int group = -1;</span>
+<span class="fc bfc" id="L629" title="All 2 branches covered.">        if (!args[1].isNil()) {</span>
+<span class="fc" id="L630">            group = RubyNumeric.num2int(args[1]);</span>
+        }
+<span class="fc bfc" id="L632" title="All 2 branches covered.">        for (int i = 2; i &lt; args.length; i++) {</span>
+<span class="fc" id="L633">            JRubyFile filename = file(args[i]);</span>
+
+<span class="fc bfc" id="L635" title="All 2 branches covered.">            if (!filename.exists()) {</span>
+<span class="fc" id="L636">                throw runtime.newErrnoENOENTError(filename.toString());</span>
+            }
+            
+<span class="pc bpc" id="L639" title="1 of 2 branches missed.">            if (0 != runtime.getPosix().chown(filename.getAbsolutePath(), owner, group)) {</span>
+<span class="nc" id="L640">                throw runtime.newErrnoFromLastPOSIXErrno();</span>
+            } else {
+<span class="fc" id="L642">                count++;</span>
+            }
+        }
+        
+<span class="fc" id="L646">        return runtime.newFixnum(count);</span>
+    }
+
+    @JRubyMethod(required = 1, meta = true)
+    public static IRubyObject dirname(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="fc" id="L651">        RubyString filename = get_path(context, arg);</span>
+
+<span class="fc" id="L653">        String jfilename = filename.asJavaString();</span>
+
+<span class="fc" id="L655">        return context.runtime.newString(dirname(context, jfilename)).infectBy(filename);</span>
+    }
+
+    public static String dirname(ThreadContext context, String jfilename) {
+<span class="fc" id="L659">        String name = jfilename.replace('\\', '/');</span>
+<span class="fc" id="L660">        int minPathLength = 1;</span>
+<span class="fc" id="L661">        boolean trimmedSlashes = false;</span>
+
+<span class="fc" id="L663">        boolean startsWithDriveLetterOnWindows = startsWithDriveLetterOnWindows(name);</span>
+
+<span class="pc bpc" id="L665" title="1 of 2 branches missed.">        if (startsWithDriveLetterOnWindows) {</span>
+<span class="nc" id="L666">            minPathLength = 3;</span>
+        }
+
+<span class="fc bfc" id="L669" title="All 4 branches covered.">        while (name.length() &gt; minPathLength &amp;&amp; name.charAt(name.length() - 1) == '/') {</span>
+<span class="fc" id="L670">            trimmedSlashes = true;</span>
+<span class="fc" id="L671">            name = name.substring(0, name.length() - 1);</span>
+        }
+
+        String result;
+<span class="pc bpc" id="L675" title="3 of 4 branches missed.">        if (startsWithDriveLetterOnWindows &amp;&amp; name.length() == 2) {</span>
+<span class="nc bnc" id="L676" title="All 2 branches missed.">            if (trimmedSlashes) {</span>
+                // C:\ is returned unchanged
+<span class="nc" id="L678">                result = jfilename.substring(0, 3);</span>
+            } else {
+<span class="nc" id="L680">                result = jfilename.substring(0, 2) + '.';</span>
+            }
+        } else {
+            //TODO deal with UNC names
+<span class="fc" id="L684">            int index = name.lastIndexOf('/');</span>
+
+<span class="fc bfc" id="L686" title="All 2 branches covered.">            if (index == -1) {</span>
+<span class="pc bpc" id="L687" title="1 of 2 branches missed.">                if (startsWithDriveLetterOnWindows) {</span>
+<span class="nc" id="L688">                    return jfilename.substring(0, 2) + &quot;.&quot;;</span>
+                } else {
+<span class="fc" id="L690">                    return &quot;.&quot;;</span>
+                }
+            }
+<span class="fc bfc" id="L693" title="All 2 branches covered.">            if (index == 0) {</span>
+<span class="fc" id="L694">                return &quot;/&quot;;</span>
+            }
+
+<span class="pc bpc" id="L697" title="3 of 4 branches missed.">            if (startsWithDriveLetterOnWindows &amp;&amp; index == 2) {</span>
+                // Include additional path separator
+                // (so that dirname of &quot;C:\file.txt&quot; is  &quot;C:\&quot;, not &quot;C:&quot;)
+<span class="nc" id="L700">                index++;</span>
+            }
+
+<span class="pc bpc" id="L703" title="1 of 2 branches missed.">            if (jfilename.startsWith(&quot;\\\\&quot;)) {</span>
+<span class="nc" id="L704">                index = jfilename.length();</span>
+<span class="nc" id="L705">                String[] splitted = jfilename.split(Pattern.quote(&quot;\\&quot;));</span>
+<span class="nc" id="L706">                int last = splitted.length-1;</span>
+<span class="nc bnc" id="L707" title="All 2 branches missed.">                if (splitted[last].contains(&quot;.&quot;)) {</span>
+<span class="nc" id="L708">                    index = jfilename.lastIndexOf(&quot;\\&quot;);</span>
+                }
+                
+            }
+            
+<span class="fc" id="L713">            result = jfilename.substring(0, index);</span>
+            
+        }
+        
+        char endChar;
+        // trim trailing slashes
+<span class="fc bfc" id="L719" title="All 2 branches covered.">        while (result.length() &gt; minPathLength) {</span>
+<span class="fc" id="L720">            endChar = result.charAt(result.length() - 1);</span>
+<span class="pc bpc" id="L721" title="1 of 4 branches missed.">            if (endChar == '/' || endChar == '\\') {</span>
+<span class="fc" id="L722">                result = result.substring(0, result.length() - 1);</span>
+            } else {
+                break;
+            }
+        }
+
+<span class="fc" id="L728">        return result;</span>
+    }
+
+    /**
+     * Returns the extension name of the file. An empty string is returned if 
+     * the filename (not the entire path) starts or ends with a dot.
+     * @param recv
+     * @param arg Path to get extension name of
+     * @return Extension, including the dot, or an empty string
+     */
+    @JRubyMethod(required = 1, meta = true)
+    public static IRubyObject extname(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="fc" id="L740">        IRubyObject baseFilename = basename(context, recv, new IRubyObject[]{arg});</span>
+        
+<span class="fc" id="L742">        String filename = RubyString.stringValue(baseFilename).getUnicodeValue();</span>
+<span class="fc" id="L743">        String result = &quot;&quot;;</span>
+
+<span class="fc" id="L745">        int dotIndex = filename.lastIndexOf(&quot;.&quot;);</span>
+<span class="fc bfc" id="L746" title="All 4 branches covered.">        if (dotIndex &gt; 0 &amp;&amp; dotIndex != (filename.length() - 1)) {</span>
+            // Dot is not at beginning and not at end of filename. 
+<span class="fc" id="L748">            result = filename.substring(dotIndex);</span>
+        }
+
+<span class="fc" id="L751">        return context.runtime.newString(result);</span>
+    }
+
+    /**
+     * Converts a pathname to an absolute pathname. Relative paths are 
+     * referenced from the current working directory of the process unless 
+     * a second argument is given, in which case it will be used as the 
+     * starting point. If the second argument is also relative, it will 
+     * first be converted to an absolute pathname.
+     * @param recv
+     * @param args 
+     * @return Resulting absolute path as a String
+     */
+    public static IRubyObject expand_path(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L765">        return expand_path19(context, recv, args);</span>
+    }
+
+    @JRubyMethod(name = &quot;expand_path&quot;, required = 1, optional = 1, meta = true)
+    public static IRubyObject expand_path19(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L770">        RubyString path = (RubyString) expandPathInternal(context, recv, args, true, false);</span>
+<span class="fc" id="L771">        path.force_encoding(context, context.runtime.getEncodingService().getDefaultExternal());</span>
+
+<span class="fc" id="L773">        return path;</span>
+    }
+
+
+    /**
+     * ---------------------------------------------------- File::absolute_path
+     *      File.absolute_path(file_name [, dir_string] ) -&gt; abs_file_name
+     *
+     *      From Ruby 1.9.1
+     * ------------------------------------------------------------------------
+     *      Converts a pathname to an absolute pathname. Relative paths are
+     *      referenced from the current working directory of the process unless
+     *      _dir_string_ is given, in which case it will be used as the
+     *      starting point. If the given pathname starts with a ``+~+'' it is
+     *      NOT expanded, it is treated as a normal directory name.
+     *
+     *         File.absolute_path(&quot;~oracle/bin&quot;)       #=&gt; &quot;&lt;relative_path&gt;/~oracle/bin&quot;
+     *
+     * @param context
+     * @param recv
+     * @param args
+     * @return
+     */
+    @JRubyMethod(required = 1, optional = 1, meta = true)
+    public static IRubyObject absolute_path(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L798">        return expandPathInternal(context, recv, args, false, false);</span>
+    }
+
+    @JRubyMethod(required = 1, optional = 1, meta = true)
+    public static IRubyObject realdirpath(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L803">        return expandPathInternal(context, recv, args, false, false);</span>
+    }
+
+    @JRubyMethod(required = 1, optional = 1, meta = true)
+    public static IRubyObject realpath(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L808">        IRubyObject file = expandPathInternal(context, recv, args, false, true);</span>
+<span class="fc bfc" id="L809" title="All 2 branches covered.">        if (!RubyFileTest.exist_p(recv, file).isTrue()) {</span>
+<span class="fc" id="L810">            throw context.runtime.newErrnoENOENTError(file.toString());</span>
+        }
+<span class="fc" id="L812">        return file;</span>
+    }
+
+    /**
+     * Returns true if path matches against pattern The pattern is not a regular expression;
+     * instead it follows rules similar to shell filename globbing. It may contain the following
+     * metacharacters:
+     *   *:  Glob - match any sequence chars (re: .*).  If like begins with '.' then it doesn't.
+     *   ?:  Matches a single char (re: .).
+     *   [set]:  Matches a single char in a set (re: [...]).
+     *
+     */
+    @JRubyMethod(name = {&quot;fnmatch&quot;, &quot;fnmatch?&quot;}, required = 2, optional = 1, meta = true)
+    public static IRubyObject fnmatch(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc bfc" id="L826" title="All 2 branches covered.">        int flags = args.length == 3 ? RubyNumeric.num2int(args[2]) : 0;</span>
+<span class="fc" id="L827">        boolean braces_match = false;</span>
+<span class="fc bfc" id="L828" title="All 2 branches covered.">        boolean extglob = (flags &amp; FNM_EXTGLOB) != 0;</span>
+
+<span class="fc" id="L830">        ByteList pattern = args[0].convertToString().getByteList();</span>
+<span class="fc" id="L831">        ByteList path = get_path(context, args[1]).getByteList();</span>
+
+<span class="fc bfc" id="L833" title="All 2 branches covered.">        if(extglob) {</span>
+<span class="fc" id="L834">            String spattern = args[0].asJavaString();</span>
+<span class="fc" id="L835">            ArrayList&lt;String&gt; patterns = org.jruby.util.Dir.braces(spattern, flags, new ArrayList&lt;String&gt;());</span>
+
+<span class="fc" id="L837">            ArrayList&lt;Boolean&gt; matches = new ArrayList&lt;Boolean&gt;();</span>
+<span class="fc bfc" id="L838" title="All 2 branches covered.">            for(int i = 0; i &lt; patterns.size(); i++) {</span>
+<span class="fc" id="L839">                String p = patterns.get(i);</span>
+<span class="fc" id="L840">                boolean match = dir_fnmatch(new ByteList(p.getBytes()), path, flags);</span>
+<span class="fc" id="L841">                matches.add(match);</span>
+            }
+<span class="fc" id="L843">            braces_match = matches.contains(true);</span>
+        }
+
+<span class="fc bfc" id="L846" title="All 4 branches covered.">        if(braces_match || dir_fnmatch(pattern, path, flags)) {</span>
+<span class="fc" id="L847">            return context.runtime.getTrue();</span>
+        }
+<span class="fc" id="L849">        return context.runtime.getFalse();</span>
+    }
+
+    private static boolean dir_fnmatch(ByteList pattern, ByteList path, int flags) {
+<span class="fc bfc" id="L853" title="All 2 branches covered.">        return org.jruby.util.Dir.fnmatch(pattern.getUnsafeBytes(),</span>
+<span class="fc" id="L854">            pattern.getBegin(),</span>
+<span class="fc" id="L855">            pattern.getBegin()+pattern.getRealSize(),</span>
+<span class="fc" id="L856">            path.getUnsafeBytes(),</span>
+<span class="fc" id="L857">            path.getBegin(),</span>
+<span class="fc" id="L858">            path.getBegin()+path.getRealSize(),</span>
+            flags) == 0;
+    }
+
+    @JRubyMethod(name = &quot;ftype&quot;, required = 1, meta = true)
+    public static IRubyObject ftype(ThreadContext context, IRubyObject recv, IRubyObject filename) {
+<span class="fc" id="L864">        return context.runtime.newFileStat(get_path(context, filename).getUnicodeValue(), true).ftype();</span>
+    }
+    
+    /*
+     * Fixme:  This does not have exact same semantics as RubyArray.join, but they
+     * probably could be consolidated (perhaps as join(args[], sep, doChomp)).
+     */
+    @JRubyMethod(rest = true, meta = true)
+    public static RubyString join(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L873">        return join(context, recv, RubyArray.newArrayNoCopyLight(context.runtime, args));</span>
+    }
+    
+    @JRubyMethod(name = &quot;lstat&quot;, required = 1, meta = true)
+    public static IRubyObject lstat(ThreadContext context, IRubyObject recv, IRubyObject filename) {
+<span class="fc" id="L878">        String f = get_path(context, filename).getUnicodeValue();</span>
+<span class="fc" id="L879">        return context.runtime.newFileStat(f, true);</span>
+    }
+
+    @JRubyMethod(name = &quot;stat&quot;, required = 1, meta = true)
+    public static IRubyObject stat(ThreadContext context, IRubyObject recv, IRubyObject filename) {
+<span class="fc" id="L884">        String f = get_path(context, filename).getUnicodeValue();</span>
+<span class="fc" id="L885">        return context.runtime.newFileStat(f, false);</span>
+    }
+
+    @JRubyMethod(name = &quot;atime&quot;, required = 1, meta = true)
+    public static IRubyObject atime(ThreadContext context, IRubyObject recv, IRubyObject filename) {
+<span class="fc" id="L890">        String f = get_path(context, filename).getUnicodeValue();</span>
+<span class="fc" id="L891">        return context.runtime.newFileStat(f, false).atime();</span>
+    }
+
+    @JRubyMethod(name = &quot;ctime&quot;, required = 1, meta = true)
+    public static IRubyObject ctime(ThreadContext context, IRubyObject recv, IRubyObject filename) {
+<span class="fc" id="L896">        String f = get_path(context, filename).getUnicodeValue();</span>
+<span class="fc" id="L897">        return context.runtime.newFileStat(f, false).ctime();</span>
+    }
+
+    @JRubyMethod(name = &quot;birthtime&quot;, required = 1, meta = true)
+    public static IRubyObject birthtime(ThreadContext context, IRubyObject recv, IRubyObject filename) {
+<span class="nc" id="L902">        String f = get_path(context, filename).getUnicodeValue();</span>
+<span class="nc" id="L903">        return context.runtime.newFileStat(f, false).birthtime();</span>
+    }
+
+    @JRubyMethod(required = 1, rest = true, meta = true)
+    public static IRubyObject lchmod(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L908">        Ruby runtime = context.runtime;</span>
+        
+<span class="fc" id="L910">        int count = 0;</span>
+<span class="fc" id="L911">        RubyInteger mode = args[0].convertToInteger();</span>
+<span class="fc bfc" id="L912" title="All 2 branches covered.">        for (int i = 1; i &lt; args.length; i++) {</span>
+<span class="fc" id="L913">            JRubyFile file = file(args[i]);</span>
+<span class="pc bpc" id="L914" title="1 of 2 branches missed.">            if (0 != runtime.getPosix().lchmod(file.toString(), (int)mode.getLongValue())) {</span>
+<span class="nc" id="L915">                throw runtime.newErrnoFromLastPOSIXErrno();</span>
+            } else {
+<span class="fc" id="L917">                count++;</span>
+            }
+        }
+        
+<span class="fc" id="L921">        return runtime.newFixnum(count);</span>
+    }
+
+    @JRubyMethod(required = 2, rest = true, meta = true)
+    public static IRubyObject lchown(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L926">        Ruby runtime = context.runtime;</span>
+<span class="nc bnc" id="L927" title="All 2 branches missed.">        int owner = !args[0].isNil() ? RubyNumeric.num2int(args[0]) : -1;</span>
+<span class="nc bnc" id="L928" title="All 2 branches missed.">        int group = !args[1].isNil() ? RubyNumeric.num2int(args[1]) : -1;</span>
+<span class="nc" id="L929">        int count = 0;</span>
+
+<span class="nc bnc" id="L931" title="All 2 branches missed.">        for (int i = 2; i &lt; args.length; i++) {</span>
+<span class="nc" id="L932">            JRubyFile file = file(args[i]);</span>
+
+<span class="nc bnc" id="L934" title="All 2 branches missed.">            if (0 != runtime.getPosix().lchown(file.toString(), owner, group)) {</span>
+<span class="nc" id="L935">                throw runtime.newErrnoFromLastPOSIXErrno();</span>
+            } else {
+<span class="nc" id="L937">                count++;</span>
+            }
+        }
+
+<span class="nc" id="L941">        return runtime.newFixnum(count);</span>
+    }
+
+    @JRubyMethod(required = 2, meta = true)
+    public static IRubyObject link(ThreadContext context, IRubyObject recv, IRubyObject from, IRubyObject to) {
+<span class="fc" id="L946">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L947">        String fromStr = file(from).toString();</span>
+<span class="fc" id="L948">        String toStr = file(to).toString();</span>
+
+<span class="fc" id="L950">        int ret = runtime.getPosix().link(fromStr, toStr);</span>
+<span class="fc bfc" id="L951" title="All 2 branches covered.">        if (ret != 0) {</span>
+<span class="pc bpc" id="L952" title="1 of 2 branches missed.">            if (runtime.getPosix().isNative()) {</span>
+<span class="fc" id="L953">                throw runtime.newErrnoFromInt(runtime.getPosix().errno(), String.format(&quot;(%s, %s)&quot;, fromStr, toStr));</span>
+            } else {
+                // In most cases, when there is an error during the call,
+                // the POSIX handler throws an exception, but not in case
+                // with pure Java POSIX layer (when native support is disabled),
+                // so we deal with it like this:
+<span class="nc" id="L959">                throw runtime.newErrnoEEXISTError(fromStr + &quot; or &quot; + toStr);</span>
+            }
+        }
+<span class="fc" id="L962">        return runtime.newFixnum(ret);</span>
+    }
+
+    @JRubyMethod(required = 1, meta = true)
+    public static IRubyObject mtime(ThreadContext context, IRubyObject recv, IRubyObject filename) {
+<span class="fc" id="L967">        return context.runtime.newFileStat(get_path(context, filename).getUnicodeValue(), false).mtime();</span>
+    }
+    
+    @JRubyMethod(required = 2, meta = true)
+    public static IRubyObject rename(ThreadContext context, IRubyObject recv, IRubyObject oldName, IRubyObject newName) {
+<span class="fc" id="L972">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L973">        RubyString oldNameString = get_path(context, oldName);</span>
+<span class="fc" id="L974">        RubyString newNameString = get_path(context, newName);</span>
+
+<span class="fc" id="L976">        String newNameJavaString = newNameString.getUnicodeValue();</span>
+<span class="fc" id="L977">        String oldNameJavaString = oldNameString.getUnicodeValue();</span>
+<span class="fc" id="L978">        JRubyFile oldFile = JRubyFile.create(runtime.getCurrentDirectory(), oldNameJavaString);</span>
+<span class="fc" id="L979">        JRubyFile newFile = JRubyFile.create(runtime.getCurrentDirectory(), newNameJavaString);</span>
+        
+<span class="fc" id="L981">        boolean isOldSymlink = RubyFileTest.symlink_p(recv, oldNameString).isTrue();</span>
+        // Broken symlinks considered by exists() as non-existing,
+        // so we need to check for symlinks explicitly.
+<span class="pc bpc" id="L984" title="2 of 6 branches missed.">        if (!(oldFile.exists() || isOldSymlink) || !newFile.getParentFile().exists()) {</span>
+<span class="fc" id="L985">            throw runtime.newErrnoENOENTError(oldNameJavaString + &quot; or &quot; + newNameJavaString);</span>
+        }
+
+<span class="fc" id="L988">        JRubyFile dest = JRubyFile.create(runtime.getCurrentDirectory(), newNameJavaString);</span>
+
+<span class="pc bpc" id="L990" title="1 of 2 branches missed.">        if (oldFile.renameTo(dest)) {  // rename is successful</span>
+<span class="fc" id="L991">            return RubyFixnum.zero(runtime);</span>
+        }
+
+        // rename via Java API call wasn't successful, let's try some tricks, similar to MRI 
+
+<span class="nc bnc" id="L996" title="All 2 branches missed.">        if (newFile.exists()) {</span>
+<span class="nc" id="L997">            runtime.getPosix().chmod(newNameJavaString, 0666);</span>
+<span class="nc" id="L998">            newFile.delete();</span>
+        }
+
+<span class="nc bnc" id="L1001" title="All 2 branches missed.">        if (oldFile.renameTo(dest)) { // try to rename one more time</span>
+<span class="nc" id="L1002">            return RubyFixnum.zero(runtime);</span>
+        }
+
+<span class="nc" id="L1005">        throw runtime.newErrnoEACCESError(oldNameJavaString + &quot; or &quot; + newNameJavaString);</span>
+    }
+    
+    @JRubyMethod(required = 1, meta = true)
+    public static RubyArray split(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="fc" id="L1010">        RubyString filename = get_path(context, arg);</span>
+
+<span class="fc" id="L1012">        return context.runtime.newArray(dirname(context, recv, filename),</span>
+<span class="fc" id="L1013">                basename(context, recv, new IRubyObject[]{filename}));</span>
+    }
+    
+    @JRubyMethod(required = 2, meta = true)
+    public static IRubyObject symlink(ThreadContext context, IRubyObject recv, IRubyObject from, IRubyObject to) {
+<span class="fc" id="L1018">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L1019">        RubyString fromStr = get_path(context, from);</span>
+<span class="fc" id="L1020">        RubyString toStr = get_path(context, to);</span>
+<span class="fc" id="L1021">        String tovalue = toStr.getUnicodeValue();</span>
+<span class="fc" id="L1022">        tovalue = JRubyFile.create(runtime.getCurrentDirectory(), tovalue).getAbsolutePath();</span>
+        try {
+<span class="fc bfc" id="L1024" title="All 2 branches covered.">            if (runtime.getPosix().symlink(fromStr.getUnicodeValue(), tovalue) == -1) {</span>
+<span class="pc bpc" id="L1025" title="1 of 2 branches missed.">                if (runtime.getPosix().isNative()) {</span>
+<span class="fc" id="L1026">                    throw runtime.newErrnoFromInt(runtime.getPosix().errno(), String.format(&quot;(%s, %s)&quot;, fromStr, toStr));</span>
+                } else {
+<span class="nc" id="L1028">                    throw runtime.newErrnoEEXISTError(String.format(&quot;(%s, %s)&quot;, fromStr, toStr));</span>
+                }
+            }
+<span class="nc" id="L1031">        } catch (java.lang.UnsatisfiedLinkError ule) {</span>
+<span class="nc" id="L1032">            throw runtime.newNotImplementedError(&quot;symlink() function is unimplemented on this machine&quot;);</span>
+<span class="fc" id="L1033">        }</span>
+        
+<span class="fc" id="L1035">        return RubyFixnum.zero(runtime);</span>
+    }
+    
+    @JRubyMethod(required = 1, meta = true)
+    public static IRubyObject readlink(ThreadContext context, IRubyObject recv, IRubyObject path) {
+<span class="fc" id="L1040">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L1041">        JRubyFile link = file(path);</span>
+
+        try {
+<span class="fc" id="L1044">            String realPath = runtime.getPosix().readlink(link.toString());</span>
+
+<span class="fc bfc" id="L1046" title="All 2 branches covered.">            if (realPath == null) {</span>
+<span class="fc" id="L1047">                throw runtime.newErrnoFromLastPOSIXErrno();</span>
+            }
+
+<span class="fc" id="L1050">            return runtime.newString(realPath);</span>
+<span class="nc" id="L1051">        } catch (IOException e) {</span>
+<span class="nc" id="L1052">            throw runtime.newIOError(e.getMessage());</span>
+        }
+    }
+
+    // Can we produce IOError which bypasses a close?
+    public static IRubyObject truncate(ThreadContext context, IRubyObject recv, IRubyObject arg1, IRubyObject arg2) {        
+<span class="nc" id="L1058">        return truncate19(context, recv, arg1, arg2);</span>
+    }
+
+    @JRubyMethod(name = &quot;truncate&quot;, required = 2, meta = true)
+    public static IRubyObject truncate19(ThreadContext context, IRubyObject recv, IRubyObject arg1, IRubyObject arg2) {
+<span class="fc" id="L1063">        return truncateCommon(context, recv, get_path(context, arg1), arg2);</span>
+    }
+
+    @JRubyMethod(meta = true, optional = 1)
+    public static IRubyObject umask(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L1068">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L1069">        int oldMask = 0;</span>
+<span class="fc bfc" id="L1070" title="All 2 branches covered.">        if (args.length == 0) {</span>
+<span class="fc" id="L1071">            oldMask = PosixShim.umask(runtime.getPosix());</span>
+<span class="pc bpc" id="L1072" title="1 of 2 branches missed.">        } else if (args.length == 1) {</span>
+<span class="fc" id="L1073">            int newMask = (int) args[0].convertToInteger().getLongValue();</span>
+<span class="fc" id="L1074">            oldMask = PosixShim.umask(runtime.getPosix(), newMask);</span>
+<span class="fc" id="L1075">        } else {</span>
+<span class="nc" id="L1076">            runtime.newArgumentError(&quot;wrong number of arguments&quot;);</span>
+        }
+        
+<span class="fc" id="L1079">        return runtime.newFixnum(oldMask);</span>
+    }
+
+    @JRubyMethod(required = 2, rest = true, meta = true)
+    public static IRubyObject utime(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L1084">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L1085">        long[] atimeval = null;</span>
+<span class="fc" id="L1086">        long[] mtimeval = null;</span>
+
+<span class="pc bpc" id="L1088" title="1 of 4 branches missed.">        if (args[0] != runtime.getNil() || args[1] != runtime.getNil()) {</span>
+<span class="fc" id="L1089">            atimeval = extractTimeval(runtime, args[0]);</span>
+<span class="fc" id="L1090">            mtimeval = extractTimeval(runtime, args[1]);</span>
+        }
+
+<span class="fc bfc" id="L1093" title="All 2 branches covered.">        for (int i = 2, j = args.length; i &lt; j; i++) {</span>
+<span class="fc" id="L1094">            RubyString filename = get_path(context, args[i]);</span>
+            
+<span class="fc" id="L1096">            JRubyFile fileToTouch = JRubyFile.create(runtime.getCurrentDirectory(),filename.getUnicodeValue());</span>
+            
+<span class="pc bpc" id="L1098" title="1 of 2 branches missed.">            if (!fileToTouch.exists()) {</span>
+<span class="nc" id="L1099">                throw runtime.newErrnoENOENTError(filename.toString());</span>
+            }
+
+<span class="fc" id="L1102">            int result = runtime.getPosix().utimes(fileToTouch.getAbsolutePath(), atimeval, mtimeval);</span>
+<span class="pc bpc" id="L1103" title="1 of 2 branches missed.">            if (result == -1) {</span>
+<span class="nc" id="L1104">                throw runtime.newErrnoFromInt(runtime.getPosix().errno());</span>
+            }
+        }
+        
+<span class="fc" id="L1108">        return runtime.newFixnum(args.length - 2);</span>
+    }
+    
+    @JRubyMethod(rest = true, meta = true)
+    public static IRubyObject delete(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L1113">        Ruby runtime = context.runtime;</span>
+         
+<span class="fc bfc" id="L1115" title="All 2 branches covered.">        for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="fc" id="L1116">            RubyString filename = get_path(context, args[i]);</span>
+<span class="fc" id="L1117">            JRubyFile lToDelete = JRubyFile.create(runtime.getCurrentDirectory(), filename.getUnicodeValue());</span>
+            
+<span class="fc" id="L1119">            boolean isSymlink = RubyFileTest.symlink_p(recv, filename).isTrue();</span>
+            // Broken symlinks considered by exists() as non-existing,
+            // so we need to check for symlinks explicitly.
+<span class="pc bpc" id="L1122" title="1 of 4 branches missed.">            if (!lToDelete.exists() &amp;&amp; !isSymlink) {</span>
+<span class="fc" id="L1123">                throw runtime.newErrnoENOENTError(filename.getUnicodeValue());</span>
+            }
+
+<span class="pc bpc" id="L1126" title="3 of 4 branches missed.">            if (lToDelete.isDirectory() &amp;&amp; !isSymlink) {</span>
+<span class="nc" id="L1127">                throw runtime.newErrnoEPERMError(filename.getUnicodeValue());</span>
+            }
+
+<span class="pc bpc" id="L1130" title="1 of 2 branches missed.">            if (!lToDelete.delete()) {</span>
+<span class="nc" id="L1131">                throw runtime.newErrnoEACCESError(filename.getUnicodeValue());</span>
+            }
+        }
+        
+<span class="fc" id="L1135">        return runtime.newFixnum(args.length);</span>
+    }
+
+    @JRubyMethod(rest = true, meta = true)
+    public static IRubyObject unlink(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L1140">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L1141">        POSIX posix = runtime.getPosix();</span>
+
+<span class="pc bpc" id="L1143" title="1 of 2 branches missed.">        if (!posix.isNative()) return delete(context, recv, args);</span>
+
+<span class="fc bfc" id="L1145" title="All 2 branches covered.">        for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="fc" id="L1146">            RubyString filename = get_path(context, args[i]);</span>
+<span class="fc" id="L1147">            JRubyFile lToDelete = JRubyFile.create(runtime.getCurrentDirectory(), filename.getUnicodeValue());</span>
+
+<span class="fc" id="L1149">            boolean isSymlink = RubyFileTest.symlink_p(recv, filename).isTrue();</span>
+            // Broken symlinks considered by exists() as non-existing,
+            // so we need to check for symlinks explicitly.
+<span class="fc bfc" id="L1152" title="All 4 branches covered.">            if (!lToDelete.exists() &amp;&amp; !isSymlink) {</span>
+<span class="fc" id="L1153">                throw runtime.newErrnoENOENTError(filename.getUnicodeValue());</span>
+            }
+
+<span class="pc bpc" id="L1156" title="1 of 4 branches missed.">            if (lToDelete.isDirectory() &amp;&amp; !isSymlink) {</span>
+<span class="nc" id="L1157">                throw runtime.newErrnoEPERMError(filename.getUnicodeValue());</span>
+            }
+
+<span class="pc bpc" id="L1160" title="1 of 2 branches missed.">            if (posix.unlink(lToDelete.getAbsolutePath()) &lt; 0) {</span>
+<span class="nc" id="L1161">                throw runtime.newErrnoFromInt(posix.errno());</span>
+            }
+        }
+
+<span class="fc" id="L1165">        return runtime.newFixnum(args.length);</span>
+    }
+
+    public static IRubyObject unlink(ThreadContext context, IRubyObject... args) {
+<span class="nc" id="L1169">        return unlink(context, context.runtime.getFile(), args);</span>
+    }
+
+    // rb_file_size but not using stat
+    @JRubyMethod
+    public IRubyObject size(ThreadContext context) {
+<span class="fc" id="L1175">        Ruby runtime = context.runtime;</span>
+        OpenFile fptr;
+        FileStat st;
+        long size;
+
+<span class="fc" id="L1180">        fptr = getOpenFileChecked();</span>
+<span class="pc bpc" id="L1181" title="1 of 2 branches missed.">        if ((fptr.getMode() &amp; OpenFile.WRITABLE) != 0) {</span>
+<span class="nc" id="L1182">            flushRaw(context, false);</span>
+        }
+
+<span class="fc" id="L1185">        size = fptr.posix.size(fptr.fd());</span>
+
+<span class="fc" id="L1187">        return RubyFixnum.newFixnum(runtime, size);</span>
+    }
+
+    public String getPath() {
+<span class="pc bpc" id="L1191" title="1 of 2 branches missed.">        if (openFile == null) return null;</span>
+<span class="fc" id="L1192">        return openFile.getPath();</span>
+    }
+
+    private void setPath(String path) {
+<span class="pc bpc" id="L1196" title="1 of 2 branches missed.">        if (openFile == null) return;</span>
+<span class="nc" id="L1197">        openFile.setPath(path);</span>
+<span class="nc" id="L1198">    }</span>
+
+    @Override
+    public Encoding getEncoding() {
+<span class="nc" id="L1202">        return null;</span>
+    }
+
+    @Override
+    public void setEncoding(Encoding encoding) {
+        // :)
+<span class="nc" id="L1208">    }</span>
+
+    // mri: rb_open_file + rb_scan_open_args
+    protected IRubyObject openFile(ThreadContext context, IRubyObject args[]) {
+<span class="fc" id="L1212">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L1213">        RubyString filename = get_path(context, args[0]);</span>
+
+<span class="fc" id="L1215">        setPath(adjustRootPathOnWindows(runtime, filename.asJavaString(), runtime.getCurrentDirectory()));</span>
+
+<span class="fc" id="L1217">        Object pm = EncodingUtils.vmodeVperm(null, null);</span>
+<span class="fc" id="L1218">        IRubyObject options = context.nil;</span>
+        
+<span class="pc bpc" id="L1220" title="2 of 5 branches missed.">        switch(args.length) {</span>
+            case 1:
+<span class="fc" id="L1222">                break;</span>
+            case 2: {
+<span class="fc" id="L1224">                IRubyObject test = TypeConverter.checkHashType(runtime, args[1]);</span>
+<span class="fc bfc" id="L1225" title="All 2 branches covered.">                if (test instanceof RubyHash) {</span>
+<span class="fc" id="L1226">                    options = test;</span>
+                } else {
+<span class="fc" id="L1228">                    vmode(pm, args[1]);</span>
+                }
+<span class="fc" id="L1230">                break;</span>
+            }
+            case 3: {
+<span class="fc" id="L1233">                IRubyObject test = TypeConverter.checkHashType(runtime, args[2]);</span>
+<span class="fc bfc" id="L1234" title="All 2 branches covered.">                if (test instanceof RubyHash) {</span>
+<span class="fc" id="L1235">                    options = test;</span>
+                } else {
+<span class="fc" id="L1237">                    vperm(pm, args[2]);</span>
+                }
+<span class="fc" id="L1239">                vmode(pm, args[1]);</span>
+<span class="fc" id="L1240">                break;</span>
+            }
+            case 4:
+<span class="nc" id="L1243">                options = args[3].convertToHash();</span>
+<span class="nc" id="L1244">                vperm(pm, args[2]);</span>
+<span class="nc" id="L1245">                vmode(pm, args[1]);</span>
+                break;
+        }
+        
+<span class="fc" id="L1249">        int[] oflags_p = {0}, fmode_p = {0};</span>
+<span class="fc" id="L1250">        IOEncodable convconfig = new ConvConfig();</span>
+<span class="fc" id="L1251">        EncodingUtils.extractModeEncoding(context, convconfig, pm, options, oflags_p, fmode_p);</span>
+<span class="fc bfc" id="L1252" title="All 4 branches covered.">        int perm = (vperm(pm) != null &amp;&amp; !vperm(pm).isNil()) ? </span>
+<span class="fc" id="L1253">                RubyNumeric.num2int(vperm(pm)) : 0666;</span>
+        
+<span class="fc" id="L1255">        return fileOpenGeneric(context, filename, oflags_p[0], fmode_p[0], convconfig, perm);</span>
+    }
+    
+    // rb_file_open_generic
+    public IRubyObject fileOpenGeneric(ThreadContext context, IRubyObject filename, int oflags, int fmode, IOEncodable convConfig, int perm) {
+<span class="pc bpc" id="L1260" title="1 of 2 branches missed.">        if (convConfig == null) {</span>
+<span class="nc" id="L1261">            convConfig = new ConvConfig();</span>
+<span class="nc" id="L1262">            EncodingUtils.ioExtIntToEncs(context, convConfig, null, null, fmode);</span>
+<span class="nc" id="L1263">            convConfig.setEcflags(0);</span>
+<span class="nc" id="L1264">            convConfig.setEcopts(context.nil);</span>
+        }
+        
+<span class="fc" id="L1267">        int[] fmode_p = {fmode};</span>
+        
+<span class="fc" id="L1269">        EncodingUtils.validateEncodingBinmode(context, fmode_p, convConfig.getEcflags(), convConfig);</span>
+        
+<span class="fc" id="L1271">        OpenFile fptr = MakeOpenFile();</span>
+
+<span class="fc" id="L1273">        fptr.setMode(fmode_p[0]);</span>
+<span class="fc" id="L1274">        fptr.encs.copy(convConfig);</span>
+<span class="fc" id="L1275">        fptr.setPath(RubyFile.get_path(context, filename).asJavaString());</span>
+
+<span class="fc" id="L1277">        fptr.setFD(sysopen(context.runtime, fptr.getPath(), oflags, perm));</span>
+<span class="fc" id="L1278">        fptr.checkTTY();</span>
+<span class="fc bfc" id="L1279" title="All 2 branches covered.">        if ((fmode &amp; OpenFile.SETENC_BY_BOM) != 0) {</span>
+<span class="fc" id="L1280">            EncodingUtils.ioSetEncodingByBOM(context, this);</span>
+        }
+
+<span class="fc" id="L1283">        return this;</span>
+    }
+
+    // mri: FilePathValue/rb_get_path/rb_get_patch_check
+    public static RubyString get_path(ThreadContext context, IRubyObject path) {
+<span class="fc bfc" id="L1288" title="All 2 branches covered.">        if (path instanceof RubyString) return (RubyString) path;</span>
+
+<span class="fc bfc" id="L1290" title="All 2 branches covered.">        if (path.respondsTo(&quot;to_path&quot;)) path = path.callMethod(context, &quot;to_path&quot;);</span>
+
+<span class="fc" id="L1292">        return filePathConvert(context, path.convertToString());</span>
+    }
+    
+    // FIXME: MRI skips this logic on windows?  Does not make sense to me why so I left it in.
+    // mri: file_path_convert
+    private static RubyString filePathConvert(ThreadContext context, RubyString path) {
+<span class="pc bpc" id="L1298" title="1 of 2 branches missed.">        if (!org.jruby.platform.Platform.IS_WINDOWS) {</span>
+<span class="fc" id="L1299">            Ruby runtime = context.getRuntime();</span>
+<span class="fc" id="L1300">            EncodingService encodingService = runtime.getEncodingService();</span>
+<span class="fc" id="L1301">            Encoding pathEncoding = path.getEncoding();</span>
+
+            // If we are not ascii and do not match fs encoding then transcode to fs.
+<span class="pc bpc" id="L1304" title="1 of 2 branches missed.">            if (runtime.getDefaultInternalEncoding() != null &amp;&amp;</span>
+<span class="nc bnc" id="L1305" title="All 2 branches missed.">                    pathEncoding != encodingService.getUSAsciiEncoding() &amp;&amp;</span>
+<span class="nc bnc" id="L1306" title="All 2 branches missed.">                    pathEncoding != encodingService.getAscii8bitEncoding() &amp;&amp;</span>
+<span class="nc bnc" id="L1307" title="All 2 branches missed.">                    pathEncoding != encodingService.getFileSystemEncoding(runtime) &amp;&amp;</span>
+<span class="nc bnc" id="L1308" title="All 2 branches missed.">                    !path.isAsciiOnly()) {</span>
+<span class="nc" id="L1309">                ByteList bytes = EncodingUtils.strConvEnc(context, path.getByteList(), pathEncoding, encodingService.getFileSystemEncoding(runtime));</span>
+<span class="nc" id="L1310">                path = RubyString.newString(runtime, bytes);</span>
+            }
+        }
+
+<span class="fc" id="L1314">        return path;</span>
+    }
+
+
+    public static FileResource fileResource(ThreadContext context, IRubyObject pathOrFile) {
+<span class="fc" id="L1319">        Ruby runtime = context.runtime;</span>
+
+<span class="fc bfc" id="L1321" title="All 2 branches covered.">        if (pathOrFile instanceof RubyFile) {</span>
+<span class="fc" id="L1322">            return JRubyFile.createResource(runtime, ((RubyFile) pathOrFile).getPath());</span>
+<span class="fc bfc" id="L1323" title="All 2 branches covered.">        } else if (pathOrFile instanceof RubyIO) {</span>
+<span class="fc" id="L1324">            return JRubyFile.createResource(runtime, ((RubyIO) pathOrFile).openFile.getPath());</span>
+
+        }
+
+<span class="fc" id="L1328">        return JRubyFile.createResource(runtime, get_path(context, pathOrFile).toString());</span>
+    }
+    /**
+     * Get the fully-qualified JRubyFile object for the path, taking into
+     * account the runtime's current directory.
+     */
+    public static FileResource fileResource(IRubyObject pathOrFile) {
+<span class="fc" id="L1335">        Ruby runtime = pathOrFile.getRuntime();</span>
+
+<span class="fc bfc" id="L1337" title="All 2 branches covered.">        if (pathOrFile instanceof RubyFile) {</span>
+<span class="fc" id="L1338">            return JRubyFile.createResource(runtime, ((RubyFile) pathOrFile).getPath());</span>
+<span class="pc bpc" id="L1339" title="1 of 2 branches missed.">        } else if (pathOrFile instanceof RubyIO) {</span>
+<span class="nc" id="L1340">            return JRubyFile.createResource(runtime, ((RubyIO) pathOrFile).openFile.getPath());</span>
+        }
+
+<span class="fc" id="L1343">        return JRubyFile.createResource(runtime, get_path(runtime.getCurrentContext(), pathOrFile).toString());</span>
+    }
+
+    @Deprecated // Use fileResource instead
+    public static JRubyFile file(IRubyObject pathOrFile) {
+<span class="fc" id="L1348">      return fileResource(pathOrFile).hackyGetJRubyFile();</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="nc" id="L1353">        return &quot;RubyFile(&quot; + openFile.getPath() + &quot;, &quot; + openFile.getMode();</span>
+    }
+
+    public static ZipEntry getFileEntry(ZipFile zf, String path) throws IOException {
+<span class="nc" id="L1357">        ZipEntry entry = zf.getEntry(path);</span>
+<span class="nc bnc" id="L1358" title="All 2 branches missed.">        if (entry == null) {</span>
+            // try canonicalizing the path to eliminate . and .. (JRUBY-4760, JRUBY-4879)
+<span class="nc" id="L1360">            String prefix = new File(&quot;.&quot;).getCanonicalPath();</span>
+<span class="nc" id="L1361">            entry = zf.getEntry(new File(path).getCanonicalPath().substring(prefix.length() + 1).replaceAll(&quot;\\\\&quot;, &quot;/&quot;));</span>
+        }
+<span class="nc" id="L1363">        return entry;</span>
+    }
+    
+    public static ZipEntry getDirOrFileEntry(String jar, String path) throws IOException {
+<span class="nc" id="L1367">        return getDirOrFileEntry(new JarFile(jar), path);</span>
+    }    
+    
+    public static ZipEntry getDirOrFileEntry(ZipFile zf, String path) throws IOException {
+<span class="nc" id="L1371">        String dirPath = path + &quot;/&quot;;</span>
+<span class="nc" id="L1372">        ZipEntry entry = zf.getEntry(dirPath); // first try as directory</span>
+<span class="nc bnc" id="L1373" title="All 2 branches missed.">        if (entry == null) {</span>
+<span class="nc bnc" id="L1374" title="All 2 branches missed.">            if (dirPath.length() == 1) {</span>
+<span class="nc" id="L1375">                return new ZipEntry(dirPath);</span>
+            }
+            // try canonicalizing the path to eliminate . and .. (JRUBY-4760, JRUBY-4879)
+<span class="nc" id="L1378">            String prefix = new File(&quot;.&quot;).getCanonicalPath();</span>
+<span class="nc" id="L1379">            entry = zf.getEntry(new File(dirPath).getCanonicalPath().substring(prefix.length() + 1).replaceAll(&quot;\\\\&quot;, &quot;/&quot;));</span>
+
+            // JRUBY-6119
+<span class="nc bnc" id="L1382" title="All 2 branches missed.">            if (entry == null) {</span>
+<span class="nc" id="L1383">                Enumeration&lt;? extends ZipEntry&gt; entries = zf.entries();</span>
+<span class="nc bnc" id="L1384" title="All 2 branches missed.">                while (entries.hasMoreElements()) {</span>
+<span class="nc" id="L1385">                    String zipEntry = entries.nextElement().getName();</span>
+<span class="nc bnc" id="L1386" title="All 2 branches missed.">                    if (zipEntry.startsWith(dirPath)) {</span>
+<span class="nc" id="L1387">                        return new ZipEntry(dirPath);</span>
+                    }
+<span class="nc" id="L1389">                }</span>
+            }
+
+<span class="nc bnc" id="L1392" title="All 2 branches missed.">            if (entry == null) {</span>
+                // try as file
+<span class="nc" id="L1394">                entry = getFileEntry(zf, path);</span>
+            }
+        }
+<span class="nc" id="L1397">        return entry;</span>
+    }
+    
+    // mri: rb_is_absolute_path
+    // Do this versus stand up full JRubyFile and perform stats + canonicalization
+    private static boolean isAbsolutePath(String path) {
+<span class="pc bpc" id="L1403" title="3 of 6 branches missed.">        return (path != null &amp;&amp; path.length() &gt; 1 &amp;&amp; path.charAt(0) == '/') ||</span>
+<span class="pc bnc" id="L1404" title="All 2 branches missed.">                startsWithDriveLetterOnWindows(path);</span>
+    }
+
+    public static boolean startsWithDriveLetterOnWindows(String path) {
+<span class="pc bpc" id="L1408" title="2 of 4 branches missed.">        return (path != null)</span>
+                &amp;&amp; Platform.IS_WINDOWS &amp;&amp;
+<span class="nc bnc" id="L1410" title="All 4 branches missed.">                ((path.length()&gt;1 &amp;&amp; path.charAt(0) == '/') ?</span>
+<span class="nc bnc" id="L1411" title="All 2 branches missed.">                        (path.length() &gt; 2</span>
+<span class="nc bnc" id="L1412" title="All 2 branches missed.">                                &amp;&amp; isWindowsDriveLetter(path.charAt(1))</span>
+<span class="nc bnc" id="L1413" title="All 2 branches missed.">                                &amp;&amp; path.charAt(2) == ':') :</span>
+<span class="nc bnc" id="L1414" title="All 2 branches missed.">                        (path.length() &gt; 1</span>
+<span class="nc bnc" id="L1415" title="All 2 branches missed.">                                &amp;&amp; isWindowsDriveLetter(path.charAt(0))</span>
+<span class="pc bnc" id="L1416" title="All 2 branches missed.">                                &amp;&amp; path.charAt(1) == ':'));</span>
+    }
+    
+    // adjusts paths started with '/' or '\\', on windows.
+    static String adjustRootPathOnWindows(Ruby runtime, String path, String dir) {
+<span class="pc bpc" id="L1421" title="2 of 4 branches missed.">        if (path == null || !Platform.IS_WINDOWS) return path;</span>
+
+        // MRI behavior on Windows: it treats '/' as a root of
+        // a current drive (but only if SINGLE slash is present!):
+        // E.g., if current work directory is
+        // 'D:/home/directory', then '/' means 'D:/'.
+        //
+        // Basically, '/path' is treated as a *RELATIVE* path,
+        // relative to the current drive. '//path' is treated
+        // as absolute one.
+<span class="nc bnc" id="L1431" title="All 8 branches missed.">        if ((path.startsWith(&quot;/&quot;) &amp;&amp; !(path.length() &gt; 2 &amp;&amp; path.charAt(2) == ':')) || path.startsWith(&quot;\\&quot;)) {</span>
+<span class="nc bnc" id="L1432" title="All 6 branches missed.">            if (path.length() &gt; 1 &amp;&amp; (path.charAt(1) == '/' || path.charAt(1) == '\\')) {</span>
+<span class="nc" id="L1433">                return path;</span>
+            }
+
+            // First try to use drive letter from supplied dir value,
+            // then try current work dir.
+<span class="nc bnc" id="L1438" title="All 2 branches missed.">            if (!startsWithDriveLetterOnWindows(dir)) {</span>
+<span class="nc" id="L1439">                dir = runtime.getCurrentDirectory();</span>
+            }
+<span class="nc bnc" id="L1441" title="All 2 branches missed.">            if (dir.length() &gt;= 2) {</span>
+<span class="nc" id="L1442">                path = dir.substring(0, 2) + path;</span>
+            }
+<span class="nc bnc" id="L1444" title="All 4 branches missed.">        } else if (startsWithDriveLetterOnWindows(path) &amp;&amp; path.length() == 2) {</span>
+            // compensate for missing slash after drive letter on windows
+<span class="nc" id="L1446">            path += &quot;/&quot;;</span>
+        }
+
+<span class="nc" id="L1449">        return path;</span>
+    }
+
+    /**
+     * Extract a timeval (an array of 2 longs: seconds and microseconds from epoch) from
+     * an IRubyObject.
+     */
+    private static long[] extractTimeval(Ruby runtime, IRubyObject value) {
+<span class="fc" id="L1457">        long[] timeval = new long[2];</span>
+
+<span class="pc bpc" id="L1459" title="1 of 2 branches missed.">        if (value instanceof RubyFloat) {</span>
+<span class="nc bnc" id="L1460" title="All 2 branches missed.">            timeval[0] = Platform.IS_32_BIT ? RubyNumeric.num2int(value) : RubyNumeric.num2long(value);</span>
+<span class="nc" id="L1461">            double fraction = ((RubyFloat) value).getDoubleValue() % 1.0;</span>
+<span class="nc" id="L1462">            timeval[1] = (long)(fraction * 1e6 + 0.5);</span>
+<span class="pc bpc" id="L1463" title="1 of 2 branches missed.">        } else if (value instanceof RubyNumeric) {</span>
+<span class="nc bnc" id="L1464" title="All 2 branches missed.">            timeval[0] = Platform.IS_32_BIT ? RubyNumeric.num2int(value) : RubyNumeric.num2long(value);</span>
+<span class="nc" id="L1465">            timeval[1] = 0;</span>
+        } else {
+            RubyTime time;
+<span class="pc bpc" id="L1468" title="1 of 2 branches missed.">            if (value instanceof RubyTime) {</span>
+<span class="fc" id="L1469">                time = ((RubyTime) value);</span>
+            } else {
+<span class="nc" id="L1471">                time = (RubyTime) TypeConverter.convertToType(value, runtime.getTime(), &quot;to_time&quot;, true);</span>
+            }
+<span class="pc bpc" id="L1473" title="1 of 2 branches missed.">            timeval[0] = Platform.IS_32_BIT ? RubyNumeric.num2int(time.to_i()) : RubyNumeric.num2long(time.to_i());</span>
+<span class="pc bpc" id="L1474" title="1 of 2 branches missed.">            timeval[1] = Platform.IS_32_BIT ? RubyNumeric.num2int(time.usec()) : RubyNumeric.num2long(time.usec());</span>
+        }
+
+<span class="fc" id="L1477">        return timeval;</span>
+    }
+
+    private void checkClosed(ThreadContext context) {
+<span class="fc" id="L1481">        openFile.checkClosed();</span>
+<span class="fc" id="L1482">    }</span>
+
+    private static boolean isWindowsDriveLetter(char c) {
+<span class="nc bnc" id="L1485" title="All 8 branches missed.">        return (c &gt;= 'a' &amp;&amp; c &lt;= 'z') || (c &gt;= 'A' &amp;&amp; c &lt;= 'Z');</span>
+    }
+
+    private static IRubyObject expandPathInternal(ThreadContext context, IRubyObject recv, IRubyObject[] args, boolean expandUser, boolean canonicalize) {
+<span class="fc" id="L1489">        Ruby runtime = context.runtime;</span>
+
+<span class="fc" id="L1491">        String relativePath = get_path(context, args[0]).getUnicodeValue();</span>
+
+        // Special /dev/null of windows
+<span class="pc bpc" id="L1494" title="5 of 6 branches missed.">        if (Platform.IS_WINDOWS &amp;&amp; (&quot;NUL:&quot;.equalsIgnoreCase(relativePath) || &quot;NUL&quot;.equalsIgnoreCase(relativePath))) {</span>
+<span class="nc" id="L1495">            return runtime.newString(&quot;//./&quot; + relativePath.substring(0, 3));</span>
+        }
+
+<span class="pc bpc" id="L1498" title="1 of 2 branches missed.">        if (relativePath.startsWith(&quot;uri:&quot;)) {</span>
+<span class="nc" id="L1499">            return runtime.newString(relativePath);</span>
+        }
+
+<span class="fc" id="L1502">        String[] uriParts = splitURI(relativePath);</span>
+        String cwd;
+
+        // Handle ~user paths
+<span class="fc bfc" id="L1506" title="All 2 branches covered.">        if (expandUser) {</span>
+<span class="fc" id="L1507">            relativePath = expandUserPath(context, relativePath, true);</span>
+        }
+
+<span class="pc bpc" id="L1510" title="1 of 2 branches missed.">        if (uriParts != null) {</span>
+            //If the path was an absolute classpath path, return it as-is.
+<span class="nc bnc" id="L1512" title="All 2 branches missed.">            if (uriParts[0].equals(&quot;classpath:&quot;)) {</span>
+<span class="nc" id="L1513">                return runtime.newString(relativePath);</span>
+            }
+
+<span class="nc" id="L1516">            relativePath = uriParts[1];</span>
+        }
+
+        // Now that we're not treating it as a URI, we need to honor the canonicalize flag.
+        // Do not insert early returns below.
+
+        // If there's a second argument, it's the path to which the first
+        // argument is relative.
+<span class="fc bfc" id="L1524" title="All 4 branches covered.">        if (args.length == 2 &amp;&amp; !args[1].isNil()) {</span>
+            // TODO maybe combine this with get_path method
+<span class="pc bpc" id="L1526" title="1 of 4 branches missed.">            if ((args[1] instanceof RubyString) &amp;&amp; args[1].asJavaString().startsWith(&quot;uri:&quot;)) {</span>
+<span class="nc" id="L1527">                cwd = args[1].asJavaString();</span>
+            } else {
+<span class="fc" id="L1529">                cwd = get_path(context, args[1]).getUnicodeValue();</span>
+    
+                // Handle ~user paths.
+<span class="fc bfc" id="L1532" title="All 2 branches covered.">                if (expandUser) {</span>
+<span class="fc" id="L1533">                    cwd = expandUserPath(context, cwd, true);</span>
+                }
+    
+<span class="fc" id="L1536">                String[] cwdURIParts = splitURI(cwd);</span>
+<span class="pc bpc" id="L1537" title="2 of 4 branches missed.">                if (uriParts == null &amp;&amp; cwdURIParts != null) {</span>
+<span class="nc" id="L1538">                    uriParts = cwdURIParts;</span>
+<span class="nc" id="L1539">                    cwd = cwdURIParts[1];</span>
+                }
+    
+<span class="fc" id="L1542">                cwd = adjustRootPathOnWindows(runtime, cwd, null);</span>
+    
+<span class="pc bpc" id="L1544" title="2 of 4 branches missed.">                boolean startsWithSlashNotOnWindows = (cwd != null)</span>
+<span class="pc bpc" id="L1545" title="1 of 2 branches missed.">                        &amp;&amp; !Platform.IS_WINDOWS &amp;&amp; cwd.length() &gt; 0</span>
+<span class="fc bfc" id="L1546" title="All 2 branches covered.">                        &amp;&amp; cwd.charAt(0) == '/';</span>
+    
+                // TODO: better detection when path is absolute or not.
+                // If the path isn't absolute, then prepend the current working
+                // directory to the path.
+<span class="pc bpc" id="L1551" title="1 of 4 branches missed.">                if (!startsWithSlashNotOnWindows &amp;&amp; !startsWithDriveLetterOnWindows(cwd)) {</span>
+<span class="fc" id="L1552">                    cwd = new File(runtime.getCurrentDirectory(), cwd).getAbsolutePath();</span>
+                }
+<span class="fc" id="L1554">            }</span>
+        } else {
+            // If there's no second argument, simply use the working directory
+            // of the runtime.
+<span class="fc" id="L1558">            cwd = runtime.getCurrentDirectory();</span>
+        }
+
+        // Something wrong we don't know the cwd...
+        // TODO: Is this behavior really desirable? /mov
+<span class="pc bpc" id="L1563" title="1 of 2 branches missed.">        if (cwd == null) return runtime.getNil();</span>
+
+        /* The counting of slashes that follows is simply a way to adhere to
+        * Ruby's UNC (or something) compatibility. When Ruby's expand_path is
+        * called with &quot;//foo//bar&quot; it will return &quot;//foo/bar&quot;. JRuby uses
+        * java.io.File, and hence returns &quot;/foo/bar&quot;. In order to retain
+        * java.io.File in the lower layers and provide full Ruby
+        * compatibility, the number of extra slashes must be counted and
+        * prepended to the result.
+        */
+
+        // TODO: special handling on windows for some corner cases
+//        if (IS_WINDOWS) {
+//            if (relativePath.startsWith(&quot;//&quot;)) {
+//                if (relativePath.length() &gt; 2 &amp;&amp; relativePath.charAt(2) != '/') {
+//                    int nextSlash = relativePath.indexOf('/', 3);
+//                    if (nextSlash != -1) {
+//                        return runtime.newString(
+//                                relativePath.substring(0, nextSlash)
+//                                + canonicalize(relativePath.substring(nextSlash)));
+//                    } else {
+//                        return runtime.newString(relativePath);
+//                    }
+//                }
+//            }
+//        }
+
+        // Find out which string to check.
+<span class="fc" id="L1591">        String padSlashes = &quot;&quot;;</span>
+<span class="pc bpc" id="L1592" title="1 of 2 branches missed.">        if (uriParts != null) {</span>
+<span class="nc" id="L1593">            padSlashes = uriParts[0];</span>
+<span class="pc bpc" id="L1594" title="1 of 2 branches missed.">        } else if (!Platform.IS_WINDOWS) {</span>
+<span class="fc bfc" id="L1595" title="All 4 branches covered.">            if (relativePath.length() &gt; 0 &amp;&amp; relativePath.charAt(0) == '/') {</span>
+<span class="fc" id="L1596">                padSlashes = countSlashes(relativePath);</span>
+<span class="pc bpc" id="L1597" title="2 of 4 branches missed.">            } else if (cwd.length() &gt; 0 &amp;&amp; cwd.charAt(0) == '/') {</span>
+<span class="fc" id="L1598">                padSlashes = countSlashes(cwd);</span>
+            }
+        }
+
+        JRubyFile path;
+
+<span class="fc bfc" id="L1604" title="All 2 branches covered.">        if (relativePath.length() == 0) {</span>
+<span class="fc" id="L1605">            path = JRubyFile.create(relativePath, cwd);</span>
+        } else {
+<span class="fc" id="L1607">            relativePath = adjustRootPathOnWindows(runtime, relativePath, cwd);</span>
+<span class="fc" id="L1608">            path = JRubyFile.create(cwd, relativePath);</span>
+        }
+
+<span class="fc" id="L1611">        String realPath = padSlashes + canonicalize(path.getAbsolutePath());</span>
+
+<span class="fc bfc" id="L1613" title="All 2 branches covered.">        if (canonicalize) {</span>
+            try {
+<span class="fc" id="L1615">                realPath = new File(realPath).getCanonicalPath();</span>
+<span class="nc" id="L1616">            } catch (IOException ioe) {</span>
+                // Earlier canonicalization will have to do.
+<span class="fc" id="L1618">            }</span>
+        }
+
+<span class="fc" id="L1621">        return runtime.newString(realPath);</span>
+    }
+
+    public static String[] splitURI(String path) {
+<span class="fc" id="L1625">        Matcher m = URI_PREFIX.matcher(path);</span>
+<span class="pc bpc" id="L1626" title="1 of 2 branches missed.">        if (m.find()) {</span>
+<span class="nc bnc" id="L1627" title="All 2 branches missed.">            if (m.group(2).length() == 0) {</span>
+<span class="nc" id="L1628">                return new String[] {path, &quot;&quot;};</span>
+            }
+            String pathWithoutJarPrefix;
+<span class="nc bnc" id="L1631" title="All 2 branches missed.">            if (m.group(1) != null) {</span>
+<span class="nc" id="L1632">                pathWithoutJarPrefix = path.substring(4);</span>
+            } else {
+<span class="nc" id="L1634">                pathWithoutJarPrefix = path;</span>
+            }
+            try {
+<span class="nc" id="L1637">                URI u = new URI(pathWithoutJarPrefix);</span>
+<span class="nc" id="L1638">                String pathPart = u.getPath();</span>
+<span class="nc" id="L1639">                return new String[] {path.substring(0, path.indexOf(pathPart)), pathPart};</span>
+<span class="nc" id="L1640">            } catch (Exception e) {</span>
+                try {
+<span class="nc" id="L1642">                    URL u = new URL(pathWithoutJarPrefix);</span>
+<span class="nc" id="L1643">                    String pathPart = u.getPath();</span>
+<span class="nc" id="L1644">                    return new String[] {path.substring(0, path.indexOf(pathPart)), pathPart};</span>
+<span class="nc" id="L1645">                } catch (Exception e2) {</span>
+                }
+            }
+        }
+<span class="fc" id="L1649">        return null;</span>
+    }
+
+    /**
+     * This method checks a path, and if it starts with ~, then it expands
+     * the path to the absolute path of the user's home directory. If the
+     * string does not begin with ~, then the string is simply returned.
+     * unaltered.
+     * @param context
+     * @param path Path to check
+     * @return Expanded path
+     */
+    public static String expandUserPath(ThreadContext context, String path) {
+<span class="nc" id="L1662">        return expandUserPath(context, path, false);</span>
+    }
+    
+    // FIXME: The variations of expand* and need for each to have a boolean discriminator makes
+    // this code ripe for refactoring...
+    public static String expandUserPath(ThreadContext context, String path, boolean raiseOnRelativePath) {
+<span class="fc" id="L1668">        int pathLength = path.length();</span>
+
+<span class="fc bfc" id="L1670" title="All 4 branches covered.">        if (pathLength &gt;= 1 &amp;&amp; path.charAt(0) == '~') {</span>
+            // Enebo : Should ~frogger\\foo work (it doesnt in linux ruby)?
+<span class="fc" id="L1672">            int userEnd = path.indexOf('/');</span>
+
+<span class="fc bfc" id="L1674" title="All 2 branches covered.">            if (userEnd == -1) {</span>
+<span class="fc bfc" id="L1675" title="All 2 branches covered.">                if (pathLength == 1) {</span>
+                    // Single '~' as whole path to expand
+<span class="fc" id="L1677">                    checkHome(context);</span>
+<span class="fc" id="L1678">                    path = RubyDir.getHomeDirectoryPath(context).toString();</span>
+                    
+<span class="pc bpc" id="L1680" title="2 of 4 branches missed.">                    if (raiseOnRelativePath &amp;&amp; !isAbsolutePath(path)) throw context.runtime.newArgumentError(&quot;non-absolute home&quot;);</span>
+                } else {
+                    // No directory delimeter.  Rest of string is username
+<span class="fc" id="L1683">                    userEnd = pathLength;</span>
+                }
+            }
+
+<span class="fc bfc" id="L1687" title="All 2 branches covered.">            if (userEnd == 1) {</span>
+                // '~/...' as path to expand
+<span class="fc" id="L1689">                checkHome(context);</span>
+<span class="fc" id="L1690">                path = RubyDir.getHomeDirectoryPath(context).toString() +</span>
+<span class="fc" id="L1691">                        path.substring(1);</span>
+                
+<span class="pc bpc" id="L1693" title="2 of 4 branches missed.">                if (raiseOnRelativePath &amp;&amp; !isAbsolutePath(path)) throw context.runtime.newArgumentError(&quot;non-absolute home&quot;);</span>
+<span class="fc bfc" id="L1694" title="All 2 branches covered.">            } else if (userEnd &gt; 1){</span>
+                // '~user/...' as path to expand
+<span class="fc" id="L1696">                String user = path.substring(1, userEnd);</span>
+<span class="fc" id="L1697">                IRubyObject dir = RubyDir.getHomeDirectoryPath(context, user);</span>
+
+<span class="pc bpc" id="L1699" title="1 of 2 branches missed.">                if (dir.isNil()) {</span>
+<span class="nc" id="L1700">                    throw context.runtime.newArgumentError(&quot;user &quot; + user + &quot; does not exist&quot;);</span>
+                }
+
+<span class="fc bfc" id="L1703" title="All 2 branches covered.">                path = &quot;&quot; + dir + (pathLength == userEnd ? &quot;&quot; : path.substring(userEnd));</span>
+                
+                // getpwd (or /etc/passwd fallback) returns a home which is not absolute!!! [mecha-unlikely]
+<span class="pc bpc" id="L1706" title="2 of 4 branches missed.">                if (raiseOnRelativePath &amp;&amp; !isAbsolutePath(path)) throw context.runtime.newArgumentError(&quot;non-absolute home of &quot; + user);</span>
+            }
+        }
+<span class="fc" id="L1709">        return path;</span>
+    }
+
+    /**
+     * Returns a string consisting of &lt;code&gt;n-1&lt;/code&gt; slashes, where
+     * &lt;code&gt;n&lt;/code&gt; is the number of slashes at the beginning of the input
+     * string.
+     * @param stringToCheck
+     * @return
+     */
+    private static String countSlashes( String stringToCheck ) {
+        // Count number of extra slashes in the beginning of the string.
+<span class="fc" id="L1721">        int slashCount = 0;</span>
+<span class="fc bfc" id="L1722" title="All 2 branches covered.">        for (int i = 0; i &lt; stringToCheck.length(); i++) {</span>
+<span class="fc bfc" id="L1723" title="All 2 branches covered.">            if (stringToCheck.charAt(i) == '/') {</span>
+<span class="fc" id="L1724">                slashCount++;</span>
+            } else {
+                break;
+            }
+        }
+
+        // If there are N slashes, then we want N-1.
+<span class="pc bpc" id="L1731" title="1 of 2 branches missed.">        if (slashCount &gt; 0) {</span>
+<span class="fc" id="L1732">            slashCount--;</span>
+        }
+
+<span class="fc bfc" id="L1735" title="All 2 branches covered.">        if (slashCount &lt; SLASHES.length) {</span>
+<span class="fc" id="L1736">            return SLASHES[slashCount];</span>
+        }
+
+        // Prepare a string with the same number of redundant slashes so that
+        // we easily can prepend it to the result.
+<span class="fc" id="L1741">        char[] slashes = new char[slashCount];</span>
+<span class="fc bfc" id="L1742" title="All 2 branches covered.">        for (int i = 0; i &lt; slashCount; i++) {</span>
+<span class="fc" id="L1743">            slashes[i] = '/';</span>
+        }
+<span class="fc" id="L1745">        return new String(slashes);</span>
+    }
+
+    public static String canonicalize(String path) {
+<span class="fc" id="L1749">        return canonicalize(null, path);</span>
+    }
+
+    private static String canonicalize(String canonicalPath, String remaining) {
+<span class="fc bfc" id="L1753" title="All 2 branches covered.">        if (remaining == null) {</span>
+<span class="pc bpc" id="L1754" title="1 of 2 branches missed.">            if (&quot;&quot;.equals(canonicalPath)) {</span>
+<span class="nc" id="L1755">                return &quot;/&quot;;</span>
+            } else {
+                // compensate for missing slash after drive letter on windows
+<span class="pc bpc" id="L1758" title="1 of 2 branches missed.">                if (startsWithDriveLetterOnWindows(canonicalPath)</span>
+<span class="nc bnc" id="L1759" title="All 2 branches missed.">                        &amp;&amp; canonicalPath.length() == 2) {</span>
+<span class="nc" id="L1760">                    canonicalPath += &quot;/&quot;;</span>
+                }
+            }
+<span class="fc" id="L1763">            return canonicalPath;</span>
+        }
+
+        String child;
+<span class="fc" id="L1767">        int slash = remaining.indexOf('/');</span>
+<span class="fc bfc" id="L1768" title="All 2 branches covered.">        if (slash == -1) {</span>
+<span class="fc" id="L1769">            child = remaining;</span>
+<span class="fc" id="L1770">            remaining = null;</span>
+        } else {
+<span class="fc" id="L1772">            child = remaining.substring(0, slash);</span>
+<span class="fc" id="L1773">            remaining = remaining.substring(slash + 1);</span>
+        }
+
+<span class="fc bfc" id="L1776" title="All 2 branches covered.">        if (child.equals(&quot;.&quot;)) {</span>
+            // no canonical path yet or length is zero, and we have a / followed by a dot...
+<span class="fc bfc" id="L1778" title="All 2 branches covered.">            if (slash == -1) {</span>
+                // we don't have another slash after this, so replace /. with /
+<span class="pc bpc" id="L1780" title="2 of 6 branches missed.">                if (canonicalPath != null &amp;&amp; canonicalPath.length() == 0 &amp;&amp; slash == -1) canonicalPath += &quot;/&quot;;</span>
+            } else {
+                // we do have another slash; omit both / and . (JRUBY-1606)
+            }
+<span class="fc bfc" id="L1784" title="All 2 branches covered.">        } else if (child.equals(&quot;..&quot;)) {</span>
+<span class="pc bpc" id="L1785" title="1 of 2 branches missed.">            if (canonicalPath == null) throw new IllegalArgumentException(&quot;Cannot have .. at the start of an absolute path&quot;);</span>
+<span class="fc" id="L1786">            int lastDir = canonicalPath.lastIndexOf('/');</span>
+<span class="fc bfc" id="L1787" title="All 2 branches covered.">            if (lastDir == -1) {</span>
+<span class="pc bpc" id="L1788" title="1 of 2 branches missed.">                if (startsWithDriveLetterOnWindows(canonicalPath)) {</span>
+                    // do nothing, we should not delete the drive letter
+                } else {
+<span class="fc" id="L1791">                    canonicalPath = &quot;&quot;;</span>
+                }
+            } else {
+<span class="fc" id="L1794">                canonicalPath = canonicalPath.substring(0, lastDir);</span>
+            }
+<span class="fc bfc" id="L1796" title="All 2 branches covered.">        } else if (canonicalPath == null) {</span>
+<span class="fc" id="L1797">            canonicalPath = child;</span>
+        } else {
+<span class="fc" id="L1799">            canonicalPath += &quot;/&quot; + child;</span>
+        }
+
+<span class="fc" id="L1802">        return canonicalize(canonicalPath, remaining);</span>
+    }
+    
+    /**
+     * Check if HOME environment variable is not nil nor empty
+     * @param context 
+     */
+    private static void checkHome(ThreadContext context) {
+<span class="fc" id="L1810">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L1811">        RubyHash env = runtime.getENV();</span>
+<span class="fc" id="L1812">        String home = (String) env.get(runtime.newString(&quot;HOME&quot;));</span>
+<span class="fc bfc" id="L1813" title="All 4 branches covered.">        if (home == null || home.equals(&quot;&quot;)) {</span>
+<span class="fc" id="L1814">            throw runtime.newArgumentError(&quot;couldn't find HOME environment -- expanding `~'&quot;);</span>
+        }
+<span class="fc" id="L1816">    }</span>
+
+    private static String inspectJoin(ThreadContext context, IRubyObject recv, RubyArray parent, RubyArray array) {
+<span class="fc" id="L1819">        Ruby runtime = context.runtime;</span>
+
+        // If already inspecting, there is no need to register/unregister again.
+<span class="pc bpc" id="L1822" title="1 of 2 branches missed.">        if (runtime.isInspecting(parent)) return join(context, recv, array).toString();</span>
+
+        try {
+<span class="fc" id="L1825">            runtime.registerInspecting(parent);</span>
+<span class="fc" id="L1826">            return join(context, recv, array).toString();</span>
+        } finally {
+<span class="fc" id="L1828">            runtime.unregisterInspecting(parent);</span>
+        }
+    }
+
+    private static RubyString join(ThreadContext context, IRubyObject recv, RubyArray ary) {
+<span class="fc" id="L1833">        IRubyObject[] args = ary.toJavaArray();</span>
+<span class="fc" id="L1834">        boolean isTainted = false;</span>
+<span class="fc" id="L1835">        StringBuilder buffer = new StringBuilder();</span>
+<span class="fc" id="L1836">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L1837">        String separator = context.getRuntime().getClass(&quot;File&quot;).getConstant(&quot;SEPARATOR&quot;).toString();</span>
+
+<span class="fc bfc" id="L1839" title="All 2 branches covered.">        for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="fc bfc" id="L1840" title="All 2 branches covered.">            if (args[i].isTaint()) {</span>
+<span class="fc" id="L1841">                isTainted = true;</span>
+            }
+            String element;
+<span class="fc bfc" id="L1844" title="All 2 branches covered.">            if (args[i] instanceof RubyString) {</span>
+<span class="fc" id="L1845">                element = args[i].convertToString().getUnicodeValue();</span>
+<span class="fc bfc" id="L1846" title="All 2 branches covered.">            } else if (args[i] instanceof RubyArray) {</span>
+<span class="fc bfc" id="L1847" title="All 2 branches covered.">                if (runtime.isInspecting(args[i])) {</span>
+<span class="fc" id="L1848">                    throw runtime.newArgumentError(&quot;recursive array&quot;);</span>
+                } else {
+<span class="fc" id="L1850">                    element = inspectJoin(context, recv, ary, ((RubyArray)args[i]));</span>
+                }
+            } else {
+<span class="fc" id="L1853">                RubyString path = get_path(context, args[i]);</span>
+<span class="fc" id="L1854">                element = path.getUnicodeValue();</span>
+            }
+
+<span class="fc" id="L1857">            chomp(buffer);</span>
+<span class="fc bfc" id="L1858" title="All 4 branches covered.">            if (i &gt; 0 &amp;&amp; !element.startsWith(separator)) {</span>
+<span class="fc" id="L1859">                buffer.append(separator);</span>
+            }
+<span class="fc" id="L1861">            buffer.append(element);</span>
+        }
+
+<span class="fc" id="L1864">        RubyString fixedStr = RubyString.newString(runtime, buffer.toString());</span>
+<span class="fc" id="L1865">        fixedStr.setTaint(isTainted);</span>
+<span class="fc" id="L1866">        return fixedStr;</span>
+    }
+
+    private static void chomp(StringBuilder buffer) {
+<span class="fc" id="L1870">        int lastIndex = buffer.length() - 1;</span>
+
+<span class="pc bpc" id="L1872" title="1 of 6 branches missed.">        while (lastIndex &gt;= 0 &amp;&amp; (buffer.lastIndexOf(&quot;/&quot;) == lastIndex || buffer.lastIndexOf(&quot;\\&quot;) == lastIndex)) {</span>
+<span class="fc" id="L1873">            buffer.setLength(lastIndex);</span>
+<span class="fc" id="L1874">            lastIndex--;</span>
+        }
+<span class="fc" id="L1876">    }</span>
+
+    private static IRubyObject truncateCommon(ThreadContext context, IRubyObject recv, IRubyObject arg1, IRubyObject arg2) {
+<span class="fc" id="L1879">        RubyString filename = arg1.convertToString(); // TODO: SafeStringValue here</span>
+<span class="fc" id="L1880">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L1881">        RubyInteger newLength = arg2.convertToInteger();</span>
+
+        File testFile ;
+<span class="fc" id="L1884">        File childFile = new File(filename.getUnicodeValue() );</span>
+<span class="fc" id="L1885">        String filenameString = Helpers.decodeByteList(runtime, filename.getByteList());</span>
+
+<span class="pc bpc" id="L1887" title="1 of 2 branches missed.">        if ( childFile.isAbsolute() ) {</span>
+<span class="fc" id="L1888">            testFile = childFile ;</span>
+        } else {
+<span class="nc" id="L1890">            testFile = new File(runtime.getCurrentDirectory(), filenameString);</span>
+        }
+
+<span class="fc bfc" id="L1893" title="All 2 branches covered.">        if (!testFile.exists()) {</span>
+<span class="fc" id="L1894">            throw runtime.newErrnoENOENTError(filenameString);</span>
+        }
+
+<span class="fc bfc" id="L1897" title="All 2 branches covered.">        if (newLength.getLongValue() &lt; 0) {</span>
+<span class="fc" id="L1898">            throw runtime.newErrnoEINVALError(filenameString);</span>
+        }
+
+<span class="fc" id="L1901">        IRubyObject[] args = new IRubyObject[] { filename, runtime.newString(&quot;r+&quot;) };</span>
+<span class="fc" id="L1902">        RubyFile file = (RubyFile) open(context, recv, args, Block.NULL_BLOCK);</span>
+<span class="fc" id="L1903">        file.truncate(context, newLength);</span>
+<span class="fc" id="L1904">        file.close();</span>
+
+<span class="fc" id="L1906">        return RubyFixnum.zero(runtime);</span>
+    }
+
+    @Deprecated
+    public IRubyObject initialize19(IRubyObject[] args, Block block) {
+<span class="nc" id="L1911">        return initialize(null, args, block);</span>
+    }
+
+    private static final long serialVersionUID = 1L;
+
+    public static final int LOCK_SH = PosixShim.LOCK_SH;
+    public static final int LOCK_EX = PosixShim.LOCK_EX;
+    public static final int LOCK_NB = PosixShim.LOCK_NB;
+    public static final int LOCK_UN = PosixShim.LOCK_UN;
+
+    private static final int FNM_NOESCAPE = 1;
+    private static final int FNM_PATHNAME = 2;
+    private static final int FNM_DOTMATCH = 4;
+    private static final int FNM_CASEFOLD = 8;
+    private static final int FNM_EXTGLOB = 16;
+<span class="pc bpc" id="L1926" title="1 of 2 branches missed.">    private static final int FNM_SYSCASE = Platform.IS_WINDOWS ? FNM_CASEFOLD : 0;</span>
+
+<span class="fc" id="L1928">    private static final String[] SLASHES = {&quot;&quot;, &quot;/&quot;, &quot;//&quot;};</span>
+<span class="fc" id="L1929">    private static Pattern URI_PREFIX = Pattern.compile(&quot;^(jar:)?[a-z]{2,}:(.*)&quot;);</span>
+
+    @Deprecated
+    protected String path;
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

@@ -1,0 +1,359 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyZlib.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.zlib</a> &gt; <span class="el_source">RubyZlib.java</span></div><h1>RubyZlib.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2006 Ola Bini &lt;ola@ologix.com&gt;
+ * Copyright (C) 2006 Ola Bini &lt;ola.bini@ki.se&gt;
+ * Copyright (C) 2006 Dave Brosius &lt;dbrosius@mebigfatguy.com&gt;
+ * Copyright (C) 2006 Peter K Chan &lt;peter@oaktop.com&gt;
+ * Copyright (C) 2009 Aurelian Oancea &lt;aurelian@locknet.ro&gt;
+ * Copyright (C) 2009 Vladimir Sizikov &lt;vsizikov@gmail.com&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.ext.zlib;
+
+import java.lang.reflect.Field;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import java.util.zip.CRC32;
+import java.util.zip.Adler32;
+
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyBasicObject;
+import org.jruby.RubyClass;
+import org.jruby.RubyModule;
+import org.jruby.RubyNumeric;
+import org.jruby.RubyException;
+
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.anno.JRubyModule;
+
+import org.jruby.exceptions.RaiseException;
+
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import static org.jruby.runtime.Visibility.*;
+import org.jruby.runtime.builtin.IRubyObject;
+
+import static org.jruby.ext.zlib.Zlib.*;
+
+import org.jruby.util.ByteList;
+
+import com.jcraft.jzlib.JZlib;
+
+import static org.jruby.CompatVersion.*;
+
+@JRubyModule(name=&quot;Zlib&quot;)
+<span class="nc" id="L72">public class RubyZlib {</span>
+    // version
+    public final static String ZLIB_VERSION = &quot;1.2.3.3&quot;;
+    public final static String VERSION = &quot;0.6.0&quot;;
+
+<span class="nc" id="L77">    private static final Field crc32InternalField = getCRC32InternalField();</span>
+
+    private static final Field getCRC32InternalField() {
+        try {
+<span class="nc" id="L81">            Field field = CRC32.class.getDeclaredField(&quot;crc&quot;);</span>
+<span class="nc" id="L82">            field.setAccessible(true);</span>
+<span class="nc" id="L83">            field.setInt(new CRC32(), 1);</span>
+<span class="nc" id="L84">            return field;</span>
+<span class="nc" id="L85">        } catch(NoSuchFieldException nsfe) {</span>
+<span class="nc" id="L86">            return null;</span>
+<span class="nc" id="L87">        } catch(IllegalAccessException iae) {</span>
+<span class="nc" id="L88">            return null;</span>
+        }
+    }
+
+    /** Create the Zlib module and add it to the Ruby runtime.
+     * 
+     */
+    public static RubyModule createZlibModule(Ruby runtime) {
+<span class="nc" id="L96">        RubyModule mZlib = runtime.defineModule(&quot;Zlib&quot;);</span>
+<span class="nc" id="L97">        mZlib.defineAnnotatedMethods(RubyZlib.class);</span>
+
+<span class="nc" id="L99">        RubyClass cStandardError = runtime.getStandardError();</span>
+<span class="nc" id="L100">        RubyClass cZlibError = mZlib.defineClassUnder(&quot;Error&quot;, cStandardError, cStandardError.getAllocator());</span>
+<span class="nc" id="L101">        mZlib.defineClassUnder(&quot;StreamEnd&quot;, cZlibError, cZlibError.getAllocator());</span>
+<span class="nc" id="L102">        mZlib.defineClassUnder(&quot;StreamError&quot;, cZlibError, cZlibError.getAllocator());</span>
+<span class="nc" id="L103">        mZlib.defineClassUnder(&quot;BufError&quot;, cZlibError, cZlibError.getAllocator());</span>
+<span class="nc" id="L104">        mZlib.defineClassUnder(&quot;NeedDict&quot;, cZlibError, cZlibError.getAllocator());</span>
+<span class="nc" id="L105">        mZlib.defineClassUnder(&quot;MemError&quot;, cZlibError, cZlibError.getAllocator());</span>
+<span class="nc" id="L106">        mZlib.defineClassUnder(&quot;VersionError&quot;, cZlibError, cZlibError.getAllocator());</span>
+<span class="nc" id="L107">        mZlib.defineClassUnder(&quot;DataError&quot;, cZlibError, cZlibError.getAllocator());</span>
+
+<span class="nc" id="L109">        RubyClass cGzFile = mZlib.defineClassUnder(&quot;GzipFile&quot;, runtime.getObject(), RubyGzipFile.GZIPFILE_ALLOCATOR);</span>
+<span class="nc" id="L110">        cGzFile.defineAnnotatedMethods(RubyGzipFile.class);</span>
+
+<span class="nc" id="L112">        cGzFile.defineClassUnder(&quot;Error&quot;, cZlibError, cZlibError.getAllocator());</span>
+<span class="nc" id="L113">        RubyClass cGzError = cGzFile.defineClassUnder(&quot;Error&quot;, cZlibError, cZlibError.getAllocator());</span>
+<span class="nc" id="L114">        cGzError.addReadAttribute(runtime.getCurrentContext(), &quot;input&quot;);</span>
+<span class="nc" id="L115">        cGzError.defineAnnotatedMethods(RubyGzipFile.Error.class);</span>
+<span class="nc" id="L116">        cGzFile.defineClassUnder(&quot;CRCError&quot;, cGzError, cGzError.getAllocator());</span>
+<span class="nc" id="L117">        cGzFile.defineClassUnder(&quot;NoFooter&quot;, cGzError, cGzError.getAllocator());</span>
+<span class="nc" id="L118">        cGzFile.defineClassUnder(&quot;LengthError&quot;, cGzError, cGzError.getAllocator());</span>
+
+<span class="nc" id="L120">        RubyClass cGzReader = mZlib.defineClassUnder(&quot;GzipReader&quot;, cGzFile, JZlibRubyGzipReader.GZIPREADER_ALLOCATOR);</span>
+<span class="nc" id="L121">        cGzReader.includeModule(runtime.getEnumerable());</span>
+<span class="nc" id="L122">        cGzReader.defineAnnotatedMethods(JZlibRubyGzipReader.class);</span>
+
+<span class="nc" id="L124">        RubyClass cGzWriter = mZlib.defineClassUnder(&quot;GzipWriter&quot;, cGzFile, JZlibRubyGzipWriter.GZIPWRITER_ALLOCATOR);</span>
+<span class="nc" id="L125">        cGzWriter.defineAnnotatedMethods(JZlibRubyGzipWriter.class);</span>
+
+<span class="nc" id="L127">        mZlib.defineConstant(&quot;ZLIB_VERSION&quot;, runtime.newString(ZLIB_VERSION));</span>
+<span class="nc" id="L128">        mZlib.defineConstant(&quot;VERSION&quot;, runtime.newString(VERSION));</span>
+
+<span class="nc" id="L130">        mZlib.defineConstant(&quot;BINARY&quot;, runtime.newFixnum(Z_BINARY));</span>
+<span class="nc" id="L131">        mZlib.defineConstant(&quot;ASCII&quot;, runtime.newFixnum(Z_ASCII));</span>
+<span class="nc" id="L132">        mZlib.defineConstant(&quot;UNKNOWN&quot;, runtime.newFixnum(Z_UNKNOWN));</span>
+
+<span class="nc" id="L134">        mZlib.defineConstant(&quot;DEF_MEM_LEVEL&quot;, runtime.newFixnum(8));</span>
+<span class="nc" id="L135">        mZlib.defineConstant(&quot;MAX_MEM_LEVEL&quot;, runtime.newFixnum(9));</span>
+
+<span class="nc" id="L137">        mZlib.defineConstant(&quot;OS_UNIX&quot;, runtime.newFixnum(OS_UNIX));</span>
+<span class="nc" id="L138">        mZlib.defineConstant(&quot;OS_UNKNOWN&quot;, runtime.newFixnum(OS_UNKNOWN));</span>
+<span class="nc" id="L139">        mZlib.defineConstant(&quot;OS_CODE&quot;, runtime.newFixnum(OS_CODE));</span>
+<span class="nc" id="L140">        mZlib.defineConstant(&quot;OS_ZSYSTEM&quot;, runtime.newFixnum(OS_ZSYSTEM));</span>
+<span class="nc" id="L141">        mZlib.defineConstant(&quot;OS_VMCMS&quot;, runtime.newFixnum(OS_VMCMS));</span>
+<span class="nc" id="L142">        mZlib.defineConstant(&quot;OS_VMS&quot;, runtime.newFixnum(OS_VMS));</span>
+<span class="nc" id="L143">        mZlib.defineConstant(&quot;OS_RISCOS&quot;, runtime.newFixnum(OS_RISCOS));</span>
+<span class="nc" id="L144">        mZlib.defineConstant(&quot;OS_MACOS&quot;, runtime.newFixnum(OS_MACOS));</span>
+<span class="nc" id="L145">        mZlib.defineConstant(&quot;OS_OS2&quot;, runtime.newFixnum(OS_OS2));</span>
+<span class="nc" id="L146">        mZlib.defineConstant(&quot;OS_AMIGA&quot;, runtime.newFixnum(OS_AMIGA));</span>
+<span class="nc" id="L147">        mZlib.defineConstant(&quot;OS_QDOS&quot;, runtime.newFixnum(OS_QDOS));</span>
+<span class="nc" id="L148">        mZlib.defineConstant(&quot;OS_WIN32&quot;, runtime.newFixnum(OS_WIN32));</span>
+<span class="nc" id="L149">        mZlib.defineConstant(&quot;OS_ATARI&quot;, runtime.newFixnum(OS_ATARI));</span>
+<span class="nc" id="L150">        mZlib.defineConstant(&quot;OS_MSDOS&quot;, runtime.newFixnum(OS_MSDOS));</span>
+<span class="nc" id="L151">        mZlib.defineConstant(&quot;OS_CPM&quot;, runtime.newFixnum(OS_CPM));</span>
+<span class="nc" id="L152">        mZlib.defineConstant(&quot;OS_TOPS20&quot;, runtime.newFixnum(OS_TOPS20));</span>
+
+<span class="nc" id="L154">        mZlib.defineConstant(&quot;DEFAULT_STRATEGY&quot;, runtime.newFixnum(JZlib.Z_DEFAULT_STRATEGY));</span>
+<span class="nc" id="L155">        mZlib.defineConstant(&quot;FILTERED&quot;, runtime.newFixnum(JZlib.Z_FILTERED));</span>
+<span class="nc" id="L156">        mZlib.defineConstant(&quot;HUFFMAN_ONLY&quot;, runtime.newFixnum(JZlib.Z_HUFFMAN_ONLY));</span>
+
+<span class="nc" id="L158">        mZlib.defineConstant(&quot;NO_FLUSH&quot;, runtime.newFixnum(JZlib.Z_NO_FLUSH));</span>
+<span class="nc" id="L159">        mZlib.defineConstant(&quot;SYNC_FLUSH&quot;, runtime.newFixnum(JZlib.Z_SYNC_FLUSH));</span>
+<span class="nc" id="L160">        mZlib.defineConstant(&quot;FULL_FLUSH&quot;, runtime.newFixnum(JZlib.Z_FULL_FLUSH));</span>
+<span class="nc" id="L161">        mZlib.defineConstant(&quot;FINISH&quot;, runtime.newFixnum(JZlib.Z_FINISH));</span>
+
+<span class="nc" id="L163">        mZlib.defineConstant(&quot;NO_COMPRESSION&quot;, runtime.newFixnum(JZlib.Z_NO_COMPRESSION));</span>
+<span class="nc" id="L164">        mZlib.defineConstant(&quot;BEST_SPEED&quot;, runtime.newFixnum(JZlib.Z_BEST_SPEED));</span>
+<span class="nc" id="L165">        mZlib.defineConstant(&quot;DEFAULT_COMPRESSION&quot;, runtime.newFixnum(JZlib.Z_DEFAULT_COMPRESSION));</span>
+<span class="nc" id="L166">        mZlib.defineConstant(&quot;BEST_COMPRESSION&quot;, runtime.newFixnum(JZlib.Z_BEST_COMPRESSION));</span>
+
+<span class="nc" id="L168">        mZlib.defineConstant(&quot;MAX_WBITS&quot;, runtime.newFixnum(JZlib.MAX_WBITS));</span>
+
+        // ZStream actually *isn't* allocatable
+<span class="nc" id="L171">        RubyClass cZStream = mZlib.defineClassUnder(&quot;ZStream&quot;, runtime.getObject(), ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);</span>
+<span class="nc" id="L172">        cZStream.defineAnnotatedMethods(ZStream.class);</span>
+<span class="nc" id="L173">        cZStream.undefineMethod(&quot;new&quot;);</span>
+
+<span class="nc" id="L175">        RubyClass cInflate = mZlib.defineClassUnder(&quot;Inflate&quot;, cZStream, JZlibInflate.INFLATE_ALLOCATOR);</span>
+<span class="nc" id="L176">        cInflate.defineAnnotatedMethods(JZlibInflate.class);</span>
+
+<span class="nc" id="L178">        RubyClass cDeflate = mZlib.defineClassUnder(&quot;Deflate&quot;, cZStream, JZlibDeflate.DEFLATE_ALLOCATOR);</span>
+<span class="nc" id="L179">        cDeflate.defineAnnotatedMethods(JZlibDeflate.class);</span>
+
+<span class="nc" id="L181">        runtime.getKernel().callMethod(runtime.getCurrentContext(), &quot;require&quot;, runtime.newString(&quot;stringio&quot;));</span>
+
+<span class="nc" id="L183">        return mZlib;</span>
+    }
+
+    @JRubyClass(name=&quot;Zlib::Error&quot;, parent=&quot;StandardError&quot;)
+<span class="nc" id="L187">    public static class Error {}</span>
+    @JRubyClass(name=&quot;Zlib::StreamEnd&quot;, parent=&quot;Zlib::Error&quot;)
+<span class="nc" id="L189">    public static class StreamEnd extends Error {}</span>
+    @JRubyClass(name=&quot;Zlib::StreamError&quot;, parent=&quot;Zlib::Error&quot;)
+<span class="nc" id="L191">    public static class StreamError extends Error {}</span>
+    @JRubyClass(name=&quot;Zlib::BufError&quot;, parent=&quot;Zlib::Error&quot;)
+<span class="nc" id="L193">    public static class BufError extends Error {}</span>
+    @JRubyClass(name=&quot;Zlib::NeedDict&quot;, parent=&quot;Zlib::Error&quot;)
+<span class="nc" id="L195">    public static class NeedDict extends Error {}</span>
+    @JRubyClass(name=&quot;Zlib::MemError&quot;, parent=&quot;Zlib::Error&quot;)
+<span class="nc" id="L197">    public static class MemError extends Error {}</span>
+    @JRubyClass(name=&quot;Zlib::VersionError&quot;, parent=&quot;Zlib::Error&quot;)
+<span class="nc" id="L199">    public static class VersionError extends Error {}</span>
+<span class="nc" id="L200">    @JRubyClass(name=&quot;Zlib::DataError&quot;, parent=&quot;Zlib::Error&quot;)</span>
+<span class="nc" id="L201">    public static class DataError extends Error {}</span>
+
+    @JRubyMethod(name = &quot;zlib_version&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject zlib_version(IRubyObject recv) {
+<span class="nc" id="L205">        RubyBasicObject res = (RubyBasicObject) ((RubyModule)recv).getConstant(&quot;ZLIB_VERSION&quot;);</span>
+        // MRI behavior, enforced by tests
+<span class="nc" id="L207">        res.setTaint(true);</span>
+<span class="nc" id="L208">        return res;</span>
+    }
+
+    @JRubyMethod(name = &quot;crc32&quot;, optional = 2, module = true, visibility = PRIVATE)
+    public static IRubyObject crc32(IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L213">        args = Arity.scanArgs(recv.getRuntime(),args,0,2);</span>
+<span class="nc" id="L214">        int start = 0;</span>
+<span class="nc" id="L215">        ByteList bytes = null;</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">        if (!args[0].isNil()) bytes = args[0].convertToString().getByteList();</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">        if (!args[1].isNil()) start = (int)RubyNumeric.num2long(args[1]);</span>
+
+<span class="nc" id="L219">        CRC32 checksum = new CRC32();</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">        boolean slow = crc32InternalField == null;</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">        if (bytes != null) {</span>
+<span class="nc bnc" id="L222" title="All 4 branches missed.">            if (start != 0 &amp;&amp; !slow) {</span>
+                try {
+<span class="nc" id="L224">                    crc32InternalField.setInt(checksum, start);</span>
+<span class="nc" id="L225">                } catch (IllegalAccessException iae) {</span>
+<span class="nc" id="L226">                    slow = true;</span>
+<span class="nc" id="L227">                }</span>
+            }
+<span class="nc" id="L229">            checksum.update(bytes.getUnsafeBytes(), bytes.begin(), bytes.length());</span>
+        }
+<span class="nc" id="L231">        long result = checksum.getValue();</span>
+<span class="nc bnc" id="L232" title="All 4 branches missed.">        if (start != 0 &amp;&amp; slow) {</span>
+<span class="nc" id="L233">            result = JZlib.crc32_combine(start, result, bytes.length());</span>
+        }
+<span class="nc" id="L235">        return recv.getRuntime().newFixnum(result);</span>
+    }
+
+    @JRubyMethod(name = &quot;adler32&quot;, optional = 2, module = true, visibility = PRIVATE)
+    public static IRubyObject adler32(IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L240">        args = Arity.scanArgs(recv.getRuntime(),args,0,2);</span>
+<span class="nc" id="L241">        int start = 1;</span>
+<span class="nc" id="L242">        ByteList bytes = null;</span>
+<span class="nc bnc" id="L243" title="All 2 branches missed.">        if (!args[0].isNil()) bytes = args[0].convertToString().getByteList();</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">        if (!args[1].isNil()) start = (int)RubyNumeric.num2long(args[1]);</span>
+
+<span class="nc" id="L246">        Adler32 checksum = new Adler32();</span>
+<span class="nc bnc" id="L247" title="All 2 branches missed.">        if (bytes != null) {</span>
+<span class="nc" id="L248">            checksum.update(bytes.getUnsafeBytes(), bytes.begin(), bytes.length());</span>
+        }
+<span class="nc" id="L250">        long result = checksum.getValue();</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">        if (start != 1) {</span>
+<span class="nc" id="L252">            result = JZlib.adler32_combine(start, result, bytes.length());</span>
+        }
+<span class="nc" id="L254">        return recv.getRuntime().newFixnum(result);</span>
+    }
+
+    @JRubyMethod
+    public static IRubyObject inflate(ThreadContext context, IRubyObject recv, IRubyObject string) {
+<span class="nc" id="L259">        return JZlibInflate.s_inflate(context, recv, string);</span>
+    }
+
+    @JRubyMethod(required = 1, optional = 1, module = true)
+    public static IRubyObject deflate(IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L264">        return JZlibDeflate.s_deflate(recv, args);</span>
+    }
+
+    @JRubyMethod(name = &quot;crc_table&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject crc_table(IRubyObject recv) {
+<span class="nc" id="L269">        Ruby runtime = recv.getRuntime();</span>
+<span class="nc" id="L270">        int[] table = com.jcraft.jzlib.CRC32.getCRC32Table();</span>
+<span class="nc" id="L271">        RubyArray array = runtime.newArray(table.length);</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">        for (int i = 0; i &lt; table.length; i++) {</span>
+<span class="nc" id="L273">            array.append(runtime.newFixnum(table[i] &amp; 0xffffffffL));</span>
+        }
+<span class="nc" id="L275">        return array;</span>
+    }
+
+    @JRubyMethod(name = &quot;crc32_combine&quot;, required = 3, module = true, visibility = PRIVATE)
+    public static IRubyObject crc32_combine(IRubyObject recv,
+                                            IRubyObject arg0,
+                                            IRubyObject arg1,
+                                            IRubyObject arg2) {
+<span class="nc" id="L283">        long crc1 = RubyNumeric.num2long(arg0);</span>
+<span class="nc" id="L284">        long crc2 = RubyNumeric.num2long(arg1);</span>
+<span class="nc" id="L285">        long len2 = RubyNumeric.num2long(arg2);</span>
+
+<span class="nc" id="L287">        long crc3 = com.jcraft.jzlib.JZlib.crc32_combine(crc1, crc2, len2);</span>
+<span class="nc" id="L288">        return recv.getRuntime().newFixnum(crc3);</span>
+    }
+
+    @JRubyMethod(name = &quot;adler32_combine&quot;, required = 3, module = true, visibility = PRIVATE)
+    public static IRubyObject adler32_combine(IRubyObject recv,
+                                            IRubyObject arg0,
+                                            IRubyObject arg1,
+                                            IRubyObject arg2) {
+<span class="nc" id="L296">        long adler1 = RubyNumeric.num2long(arg0);</span>
+<span class="nc" id="L297">        long adler2 = RubyNumeric.num2long(arg1);</span>
+<span class="nc" id="L298">        long len2 = RubyNumeric.num2long(arg2);</span>
+
+<span class="nc" id="L300">        long adler3 = com.jcraft.jzlib.JZlib.adler32_combine(adler1, adler2, len2);</span>
+<span class="nc" id="L301">        return recv.getRuntime().newFixnum(adler3);</span>
+    }
+
+    static RaiseException newZlibError(Ruby runtime, String message) {
+<span class="nc" id="L305">        return newZlibError(runtime, &quot;Error&quot;, message);</span>
+    }
+
+    static RaiseException newBufError(Ruby runtime, String message) {
+<span class="nc" id="L309">        return newZlibError(runtime, &quot;BufError&quot;, message);</span>
+    }
+
+    static RaiseException newDictError(Ruby runtime, String message) {
+<span class="nc" id="L313">        return newZlibError(runtime, &quot;NeedDict&quot;, message);</span>
+    }
+
+    static RaiseException newStreamError(Ruby runtime, String message) {
+<span class="nc" id="L317">        return newZlibError(runtime, &quot;StreamError&quot;, message);</span>
+    }
+
+    static RaiseException newDataError(Ruby runtime, String message) {
+<span class="nc" id="L321">        return newZlibError(runtime, &quot;DataError&quot;, message);</span>
+    }
+
+    static RaiseException newZlibError(Ruby runtime, String klass, String message) {
+<span class="nc" id="L325">        RubyClass errorClass = runtime.getModule(&quot;Zlib&quot;).getClass(klass);</span>
+<span class="nc" id="L326">        return new RaiseException(RubyException.newException(runtime, errorClass, message), true);</span>
+    }
+
+    static RaiseException newGzipFileError(Ruby runtime, String message) {
+<span class="nc" id="L330">        return newGzipFileError(runtime, &quot;Error&quot;, message);</span>
+    }
+
+    static RaiseException newCRCError(Ruby runtime, String message) {
+<span class="nc" id="L334">        return newGzipFileError(runtime, &quot;CRCError&quot;, message);</span>
+    }
+
+    static RaiseException newNoFooter(Ruby runtime, String message) {
+<span class="nc" id="L338">        return newGzipFileError(runtime, &quot;NoFooter&quot;, message);</span>
+    }
+
+    static RaiseException newLengthError(Ruby runtime, String message) {
+<span class="nc" id="L342">        return newGzipFileError(runtime, &quot;LengthError&quot;, message);</span>
+    }
+
+    static RaiseException newGzipFileError(Ruby runtime, String klass, String message) {
+<span class="nc" id="L346">        RubyClass errorClass = runtime.getModule(&quot;Zlib&quot;).getClass(&quot;GzipFile&quot;).getClass(klass);</span>
+<span class="nc" id="L347">        RubyException excn = RubyException.newException(runtime, errorClass, message);</span>
+        // TODO: not yet supported. rewrite GzipReader/Writer with Inflate/Deflate?
+<span class="nc" id="L349">        excn.setInstanceVariable(&quot;@input&quot;, runtime.getNil());</span>
+<span class="nc" id="L350">        return new RaiseException(excn, true);</span>
+    }
+    
+    static int FIXNUMARG(IRubyObject obj, int ifnil) {
+<span class="nc bnc" id="L354" title="All 2 branches missed.">        if (obj.isNil()) return ifnil;</span>
+        
+<span class="nc" id="L356">        return RubyNumeric.fix2int(obj);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

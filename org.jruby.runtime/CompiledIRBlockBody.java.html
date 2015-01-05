@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>CompiledIRBlockBody.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime</a> &gt; <span class="el_source">CompiledIRBlockBody.java</span></div><h1>CompiledIRBlockBody.java</h1><pre class="source lang-java linenums">package org.jruby.runtime;
+
+import org.jruby.EvalType;
+import org.jruby.ir.IRClosure;
+import org.jruby.ir.IRFlags;
+import org.jruby.ir.IRScope;
+import org.jruby.ir.representations.CFG;
+import org.jruby.ir.runtime.IRRuntimeHelpers;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.Block.Type;
+import org.jruby.runtime.builtin.IRubyObject;
+
+import java.lang.invoke.MethodHandle;
+
+public class CompiledIRBlockBody extends IRBlockBody {
+    protected final IRClosure closure;
+    protected final MethodHandle handle;
+    protected boolean pushScope;
+    protected boolean reuseParentScope;
+
+    public CompiledIRBlockBody(MethodHandle handle, IRScope closure, int arity) {
+<span class="fc" id="L22">        super(closure.getStaticScope(), ((IRClosure)closure).getParameterList(), closure.getFileName(), closure.getLineNumber(), Arity.createArity(arity));</span>
+<span class="fc" id="L23">        this.handle = handle;</span>
+<span class="fc" id="L24">        this.closure = (IRClosure)closure;</span>
+        // FIXME: duplicated from InterpreterContext
+<span class="fc" id="L26">        this.reuseParentScope = closure.getFlags().contains(IRFlags.REUSE_PARENT_DYNSCOPE);</span>
+<span class="pc bpc" id="L27" title="1 of 4 branches missed.">        this.pushScope = !closure.getFlags().contains(IRFlags.DYNSCOPE_ELIMINATED) &amp;&amp; !this.reuseParentScope;</span>
+
+        // Done in the interpreter (WrappedIRClosure) but we do it here
+<span class="fc" id="L30">        closure.getStaticScope().determineModule();</span>
+<span class="fc" id="L31">    }</span>
+
+    protected IRubyObject commonYieldPath(ThreadContext context, IRubyObject[] args, IRubyObject self, Binding binding, Type type, Block block) {
+
+        // SSS: Important!  Use getStaticScope() to use a copy of the static-scope stored in the block-body.
+        // Do not use 'closure.getStaticScope()' -- that returns the original copy of the static scope.
+        // This matters because blocks created for Thread bodies modify the static-scope field of the block-body
+        // that records additional state about the block body.
+        //
+        // FIXME: Rather than modify static-scope, it seems we ought to set a field in block-body which is then
+        // used to tell dynamic-scope that it is a dynamic scope for a thread body.  Anyway, to be revisited later!
+<span class="fc" id="L42">        Visibility oldVis = binding.getFrame().getVisibility();</span>
+<span class="fc" id="L43">        Frame prevFrame = context.preYieldNoScope(binding);</span>
+
+        // SSS FIXME: Why is self null in non-binding-eval contexts?
+<span class="pc bpc" id="L46" title="1 of 4 branches missed.">        if (self == null || this.evalType.get() == EvalType.BINDING_EVAL) {</span>
+<span class="fc" id="L47">            self = useBindingSelf(binding);</span>
+        }
+
+        // SSS FIXME: Maybe, we should allocate a NoVarsScope/DummyScope for for-loop bodies because the static-scope here
+        // probably points to the parent scope? To be verified and fixed if necessary. There is no harm as it is now. It
+        // is just wasteful allocation since the scope is not used at all.
+
+        // Pass on eval state info to the dynamic scope and clear it on the block-body
+<span class="fc" id="L55">        DynamicScope prevScope = binding.getDynamicScope();</span>
+<span class="fc bfc" id="L56" title="All 2 branches covered.">        if (this.pushScope) {</span>
+<span class="fc" id="L57">            context.pushScope(DynamicScope.newDynamicScope(getStaticScope(), prevScope, this.evalType.get()));</span>
+<span class="fc bfc" id="L58" title="All 2 branches covered.">        } else if (this.reuseParentScope) {</span>
+            // Reuse!
+            // We can avoid the push only if surrounding vars aren't referenced!
+<span class="fc" id="L61">            context.pushScope(prevScope);</span>
+        }
+<span class="fc" id="L63">        this.evalType.set(EvalType.NONE);</span>
+
+        try {
+<span class="fc" id="L66">            return (IRubyObject)handle.invokeExact(context, getStaticScope(), self, args, block, binding.getMethod(), type);</span>
+<span class="nc" id="L67">        } catch (Throwable t) {</span>
+<span class="nc" id="L68">            Helpers.throwException(t);</span>
+<span class="nc" id="L69">            return null; // not reached</span>
+        } finally {
+            // IMPORTANT: Do not clear eval-type in case this is reused in bindings!
+            // Ex: eval(&quot;...&quot;, foo.instance_eval { binding })
+            // The dyn-scope used for binding needs to have its eval-type set to INSTANCE_EVAL
+<span class="pc" id="L74">            binding.getFrame().setVisibility(oldVis);</span>
+<span class="pc bpc" id="L75" title="4 of 12 branches missed.">            if (this.pushScope || this.reuseParentScope) {</span>
+<span class="pc" id="L76">                context.postYield(binding, prevFrame);</span>
+            } else {
+<span class="pc" id="L78">                context.postYieldNoScope(prevFrame);</span>
+            }
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

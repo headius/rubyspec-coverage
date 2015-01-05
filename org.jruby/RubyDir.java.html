@@ -1,0 +1,781 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyDir.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyDir.java</span></div><h1>RubyDir.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2002-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004-2005 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import static org.jruby.RubyEnumerator.enumeratorize;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import jnr.posix.FileStat;
+
+import jnr.posix.POSIX;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.anno.JRubyClass;
+import jnr.posix.util.Platform;
+import org.jcodings.Encoding;
+import org.jcodings.specific.UTF8Encoding;
+
+import org.jruby.exceptions.RaiseException;
+import org.jruby.javasupport.JavaUtil;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.Visibility;
+import org.jruby.util.Dir;
+import org.jruby.util.FileResource;
+import org.jruby.util.JRubyFile;
+import org.jruby.util.ByteList;
+
+/**
+ * .The Ruby built-in class Dir.
+ *
+ * @author  jvoegele
+ */
+@JRubyClass(name = &quot;Dir&quot;, include = &quot;Enumerable&quot;)
+public class RubyDir extends RubyObject {
+    private RubyString path;       // What we passed to the constructor for method 'path'
+    protected FileResource dir;
+<span class="fc" id="L77">    private long lastModified = Long.MIN_VALUE;</span>
+    private String[] snapshot;     // snapshot of contents of directory
+    private int pos;               // current position in directory
+<span class="fc" id="L80">    private boolean isOpen = true;</span>
+
+<span class="fc" id="L82">    private final static Encoding UTF8 = UTF8Encoding.INSTANCE;</span>
+
+    public RubyDir(Ruby runtime, RubyClass type) {
+<span class="fc" id="L85">        super(runtime, type);</span>
+<span class="fc" id="L86">    }</span>
+
+<span class="fc" id="L88">    private static final ObjectAllocator DIR_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L91">            return new RubyDir(runtime, klass);</span>
+        }
+    };
+
+    public static RubyClass createDirClass(Ruby runtime) {
+<span class="fc" id="L96">        RubyClass dirClass = runtime.defineClass(&quot;Dir&quot;, runtime.getObject(), DIR_ALLOCATOR);</span>
+<span class="fc" id="L97">        runtime.setDir(dirClass);</span>
+
+<span class="fc" id="L99">        dirClass.setClassIndex(ClassIndex.DIR);</span>
+<span class="fc" id="L100">        dirClass.setReifiedClass(RubyDir.class);</span>
+
+<span class="fc" id="L102">        dirClass.includeModule(runtime.getEnumerable());</span>
+<span class="fc" id="L103">        dirClass.defineAnnotatedMethods(RubyDir.class);</span>
+
+<span class="fc" id="L105">        return dirClass;</span>
+    }
+
+    private final void checkDir() {
+<span class="fc" id="L109">        testFrozen(&quot;Dir&quot;);</span>
+<span class="fc" id="L110">        update();</span>
+
+<span class="fc bfc" id="L112" title="All 2 branches covered.">        if (!isOpen) throw getRuntime().newIOError(&quot;closed directory&quot;);</span>
+<span class="fc" id="L113">    }</span>
+
+    private void update() {
+<span class="pc bpc" id="L116" title="2 of 6 branches missed.">        if (snapshot == null || dir.exists() &amp;&amp; dir.lastModified() &gt; lastModified) {</span>
+<span class="fc" id="L117">            lastModified = dir.lastModified();</span>
+<span class="fc" id="L118">            List&lt;String&gt; snapshotList = new ArrayList&lt;String&gt;();</span>
+<span class="fc" id="L119">            snapshotList.addAll(getContents(dir));</span>
+<span class="fc" id="L120">            snapshot = snapshotList.toArray(new String[snapshotList.size()]);</span>
+        }
+<span class="fc" id="L122">    }</span>
+
+    /**
+     * Creates a new &lt;code&gt;Dir&lt;/code&gt;.  This method takes a snapshot of the
+     * contents of the directory at creation time, so changes to the contents
+     * of the directory will not be reflected during the lifetime of the
+     * &lt;code&gt;Dir&lt;/code&gt; object returned, so a new &lt;code&gt;Dir&lt;/code&gt; instance
+     * must be created to reflect changes to the underlying file system.
+     */
+    public IRubyObject initialize(ThreadContext context, IRubyObject arg) {
+<span class="nc" id="L132">        return initialize19(context, arg);</span>
+    }
+
+    @JRubyMethod(name = &quot;initialize&quot;)
+    public IRubyObject initialize19(ThreadContext context, IRubyObject arg) {
+<span class="fc" id="L137">        RubyString newPath = RubyFile.get_path(getRuntime().getCurrentContext(), arg).convertToString();</span>
+<span class="fc" id="L138">        path = newPath;</span>
+<span class="fc" id="L139">        pos = 0;</span>
+
+<span class="fc" id="L141">        String adjustedPath = RubyFile.adjustRootPathOnWindows(context.runtime, newPath.toString(), null);</span>
+<span class="fc" id="L142">        checkDirIsTwoSlashesOnWindows(getRuntime(), adjustedPath);</span>
+
+<span class="fc" id="L144">        dir = JRubyFile.createResource(context, adjustedPath);</span>
+<span class="fc" id="L145">        snapshot = getEntries(context, dir, adjustedPath);</span>
+
+<span class="fc" id="L147">        return this;</span>
+    }
+
+// ----- Ruby Class Methods ----------------------------------------------------
+
+    private static List&lt;ByteList&gt; dirGlobs(ThreadContext context, String cwd, IRubyObject[] args, int flags) {
+<span class="fc" id="L153">        List&lt;ByteList&gt; dirs = new ArrayList&lt;ByteList&gt;();</span>
+
+<span class="fc" id="L155">        POSIX posix = context.runtime.getPosix();</span>
+<span class="fc bfc" id="L156" title="All 2 branches covered.">        for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="fc" id="L157">            dirs.addAll(Dir.push_glob(posix, cwd, globArgumentAsByteList(context, args[i]), flags));</span>
+        }
+
+<span class="fc" id="L160">        return dirs;</span>
+    }
+
+    private static IRubyObject asRubyStringList(Ruby runtime, List&lt;ByteList&gt; dirs) {
+<span class="fc" id="L164">        List&lt;RubyString&gt; allFiles = new ArrayList&lt;RubyString&gt;();</span>
+<span class="fc" id="L165">        Encoding enc = runtime.getDefaultExternalEncoding();</span>
+<span class="pc bpc" id="L166" title="1 of 2 branches missed.">        if (enc == null) {</span>
+<span class="nc" id="L167">            enc = UTF8;</span>
+        }
+
+<span class="fc bfc" id="L170" title="All 2 branches covered.">        for (ByteList dir : dirs) {</span>
+<span class="fc" id="L171">            allFiles.add(RubyString.newString(runtime, dir, enc));</span>
+<span class="fc" id="L172">        }</span>
+
+<span class="fc" id="L174">        IRubyObject[] tempFileList = new IRubyObject[allFiles.size()];</span>
+<span class="fc" id="L175">        allFiles.toArray(tempFileList);</span>
+
+<span class="fc" id="L177">        return runtime.newArrayNoCopy(tempFileList);</span>
+    }
+
+    private static String getCWD(Ruby runtime) {
+        try {
+<span class="fc" id="L182">            return new org.jruby.util.NormalizedFile(runtime.getCurrentDirectory()).getCanonicalPath();</span>
+<span class="nc" id="L183">        } catch (Exception e) {</span>
+<span class="nc" id="L184">            return runtime.getCurrentDirectory();</span>
+        }
+    }
+
+    @JRubyMethod(name = &quot;[]&quot;, rest = true, meta = true)
+    public static IRubyObject aref(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L190">        Ruby runtime = context.runtime;</span>
+        List&lt;ByteList&gt; dirs;
+<span class="fc bfc" id="L192" title="All 2 branches covered.">        if (args.length == 1) {</span>
+<span class="fc" id="L193">            dirs = Dir.push_glob(runtime.getPosix(), getCWD(runtime), globArgumentAsByteList(context, args[0]), 0);</span>
+        } else {
+<span class="fc" id="L195">            dirs = dirGlobs(context, getCWD(runtime), args, 0);</span>
+        }
+
+<span class="fc" id="L198">        return asRubyStringList(runtime, dirs);</span>
+    }
+
+    private static ByteList globArgumentAsByteList(ThreadContext context, IRubyObject arg) {
+<span class="fc" id="L202">        return RubyFile.get_path(context, arg).getByteList();</span>
+    }
+
+    /**
+     * Returns an array of filenames matching the specified wildcard pattern
+     * &lt;code&gt;pat&lt;/code&gt;. If a block is given, the array is iterated internally
+     * with each filename is passed to the block in turn. In this case, Nil is
+     * returned.
+     */
+    @JRubyMethod(required = 1, optional = 1, meta = true)
+    public static IRubyObject glob(ThreadContext context, IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="fc" id="L213">        Ruby runtime = context.runtime;</span>
+<span class="fc bfc" id="L214" title="All 2 branches covered.">        int flags = args.length == 2 ? RubyNumeric.num2int(args[1]) : 0;</span>
+
+        List&lt;ByteList&gt; dirs;
+<span class="fc" id="L217">        IRubyObject tmp = args[0].checkArrayType();</span>
+<span class="fc bfc" id="L218" title="All 2 branches covered.">        if (tmp.isNil()) {</span>
+<span class="fc" id="L219">            dirs = Dir.push_glob(runtime.getPosix(), runtime.getCurrentDirectory(), globArgumentAsByteList(context, args[0]), flags);</span>
+        } else {
+<span class="fc" id="L221">            dirs = dirGlobs(context, getCWD(runtime), ((RubyArray) tmp).toJavaArray(), flags);</span>
+        }
+
+<span class="fc bfc" id="L224" title="All 2 branches covered.">        if (block.isGiven()) {</span>
+<span class="fc bfc" id="L225" title="All 2 branches covered.">            for (int i = 0; i &lt; dirs.size(); i++) {</span>
+<span class="fc" id="L226">                Encoding enc = runtime.getDefaultExternalEncoding();</span>
+<span class="pc bpc" id="L227" title="1 of 2 branches missed.">                if (enc == null) {</span>
+<span class="nc" id="L228">                    enc = UTF8;</span>
+                }
+<span class="fc" id="L230">                block.yield(context, RubyString.newString(runtime, dirs.get(i), enc));</span>
+            }
+
+<span class="fc" id="L233">            return runtime.getNil();</span>
+        }
+
+<span class="fc" id="L236">        return asRubyStringList(runtime, dirs);</span>
+    }
+
+    /**
+     * @return all entries for this Dir
+     */
+    @JRubyMethod(name = &quot;entries&quot;)
+    public RubyArray entries() {
+<span class="nc" id="L244">        return getRuntime().newArrayNoCopy(JavaUtil.convertJavaArrayToRuby(getRuntime(), snapshot));</span>
+    }
+
+    /**
+     * Returns an array containing all of the filenames in the given directory.
+     */
+    public static RubyArray entries(IRubyObject recv, IRubyObject path) {
+<span class="nc" id="L251">        return entries19(recv.getRuntime().getCurrentContext(), recv, path);</span>
+    }
+
+    @JRubyMethod(name = &quot;entries&quot;, meta = true)
+    public static RubyArray entries19(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="fc" id="L256">        return entriesCommon(context, RubyFile.get_path(context, arg).asJavaString());</span>
+    }
+
+    @JRubyMethod(name = &quot;entries&quot;, meta = true)
+    public static RubyArray entries19(ThreadContext context, IRubyObject recv, IRubyObject arg, IRubyObject opts) {
+        // FIXME: do something with opts
+<span class="fc" id="L262">        return entriesCommon(context, RubyFile.get_path(context, arg).asJavaString());</span>
+    }
+
+    private static RubyArray entriesCommon(ThreadContext context, String path) {
+<span class="fc" id="L266">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L267">        String adjustedPath = RubyFile.adjustRootPathOnWindows(runtime, path, null);</span>
+<span class="fc" id="L268">        checkDirIsTwoSlashesOnWindows(runtime, adjustedPath);</span>
+
+<span class="fc" id="L270">        FileResource directory = JRubyFile.createResource(context, path);</span>
+<span class="fc" id="L271">        Object[] files = getEntries(context, directory, adjustedPath);</span>
+
+<span class="fc" id="L273">        return runtime.newArrayNoCopy(JavaUtil.convertJavaArrayToRuby(runtime, files));</span>
+    }
+
+<span class="fc" id="L276">    private static final String[] NO_FILES = new String[] {};</span>
+    private static String[] getEntries(ThreadContext context, FileResource dir, String path) {
+<span class="fc bfc" id="L278" title="All 2 branches covered.">        if (!dir.isDirectory()) throw context.runtime.newErrnoENOENTError(&quot;No such directory: &quot; + path);</span>
+
+<span class="fc" id="L280">        String[] list = dir.list();</span>
+
+<span class="pc bpc" id="L282" title="1 of 2 branches missed.">        return list == null ? NO_FILES : list;</span>
+    }
+
+    // MRI behavior: just plain '//' or '\\\\' are considered illegal on Windows.
+    private static void checkDirIsTwoSlashesOnWindows(Ruby runtime, String path) {
+<span class="pc bpc" id="L287" title="5 of 6 branches missed.">        if (Platform.IS_WINDOWS &amp;&amp; (&quot;//&quot;.equals(path) || &quot;\\\\&quot;.equals(path))) {</span>
+<span class="nc" id="L288">            throw runtime.newErrnoEINVALError(&quot;Invalid argument - &quot; + path);</span>
+        }
+<span class="fc" id="L290">    }</span>
+
+    /** Changes the current directory to &lt;code&gt;path&lt;/code&gt; */
+    @JRubyMethod(optional = 1, meta = true)
+    public static IRubyObject chdir(ThreadContext context, IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="fc" id="L295">        Ruby runtime = context.runtime;</span>
+<span class="fc bfc" id="L296" title="All 2 branches covered.">        RubyString path = args.length == 1 ?</span>
+<span class="fc" id="L297">            RubyFile.get_path(context, args[0]) : getHomeDirectoryPath(context);</span>
+<span class="fc" id="L298">        String adjustedPath = RubyFile.adjustRootPathOnWindows(runtime, path.asJavaString(), null);</span>
+<span class="fc" id="L299">        checkDirIsTwoSlashesOnWindows(runtime, adjustedPath);</span>
+<span class="fc" id="L300">        JRubyFile dir = getDir(runtime, adjustedPath, true);</span>
+        String realPath;
+<span class="fc" id="L302">        String oldCwd = runtime.getCurrentDirectory();</span>
+
+        // We get canonical path to try and flatten the path out.
+        // a dir '/subdir/..' should return as '/'
+        // cnutter: Do we want to flatten path out?
+        try {
+<span class="fc" id="L308">            realPath = dir.getCanonicalPath();</span>
+<span class="nc" id="L309">        } catch (IOException e) {</span>
+<span class="nc" id="L310">            realPath = dir.getAbsolutePath();</span>
+<span class="fc" id="L311">        }</span>
+
+<span class="fc" id="L313">        IRubyObject result = null;</span>
+<span class="fc bfc" id="L314" title="All 2 branches covered.">        if (block.isGiven()) {</span>
+            // FIXME: Don't allow multiple threads to do this at once
+<span class="fc" id="L316">            runtime.setCurrentDirectory(realPath);</span>
+            try {
+<span class="fc" id="L318">                result = block.yield(context, path);</span>
+            } finally {
+<span class="fc" id="L320">                getDir(runtime, oldCwd, true); // ENEBO: Needed in case exception is thrown???</span>
+<span class="fc" id="L321">                runtime.setCurrentDirectory(oldCwd);</span>
+<span class="fc" id="L322">            }</span>
+        } else {
+<span class="fc" id="L324">            runtime.setCurrentDirectory(realPath);</span>
+<span class="fc" id="L325">            result = runtime.newFixnum(0);</span>
+        }
+
+<span class="fc" id="L328">        return result;</span>
+    }
+
+    /**
+     * Changes the root directory (only allowed by super user).  Not available
+     * on all platforms.
+     */
+    @JRubyMethod(name = &quot;chroot&quot;, required = 1, meta = true)
+    public static IRubyObject chroot(IRubyObject recv, IRubyObject path) {
+<span class="nc" id="L337">        throw recv.getRuntime().newNotImplementedError(&quot;chroot not implemented: chroot is non-portable and is not supported.&quot;);</span>
+    }
+
+    /**
+     * Deletes the directory specified by &lt;code&gt;path&lt;/code&gt;.  The directory must
+     * be empty.
+     */
+    public static IRubyObject rmdir(IRubyObject recv, IRubyObject path) {
+<span class="nc" id="L345">        return rmdir19(recv.getRuntime().getCurrentContext(), recv, path);</span>
+    }
+
+    @JRubyMethod(name = {&quot;rmdir&quot;, &quot;unlink&quot;, &quot;delete&quot;}, required = 1, meta = true)
+    public static IRubyObject rmdir19(ThreadContext context, IRubyObject recv, IRubyObject path) {
+<span class="fc" id="L350">        return rmdirCommon(context.runtime, RubyFile.get_path(context, path).asJavaString());</span>
+    }
+
+    private static IRubyObject rmdirCommon(Ruby runtime, String path) {
+<span class="fc" id="L354">        JRubyFile directory = getDirForRmdir(runtime, path);</span>
+
+        // at this point, only thing preventing delete should be non-emptiness
+<span class="pc bpc" id="L357" title="1 of 2 branches missed.">        if (runtime.getPosix().rmdir(directory.toString()) &lt; 0) {</span>
+<span class="nc" id="L358">            throw runtime.newErrnoENOTEMPTYError(path);</span>
+        }
+
+<span class="fc" id="L361">        return runtime.newFixnum(0);</span>
+    }
+
+    /**
+     * Executes the block once for each file in the directory specified by
+     * &lt;code&gt;path&lt;/code&gt;.
+     */
+    public static IRubyObject foreach(ThreadContext context, IRubyObject recv, IRubyObject _path, Block block) {
+<span class="nc" id="L369">        return foreach19(context, recv, _path, block);</span>
+    }
+
+    @JRubyMethod(name = &quot;foreach&quot;, meta = true)
+    public static IRubyObject foreach19(ThreadContext context, IRubyObject recv, IRubyObject arg, Block block) {
+<span class="fc" id="L374">        RubyString pathString = RubyFile.get_path(context, arg);</span>
+
+<span class="fc" id="L376">        return foreachCommon(context, recv, context.runtime, pathString, block);</span>
+    }
+
+    private static IRubyObject foreachCommon(ThreadContext context, IRubyObject recv, Ruby runtime, RubyString _path, Block block) {
+<span class="fc bfc" id="L380" title="All 2 branches covered.">        if (block.isGiven()) {</span>
+<span class="fc" id="L381">            RubyClass dirClass = runtime.getDir();</span>
+<span class="fc" id="L382">            RubyDir dir = (RubyDir) dirClass.newInstance(context, new IRubyObject[]{_path}, block);</span>
+
+<span class="fc" id="L384">            dir.each(context, block);</span>
+<span class="fc" id="L385">            return runtime.getNil();</span>
+        }
+
+<span class="fc" id="L388">        return enumeratorize(runtime, recv, &quot;foreach&quot;, _path);</span>
+    }
+
+    /** Returns the current directory. */
+    @JRubyMethod(name = {&quot;getwd&quot;, &quot;pwd&quot;}, meta = true)
+    public static RubyString getwd(IRubyObject recv) {
+<span class="fc" id="L394">        Ruby ruby = recv.getRuntime();</span>
+
+<span class="fc" id="L396">        RubyString pwd = RubyString.newUnicodeString(ruby, getCWD(ruby));</span>
+<span class="fc" id="L397">        pwd.setTaint(true);</span>
+<span class="fc" id="L398">        return pwd;</span>
+    }
+
+    /**
+     * Returns the home directory of the current user or the named user if given.
+     */
+    @JRubyMethod(name = &quot;home&quot;, optional = 1, meta = true)
+    public static IRubyObject home(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="pc bpc" id="L406" title="1 of 4 branches missed.">        if (args.length &gt; 0 &amp;&amp; !args[0].isNil()) return getHomeDirectoryPath(context, args[0].toString());</span>
+
+<span class="fc" id="L408">        return getHomeDirectoryPath(context);</span>
+    }
+
+    /**
+     * Creates the directory specified by &lt;code&gt;path&lt;/code&gt;.  Note that the
+     * &lt;code&gt;mode&lt;/code&gt; parameter is provided only to support existing Ruby
+     * code, and is ignored.
+     */
+    public static IRubyObject mkdir(IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L417">        return mkdir19(recv.getRuntime().getCurrentContext(), recv, args);</span>
+    }
+
+    @JRubyMethod(name = &quot;mkdir&quot;, required = 1, optional = 1, meta = true)
+    public static IRubyObject mkdir19(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L422">        return mkdirCommon(context.runtime, RubyFile.get_path(context, args[0]).asJavaString(), args);</span>
+    }
+
+    private static IRubyObject mkdirCommon(Ruby runtime, String path, IRubyObject[] args) {
+<span class="fc" id="L426">        File newDir = getDir(runtime, path, false);</span>
+        
+        
+<span class="fc" id="L429">        String name = path.replace('\\', '/');</span>
+
+<span class="fc" id="L431">        boolean startsWithDriveLetterOnWindows = RubyFile.startsWithDriveLetterOnWindows(name);</span>
+        
+        // don't attempt to create a dir for drive letters
+<span class="pc bpc" id="L434" title="1 of 2 branches missed.">        if (startsWithDriveLetterOnWindows) {</span>
+            // path is just drive letter plus :
+<span class="nc bnc" id="L436" title="All 2 branches missed.">            if (path.length() == 2) return RubyFixnum.zero(runtime);</span>
+            // path is drive letter plus : plus leading or trailing /
+<span class="nc bnc" id="L438" title="All 6 branches missed.">            if (path.length() == 3 &amp;&amp; (path.charAt(0) == '/' || path.charAt(2) == '/')) return RubyFixnum.zero(runtime);</span>
+            // path is drive letter plus : plus leading and trailing /
+<span class="nc bnc" id="L440" title="All 6 branches missed.">            if (path.length() == 4 &amp;&amp; (path.charAt(0) == '/' &amp;&amp; path.charAt(3) == '/')) return RubyFixnum.zero(runtime);</span>
+        }
+
+<span class="pc bpc" id="L443" title="1 of 2 branches missed.">        if (File.separatorChar == '\\') newDir = new File(newDir.getPath());</span>
+
+<span class="fc bfc" id="L445" title="All 2 branches covered.">        int mode = args.length == 2 ? ((int) args[1].convertToInteger().getLongValue()) : 0777;</span>
+
+<span class="pc bpc" id="L447" title="1 of 2 branches missed.">        if (runtime.getPosix().mkdir(newDir.getAbsolutePath(), mode) &lt; 0) {</span>
+            // FIXME: This is a system error based on errno
+<span class="nc" id="L449">            throw runtime.newSystemCallError(&quot;mkdir failed&quot;);</span>
+        }
+
+<span class="fc" id="L452">        return RubyFixnum.zero(runtime);</span>
+    }
+
+    /**
+     * Returns a new directory object for &lt;code&gt;path&lt;/code&gt;.  If a block is
+     * provided, a new directory object is passed to the block, which closes the
+     * directory object before terminating.
+     */
+    public static IRubyObject open(ThreadContext context, IRubyObject recv, IRubyObject path, Block block) {
+<span class="nc" id="L461">        return open19(context, recv, path, block);</span>
+    }
+
+    @JRubyMethod(name = &quot;open&quot;, meta = true)
+    public static IRubyObject open19(ThreadContext context, IRubyObject recv, IRubyObject path, Block block) {
+<span class="fc" id="L466">        RubyDir directory = (RubyDir) context.runtime.getDir().newInstance(context,</span>
+<span class="fc" id="L467">                new IRubyObject[] { RubyFile.get_path(context, path) }, Block.NULL_BLOCK);</span>
+
+<span class="fc bfc" id="L469" title="All 2 branches covered.">        if (!block.isGiven()) return directory;</span>
+
+        try {
+<span class="fc" id="L472">            return block.yield(context, directory);</span>
+        } finally {
+<span class="fc" id="L474">            directory.close();</span>
+        }        
+    }
+
+// ----- Ruby Instance Methods -------------------------------------------------
+    /**
+     * Closes the directory stream.
+     */
+    @JRubyMethod(name = &quot;close&quot;)
+    public IRubyObject close() {
+        // Make sure any read()s after close fail.
+<span class="fc" id="L485">        checkDir();</span>
+
+<span class="fc" id="L487">        isOpen = false;</span>
+
+<span class="fc" id="L489">        return getRuntime().getNil();</span>
+    }
+
+    /**
+     * Executes the block once for each entry in the directory.
+     */
+    public IRubyObject each(ThreadContext context, Block block) {
+<span class="fc" id="L496">        checkDir();</span>
+
+<span class="fc" id="L498">        String[] contents = snapshot;</span>
+<span class="fc bfc" id="L499" title="All 2 branches covered.">        for (pos = 0; pos &lt; contents.length; pos++) {</span>
+<span class="fc" id="L500">            block.yield(context, getRuntime().newString(contents[pos]));</span>
+        }
+
+<span class="fc" id="L503">        return this;</span>
+    }
+
+    @JRubyMethod(name = &quot;each&quot;)
+    public IRubyObject each19(ThreadContext context, Block block) {
+<span class="fc bfc" id="L508" title="All 2 branches covered.">        return block.isGiven() ? each(context, block) : enumeratorize(context.runtime, this, &quot;each&quot;);</span>
+    }
+
+    @Override
+    @JRubyMethod
+    public IRubyObject inspect() {
+<span class="fc" id="L514">        Ruby runtime = getRuntime();</span>
+<span class="fc" id="L515">        StringBuilder part = new StringBuilder();</span>
+<span class="fc" id="L516">        String cname = getMetaClass().getRealClass().getName();</span>
+<span class="fc" id="L517">        part.append(&quot;#&lt;&quot;).append(cname).append(&quot;:&quot;).append(path.asJavaString()).append(&quot;&gt;&quot;);</span>
+
+<span class="fc" id="L519">        return runtime.newString(part.toString());</span>
+    }
+
+    /**
+     * Returns the current position in the directory.
+     */
+    @JRubyMethod(name = {&quot;tell&quot;, &quot;pos&quot;})
+    public RubyInteger tell() {
+<span class="fc" id="L527">        checkDir();</span>
+<span class="fc" id="L528">        return getRuntime().newFixnum(pos);</span>
+    }
+
+    /**
+     * Moves to a position &lt;code&gt;d&lt;/code&gt;.  &lt;code&gt;pos&lt;/code&gt; must be a value
+     * returned by &lt;code&gt;tell&lt;/code&gt; or 0.
+     */
+
+    @JRubyMethod(name = &quot;seek&quot;, required = 1)
+    public IRubyObject seek(IRubyObject newPos) {
+<span class="fc" id="L538">        checkDir();</span>
+
+<span class="fc" id="L540">        set_pos(newPos);</span>
+<span class="fc" id="L541">        return this;</span>
+    }
+
+    @JRubyMethod(name = &quot;pos=&quot;, required = 1)
+    public IRubyObject set_pos(IRubyObject newPos) {
+<span class="fc" id="L546">        int pos2 = RubyNumeric.fix2int(newPos);</span>
+<span class="pc bpc" id="L547" title="1 of 2 branches missed.">        if (pos2 &gt;= 0) this.pos = pos2;</span>
+<span class="fc" id="L548">        return newPos;</span>
+    }
+
+    @JRubyMethod(name = {&quot;path&quot;, &quot;to_path&quot;})
+    public IRubyObject path(ThreadContext context) {
+<span class="fc" id="L553">        return path.strDup(context.runtime);</span>
+    }
+    
+    @JRubyMethod
+    public IRubyObject to_path(ThreadContext context) {
+<span class="nc" id="L558">        return path(context);</span>
+    }    
+
+    /** Returns the next entry from this directory. */
+    @JRubyMethod(name = &quot;read&quot;)
+    public IRubyObject read() {
+<span class="fc" id="L564">        checkDir();</span>
+
+<span class="fc bfc" id="L566" title="All 2 branches covered.">        if (pos &gt;= snapshot.length) return getRuntime().getNil();</span>
+
+<span class="fc" id="L568">        RubyString result = getRuntime().newString(snapshot[pos]);</span>
+<span class="fc" id="L569">        pos++;</span>
+<span class="fc" id="L570">        return result;</span>
+    }
+
+    /** Moves position in this directory to the first entry. */
+    @JRubyMethod(name = &quot;rewind&quot;)
+    public IRubyObject rewind() {
+<span class="fc" id="L576">        checkDir();</span>
+
+<span class="fc" id="L578">        pos = 0;</span>
+<span class="fc" id="L579">        return this;</span>
+    }
+
+    @JRubyMethod(name = &quot;exist?&quot;, meta = true)
+    public static IRubyObject exist(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+        // Capture previous exception if any.
+<span class="fc" id="L585">        IRubyObject exception = context.runtime.getGlobalVariables().get(&quot;$!&quot;);</span>
+        
+        try {
+<span class="fc" id="L588">            return context.runtime.newFileStat(RubyFile.get_path(context, arg).asJavaString(), false).directory_p();</span>
+<span class="fc" id="L589">        } catch (Exception e) {</span>
+            // Restore $!
+<span class="fc" id="L591">            context.runtime.getGlobalVariables().set(&quot;$!&quot;, exception);</span>
+<span class="fc" id="L592">            return context.runtime.newBoolean(false);</span>
+        }
+    }
+
+    @JRubyMethod(name = &quot;exists?&quot;, meta = true)
+    public static IRubyObject exists_p(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="pc bpc" id="L598" title="1 of 2 branches missed.">        if (context.runtime.warningsEnabled()) {</span>
+<span class="nc" id="L599">            context.runtime.getWarnings().warn(&quot;Dir.exists? is a deprecated name, use Dir.exist? instead&quot;);</span>
+        }
+
+<span class="fc" id="L602">        return exist(context, recv, arg);</span>
+    }
+
+    @JRubyMethod(name = &quot;fileno&quot;, notImplemented = true)
+    public IRubyObject fileno(ThreadContext context) {
+<span class="nc" id="L607">        throw context.runtime.newNotImplementedError(&quot;Dir#fileno&quot;);</span>
+    }
+
+// ----- Helper Methods --------------------------------------------------------
+    /** Returns a Java &lt;code&gt;File&lt;/code&gt; object for the specified path.  If
+     * &lt;code&gt;path&lt;/code&gt; is not a directory, throws &lt;code&gt;IOError&lt;/code&gt;.
+     *
+     * @param   path path for which to return the &lt;code&gt;File&lt;/code&gt; object.
+     * @param   mustExist is true the directory must exist.  If false it must not.
+     */
+    protected static JRubyFile getDir(final Ruby runtime, final String path, final boolean mustExist) {
+<span class="fc" id="L618">        String dir = dirFromPath(path, runtime);</span>
+
+<span class="fc" id="L620">        JRubyFile result = JRubyFile.create(runtime.getCurrentDirectory(), dir);</span>
+
+<span class="fc bfc" id="L622" title="All 4 branches covered.">        if (mustExist &amp;&amp; !result.exists()) {</span>
+<span class="fc" id="L623">            throw runtime.newErrnoENOENTError(dir);</span>
+        }
+
+<span class="fc" id="L626">        boolean isDirectory = result.isDirectory();</span>
+
+<span class="pc bpc" id="L628" title="1 of 4 branches missed.">        if (mustExist &amp;&amp; !isDirectory) {</span>
+<span class="nc" id="L629">            throw runtime.newErrnoENOTDIRError(path);</span>
+        }
+
+<span class="fc bfc" id="L632" title="All 4 branches covered.">        if (!mustExist &amp;&amp; isDirectory) {</span>
+<span class="fc" id="L633">            throw runtime.newErrnoEEXISTError(dir);</span>
+        }
+
+<span class="fc" id="L636">        return result;</span>
+    }
+
+    /**
+     * Similar to getDir, but performs different checks to match rmdir behavior.
+     * @param runtime
+     * @param path
+     * @return
+     */
+    protected static JRubyFile getDirForRmdir(final Ruby runtime, final String path) {
+<span class="fc" id="L646">        String dir = dirFromPath(path, runtime);</span>
+
+<span class="fc" id="L648">        JRubyFile directory = JRubyFile.create(runtime.getCurrentDirectory(), dir);</span>
+
+        // Order is important here...File.exists() will return false if the parent
+        // dir can't be read, so we check permissions first
+
+        // no permission
+<span class="fc bfc" id="L654" title="All 2 branches covered.">        if (directory.getParentFile().exists() &amp;&amp;</span>
+<span class="fc bfc" id="L655" title="All 2 branches covered.">                !directory.getParentFile().canWrite()) {</span>
+<span class="fc" id="L656">            throw runtime.newErrnoEACCESError(path);</span>
+        }
+
+        // Since we transcode we depend on posix to lookup stat stuff since
+        // java.io.File does not seem to cut it.  A failed stat will throw ENOENT.
+<span class="fc" id="L661">        FileStat stat = runtime.getPosix().stat(directory.toString());</span>
+
+        // is not directory
+<span class="fc bfc" id="L664" title="All 2 branches covered.">        if (!stat.isDirectory()) throw runtime.newErrnoENOTDIRError(path);</span>
+
+<span class="fc" id="L666">        return directory;</span>
+    }
+
+    private static String dirFromPath(final String path, final Ruby runtime) throws RaiseException {
+<span class="fc" id="L670">        String dir = path;</span>
+<span class="fc" id="L671">        String[] pathParts = RubyFile.splitURI(path);</span>
+<span class="pc bpc" id="L672" title="1 of 2 branches missed.">        if (pathParts != null) {</span>
+<span class="nc bnc" id="L673" title="All 6 branches missed.">            if (pathParts[0].equals(&quot;file:&quot;) &amp;&amp; pathParts[1].length() &gt; 0 &amp;&amp; pathParts[1].indexOf(&quot;!/&quot;) == -1) {</span>
+<span class="nc" id="L674">                dir = pathParts[1];</span>
+            } else {
+<span class="nc" id="L676">                throw runtime.newErrnoENOTDIRError(dir);</span>
+            }
+        }
+<span class="fc" id="L679">        return dir;</span>
+    }
+
+    /**
+     * Returns the contents of the specified &lt;code&gt;directory&lt;/code&gt; as an
+     * &lt;code&gt;ArrayList&lt;/code&gt; containing the names of the files as Java Strings.
+     */
+    protected static List&lt;String&gt; getContents(FileResource directory) {
+<span class="fc" id="L687">        String[] contents = directory.list();</span>
+<span class="fc" id="L688">        List&lt;String&gt; result = new ArrayList&lt;String&gt;();</span>
+
+        // If an IO exception occurs (something odd, but possible)
+        // A directory may return null.
+<span class="pc bpc" id="L692" title="1 of 2 branches missed.">        if (contents != null) result.addAll(Arrays.asList(contents));</span>
+
+<span class="fc" id="L694">        return result;</span>
+    }
+
+    /**
+     * Returns the contents of the specified &lt;code&gt;directory&lt;/code&gt; as an
+     * &lt;code&gt;ArrayList&lt;/code&gt; containing the names of the files as Ruby Strings.
+     */
+    protected static List&lt;RubyString&gt; getContents(FileResource directory, Ruby runtime) {
+<span class="nc" id="L702">        List&lt;RubyString&gt; result = new ArrayList&lt;RubyString&gt;();</span>
+<span class="nc" id="L703">        String[] contents = directory.list();</span>
+
+<span class="nc bnc" id="L705" title="All 2 branches missed.">        for (int i = 0; i &lt; contents.length; i++) {</span>
+<span class="nc" id="L706">            result.add(runtime.newString(contents[i]));</span>
+        }
+<span class="nc" id="L708">        return result;</span>
+    }
+
+    /**
+     * Returns the home directory of the specified &lt;code&gt;user&lt;/code&gt; on the
+     * system. If the home directory of the specified user cannot be found,
+     * an &lt;code&gt;ArgumentError it thrown&lt;/code&gt;.
+     */
+    public static IRubyObject getHomeDirectoryPath(ThreadContext context, String user) {
+        /*
+         * TODO: This version is better than the hackish previous one. Windows
+         *       behavior needs to be defined though. I suppose this version
+         *       could be improved more too.
+         * TODO: /etc/passwd is also inadequate for MacOSX since it does not
+         *       use /etc/passwd for regular user accounts
+         */
+<span class="fc" id="L724">        Ruby runtime = context.runtime;</span>
+
+        try {
+            // try to use POSIX for this first
+<span class="fc" id="L728">            return runtime.newString(runtime.getPosix().getpwnam(user).getHome());</span>
+<span class="fc" id="L729">        } catch (Exception e) {</span>
+            // otherwise fall back on the old way
+            String passwd;
+            try {
+<span class="fc" id="L733">                FileInputStream stream = new FileInputStream(&quot;/etc/passwd&quot;);</span>
+<span class="fc" id="L734">                int totalBytes = stream.available();</span>
+<span class="fc" id="L735">                byte[] bytes = new byte[totalBytes];</span>
+<span class="fc" id="L736">                stream.read(bytes);</span>
+<span class="fc" id="L737">                stream.close();</span>
+<span class="fc" id="L738">                passwd = new String(bytes);</span>
+<span class="nc" id="L739">            } catch (IOException ioe) {</span>
+<span class="nc" id="L740">                return runtime.getNil();</span>
+<span class="fc" id="L741">            }</span>
+
+<span class="fc" id="L743">            String[] rows = passwd.split(&quot;\n&quot;);</span>
+<span class="fc" id="L744">            int rowCount = rows.length;</span>
+<span class="fc bfc" id="L745" title="All 2 branches covered.">            for (int i = 0; i &lt; rowCount; i++) {</span>
+<span class="fc" id="L746">                String[] fields = rows[i].split(&quot;:&quot;);</span>
+<span class="pc bpc" id="L747" title="1 of 2 branches missed.">                if (fields[0].equals(user)) {</span>
+<span class="nc" id="L748">                    return runtime.newString(fields[5]);</span>
+                }
+            }
+        }
+
+<span class="fc" id="L753">        throw runtime.newArgumentError(&quot;user &quot; + user + &quot; doesn't exist&quot;);</span>
+    }
+
+    public static RubyString getHomeDirectoryPath(ThreadContext context) {
+<span class="fc" id="L757">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L758">        IRubyObject systemHash = runtime.getObject().getConstant(&quot;ENV_JAVA&quot;);</span>
+<span class="fc" id="L759">        RubyHash envHash = (RubyHash) runtime.getObject().getConstant(&quot;ENV&quot;);</span>
+<span class="fc" id="L760">        IRubyObject home = null;</span>
+
+<span class="pc bpc" id="L762" title="3 of 4 branches missed.">        if (home == null || home.isNil()) {</span>
+<span class="fc" id="L763">            home = envHash.op_aref(context, runtime.newString(&quot;HOME&quot;));</span>
+        }
+
+<span class="pc bpc" id="L766" title="2 of 4 branches missed.">        if (home == null || home.isNil()) {</span>
+<span class="nc" id="L767">            home = systemHash.callMethod(context, &quot;[]&quot;, runtime.newString(&quot;user.home&quot;));</span>
+        }
+
+<span class="pc bpc" id="L770" title="2 of 4 branches missed.">        if (home == null || home.isNil()) {</span>
+<span class="nc" id="L771">            home = envHash.op_aref(context, runtime.newString(&quot;LOGDIR&quot;));</span>
+        }
+
+<span class="pc bpc" id="L774" title="2 of 4 branches missed.">        if (home == null || home.isNil()) {</span>
+<span class="nc" id="L775">            throw runtime.newArgumentError(&quot;user.home/LOGDIR not set&quot;);</span>
+        }
+
+<span class="fc" id="L778">        return (RubyString) home;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

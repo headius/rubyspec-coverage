@@ -1,0 +1,2771 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyLexer.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.lexer.yacc</a> &gt; <span class="el_source">RubyLexer.java</span></div><h1>RubyLexer.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002 Benoit Cerrina &lt;b.cerrina@wanadoo.fr&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2002-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2004-2006 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2004-2005 David Corbin &lt;dcorbin@users.sourceforge.net&gt;
+ * Copyright (C) 2005 Zach Dennis &lt;zdennis@mktec.com&gt;
+ * Copyright (C) 2006 Thomas Corbat &lt;tcorbat@hsr.ch&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.lexer.yacc;
+
+import java.io.IOException;
+
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.util.HashMap;
+
+import org.jcodings.Encoding;
+import org.jcodings.specific.ASCIIEncoding;
+import org.jcodings.specific.USASCIIEncoding;
+import org.jcodings.specific.UTF8Encoding;
+import org.joni.Matcher;
+import org.joni.Option;
+import org.joni.Regex;
+import org.jruby.RubyRegexp;
+import org.jruby.ast.*;
+import org.jruby.common.IRubyWarnings;
+import org.jruby.common.IRubyWarnings.ID;
+import org.jruby.lexer.yacc.SyntaxException.PID;
+import org.jruby.parser.ParserSupport;
+import org.jruby.parser.RubyParser;
+import org.jruby.parser.Tokens;
+import org.jruby.util.ByteList;
+import org.jruby.util.SafeDoubleParser;
+import org.jruby.util.StringSupport;
+import org.jruby.util.cli.Options;
+
+/*
+ * This is a port of the MRI lexer to Java.
+ */
+public class RubyLexer {
+<span class="fc" id="L68">    public static final Encoding UTF8_ENCODING = UTF8Encoding.INSTANCE;</span>
+<span class="fc" id="L69">    public static final Encoding USASCII_ENCODING = USASCIIEncoding.INSTANCE;</span>
+<span class="fc" id="L70">    public static final Encoding ASCII8BIT_ENCODING = ASCIIEncoding.INSTANCE;</span>
+    
+<span class="fc" id="L72">    private static final ByteList END_MARKER = new ByteList(new byte[] {'_', 'E', 'N', 'D', '_', '_'});</span>
+<span class="fc" id="L73">    private static final ByteList BEGIN_DOC_MARKER = new ByteList(new byte[] {'b', 'e', 'g', 'i', 'n'});</span>
+<span class="fc" id="L74">    private static final ByteList END_DOC_MARKER = new ByteList(new byte[] {'e', 'n', 'd'});</span>
+    private static final HashMap&lt;String, Keyword&gt; map;
+    
+    private static final int SUFFIX_R = 1&lt;&lt;0;
+    private static final int SUFFIX_I = 1&lt;&lt;1;
+    private static final int SUFFIX_ALL = 3;
+
+    static {
+<span class="fc" id="L82">        map = new HashMap&lt;String, Keyword&gt;();</span>
+
+<span class="fc" id="L84">        map.put(&quot;end&quot;, Keyword.END);</span>
+<span class="fc" id="L85">        map.put(&quot;else&quot;, Keyword.ELSE);</span>
+<span class="fc" id="L86">        map.put(&quot;case&quot;, Keyword.CASE);</span>
+<span class="fc" id="L87">        map.put(&quot;ensure&quot;, Keyword.ENSURE);</span>
+<span class="fc" id="L88">        map.put(&quot;module&quot;, Keyword.MODULE);</span>
+<span class="fc" id="L89">        map.put(&quot;elsif&quot;, Keyword.ELSIF);</span>
+<span class="fc" id="L90">        map.put(&quot;def&quot;, Keyword.DEF);</span>
+<span class="fc" id="L91">        map.put(&quot;rescue&quot;, Keyword.RESCUE);</span>
+<span class="fc" id="L92">        map.put(&quot;not&quot;, Keyword.NOT);</span>
+<span class="fc" id="L93">        map.put(&quot;then&quot;, Keyword.THEN);</span>
+<span class="fc" id="L94">        map.put(&quot;yield&quot;, Keyword.YIELD);</span>
+<span class="fc" id="L95">        map.put(&quot;for&quot;, Keyword.FOR);</span>
+<span class="fc" id="L96">        map.put(&quot;self&quot;, Keyword.SELF);</span>
+<span class="fc" id="L97">        map.put(&quot;false&quot;, Keyword.FALSE);</span>
+<span class="fc" id="L98">        map.put(&quot;retry&quot;, Keyword.RETRY);</span>
+<span class="fc" id="L99">        map.put(&quot;return&quot;, Keyword.RETURN);</span>
+<span class="fc" id="L100">        map.put(&quot;true&quot;, Keyword.TRUE);</span>
+<span class="fc" id="L101">        map.put(&quot;if&quot;, Keyword.IF);</span>
+<span class="fc" id="L102">        map.put(&quot;defined?&quot;, Keyword.DEFINED_P);</span>
+<span class="fc" id="L103">        map.put(&quot;super&quot;, Keyword.SUPER);</span>
+<span class="fc" id="L104">        map.put(&quot;undef&quot;, Keyword.UNDEF);</span>
+<span class="fc" id="L105">        map.put(&quot;break&quot;, Keyword.BREAK);</span>
+<span class="fc" id="L106">        map.put(&quot;in&quot;, Keyword.IN);</span>
+<span class="fc" id="L107">        map.put(&quot;do&quot;, Keyword.DO);</span>
+<span class="fc" id="L108">        map.put(&quot;nil&quot;, Keyword.NIL);</span>
+<span class="fc" id="L109">        map.put(&quot;until&quot;, Keyword.UNTIL);</span>
+<span class="fc" id="L110">        map.put(&quot;unless&quot;, Keyword.UNLESS);</span>
+<span class="fc" id="L111">        map.put(&quot;or&quot;, Keyword.OR);</span>
+<span class="fc" id="L112">        map.put(&quot;next&quot;, Keyword.NEXT);</span>
+<span class="fc" id="L113">        map.put(&quot;when&quot;, Keyword.WHEN);</span>
+<span class="fc" id="L114">        map.put(&quot;redo&quot;, Keyword.REDO);</span>
+<span class="fc" id="L115">        map.put(&quot;and&quot;, Keyword.AND);</span>
+<span class="fc" id="L116">        map.put(&quot;begin&quot;, Keyword.BEGIN);</span>
+<span class="fc" id="L117">        map.put(&quot;__LINE__&quot;, Keyword.__LINE__);</span>
+<span class="fc" id="L118">        map.put(&quot;class&quot;, Keyword.CLASS);</span>
+<span class="fc" id="L119">        map.put(&quot;__FILE__&quot;, Keyword.__FILE__);</span>
+<span class="fc" id="L120">        map.put(&quot;END&quot;, Keyword.LEND);</span>
+<span class="fc" id="L121">        map.put(&quot;BEGIN&quot;, Keyword.LBEGIN);</span>
+<span class="fc" id="L122">        map.put(&quot;while&quot;, Keyword.WHILE);</span>
+<span class="fc" id="L123">        map.put(&quot;alias&quot;, Keyword.ALIAS);</span>
+<span class="fc" id="L124">        map.put(&quot;__ENCODING__&quot;, Keyword.__ENCODING__);</span>
+    }
+
+    private Encoding encoding;
+
+    public Encoding getEncoding() {
+<span class="fc" id="L130">        return encoding;</span>
+    }
+
+    private BignumNode newBignumNode(String value, int radix) {
+<span class="fc" id="L134">        return new BignumNode(getPosition(), new BigInteger(value, radix));</span>
+    }
+
+    private FixnumNode newFixnumNode(String value, int radix) throws NumberFormatException {
+<span class="fc" id="L138">        return new FixnumNode(getPosition(), Long.parseLong(value, radix));</span>
+    }
+    
+    private RationalNode newRationalNode(String value, int radix) throws NumberFormatException {
+<span class="fc" id="L142">        return new RationalNode(getPosition(), Long.parseLong(value, radix), 1);</span>
+    }
+    
+    private ComplexNode newComplexNode(Node number) {
+<span class="fc" id="L146">        return new ComplexNode(getPosition(), number);</span>
+    }
+    
+    private void ambiguousOperator(String op, String syn) {
+<span class="nc" id="L150">        warnings.warn(ID.AMBIGUOUS_ARGUMENT, &quot;`&quot; + op + &quot;' after local variable is interpreted as binary operator\nevent though it seems like \&quot;&quot; + syn + &quot;\&quot;&quot;);</span>
+<span class="nc" id="L151">    }</span>
+    
+    private void warn_balanced(int c, boolean spaceSeen, String op, String syn) {
+        if (false &amp;&amp; last_state != LexState.EXPR_CLASS &amp;&amp; last_state != LexState.EXPR_DOT &amp;&amp;
+                last_state != LexState.EXPR_FNAME &amp;&amp; last_state != LexState.EXPR_ENDFN &amp;&amp;
+                last_state != LexState.EXPR_ENDARG &amp;&amp; spaceSeen &amp;&amp; !Character.isWhitespace(c)) {
+            ambiguousOperator(op, syn);
+        }
+<span class="fc" id="L159">    }</span>
+
+    // FIXME: Also sucks that matchMarker will strip off valuable bytes and not work for this (could be a one-liner)
+    private void detectUTF8BOM() throws IOException {
+<span class="fc" id="L163">        int b1 = src.read();</span>
+<span class="pc bpc" id="L164" title="1 of 2 branches missed.">        if (b1 == 0xef) {</span>
+<span class="nc" id="L165">            int b2 = src.read();</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">            if (b2 == 0xbb) {</span>
+<span class="nc" id="L167">                int b3 = src.read();</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">                if (b3 == 0xbf) {</span>
+<span class="nc" id="L169">                    setEncoding(UTF8_ENCODING);</span>
+                } else {
+<span class="nc" id="L171">                    src.unread(b3);</span>
+<span class="nc" id="L172">                    src.unread(b2);</span>
+<span class="nc" id="L173">                    src.unread(b1);</span>
+                }
+<span class="nc" id="L175">            } else {</span>
+<span class="nc" id="L176">                src.unread(b2);</span>
+<span class="nc" id="L177">                src.unread(b1);</span>
+            }
+<span class="nc" id="L179">        } else {</span>
+<span class="fc" id="L180">            src.unread(b1);</span>
+        }
+<span class="fc" id="L182">    }</span>
+
+    private int numberLiteralSuffix(int mask) throws IOException {
+<span class="fc" id="L185">        int c = src.read();</span>
+        
+<span class="pc bpc" id="L187" title="1 of 4 branches missed.">        if (c == 'i') return (mask &amp; SUFFIX_I) != 0 ?  mask &amp; SUFFIX_I : 0;</span>
+        
+<span class="fc bfc" id="L189" title="All 2 branches covered.">        if (c == 'r') {</span>
+<span class="fc" id="L190">            int result = 0;</span>
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">            if ((mask &amp; SUFFIX_R) != 0) result |= (mask &amp; SUFFIX_R);</span>
+            
+<span class="pc bpc" id="L193" title="3 of 4 branches missed.">            if (src.peek('i') &amp;&amp; (mask &amp; SUFFIX_I) != 0) {</span>
+<span class="nc" id="L194">                c = src.read();</span>
+<span class="nc" id="L195">                result |= (mask &amp; SUFFIX_I);</span>
+            }
+            
+<span class="fc" id="L198">            return result;</span>
+        }
+<span class="fc" id="L200">        src.unread(c);</span>
+
+<span class="fc" id="L202">        return 0;</span>
+    }
+   
+<span class="pc" id="L205">    public enum Keyword {</span>
+<span class="fc" id="L206">        END (&quot;end&quot;, Tokens.kEND, Tokens.kEND, LexState.EXPR_END),</span>
+<span class="fc" id="L207">        ELSE (&quot;else&quot;, Tokens.kELSE, Tokens.kELSE, LexState.EXPR_BEG),</span>
+<span class="fc" id="L208">        CASE (&quot;case&quot;, Tokens.kCASE, Tokens.kCASE, LexState.EXPR_BEG),</span>
+<span class="fc" id="L209">        ENSURE (&quot;ensure&quot;, Tokens.kENSURE, Tokens.kENSURE, LexState.EXPR_BEG),</span>
+<span class="fc" id="L210">        MODULE (&quot;module&quot;, Tokens.kMODULE, Tokens.kMODULE, LexState.EXPR_BEG),</span>
+<span class="fc" id="L211">        ELSIF (&quot;elsif&quot;, Tokens.kELSIF, Tokens.kELSIF, LexState.EXPR_BEG),</span>
+<span class="fc" id="L212">        DEF (&quot;def&quot;, Tokens.kDEF, Tokens.kDEF, LexState.EXPR_FNAME),</span>
+<span class="fc" id="L213">        RESCUE (&quot;rescue&quot;, Tokens.kRESCUE, Tokens.kRESCUE_MOD, LexState.EXPR_MID),</span>
+<span class="fc" id="L214">        NOT (&quot;not&quot;, Tokens.kNOT, Tokens.kNOT, LexState.EXPR_BEG),</span>
+<span class="fc" id="L215">        THEN (&quot;then&quot;, Tokens.kTHEN, Tokens.kTHEN, LexState.EXPR_BEG),</span>
+<span class="fc" id="L216">        YIELD (&quot;yield&quot;, Tokens.kYIELD, Tokens.kYIELD, LexState.EXPR_ARG),</span>
+<span class="fc" id="L217">        FOR (&quot;for&quot;, Tokens.kFOR, Tokens.kFOR, LexState.EXPR_BEG),</span>
+<span class="fc" id="L218">        SELF (&quot;self&quot;, Tokens.kSELF, Tokens.kSELF, LexState.EXPR_END),</span>
+<span class="fc" id="L219">        FALSE (&quot;false&quot;, Tokens.kFALSE, Tokens.kFALSE, LexState.EXPR_END),</span>
+<span class="fc" id="L220">        RETRY (&quot;retry&quot;, Tokens.kRETRY, Tokens.kRETRY, LexState.EXPR_END),</span>
+<span class="fc" id="L221">        RETURN (&quot;return&quot;, Tokens.kRETURN, Tokens.kRETURN, LexState.EXPR_MID),</span>
+<span class="fc" id="L222">        TRUE (&quot;true&quot;, Tokens.kTRUE, Tokens.kTRUE, LexState.EXPR_END),</span>
+<span class="fc" id="L223">        IF (&quot;if&quot;, Tokens.kIF, Tokens.kIF_MOD, LexState.EXPR_BEG),</span>
+<span class="fc" id="L224">        DEFINED_P (&quot;defined?&quot;, Tokens.kDEFINED, Tokens.kDEFINED, LexState.EXPR_ARG),</span>
+<span class="fc" id="L225">        SUPER (&quot;super&quot;, Tokens.kSUPER, Tokens.kSUPER, LexState.EXPR_ARG),</span>
+<span class="fc" id="L226">        UNDEF (&quot;undef&quot;, Tokens.kUNDEF, Tokens.kUNDEF, LexState.EXPR_FNAME),</span>
+<span class="fc" id="L227">        BREAK (&quot;break&quot;, Tokens.kBREAK, Tokens.kBREAK, LexState.EXPR_MID),</span>
+<span class="fc" id="L228">        IN (&quot;in&quot;, Tokens.kIN, Tokens.kIN, LexState.EXPR_BEG),</span>
+<span class="fc" id="L229">        DO (&quot;do&quot;, Tokens.kDO, Tokens.kDO, LexState.EXPR_BEG),</span>
+<span class="fc" id="L230">        NIL (&quot;nil&quot;, Tokens.kNIL, Tokens.kNIL, LexState.EXPR_END),</span>
+<span class="fc" id="L231">        UNTIL (&quot;until&quot;, Tokens.kUNTIL, Tokens.kUNTIL_MOD, LexState.EXPR_BEG),</span>
+<span class="fc" id="L232">        UNLESS (&quot;unless&quot;, Tokens.kUNLESS, Tokens.kUNLESS_MOD, LexState.EXPR_BEG),</span>
+<span class="fc" id="L233">        OR (&quot;or&quot;, Tokens.kOR, Tokens.kOR, LexState.EXPR_BEG),</span>
+<span class="fc" id="L234">        NEXT (&quot;next&quot;, Tokens.kNEXT, Tokens.kNEXT, LexState.EXPR_MID),</span>
+<span class="fc" id="L235">        WHEN (&quot;when&quot;, Tokens.kWHEN, Tokens.kWHEN, LexState.EXPR_BEG),</span>
+<span class="fc" id="L236">        REDO (&quot;redo&quot;, Tokens.kREDO, Tokens.kREDO, LexState.EXPR_END),</span>
+<span class="fc" id="L237">        AND (&quot;and&quot;, Tokens.kAND, Tokens.kAND, LexState.EXPR_BEG),</span>
+<span class="fc" id="L238">        BEGIN (&quot;begin&quot;, Tokens.kBEGIN, Tokens.kBEGIN, LexState.EXPR_BEG),</span>
+<span class="fc" id="L239">        __LINE__ (&quot;__LINE__&quot;, Tokens.k__LINE__, Tokens.k__LINE__, LexState.EXPR_END),</span>
+<span class="fc" id="L240">        CLASS (&quot;class&quot;, Tokens.kCLASS, Tokens.kCLASS, LexState.EXPR_CLASS),</span>
+<span class="fc" id="L241">        __FILE__(&quot;__FILE__&quot;, Tokens.k__FILE__, Tokens.k__FILE__, LexState.EXPR_END),</span>
+<span class="fc" id="L242">        LEND (&quot;END&quot;, Tokens.klEND, Tokens.klEND, LexState.EXPR_END),</span>
+<span class="fc" id="L243">        LBEGIN (&quot;BEGIN&quot;, Tokens.klBEGIN, Tokens.klBEGIN, LexState.EXPR_END),</span>
+<span class="fc" id="L244">        WHILE (&quot;while&quot;, Tokens.kWHILE, Tokens.kWHILE_MOD, LexState.EXPR_BEG),</span>
+<span class="fc" id="L245">        ALIAS (&quot;alias&quot;, Tokens.kALIAS, Tokens.kALIAS, LexState.EXPR_FNAME),</span>
+<span class="fc" id="L246">        __ENCODING__(&quot;__ENCODING__&quot;, Tokens.k__ENCODING__, Tokens.k__ENCODING__, LexState.EXPR_END);</span>
+        
+        public final String name;
+        public final int id0;
+        public final int id1;
+        public final LexState state;
+        
+<span class="fc" id="L253">        Keyword(String name, int id0, int id1, LexState state) {</span>
+<span class="fc" id="L254">            this.name = name;</span>
+<span class="fc" id="L255">            this.id0 = id0;</span>
+<span class="fc" id="L256">            this.id1 = id1;</span>
+<span class="fc" id="L257">            this.state = state;</span>
+<span class="fc" id="L258">        }</span>
+    }
+    
+<span class="pc" id="L261">    public enum LexState {</span>
+<span class="fc" id="L262">        EXPR_BEG, EXPR_END, EXPR_ARG, EXPR_CMDARG, EXPR_ENDARG, EXPR_MID,</span>
+<span class="fc" id="L263">        EXPR_FNAME, EXPR_DOT, EXPR_CLASS, EXPR_VALUE, EXPR_ENDFN</span>
+    }
+    
+    public static Keyword getKeyword(String str) {
+<span class="fc" id="L267">        return (Keyword) map.get(str);</span>
+    }
+
+    // Last token read via yylex().
+    private int token;
+    
+    // Value of last token which had a value associated with it.
+    Object yaccValue;
+
+    // Stream of data that yylex() examines.
+    private LexerSource src;
+    
+    // Used for tiny smidgen of grammar in lexer (see setParserSupport())
+<span class="fc" id="L280">    private ParserSupport parserSupport = null;</span>
+
+    // What handles warnings
+    private IRubyWarnings warnings;
+
+    // Additional context surrounding tokens that both the lexer and
+    // grammar use.
+    private LexState lex_state;
+    private LexState last_state;
+    public ISourcePosition tokline;
+
+    public void startOfToken() {
+<span class="fc" id="L292">        src.startOfToken();</span>
+<span class="fc" id="L293">    }</span>
+
+    public void newtok() {
+<span class="fc" id="L296">        tokline = getPosition();</span>
+<span class="fc" id="L297">    }</span>
+
+    // Tempory buffer to build up a potential token.  Consumer takes responsibility to reset 
+    // this before use.
+<span class="fc" id="L301">    private StringBuilder tokenBuffer = new StringBuilder(60);</span>
+
+<span class="fc" id="L303">    private StackState conditionState = new StackState();</span>
+<span class="fc" id="L304">    private StackState cmdArgumentState = new StackState();</span>
+    private StrTerm lex_strterm;
+    public boolean commandStart;
+
+    // Give a name to a value.  Enebo: This should be used more.
+    static final int EOF = -1;
+
+    // ruby constants for strings (should this be moved somewhere else?)
+    static final int STR_FUNC_ESCAPE=0x01;
+    static final int STR_FUNC_EXPAND=0x02;
+    static final int STR_FUNC_REGEXP=0x04;
+    static final int STR_FUNC_QWORDS=0x08;
+    static final int STR_FUNC_SYMBOL=0x10;
+    // When the heredoc identifier specifies &lt;&lt;-EOF that indents before ident. are ok (the '-').
+    static final int STR_FUNC_INDENT=0x20;
+
+    private static final int str_squote = 0;
+    private static final int str_dquote = STR_FUNC_EXPAND;
+    private static final int str_xquote = STR_FUNC_EXPAND;
+    private static final int str_regexp = STR_FUNC_REGEXP | STR_FUNC_ESCAPE | STR_FUNC_EXPAND;
+    private static final int str_ssym   = STR_FUNC_SYMBOL;
+    private static final int str_dsym   = STR_FUNC_SYMBOL | STR_FUNC_EXPAND;
+
+    // Count of nested parentheses
+<span class="fc" id="L328">    private int parenNest = 0;</span>
+
+<span class="fc" id="L330">    private int leftParenBegin = 0;</span>
+
+    public int incrementParenNest() {
+<span class="fc" id="L333">        parenNest++;</span>
+
+<span class="fc" id="L335">        return parenNest;</span>
+    }
+
+    public int getLeftParenBegin() {
+<span class="fc" id="L339">        return leftParenBegin;</span>
+    }
+
+    public void setLeftParenBegin(int value) {
+<span class="fc" id="L343">        leftParenBegin = value;</span>
+<span class="fc" id="L344">    }</span>
+
+<span class="fc" id="L346">    public RubyLexer() {</span>
+<span class="fc" id="L347">        reset();</span>
+<span class="fc" id="L348">    }</span>
+    
+    public final void reset() {
+<span class="fc" id="L351">    	token = 0;</span>
+<span class="fc" id="L352">        tokline = null;</span>
+<span class="fc" id="L353">    	yaccValue = null;</span>
+<span class="fc" id="L354">    	src = null;</span>
+<span class="fc" id="L355">        setState(null);</span>
+<span class="fc" id="L356">        resetStacks();</span>
+<span class="fc" id="L357">        lex_strterm = null;</span>
+<span class="fc" id="L358">        commandStart = true;</span>
+<span class="fc" id="L359">    }</span>
+
+    public int nextToken() throws IOException {
+<span class="fc" id="L362">        token = yylex();</span>
+<span class="fc bfc" id="L363" title="All 2 branches covered.">        return token == EOF ? 0 : token;</span>
+    }
+    
+    /**
+     * Last token read from the lexer at the end of a call to yylex()
+     * 
+     * @return last token read
+     */
+    public int token() {
+<span class="nc" id="L372">        return token;</span>
+    }
+
+    public StringBuilder getTokenBuffer() {
+<span class="nc" id="L376">        return tokenBuffer;</span>
+    }
+    
+    /**
+     * Value of last token (if it is a token which has a value).
+     * 
+     * @return value of last value-laden token
+     */
+    public Object value() {
+<span class="fc" id="L385">        return yaccValue;</span>
+    }
+    
+    /**
+     * Get position information for Token/Node that follows node represented by startPosition 
+     * and current lexer location.
+     * 
+     * @param startPosition previous node/token
+     * @return a new position
+     */
+    public ISourcePosition getPosition(ISourcePosition startPosition) {
+<span class="fc" id="L396">    	return src.getPosition(startPosition); </span>
+    }
+
+    public ISourcePosition getPosition() {
+<span class="fc" id="L400">        return src.getPosition(null);</span>
+    }
+
+    public String getCurrentLine() {
+<span class="fc" id="L404">        return src.getCurrentLine();</span>
+    }
+
+    /**
+     * Parse must pass its support object for some check at bottom of
+     * yylex().  Ruby does it this way as well (i.e. a little parsing
+     * logic in the lexer).
+     * 
+     * @param parserSupport
+     */
+    public void setParserSupport(ParserSupport parserSupport) {
+<span class="fc" id="L415">        this.parserSupport = parserSupport;</span>
+<span class="fc" id="L416">    }</span>
+
+    private void setEncoding(ByteList name) {
+<span class="fc" id="L419">        Encoding newEncoding = parserSupport.getConfiguration().getEncodingService().loadEncoding(name);</span>
+
+<span class="pc bpc" id="L421" title="1 of 2 branches missed.">        if (newEncoding == null) {</span>
+<span class="nc" id="L422">            throw new SyntaxException(PID.UNKNOWN_ENCODING, getPosition(),</span>
+<span class="nc" id="L423">                    null, &quot;unknown encoding name: &quot; + name.toString());</span>
+        }
+
+<span class="pc bpc" id="L426" title="1 of 2 branches missed.">        if (!newEncoding.isAsciiCompatible()) {</span>
+<span class="nc" id="L427">            throw new SyntaxException(PID.NOT_ASCII_COMPATIBLE, getPosition(),</span>
+<span class="nc" id="L428">                    null, name.toString() + &quot; is not ASCII compatible&quot;);</span>
+        }
+
+<span class="fc" id="L431">        setEncoding(newEncoding);</span>
+<span class="fc" id="L432">    }</span>
+
+    public void setEncoding(Encoding encoding) {
+<span class="fc" id="L435">        this.encoding = encoding;</span>
+<span class="fc" id="L436">    }</span>
+
+    /**
+     * Allow the parser to set the source for its lexer.
+     * 
+     * @param source where the lexer gets raw data
+     */
+    public void setSource(LexerSource source) {
+<span class="fc" id="L444">        this.src = source;</span>
+<span class="fc" id="L445">    }</span>
+
+    public StrTerm getStrTerm() {
+<span class="fc" id="L448">        return lex_strterm;</span>
+    }
+    
+    public void setStrTerm(StrTerm strterm) {
+<span class="fc" id="L452">        this.lex_strterm = strterm;</span>
+<span class="fc" id="L453">    }</span>
+
+    public void resetStacks() {
+<span class="fc" id="L456">        conditionState.reset();</span>
+<span class="fc" id="L457">        cmdArgumentState.reset();</span>
+<span class="fc" id="L458">    }</span>
+    
+    public void setWarnings(IRubyWarnings warnings) {
+<span class="fc" id="L461">        this.warnings = warnings;</span>
+<span class="fc" id="L462">    }</span>
+
+    private void printState() {
+<span class="nc bnc" id="L465" title="All 2 branches missed.">        if (lex_state == null) {</span>
+<span class="nc" id="L466">            System.out.println(&quot;NULL&quot;);</span>
+        } else {
+<span class="nc" id="L468">            System.out.println(lex_state);</span>
+        }
+<span class="nc" id="L470">    }</span>
+
+    public void setState(LexState state) {
+<span class="fc" id="L473">        this.lex_state = state;</span>
+//        printState();
+<span class="fc" id="L475">    }</span>
+
+    public StackState getCmdArgumentState() {
+<span class="fc" id="L478">        return cmdArgumentState;</span>
+    }
+
+    public StackState getConditionState() {
+<span class="fc" id="L482">        return conditionState;</span>
+    }
+    
+    public void setValue(Object yaccValue) {
+<span class="fc" id="L486">        this.yaccValue = yaccValue;</span>
+<span class="fc" id="L487">    }</span>
+
+    private boolean isNext_identchar() throws IOException {
+<span class="fc" id="L490">        int c = src.read();</span>
+<span class="fc" id="L491">        src.unread(c);</span>
+
+<span class="pc bpc" id="L493" title="2 of 6 branches missed.">        return c != EOF &amp;&amp; (Character.isLetterOrDigit(c) || c == '_');</span>
+    }
+
+    private boolean isBEG() {
+<span class="fc bfc" id="L497" title="All 8 branches covered.">        return lex_state == LexState.EXPR_BEG || lex_state == LexState.EXPR_MID ||</span>
+                lex_state == LexState.EXPR_CLASS || (lex_state == LexState.EXPR_VALUE);
+    }
+    
+    private boolean isEND() {
+<span class="fc bfc" id="L502" title="All 6 branches covered.">        return lex_state == LexState.EXPR_END || lex_state == LexState.EXPR_ENDARG ||</span>
+                (lex_state == LexState.EXPR_ENDFN);
+    }
+
+    private boolean isARG() {
+<span class="fc bfc" id="L507" title="All 4 branches covered.">        return lex_state == LexState.EXPR_ARG || lex_state == LexState.EXPR_CMDARG;</span>
+    }
+    
+    private boolean isLabelPossible(boolean commandState) {
+<span class="fc bfc" id="L511" title="All 8 branches covered.">        return ((lex_state == LexState.EXPR_BEG || lex_state == LexState.EXPR_ENDFN) &amp;&amp; !commandState) || isARG();</span>
+    }
+    
+    private boolean isSpaceArg(int c, boolean spaceSeen) {
+<span class="fc bfc" id="L515" title="All 6 branches covered.">        return isARG() &amp;&amp; spaceSeen &amp;&amp; !Character.isWhitespace(c);</span>
+    }
+
+    private void determineExpressionState() {
+<span class="pc bfc" id="L519" title="All 2 branches covered.">        switch (lex_state) {</span>
+        case EXPR_FNAME: case EXPR_DOT:
+<span class="fc" id="L521">            setState(LexState.EXPR_ARG);</span>
+<span class="fc" id="L522">            break;</span>
+        default:
+<span class="fc" id="L524">            setState(LexState.EXPR_BEG);</span>
+            break;
+        }
+<span class="fc" id="L527">    }</span>
+
+    private int considerComplex(int token, int suffix) {
+<span class="fc bfc" id="L530" title="All 2 branches covered.">        if ((suffix &amp; SUFFIX_I) == 0) {</span>
+<span class="fc" id="L531">            return token;</span>
+        } else {
+<span class="fc" id="L533">            yaccValue = newComplexNode((Node) yaccValue);</span>
+<span class="fc" id="L534">            return RubyParser.tIMAGINARY;</span>
+        }
+    }
+
+    private int getFloatToken(String number, int suffix) {
+<span class="fc bfc" id="L539" title="All 2 branches covered.">        if ((suffix &amp; SUFFIX_R) != 0) {</span>
+<span class="fc" id="L540">            BigDecimal bd = new BigDecimal(number);</span>
+<span class="fc" id="L541">            BigDecimal denominator = BigDecimal.ONE.scaleByPowerOfTen(bd.scale());</span>
+<span class="fc" id="L542">            BigDecimal numerator = bd.multiply(denominator);</span>
+
+            try {
+<span class="fc" id="L545">                yaccValue = new RationalNode(getPosition(), numerator.longValueExact(), denominator.longValueExact());</span>
+<span class="nc" id="L546">            } catch (ArithmeticException ae) {</span>
+                // FIXME: Rational supports Bignum numerator and denominator
+<span class="nc" id="L548">                throw new SyntaxException(PID.RATIONAL_OUT_OF_RANGE, getPosition(), getCurrentLine(), &quot;Rational (&quot; + numerator + &quot;/&quot; + denominator + &quot;) out of range.&quot;);</span>
+<span class="fc" id="L549">            }</span>
+<span class="fc" id="L550">            return considerComplex(Tokens.tRATIONAL, suffix);</span>
+        }
+
+        double d;
+        try {
+<span class="fc" id="L555">            d = SafeDoubleParser.parseDouble(number);</span>
+<span class="nc" id="L556">        } catch (NumberFormatException e) {</span>
+<span class="nc" id="L557">            warnings.warn(ID.FLOAT_OUT_OF_RANGE, getPosition(), &quot;Float &quot; + number + &quot; out of range.&quot;);</span>
+
+<span class="nc bnc" id="L559" title="All 2 branches missed.">            d = number.startsWith(&quot;-&quot;) ? Double.NEGATIVE_INFINITY : Double.POSITIVE_INFINITY;</span>
+<span class="fc" id="L560">        }</span>
+<span class="fc" id="L561">        yaccValue = new FloatNode(getPosition(), d);</span>
+<span class="fc" id="L562">        return considerComplex(Tokens.tFLOAT, suffix);</span>
+    }
+
+    private int getIntegerToken(String value, int radix, int suffix) {
+        Node literalValue;
+
+<span class="fc bfc" id="L568" title="All 2 branches covered.">        if ((suffix &amp; SUFFIX_R) != 0) {</span>
+<span class="fc" id="L569">            literalValue = newRationalNode(value, radix);</span>
+        } else {
+            try {
+<span class="fc" id="L572">                literalValue = newFixnumNode(value, radix);</span>
+<span class="fc" id="L573">            } catch (NumberFormatException e) {</span>
+<span class="fc" id="L574">                literalValue = newBignumNode(value, radix);</span>
+<span class="fc" id="L575">            }</span>
+        }
+
+<span class="fc" id="L578">        yaccValue = literalValue;</span>
+<span class="fc" id="L579">        return considerComplex(Tokens.tINTEGER, suffix);</span>
+    }
+
+	/**
+	 * @param c the character to test
+	 * @return true if character is a hex value (0-9a-f)
+	 */
+    static boolean isHexChar(int c) {
+<span class="fc bfc" id="L587" title="All 10 branches covered.">        return Character.isDigit(c) || ('a' &lt;= c &amp;&amp; c &lt;= 'f') || ('A' &lt;= c &amp;&amp; c &lt;= 'F');</span>
+    }
+
+    /**
+	 * @param c the character to test
+     * @return true if character is an octal value (0-7)
+	 */
+    static boolean isOctChar(int c) {
+<span class="fc bfc" id="L595" title="All 4 branches covered.">        return '0' &lt;= c &amp;&amp; c &lt;= '7';</span>
+    }
+    
+    /**
+     * This is a valid character for an identifier?
+     *
+     * @param c is character to be compared
+     * @return whether c is an identifier or not
+     *
+     * mri: is_identchar
+     */
+    public boolean isIdentifierChar(int c) {
+<span class="pc bpc" id="L607" title="1 of 6 branches missed.">        return Character.isLetterOrDigit(c) || c == '_' || isMultiByteChar(c);</span>
+    }
+
+    public boolean isASCII(int c) {
+<span class="nc bnc" id="L611" title="All 2 branches missed.">        return !isMultiByteChar(c);</span>
+    }
+    
+    /**
+     * Is this a multibyte character from a multibyte encoding?
+     *
+     * @param c
+     * @return whether c is an multibyte char or not
+     */
+    protected boolean isMultiByteChar(int c) {
+<span class="fc bfc" id="L621" title="All 2 branches covered.">        return encoding.codeToMbcLength(c) != 1;</span>
+    }
+
+    // STR_NEW3/parser_str_new
+    public StrNode createStrNode(ISourcePosition position, ByteList buffer, int flags) {
+<span class="fc" id="L626">        Encoding bufferEncoding = buffer.getEncoding();</span>
+<span class="fc" id="L627">        int codeRange = StringSupport.codeRangeScan(bufferEncoding, buffer);</span>
+
+<span class="pc bpc" id="L629" title="1 of 4 branches missed.">        if ((flags &amp; RubyLexer.STR_FUNC_REGEXP) == 0 &amp;&amp; bufferEncoding.isAsciiCompatible()) {</span>
+            // If we have characters outside 7-bit range and we are still ascii then change to ascii-8bit
+<span class="fc bfc" id="L631" title="All 2 branches covered.">            if (codeRange == StringSupport.CR_7BIT) {</span>
+                // Do nothing like MRI
+<span class="fc bfc" id="L633" title="All 4 branches covered.">            } else if (getEncoding() == RubyLexer.USASCII_ENCODING &amp;&amp;</span>
+                    bufferEncoding != RubyLexer.UTF8_ENCODING) {
+<span class="fc" id="L635">                codeRange = ParserSupport.associateEncoding(buffer, RubyLexer.ASCII8BIT_ENCODING, codeRange);</span>
+            }
+        }
+
+<span class="fc" id="L639">        return new StrNode(position, buffer, codeRange);</span>
+    }
+    
+    /**
+     * What type/kind of quote are we dealing with?
+     * 
+     * @param c first character the the quote construct
+     * @return a token that specifies the quote type
+     */
+    private int parseQuote(int c) throws IOException {
+        int begin, end;
+        boolean shortHand;
+        
+        // Short-hand (e.g. %{,%.,%!,... versus %Q{).
+<span class="fc bfc" id="L653" title="All 2 branches covered.">        if (!Character.isLetterOrDigit(c)) {</span>
+<span class="fc" id="L654">            begin = c;</span>
+<span class="fc" id="L655">            c = 'Q';</span>
+<span class="fc" id="L656">            shortHand = true;</span>
+        // Long-hand (e.g. %Q{}).
+        } else {
+<span class="fc" id="L659">            shortHand = false;</span>
+<span class="fc" id="L660">            begin = src.read();</span>
+<span class="fc bfc" id="L661" title="All 2 branches covered.">            if (Character.isLetterOrDigit(begin) /* no mb || ismbchar(term)*/) {</span>
+<span class="fc" id="L662">                throw new SyntaxException(PID.STRING_UNKNOWN_TYPE, getPosition(), getCurrentLine(), &quot;unknown type of %string&quot;);</span>
+            }
+        }
+<span class="pc bpc" id="L665" title="2 of 4 branches missed.">        if (c == EOF || begin == EOF) {</span>
+<span class="nc" id="L666">            throw new SyntaxException(PID.STRING_HITS_EOF, getPosition(), getCurrentLine(), &quot;unterminated quoted string meets end of file&quot;);</span>
+        }
+        
+        // Figure end-char.  '\0' is special to indicate begin=end and that no nesting?
+<span class="fc bfc" id="L670" title="All 5 branches covered.">        switch(begin) {</span>
+<span class="fc" id="L671">        case '(': end = ')'; break;</span>
+<span class="fc" id="L672">        case '[': end = ']'; break;</span>
+<span class="fc" id="L673">        case '{': end = '}'; break;</span>
+<span class="fc" id="L674">        case '&lt;': end = '&gt;'; break;</span>
+        default: 
+<span class="fc" id="L676">            end = begin; </span>
+<span class="fc" id="L677">            begin = '\0';</span>
+        }
+
+<span class="pc bpc" id="L680" title="1 of 10 branches missed.">        switch (c) {</span>
+        case 'Q':
+<span class="fc" id="L682">            lex_strterm = new StringTerm(str_dquote, begin ,end);</span>
+<span class="fc bfc" id="L683" title="All 2 branches covered.">            yaccValue = &quot;%&quot;+ (shortHand ? (&quot;&quot;+end) : (&quot;&quot; + c + begin));</span>
+<span class="fc" id="L684">            return Tokens.tSTRING_BEG;</span>
+
+        case 'q':
+<span class="fc" id="L687">            lex_strterm = new StringTerm(str_squote, begin, end);</span>
+<span class="fc" id="L688">            yaccValue = &quot;%&quot;+c+begin;</span>
+<span class="fc" id="L689">            return Tokens.tSTRING_BEG;</span>
+
+        case 'W':
+<span class="fc" id="L692">            lex_strterm = new StringTerm(str_dquote | STR_FUNC_QWORDS, begin, end);</span>
+<span class="pc bpc" id="L693" title="1 of 2 branches missed.">            do {c = src.read();} while (Character.isWhitespace(c));</span>
+<span class="fc" id="L694">            src.unread(c);</span>
+<span class="fc" id="L695">            yaccValue = &quot;%&quot;+c+begin;</span>
+<span class="fc" id="L696">            return Tokens.tWORDS_BEG;</span>
+
+        case 'w':
+<span class="fc" id="L699">            lex_strterm = new StringTerm(/* str_squote | */ STR_FUNC_QWORDS, begin, end);</span>
+<span class="fc bfc" id="L700" title="All 2 branches covered.">            do {c = src.read();} while (Character.isWhitespace(c));</span>
+<span class="fc" id="L701">            src.unread(c);</span>
+<span class="fc" id="L702">            yaccValue = &quot;%&quot;+c+begin;</span>
+<span class="fc" id="L703">            return Tokens.tQWORDS_BEG;</span>
+
+        case 'x':
+<span class="fc" id="L706">            lex_strterm = new StringTerm(str_xquote, begin, end);</span>
+<span class="fc" id="L707">            yaccValue = &quot;%&quot;+c+begin;</span>
+<span class="fc" id="L708">            return Tokens.tXSTRING_BEG;</span>
+
+        case 'r':
+<span class="fc" id="L711">            lex_strterm = new StringTerm(str_regexp, begin, end);</span>
+<span class="fc" id="L712">            yaccValue = &quot;%&quot;+c+begin;</span>
+<span class="fc" id="L713">            return Tokens.tREGEXP_BEG;</span>
+
+        case 's':
+<span class="fc" id="L716">            lex_strterm = new StringTerm(str_ssym, begin, end);</span>
+<span class="fc" id="L717">            setState(LexState.EXPR_FNAME);</span>
+<span class="fc" id="L718">            yaccValue = &quot;%&quot;+c+begin;</span>
+<span class="fc" id="L719">            return Tokens.tSYMBEG;</span>
+        
+        case 'I':
+<span class="fc" id="L722">            lex_strterm = new StringTerm(str_dquote | STR_FUNC_QWORDS, begin, end);</span>
+<span class="pc bpc" id="L723" title="1 of 2 branches missed.">            do {c = src.read();} while (Character.isWhitespace(c));</span>
+<span class="fc" id="L724">            src.unread(c);</span>
+<span class="fc" id="L725">            yaccValue = &quot;%&quot; + c + begin;</span>
+<span class="fc" id="L726">            return Tokens.tSYMBOLS_BEG;</span>
+        case 'i':
+<span class="fc" id="L728">            lex_strterm = new StringTerm(/* str_squote | */STR_FUNC_QWORDS, begin, end);</span>
+<span class="pc bpc" id="L729" title="1 of 2 branches missed.">            do {c = src.read();} while (Character.isWhitespace(c));</span>
+<span class="fc" id="L730">            src.unread(c);</span>
+<span class="fc" id="L731">            yaccValue = &quot;%&quot; + c + begin;</span>
+<span class="fc" id="L732">            return Tokens.tQSYMBOLS_BEG;</span>
+        default:
+<span class="nc" id="L734">            throw new SyntaxException(PID.STRING_UNKNOWN_TYPE, </span>
+<span class="nc" id="L735">                        getPosition(), getCurrentLine(), &quot;unknown type of %string&quot;);</span>
+        }
+    }
+    
+    private int hereDocumentIdentifier() throws IOException {
+<span class="fc" id="L740">        int c = src.read(); </span>
+        int term;
+
+<span class="fc" id="L743">        int func = 0;</span>
+<span class="fc bfc" id="L744" title="All 2 branches covered.">        if (c == '-') {</span>
+<span class="fc" id="L745">            c = src.read();</span>
+<span class="fc" id="L746">            func = STR_FUNC_INDENT;</span>
+        }
+        
+        ByteList markerValue;
+<span class="pc bpc" id="L750" title="1 of 6 branches missed.">        if (c == '\'' || c == '&quot;' || c == '`') {</span>
+<span class="fc bfc" id="L751" title="All 2 branches covered.">            if (c == '\'') {</span>
+<span class="fc" id="L752">                func |= str_squote;</span>
+<span class="pc bpc" id="L753" title="1 of 2 branches missed.">            } else if (c == '&quot;') {</span>
+<span class="fc" id="L754">                func |= str_dquote;</span>
+            } else {
+<span class="nc" id="L756">                func |= str_xquote; </span>
+            }
+
+<span class="fc" id="L759">            newtok();</span>
+
+<span class="fc" id="L761">            markerValue = new ByteList();</span>
+<span class="fc" id="L762">            term = c;</span>
+<span class="pc bpc" id="L763" title="1 of 4 branches missed.">            while ((c = src.read()) != EOF &amp;&amp; c != term) {</span>
+<span class="fc" id="L764">                markerValue.append(c);</span>
+            }
+<span class="pc bpc" id="L766" title="1 of 2 branches missed.">            if (c == EOF) {</span>
+<span class="nc" id="L767">                throw new SyntaxException(PID.STRING_MARKER_MISSING, getPosition(), </span>
+<span class="nc" id="L768">                        getCurrentLine(), &quot;unterminated here document identifier&quot;);</span>
+            }	
+        } else {
+<span class="fc bfc" id="L771" title="All 2 branches covered.">            if (!isIdentifierChar(c)) {</span>
+<span class="fc" id="L772">                src.unread(c);</span>
+<span class="pc bpc" id="L773" title="1 of 2 branches missed.">                if ((func &amp; STR_FUNC_INDENT) != 0) {</span>
+<span class="nc" id="L774">                    src.unread('-');</span>
+                }
+<span class="fc" id="L776">                return 0;</span>
+            }
+<span class="fc" id="L778">            newtok();</span>
+<span class="fc" id="L779">            markerValue = new ByteList();</span>
+<span class="fc" id="L780">            term = '&quot;';</span>
+<span class="fc" id="L781">            func |= str_dquote;</span>
+            do {
+<span class="fc" id="L783">                markerValue.append(c);</span>
+<span class="pc bpc" id="L784" title="1 of 4 branches missed.">            } while ((c = src.read()) != EOF &amp;&amp; isIdentifierChar(c));</span>
+
+<span class="fc" id="L786">            src.unread(c);</span>
+        }
+
+<span class="fc" id="L789">        ByteList lastLine = src.readLineBytes();</span>
+<span class="fc" id="L790">        lastLine.append('\n');</span>
+<span class="fc" id="L791">        lex_strterm = new HeredocTerm(markerValue, func, lastLine);</span>
+
+<span class="pc bpc" id="L793" title="1 of 2 branches missed.">        if (term == '`') {</span>
+<span class="nc" id="L794">            yaccValue = &quot;`&quot;;</span>
+<span class="nc" id="L795">            return Tokens.tXSTRING_BEG;</span>
+        }
+        
+<span class="fc" id="L798">        yaccValue = &quot;\&quot;&quot;;</span>
+        // Hacky: Advance position to eat newline here....
+<span class="fc" id="L800">        getPosition();</span>
+<span class="fc" id="L801">        return Tokens.tSTRING_BEG;</span>
+    }
+    
+    private void arg_ambiguous() {
+<span class="pc bpc" id="L805" title="1 of 2 branches missed.">        if (warnings.isVerbose()) warnings.warning(ID.AMBIGUOUS_ARGUMENT, getPosition(), &quot;Ambiguous first argument; make sure.&quot;);</span>
+<span class="fc" id="L806">    }</span>
+
+
+    /* MRI: magic_comment_marker */
+    /* This impl is a little sucky.  We basically double scan the same bytelist twice.  Once here
+     * and once in parseMagicComment.
+     */
+    private int magicCommentMarker(ByteList str, int begin) {
+<span class="fc" id="L814">        int i = begin;</span>
+<span class="fc" id="L815">        int len = str.length();</span>
+
+<span class="fc bfc" id="L817" title="All 2 branches covered.">        while (i &lt; len) {</span>
+<span class="fc bfc" id="L818" title="All 3 branches covered.">            switch (str.charAt(i)) {</span>
+                case '-':
+<span class="pc bpc" id="L820" title="2 of 6 branches missed.">                    if (i &gt;= 2 &amp;&amp; str.charAt(i - 1) == '*' &amp;&amp; str.charAt(i - 2) == '-') return i + 1;</span>
+<span class="fc" id="L821">                    i += 2;</span>
+<span class="fc" id="L822">                    break;</span>
+                case '*':
+<span class="pc bpc" id="L824" title="1 of 2 branches missed.">                    if (i + 1 &gt;= len) return -1;</span>
+
+<span class="pc bpc" id="L826" title="1 of 2 branches missed.">                    if (str.charAt(i + 1) != '-') {</span>
+<span class="nc" id="L827">                        i += 4;</span>
+<span class="pc bpc" id="L828" title="1 of 2 branches missed.">                    } else if (str.charAt(i - 1) != '-') {</span>
+<span class="nc" id="L829">                        i += 2;</span>
+                    } else {
+<span class="fc" id="L831">                        return i + 2;</span>
+                    }
+                    break;
+                default:
+<span class="fc" id="L835">                    i += 3;</span>
+<span class="fc" id="L836">                    break;</span>
+            }
+        }
+<span class="fc" id="L839">        return -1;</span>
+    }
+
+
+    private boolean magicCommentSpecialChar(char c) {
+<span class="nc bnc" id="L844" title="All 2 branches missed.">        switch (c) {</span>
+<span class="nc" id="L845">            case '\'': case '&quot;': case ':': case ';': return true;</span>
+        }
+<span class="nc" id="L847">        return false;</span>
+    }
+
+    private static final String magicString = &quot;([^\\s\'\&quot;:;]+)\\s*:\\s*(\&quot;(?:\\\\.|[^\&quot;])*\&quot;|[^\&quot;\\s;]+)[\\s;]*&quot;;
+<span class="fc" id="L851">    private static final Regex magicRegexp = new Regex(magicString.getBytes(), 0, magicString.length(), 0, Encoding.load(&quot;ASCII&quot;));</span>
+
+    // MRI: parser_magic_comment
+    protected boolean parseMagicComment(ByteList magicLine) throws IOException {
+<span class="fc" id="L855">        int length = magicLine.length();</span>
+
+<span class="fc bfc" id="L857" title="All 2 branches covered.">        if (length &lt;= 7) return false;</span>
+<span class="fc" id="L858">        int beg = magicCommentMarker(magicLine, 0);</span>
+<span class="fc bfc" id="L859" title="All 2 branches covered.">        if (beg &lt; 0) return false;</span>
+<span class="fc" id="L860">        int end = magicCommentMarker(magicLine, beg);</span>
+<span class="pc bpc" id="L861" title="1 of 2 branches missed.">        if (end &lt; 0) return false;</span>
+
+        // We only use a regex if -*- ... -*- is found.  Not too hot a path?
+<span class="fc" id="L864">        int realSize = magicLine.getRealSize();</span>
+<span class="fc" id="L865">        int begin = magicLine.getBegin();</span>
+<span class="fc" id="L866">        Matcher matcher = magicRegexp.matcher(magicLine.getUnsafeBytes(), begin, begin + realSize);</span>
+<span class="fc" id="L867">        int result = RubyRegexp.matcherSearch(parserSupport.getConfiguration().getRuntime(), matcher, begin, begin + realSize, Option.NONE);</span>
+
+<span class="fc bfc" id="L869" title="All 2 branches covered.">        if (result &lt; 0) return false;</span>
+
+        // Regexp is guarateed to have three matches
+<span class="fc" id="L872">        int begs[] = matcher.getRegion().beg;</span>
+<span class="fc" id="L873">        int ends[] = matcher.getRegion().end;</span>
+<span class="fc" id="L874">        String name = magicLine.subSequence(begs[1], ends[1]).toString();</span>
+<span class="fc bfc" id="L875" title="All 2 branches covered.">        if (!name.equalsIgnoreCase(&quot;encoding&quot;)) return false;</span>
+
+<span class="fc" id="L877">        setEncoding(new ByteList(magicLine.getUnsafeBytes(), begs[2], ends[2] - begs[2]));</span>
+
+<span class="fc" id="L879">        return true;</span>
+    }
+
+    // TODO: Make hand-rolled version of this
+    private static final String encodingString = &quot;[cC][oO][dD][iI][nN][gG]\\s*[=:]\\s*([a-zA-Z0-9\\-_]+)&quot;;
+<span class="fc" id="L884">    private static final Regex encodingRegexp = new Regex(encodingString.getBytes(), 0,</span>
+<span class="fc" id="L885">            encodingString.length(), 0, Encoding.load(&quot;ASCII&quot;));</span>
+
+    protected void handleFileEncodingComment(ByteList encodingLine) throws IOException {
+<span class="fc" id="L888">        int realSize = encodingLine.getRealSize();</span>
+<span class="fc" id="L889">        int begin = encodingLine.getBegin();</span>
+<span class="fc" id="L890">        Matcher matcher = encodingRegexp.matcher(encodingLine.getUnsafeBytes(), begin, begin + realSize);</span>
+<span class="fc" id="L891">        int result = RubyRegexp.matcherSearch(parserSupport.getConfiguration().getRuntime(), matcher, begin, begin + realSize, Option.IGNORECASE);</span>
+
+<span class="fc bfc" id="L893" title="All 2 branches covered.">        if (result &lt; 0) return;</span>
+
+<span class="fc" id="L895">        int begs[] = matcher.getRegion().beg;</span>
+<span class="fc" id="L896">        int ends[] = matcher.getRegion().end;</span>
+
+<span class="fc" id="L898">        setEncoding(new ByteList(encodingLine.getUnsafeBytes(), begs[1], ends[1] - begs[1]));</span>
+<span class="fc" id="L899">    }</span>
+
+    /**
+     * Read a comment up to end of line.
+     * 
+     * @return something or eof value
+     */
+    protected int readComment() throws IOException {
+        // 1.9 - first line comment handling
+        ByteList commentLine;
+<span class="fc bfc" id="L909" title="All 4 branches covered.">        if (src.getLine() == 0 &amp;&amp; token == 0) {</span>
+            // Skip first line if it is a shebang line?
+            // (not the same as MRI:parser_prepare/comment_at_top)
+<span class="fc bfc" id="L912" title="All 2 branches covered.">            if (src.peek('!')) {</span>
+<span class="fc" id="L913">                int c = src.skipUntil('\n');</span>
+
+                // TODO: Eat whitespace
+                
+<span class="fc bfc" id="L917" title="All 2 branches covered.">                if (!src.peek('#')) return c; // Next line better also be a comment</span>
+            }
+
+<span class="fc" id="L920">            commentLine = src.readUntil('\n');</span>
+<span class="pc bpc" id="L921" title="1 of 2 branches missed.">            if (commentLine != null) {</span>
+<span class="fc" id="L922">                boolean handledMagicComment = parseMagicComment(commentLine);</span>
+<span class="fc bfc" id="L923" title="All 2 branches covered.">                if (!handledMagicComment) {</span>
+<span class="fc" id="L924">                    handleFileEncodingComment(commentLine);</span>
+                }
+            }
+<span class="fc" id="L927">            return 0;</span>
+        }
+        
+<span class="fc" id="L930">        return src.skipUntil('\n');</span>
+    }
+    
+    /*
+     * Not normally used, but is left in here since it can be useful in debugging
+     * grammar and lexing problems.
+     *
+     */
+    private void printToken(int token) {
+        //System.out.print(&quot;LOC: &quot; + support.getPosition() + &quot; ~ &quot;);
+        
+<span class="nc bnc" id="L941" title="All 127 branches missed.">        switch (token) {</span>
+<span class="nc" id="L942">            case Tokens.yyErrorCode: System.err.print(&quot;yyErrorCode,&quot;); break;</span>
+<span class="nc" id="L943">            case Tokens.kCLASS: System.err.print(&quot;kClass,&quot;); break;</span>
+<span class="nc" id="L944">            case Tokens.kMODULE: System.err.print(&quot;kModule,&quot;); break;</span>
+<span class="nc" id="L945">            case Tokens.kDEF: System.err.print(&quot;kDEF,&quot;); break;</span>
+<span class="nc" id="L946">            case Tokens.kUNDEF: System.err.print(&quot;kUNDEF,&quot;); break;</span>
+<span class="nc" id="L947">            case Tokens.kBEGIN: System.err.print(&quot;kBEGIN,&quot;); break;</span>
+<span class="nc" id="L948">            case Tokens.kRESCUE: System.err.print(&quot;kRESCUE,&quot;); break;</span>
+<span class="nc" id="L949">            case Tokens.kENSURE: System.err.print(&quot;kENSURE,&quot;); break;</span>
+<span class="nc" id="L950">            case Tokens.kEND: System.err.print(&quot;kEND,&quot;); break;</span>
+<span class="nc" id="L951">            case Tokens.kIF: System.err.print(&quot;kIF,&quot;); break;</span>
+<span class="nc" id="L952">            case Tokens.kUNLESS: System.err.print(&quot;kUNLESS,&quot;); break;</span>
+<span class="nc" id="L953">            case Tokens.kTHEN: System.err.print(&quot;kTHEN,&quot;); break;</span>
+<span class="nc" id="L954">            case Tokens.kELSIF: System.err.print(&quot;kELSIF,&quot;); break;</span>
+<span class="nc" id="L955">            case Tokens.kELSE: System.err.print(&quot;kELSE,&quot;); break;</span>
+<span class="nc" id="L956">            case Tokens.kCASE: System.err.print(&quot;kCASE,&quot;); break;</span>
+<span class="nc" id="L957">            case Tokens.kWHEN: System.err.print(&quot;kWHEN,&quot;); break;</span>
+<span class="nc" id="L958">            case Tokens.kWHILE: System.err.print(&quot;kWHILE,&quot;); break;</span>
+<span class="nc" id="L959">            case Tokens.kUNTIL: System.err.print(&quot;kUNTIL,&quot;); break;</span>
+<span class="nc" id="L960">            case Tokens.kFOR: System.err.print(&quot;kFOR,&quot;); break;</span>
+<span class="nc" id="L961">            case Tokens.kBREAK: System.err.print(&quot;kBREAK,&quot;); break;</span>
+<span class="nc" id="L962">            case Tokens.kNEXT: System.err.print(&quot;kNEXT,&quot;); break;</span>
+<span class="nc" id="L963">            case Tokens.kREDO: System.err.print(&quot;kREDO,&quot;); break;</span>
+<span class="nc" id="L964">            case Tokens.kRETRY: System.err.print(&quot;kRETRY,&quot;); break;</span>
+<span class="nc" id="L965">            case Tokens.kIN: System.err.print(&quot;kIN,&quot;); break;</span>
+<span class="nc" id="L966">            case Tokens.kDO: System.err.print(&quot;kDO,&quot;); break;</span>
+<span class="nc" id="L967">            case Tokens.kDO_COND: System.err.print(&quot;kDO_COND,&quot;); break;</span>
+<span class="nc" id="L968">            case Tokens.kDO_BLOCK: System.err.print(&quot;kDO_BLOCK,&quot;); break;</span>
+<span class="nc" id="L969">            case Tokens.kRETURN: System.err.print(&quot;kRETURN,&quot;); break;</span>
+<span class="nc" id="L970">            case Tokens.kYIELD: System.err.print(&quot;kYIELD,&quot;); break;</span>
+<span class="nc" id="L971">            case Tokens.kSUPER: System.err.print(&quot;kSUPER,&quot;); break;</span>
+<span class="nc" id="L972">            case Tokens.kSELF: System.err.print(&quot;kSELF,&quot;); break;</span>
+<span class="nc" id="L973">            case Tokens.kNIL: System.err.print(&quot;kNIL,&quot;); break;</span>
+<span class="nc" id="L974">            case Tokens.kTRUE: System.err.print(&quot;kTRUE,&quot;); break;</span>
+<span class="nc" id="L975">            case Tokens.kFALSE: System.err.print(&quot;kFALSE,&quot;); break;</span>
+<span class="nc" id="L976">            case Tokens.kAND: System.err.print(&quot;kAND,&quot;); break;</span>
+<span class="nc" id="L977">            case Tokens.kOR: System.err.print(&quot;kOR,&quot;); break;</span>
+<span class="nc" id="L978">            case Tokens.kNOT: System.err.print(&quot;kNOT,&quot;); break;</span>
+<span class="nc" id="L979">            case Tokens.kIF_MOD: System.err.print(&quot;kIF_MOD,&quot;); break;</span>
+<span class="nc" id="L980">            case Tokens.kUNLESS_MOD: System.err.print(&quot;kUNLESS_MOD,&quot;); break;</span>
+<span class="nc" id="L981">            case Tokens.kWHILE_MOD: System.err.print(&quot;kWHILE_MOD,&quot;); break;</span>
+<span class="nc" id="L982">            case Tokens.kUNTIL_MOD: System.err.print(&quot;kUNTIL_MOD,&quot;); break;</span>
+<span class="nc" id="L983">            case Tokens.kRESCUE_MOD: System.err.print(&quot;kRESCUE_MOD,&quot;); break;</span>
+<span class="nc" id="L984">            case Tokens.kALIAS: System.err.print(&quot;kALIAS,&quot;); break;</span>
+<span class="nc" id="L985">            case Tokens.kDEFINED: System.err.print(&quot;kDEFINED,&quot;); break;</span>
+<span class="nc" id="L986">            case Tokens.klBEGIN: System.err.print(&quot;klBEGIN,&quot;); break;</span>
+<span class="nc" id="L987">            case Tokens.klEND: System.err.print(&quot;klEND,&quot;); break;</span>
+<span class="nc" id="L988">            case Tokens.k__LINE__: System.err.print(&quot;k__LINE__,&quot;); break;</span>
+<span class="nc" id="L989">            case Tokens.k__FILE__: System.err.print(&quot;k__FILE__,&quot;); break;</span>
+<span class="nc" id="L990">            case Tokens.k__ENCODING__: System.err.print(&quot;k__ENCODING__,&quot;); break;</span>
+<span class="nc" id="L991">            case Tokens.kDO_LAMBDA: System.err.print(&quot;kDO_LAMBDA,&quot;); break;</span>
+<span class="nc" id="L992">            case Tokens.tIDENTIFIER: System.err.print(&quot;tIDENTIFIER[&quot;+ value() + &quot;],&quot;); break;</span>
+<span class="nc" id="L993">            case Tokens.tFID: System.err.print(&quot;tFID[&quot; + value() + &quot;],&quot;); break;</span>
+<span class="nc" id="L994">            case Tokens.tGVAR: System.err.print(&quot;tGVAR[&quot; + value() + &quot;],&quot;); break;</span>
+<span class="nc" id="L995">            case Tokens.tIVAR: System.err.print(&quot;tIVAR[&quot; + value() +&quot;],&quot;); break;</span>
+<span class="nc" id="L996">            case Tokens.tCONSTANT: System.err.print(&quot;tCONSTANT[&quot;+ value() +&quot;],&quot;); break;</span>
+<span class="nc" id="L997">            case Tokens.tCVAR: System.err.print(&quot;tCVAR,&quot;); break;</span>
+<span class="nc" id="L998">            case Tokens.tINTEGER: System.err.print(&quot;tINTEGER,&quot;); break;</span>
+<span class="nc" id="L999">            case Tokens.tFLOAT: System.err.print(&quot;tFLOAT,&quot;); break;</span>
+<span class="nc" id="L1000">            case Tokens.tSTRING_CONTENT: System.err.print(&quot;tSTRING_CONTENT[&quot; + ((StrNode) value()).getValue() + &quot;],&quot;); break;</span>
+<span class="nc" id="L1001">            case Tokens.tSTRING_BEG: System.err.print(&quot;tSTRING_BEG,&quot;); break;</span>
+<span class="nc" id="L1002">            case Tokens.tSTRING_END: System.err.print(&quot;tSTRING_END,&quot;); break;</span>
+<span class="nc" id="L1003">            case Tokens.tSTRING_DBEG: System.err.print(&quot;tSTRING_DBEG,&quot;); break;</span>
+<span class="nc" id="L1004">            case Tokens.tSTRING_DVAR: System.err.print(&quot;tSTRING_DVAR,&quot;); break;</span>
+<span class="nc" id="L1005">            case Tokens.tXSTRING_BEG: System.err.print(&quot;tXSTRING_BEG,&quot;); break;</span>
+<span class="nc" id="L1006">            case Tokens.tREGEXP_BEG: System.err.print(&quot;tREGEXP_BEG,&quot;); break;</span>
+<span class="nc" id="L1007">            case Tokens.tREGEXP_END: System.err.print(&quot;tREGEXP_END,&quot;); break;</span>
+<span class="nc" id="L1008">            case Tokens.tWORDS_BEG: System.err.print(&quot;tWORDS_BEG,&quot;); break;</span>
+<span class="nc" id="L1009">            case Tokens.tQWORDS_BEG: System.err.print(&quot;tQWORDS_BEG,&quot;); break;</span>
+<span class="nc" id="L1010">            case Tokens.tBACK_REF: System.err.print(&quot;tBACK_REF,&quot;); break;</span>
+<span class="nc" id="L1011">            case Tokens.tBACK_REF2: System.err.print(&quot;tBACK_REF2,&quot;); break;</span>
+<span class="nc" id="L1012">            case Tokens.tNTH_REF: System.err.print(&quot;tNTH_REF,&quot;); break;</span>
+<span class="nc" id="L1013">            case Tokens.tUPLUS: System.err.print(&quot;tUPLUS&quot;); break;</span>
+<span class="nc" id="L1014">            case Tokens.tUMINUS: System.err.print(&quot;tUMINUS,&quot;); break;</span>
+<span class="nc" id="L1015">            case Tokens.tPOW: System.err.print(&quot;tPOW,&quot;); break;</span>
+<span class="nc" id="L1016">            case Tokens.tCMP: System.err.print(&quot;tCMP,&quot;); break;</span>
+<span class="nc" id="L1017">            case Tokens.tEQ: System.err.print(&quot;tEQ,&quot;); break;</span>
+<span class="nc" id="L1018">            case Tokens.tEQQ: System.err.print(&quot;tEQQ,&quot;); break;</span>
+<span class="nc" id="L1019">            case Tokens.tNEQ: System.err.print(&quot;tNEQ,&quot;); break;</span>
+<span class="nc" id="L1020">            case Tokens.tGEQ: System.err.print(&quot;tGEQ,&quot;); break;</span>
+<span class="nc" id="L1021">            case Tokens.tLEQ: System.err.print(&quot;tLEQ,&quot;); break;</span>
+<span class="nc" id="L1022">            case Tokens.tANDOP: System.err.print(&quot;tANDOP,&quot;); break;</span>
+<span class="nc" id="L1023">            case Tokens.tOROP: System.err.print(&quot;tOROP,&quot;); break;</span>
+<span class="nc" id="L1024">            case Tokens.tMATCH: System.err.print(&quot;tMATCH,&quot;); break;</span>
+<span class="nc" id="L1025">            case Tokens.tNMATCH: System.err.print(&quot;tNMATCH,&quot;); break;</span>
+<span class="nc" id="L1026">            case Tokens.tDOT: System.err.print(&quot;tDOT,&quot;); break;</span>
+<span class="nc" id="L1027">            case Tokens.tDOT2: System.err.print(&quot;tDOT2,&quot;); break;</span>
+<span class="nc" id="L1028">            case Tokens.tDOT3: System.err.print(&quot;tDOT3,&quot;); break;</span>
+<span class="nc" id="L1029">            case Tokens.tAREF: System.err.print(&quot;tAREF,&quot;); break;</span>
+<span class="nc" id="L1030">            case Tokens.tASET: System.err.print(&quot;tASET,&quot;); break;</span>
+<span class="nc" id="L1031">            case Tokens.tLSHFT: System.err.print(&quot;tLSHFT,&quot;); break;</span>
+<span class="nc" id="L1032">            case Tokens.tRSHFT: System.err.print(&quot;tRSHFT,&quot;); break;</span>
+<span class="nc" id="L1033">            case Tokens.tCOLON2: System.err.print(&quot;tCOLON2,&quot;); break;</span>
+<span class="nc" id="L1034">            case Tokens.tCOLON3: System.err.print(&quot;tCOLON3,&quot;); break;</span>
+<span class="nc" id="L1035">            case Tokens.tOP_ASGN: System.err.print(&quot;tOP_ASGN,&quot;); break;</span>
+<span class="nc" id="L1036">            case Tokens.tASSOC: System.err.print(&quot;tASSOC,&quot;); break;</span>
+<span class="nc" id="L1037">            case Tokens.tLPAREN: System.err.print(&quot;tLPAREN,&quot;); break;</span>
+<span class="nc" id="L1038">            case Tokens.tLPAREN2: System.err.print(&quot;tLPAREN2,&quot;); break;</span>
+<span class="nc" id="L1039">            case Tokens.tLPAREN_ARG: System.err.print(&quot;tLPAREN_ARG,&quot;); break;</span>
+<span class="nc" id="L1040">            case Tokens.tLBRACK: System.err.print(&quot;tLBRACK,&quot;); break;</span>
+<span class="nc" id="L1041">            case Tokens.tRBRACK: System.err.print(&quot;tRBRACK,&quot;); break;</span>
+<span class="nc" id="L1042">            case Tokens.tLBRACE: System.err.print(&quot;tLBRACE,&quot;); break;</span>
+<span class="nc" id="L1043">            case Tokens.tLBRACE_ARG: System.err.print(&quot;tLBRACE_ARG,&quot;); break;</span>
+<span class="nc" id="L1044">            case Tokens.tSTAR: System.err.print(&quot;tSTAR,&quot;); break;</span>
+<span class="nc" id="L1045">            case Tokens.tSTAR2: System.err.print(&quot;tSTAR2,&quot;); break;</span>
+<span class="nc" id="L1046">            case Tokens.tAMPER: System.err.print(&quot;tAMPER,&quot;); break;</span>
+<span class="nc" id="L1047">            case Tokens.tAMPER2: System.err.print(&quot;tAMPER2,&quot;); break;</span>
+<span class="nc" id="L1048">            case Tokens.tSYMBEG: System.err.print(&quot;tSYMBEG,&quot;); break;</span>
+<span class="nc" id="L1049">            case Tokens.tTILDE: System.err.print(&quot;tTILDE,&quot;); break;</span>
+<span class="nc" id="L1050">            case Tokens.tPERCENT: System.err.print(&quot;tPERCENT,&quot;); break;</span>
+<span class="nc" id="L1051">            case Tokens.tDIVIDE: System.err.print(&quot;tDIVIDE,&quot;); break;</span>
+<span class="nc" id="L1052">            case Tokens.tPLUS: System.err.print(&quot;tPLUS,&quot;); break;</span>
+<span class="nc" id="L1053">            case Tokens.tMINUS: System.err.print(&quot;tMINUS,&quot;); break;</span>
+<span class="nc" id="L1054">            case Tokens.tLT: System.err.print(&quot;tLT,&quot;); break;</span>
+<span class="nc" id="L1055">            case Tokens.tGT: System.err.print(&quot;tGT,&quot;); break;</span>
+<span class="nc" id="L1056">            case Tokens.tCARET: System.err.print(&quot;tCARET,&quot;); break;</span>
+<span class="nc" id="L1057">            case Tokens.tBANG: System.err.print(&quot;tBANG,&quot;); break;</span>
+<span class="nc" id="L1058">            case Tokens.tLCURLY: System.err.print(&quot;tTLCURLY,&quot;); break;</span>
+<span class="nc" id="L1059">            case Tokens.tRCURLY: System.err.print(&quot;tRCURLY,&quot;); break;</span>
+<span class="nc" id="L1060">            case Tokens.tPIPE: System.err.print(&quot;tTPIPE,&quot;); break;</span>
+<span class="nc" id="L1061">            case Tokens.tLAMBDA: System.err.print(&quot;tLAMBDA,&quot;); break;</span>
+<span class="nc" id="L1062">            case Tokens.tLAMBEG: System.err.print(&quot;tLAMBEG,&quot;); break;</span>
+<span class="nc" id="L1063">            case Tokens.tRPAREN: System.err.print(&quot;tRPAREN,&quot;); break;</span>
+<span class="nc" id="L1064">            case Tokens.tLABEL: System.err.print(&quot;tLABEL(&quot;+ value() +&quot;:),&quot;); break;</span>
+<span class="nc" id="L1065">            case '\n': System.err.println(&quot;NL&quot;); break;</span>
+<span class="nc" id="L1066">            case EOF: System.out.println(&quot;EOF&quot;); break;</span>
+<span class="nc" id="L1067">            case Tokens.tDSTAR: System.err.print(&quot;tDSTAR&quot;); break;</span>
+<span class="nc" id="L1068">            default: System.err.print(&quot;'&quot; + (char)token + &quot;',&quot;); break;</span>
+        }
+<span class="nc" id="L1070">    }</span>
+
+    // DEBUGGING HELP 
+    private int yylex2() throws IOException {
+<span class="nc" id="L1074">        int currentToken = yylex2();</span>
+        
+<span class="nc" id="L1076">        printToken(currentToken);</span>
+        
+<span class="nc" id="L1078">        return currentToken;</span>
+    }
+    
+    /**
+     *  Returns the next token. Also sets yyVal is needed.
+     *
+     *@return    Description of the Returned Value
+     */
+    private int yylex() throws IOException {
+        int c;
+<span class="fc" id="L1088">        boolean spaceSeen = false;</span>
+        boolean commandState;
+
+        // FIXME: Sucks we do this n times versus one since it is only important at beginning of parse but we need to change
+        // setup of parser differently.
+<span class="pc bpc" id="L1093" title="1 of 4 branches missed.">        if (token == 0 &amp;&amp; src.getLine() == 0) detectUTF8BOM();</span>
+        
+<span class="fc bfc" id="L1095" title="All 2 branches covered.">        if (lex_strterm != null) {</span>
+<span class="fc" id="L1096">            int tok = lex_strterm.parseString(this, src);</span>
+<span class="fc bfc" id="L1097" title="All 4 branches covered.">            if (tok == Tokens.tSTRING_END || tok == Tokens.tREGEXP_END) {</span>
+<span class="fc" id="L1098">                lex_strterm = null;</span>
+<span class="fc" id="L1099">                setState(LexState.EXPR_END);</span>
+            }
+
+<span class="fc" id="L1102">            return tok;</span>
+        }
+
+<span class="fc" id="L1105">        commandState = commandStart;</span>
+<span class="fc" id="L1106">        commandStart = false;</span>
+
+        loop: for(;;) {
+<span class="fc" id="L1109">            startOfToken();</span>
+<span class="fc" id="L1110">            last_state = lex_state;</span>
+<span class="fc" id="L1111">            c = src.read();</span>
+<span class="fc bfc" id="L1112" title="All 37 branches covered.">            switch(c) {</span>
+            case '\000': /* NUL */
+            case '\004': /* ^D */
+            case '\032': /* ^Z */
+            case EOF:	 /* end of script. */
+<span class="fc" id="L1117">                return EOF;</span>
+           
+                /* white spaces */
+            case ' ': case '\t': case '\f': case '\r':
+            case '\13': /* '\v' */
+<span class="fc" id="L1122">                getPosition();</span>
+<span class="fc" id="L1123">                spaceSeen = true;</span>
+<span class="fc" id="L1124">                continue;</span>
+            case '#':		/* it's a comment */
+<span class="fc bfc" id="L1126" title="All 2 branches covered.">                if (readComment() == EOF) return EOF;</span>
+                    
+                /* fall through */
+            case '\n':
+<span class="fc bfc" id="L1130" title="All 2 branches covered.">                switch (lex_state) {</span>
+                case EXPR_BEG: case EXPR_FNAME: case EXPR_DOT:
+                case EXPR_CLASS: case EXPR_VALUE:
+<span class="fc" id="L1133">                    continue loop;</span>
+                }
+
+<span class="fc" id="L1136">                boolean done = false;</span>
+<span class="fc bfc" id="L1137" title="All 2 branches covered.">                while(!done) {</span>
+<span class="fc" id="L1138">                    c = src.read();</span>
+
+<span class="pc bpc" id="L1140" title="1 of 3 branches missed.">                    switch (c) {</span>
+                    case ' ': case '\t': case '\f': case '\r': case '\13': /* '\v' */
+<span class="fc" id="L1142">                        spaceSeen = true;</span>
+<span class="fc" id="L1143">                        continue;</span>
+                    case '.': {
+<span class="nc bnc" id="L1145" title="All 2 branches missed.">                        if ((c = src.read()) != '.') {</span>
+<span class="nc" id="L1146">                            src.unread(c);</span>
+<span class="nc" id="L1147">                            src.unread('.');</span>
+
+<span class="nc" id="L1149">                            continue loop;</span>
+                        }
+                    }
+                    default:
+                    case -1:		// EOF (ENEBO: After default?
+<span class="fc" id="L1154">                        done = true;</span>
+                    }
+                }
+
+<span class="fc bfc" id="L1158" title="All 2 branches covered.">                if (c == -1) return EOF;</span>
+
+<span class="fc" id="L1160">                src.unread(c);</span>
+<span class="fc" id="L1161">                getPosition();</span>
+
+<span class="pc bpc" id="L1163" title="1 of 2 branches missed.">                switch (lex_state) {</span>
+                case EXPR_BEG: case EXPR_FNAME: case EXPR_DOT: case EXPR_CLASS:
+<span class="nc" id="L1165">                    continue loop;</span>
+                }
+
+<span class="fc" id="L1168">                commandStart = true;</span>
+<span class="fc" id="L1169">                setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1170">                return '\n';</span>
+            case '*':
+<span class="fc" id="L1172">                return star(spaceSeen);</span>
+            case '!':
+<span class="fc" id="L1174">                return bang();</span>
+            case '=':
+                // documentation nodes
+<span class="fc bfc" id="L1177" title="All 2 branches covered.">                if (src.wasBeginOfLine()) {</span>
+<span class="pc bpc" id="L1178" title="1 of 2 branches missed.">                    if (src.matchMarker(BEGIN_DOC_MARKER, false, false)) {</span>
+<span class="fc" id="L1179">                        c = src.read();</span>
+                        
+<span class="pc bpc" id="L1181" title="1 of 2 branches missed.">                        if (Character.isWhitespace(c)) {</span>
+                            // In case last next was the newline.
+<span class="fc" id="L1183">                            src.unread(c);</span>
+                            for (;;) {
+<span class="fc" id="L1185">                                c = src.read();</span>
+
+                                // If a line is followed by a blank line put
+                                // it back.
+<span class="fc bfc" id="L1189" title="All 2 branches covered.">                                while (c == '\n') {</span>
+<span class="fc" id="L1190">                                    c = src.read();</span>
+                                }
+<span class="pc bpc" id="L1192" title="1 of 2 branches missed.">                                if (c == EOF) {</span>
+<span class="nc" id="L1193">                                    throw new SyntaxException(PID.STRING_HITS_EOF, getPosition(),</span>
+<span class="nc" id="L1194">                                            getCurrentLine(), &quot;embedded document meets end of file&quot;);</span>
+                                }
+<span class="fc bfc" id="L1196" title="All 2 branches covered.">                                if (c != '=') continue;</span>
+<span class="fc bfc" id="L1197" title="All 4 branches covered.">                                if (src.wasBeginOfLine() &amp;&amp; src.matchMarker(END_DOC_MARKER, false, false)) {</span>
+<span class="fc" id="L1198">                                    ByteList list = src.readLineBytes();</span>
+<span class="fc" id="L1199">                                    src.unread('\n');</span>
+<span class="fc" id="L1200">                                    break;</span>
+                                }
+                            }
+
+                            continue;
+                        }
+<span class="nc" id="L1206">						src.unread(c);</span>
+                    }
+                }
+
+<span class="fc" id="L1210">                determineExpressionState();</span>
+
+<span class="fc" id="L1212">                c = src.read();</span>
+<span class="fc bfc" id="L1213" title="All 2 branches covered.">                if (c == '=') {</span>
+<span class="fc" id="L1214">                    c = src.read();</span>
+<span class="fc bfc" id="L1215" title="All 2 branches covered.">                    if (c == '=') {</span>
+<span class="fc" id="L1216">                        yaccValue = &quot;===&quot;;</span>
+<span class="fc" id="L1217">                        return Tokens.tEQQ;</span>
+                    }
+<span class="fc" id="L1219">                    src.unread(c);</span>
+<span class="fc" id="L1220">                    yaccValue = &quot;==&quot;;</span>
+<span class="fc" id="L1221">                    return Tokens.tEQ;</span>
+                }
+<span class="fc bfc" id="L1223" title="All 2 branches covered.">                if (c == '~') {</span>
+<span class="fc" id="L1224">                    yaccValue = &quot;=~&quot;;</span>
+<span class="fc" id="L1225">                    return Tokens.tMATCH;</span>
+<span class="fc bfc" id="L1226" title="All 2 branches covered.">                } else if (c == '&gt;') {</span>
+<span class="fc" id="L1227">                    yaccValue = &quot;=&gt;&quot;;</span>
+<span class="fc" id="L1228">                    return Tokens.tASSOC;</span>
+                }
+<span class="fc" id="L1230">                src.unread(c);</span>
+<span class="fc" id="L1231">                yaccValue = &quot;=&quot;;</span>
+<span class="fc" id="L1232">                return '=';</span>
+                
+            case '&lt;':
+<span class="fc" id="L1235">                return lessThan(spaceSeen);</span>
+            case '&gt;':
+<span class="fc" id="L1237">                return greaterThan();</span>
+            case '&quot;':
+<span class="fc" id="L1239">                return doubleQuote();</span>
+            case '`':
+<span class="fc" id="L1241">                return backtick(commandState);</span>
+            case '\'':
+<span class="fc" id="L1243">                return singleQuote();</span>
+            case '?':
+<span class="fc" id="L1245">                return questionMark();</span>
+            case '&amp;':
+<span class="fc" id="L1247">                return ampersand(spaceSeen);</span>
+            case '|':
+<span class="fc" id="L1249">                return pipe();</span>
+            case '+':
+<span class="fc" id="L1251">                return plus(spaceSeen);</span>
+            case '-':
+<span class="fc" id="L1253">                return minus(spaceSeen);</span>
+            case '.':
+<span class="fc" id="L1255">                return dot();</span>
+            case '0' : case '1' : case '2' : case '3' : case '4' :
+            case '5' : case '6' : case '7' : case '8' : case '9' :
+<span class="fc" id="L1258">                return parseNumber(c);</span>
+            case ')':
+<span class="fc" id="L1260">                return rightParen();</span>
+            case ']':
+<span class="fc" id="L1262">                return rightBracket();</span>
+            case '}':
+<span class="fc" id="L1264">                return rightCurly();</span>
+            case ':':
+<span class="fc" id="L1266">                return colon(spaceSeen);</span>
+            case '/':
+<span class="fc" id="L1268">                return slash(spaceSeen);</span>
+            case '^':
+<span class="fc" id="L1270">                return caret();</span>
+            case ';':
+<span class="fc" id="L1272">                commandStart = true;</span>
+<span class="fc" id="L1273">                setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1274">                yaccValue = &quot;;&quot;;</span>
+<span class="fc" id="L1275">                return ';';</span>
+            case ',':
+<span class="fc" id="L1277">                return comma(c);</span>
+            case '~':
+<span class="fc" id="L1279">                return tilde();</span>
+            case '(':
+<span class="fc" id="L1281">                return leftParen(spaceSeen);</span>
+            case '[':
+<span class="fc" id="L1283">                return leftBracket(spaceSeen);</span>
+            case '{':
+<span class="fc" id="L1285">            	return leftCurly();</span>
+            case '\\':
+<span class="fc" id="L1287">                c = src.read();</span>
+<span class="pc bpc" id="L1288" title="1 of 2 branches missed.">                if (c == '\n') {</span>
+<span class="fc" id="L1289">                    spaceSeen = true;</span>
+<span class="fc" id="L1290">                    continue;</span>
+                }
+<span class="nc" id="L1292">                src.unread(c);</span>
+<span class="nc" id="L1293">                yaccValue = &quot;\\&quot;;</span>
+<span class="nc" id="L1294">                return '\\';</span>
+            case '%':
+<span class="fc" id="L1296">                return percent(spaceSeen);</span>
+            case '$':
+<span class="fc" id="L1298">                return dollar();</span>
+            case '@':
+<span class="fc" id="L1300">                return at();</span>
+            case '_':
+<span class="fc bfc" id="L1302" title="All 4 branches covered.">                if (src.wasBeginOfLine() &amp;&amp; src.matchMarker(END_MARKER, false, true)) {</span>
+<span class="fc" id="L1303">                	parserSupport.getResult().setEndOffset(src.getOffset());</span>
+<span class="fc" id="L1304">                    return EOF;</span>
+                }
+<span class="fc" id="L1306">                return identifier(c, commandState);</span>
+            default:
+<span class="fc" id="L1308">                return identifier(c, commandState);</span>
+            }
+        }
+    }
+
+    private int identifierToken(int result, String value) {
+
+<span class="fc bfc" id="L1315" title="All 4 branches covered.">        if (result == Tokens.tIDENTIFIER &amp;&amp; last_state != LexState.EXPR_DOT &amp;&amp;</span>
+<span class="fc bfc" id="L1316" title="All 2 branches covered.">                parserSupport.getCurrentScope().isDefined(value) &gt;= 0) {</span>
+<span class="fc" id="L1317">            setState(LexState.EXPR_END);</span>
+        }
+
+<span class="fc" id="L1320">        yaccValue = value;</span>
+<span class="fc" id="L1321">        return result;</span>
+    }
+
+    private int getIdentifier(int first) throws IOException {
+<span class="fc bfc" id="L1325" title="All 2 branches covered.">        if (isMultiByteChar(first)) first = src.readCodepoint(first, encoding);</span>
+<span class="pc bpc" id="L1326" title="1 of 2 branches missed.">        if (!isIdentifierChar(first)) return first;</span>
+
+<span class="fc" id="L1328">        tokenBuffer.append((char) first);</span>
+
+        int c;
+<span class="fc bfc" id="L1331" title="All 2 branches covered.">        for (c = src.read(); c != EOF; c = src.read()) {</span>
+<span class="fc bfc" id="L1332" title="All 2 branches covered.">            if (isMultiByteChar(c)) c = src.readCodepoint(c, encoding);</span>
+<span class="fc bfc" id="L1333" title="All 2 branches covered.">            if (!isIdentifierChar(c)) break;</span>
+
+<span class="fc" id="L1335">            tokenBuffer.append((char) c);</span>
+        }
+
+<span class="fc" id="L1338">        src.unread(c);</span>
+
+<span class="fc" id="L1340">        return first;</span>
+    }
+    
+    private int ampersand(boolean spaceSeen) throws IOException {
+<span class="fc" id="L1344">        int c = src.read();</span>
+        
+<span class="fc bfc" id="L1346" title="All 3 branches covered.">        switch (c) {</span>
+        case '&amp;':
+<span class="fc" id="L1348">            setState(LexState.EXPR_BEG);</span>
+<span class="fc bfc" id="L1349" title="All 2 branches covered.">            if ((c = src.read()) == '=') {</span>
+<span class="fc" id="L1350">                yaccValue = &quot;&amp;&amp;&quot;;</span>
+<span class="fc" id="L1351">                setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1352">                return Tokens.tOP_ASGN;</span>
+            }
+<span class="fc" id="L1354">            src.unread(c);</span>
+<span class="fc" id="L1355">            yaccValue = &quot;&amp;&amp;&quot;;</span>
+<span class="fc" id="L1356">            return Tokens.tANDOP;</span>
+        case '=':
+<span class="fc" id="L1358">            yaccValue = &quot;&amp;&quot;;</span>
+<span class="fc" id="L1359">            setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1360">            return Tokens.tOP_ASGN;</span>
+        }
+<span class="fc" id="L1362">        src.unread(c);</span>
+        
+        //tmpPosition is required because getPosition()'s side effects.
+        //if the warning is generated, the getPosition() on line 954 (this line + 18) will create
+        //a wrong position if the &quot;inclusive&quot; flag is not set.
+<span class="fc" id="L1367">        ISourcePosition tmpPosition = getPosition();</span>
+<span class="fc bfc" id="L1368" title="All 2 branches covered.">        if (isSpaceArg(c, spaceSeen)) {</span>
+<span class="pc bpc" id="L1369" title="3 of 4 branches missed.">            if (warnings.isVerbose() &amp;&amp; Options.PARSER_WARN_ARGUMENT_PREFIX.load())</span>
+<span class="nc" id="L1370">                warnings.warning(ID.ARGUMENT_AS_PREFIX, tmpPosition, &quot;`&amp;' interpreted as argument prefix&quot;);</span>
+<span class="fc" id="L1371">            c = Tokens.tAMPER;</span>
+<span class="fc bfc" id="L1372" title="All 2 branches covered.">        } else if (isBEG()) {</span>
+<span class="fc" id="L1373">            c = Tokens.tAMPER;</span>
+        } else {
+<span class="fc" id="L1375">            warn_balanced(c, spaceSeen, &quot;&amp;&quot;, &quot;argument prefix&quot;);</span>
+<span class="fc" id="L1376">            c = Tokens.tAMPER2;</span>
+        }
+        
+<span class="fc" id="L1379">        determineExpressionState();</span>
+        
+<span class="fc" id="L1381">        yaccValue = &quot;&amp;&quot;;</span>
+<span class="fc" id="L1382">        return c;</span>
+    }
+    
+    private int at() throws IOException {
+<span class="fc" id="L1386">        newtok();</span>
+<span class="fc" id="L1387">        int c = src.read();</span>
+        int result;
+<span class="fc" id="L1389">        tokenBuffer.setLength(0);</span>
+<span class="fc" id="L1390">        tokenBuffer.append('@');</span>
+<span class="fc bfc" id="L1391" title="All 2 branches covered.">        if (c == '@') {</span>
+<span class="fc" id="L1392">            tokenBuffer.append('@');</span>
+<span class="fc" id="L1393">            c = src.read();</span>
+<span class="fc" id="L1394">            result = Tokens.tCVAR;</span>
+        } else {
+<span class="fc" id="L1396">            result = Tokens.tIVAR;                    </span>
+        }
+        
+<span class="pc bpc" id="L1399" title="1 of 2 branches missed.">        if (Character.isDigit(c)) {</span>
+<span class="nc bnc" id="L1400" title="All 2 branches missed.">            if (tokenBuffer.length() == 1) {</span>
+<span class="nc" id="L1401">                throw new SyntaxException(PID.IVAR_BAD_NAME, getPosition(), getCurrentLine(),</span>
+                        &quot;`@&quot; + c + &quot;' is not allowed as an instance variable name&quot;);
+            }
+<span class="nc" id="L1404">            throw new SyntaxException(PID.CVAR_BAD_NAME, getPosition(), getCurrentLine(),</span>
+                    &quot;`@@&quot; + c + &quot;' is not allowed as a class variable name&quot;);
+        }
+        
+<span class="pc bpc" id="L1408" title="1 of 2 branches missed.">        if (!isIdentifierChar(c)) {</span>
+<span class="nc" id="L1409">            src.unread(c);</span>
+<span class="nc" id="L1410">            yaccValue = &quot;@&quot;;</span>
+<span class="nc" id="L1411">            return '@';</span>
+        }
+
+<span class="fc" id="L1414">        getIdentifier(c);</span>
+
+<span class="fc" id="L1416">        last_state = lex_state;</span>
+<span class="fc" id="L1417">        setState(LexState.EXPR_END);</span>
+
+<span class="fc" id="L1419">        return identifierToken(result, tokenBuffer.toString().intern());</span>
+    }
+    
+    private int backtick(boolean commandState) throws IOException {
+<span class="fc" id="L1423">        yaccValue = &quot;`&quot;;</span>
+
+<span class="fc bfc" id="L1425" title="All 3 branches covered.">        switch (lex_state) {</span>
+        case EXPR_FNAME:
+<span class="fc" id="L1427">            setState(LexState.EXPR_ENDFN);</span>
+            
+<span class="fc" id="L1429">            return Tokens.tBACK_REF2;</span>
+        case EXPR_DOT:
+<span class="pc bpc" id="L1431" title="1 of 2 branches missed.">            setState(commandState ? LexState.EXPR_CMDARG : LexState.EXPR_ARG);</span>
+
+<span class="fc" id="L1433">            return Tokens.tBACK_REF2;</span>
+        default:
+<span class="fc" id="L1435">            lex_strterm = new StringTerm(str_xquote, '\0', '`');</span>
+        
+<span class="fc" id="L1437">            return Tokens.tXSTRING_BEG;</span>
+        }
+    }
+    
+    private int bang() throws IOException {
+<span class="fc" id="L1442">        int c = src.read();</span>
+
+<span class="pc bpc" id="L1444" title="1 of 4 branches missed.">        if (lex_state == LexState.EXPR_FNAME || lex_state == LexState.EXPR_DOT) {</span>
+<span class="fc" id="L1445">            setState(LexState.EXPR_ARG);</span>
+<span class="pc bpc" id="L1446" title="1 of 2 branches missed.">            if (c == '@') {</span>
+<span class="nc" id="L1447">                yaccValue = &quot;!&quot;;</span>
+<span class="nc" id="L1448">                return Tokens.tBANG;</span>
+            }
+        } else {
+<span class="fc" id="L1451">            setState(LexState.EXPR_BEG);</span>
+        }
+        
+<span class="fc bfc" id="L1454" title="All 3 branches covered.">        switch (c) {</span>
+        case '=':
+<span class="fc" id="L1456">            yaccValue = &quot;!=&quot;;</span>
+            
+<span class="fc" id="L1458">            return Tokens.tNEQ;</span>
+        case '~':
+<span class="fc" id="L1460">            yaccValue = &quot;!~&quot;;</span>
+            
+<span class="fc" id="L1462">            return Tokens.tNMATCH;</span>
+        default: // Just a plain bang
+<span class="fc" id="L1464">            src.unread(c);</span>
+<span class="fc" id="L1465">            yaccValue = &quot;!&quot;;</span>
+            
+<span class="fc" id="L1467">            return Tokens.tBANG;</span>
+        }
+    }
+    
+    private int caret() throws IOException {
+<span class="fc" id="L1472">        int c = src.read();</span>
+<span class="fc bfc" id="L1473" title="All 2 branches covered.">        if (c == '=') {</span>
+<span class="fc" id="L1474">            setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1475">            yaccValue = &quot;^&quot;;</span>
+<span class="fc" id="L1476">            return Tokens.tOP_ASGN;</span>
+        }
+        
+<span class="fc" id="L1479">        determineExpressionState();</span>
+        
+<span class="fc" id="L1481">        src.unread(c);</span>
+<span class="fc" id="L1482">        yaccValue = &quot;^&quot;;</span>
+<span class="fc" id="L1483">        return Tokens.tCARET;</span>
+    }
+
+    private int colon(boolean spaceSeen) throws IOException {
+<span class="fc" id="L1487">        int c = src.read();</span>
+        
+<span class="fc bfc" id="L1489" title="All 2 branches covered.">        if (c == ':') {</span>
+<span class="pc bpc" id="L1490" title="1 of 8 branches missed.">            if (isBEG() || lex_state == LexState.EXPR_CLASS || (isARG() &amp;&amp; spaceSeen)) {</span>
+<span class="fc" id="L1491">                setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1492">                yaccValue = &quot;::&quot;;</span>
+<span class="fc" id="L1493">                return Tokens.tCOLON3;</span>
+            }
+<span class="fc" id="L1495">            setState(LexState.EXPR_DOT);</span>
+<span class="fc" id="L1496">            yaccValue = &quot;:&quot;;</span>
+<span class="fc" id="L1497">            return Tokens.tCOLON2;</span>
+        }
+
+<span class="fc bfc" id="L1500" title="All 4 branches covered.">        if (isEND() || Character.isWhitespace(c)) {</span>
+<span class="fc" id="L1501">            src.unread(c);</span>
+<span class="fc" id="L1502">            setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1503">            yaccValue = &quot;:&quot;;</span>
+<span class="fc" id="L1504">            warn_balanced(c, spaceSeen, &quot;:&quot;, &quot;symbol literal&quot;);</span>
+<span class="fc" id="L1505">            return ':';</span>
+        }
+        
+<span class="fc bfc" id="L1508" title="All 3 branches covered.">        switch (c) {</span>
+        case '\'':
+<span class="fc" id="L1510">            lex_strterm = new StringTerm(str_ssym, '\0', c);</span>
+<span class="fc" id="L1511">            break;</span>
+        case '&quot;':
+<span class="fc" id="L1513">            lex_strterm = new StringTerm(str_dsym, '\0', c);</span>
+<span class="fc" id="L1514">            break;</span>
+        default:
+<span class="fc" id="L1516">            src.unread(c);</span>
+            break;
+        }
+        
+<span class="fc" id="L1520">        setState(LexState.EXPR_FNAME);</span>
+<span class="fc" id="L1521">        yaccValue = &quot;:&quot;;</span>
+<span class="fc" id="L1522">        return Tokens.tSYMBEG;</span>
+    }
+
+    private int comma(int c) throws IOException {
+<span class="fc" id="L1526">        setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1527">        yaccValue = &quot;,&quot;;</span>
+        
+<span class="fc" id="L1529">        return c;</span>
+    }
+
+    private int doKeyword(LexState state) {
+<span class="fc" id="L1533">        commandStart = true;</span>
+
+<span class="pc bpc" id="L1535" title="1 of 4 branches missed.">        if (leftParenBegin &gt; 0 &amp;&amp; leftParenBegin == parenNest) {</span>
+<span class="fc" id="L1536">            leftParenBegin = 0;</span>
+<span class="fc" id="L1537">            parenNest--;</span>
+<span class="fc" id="L1538">            return Tokens.kDO_LAMBDA;</span>
+        }
+
+<span class="fc bfc" id="L1541" title="All 2 branches covered.">        if (conditionState.isInState()) return Tokens.kDO_COND;</span>
+
+<span class="fc bfc" id="L1543" title="All 4 branches covered.">        if (state != LexState.EXPR_CMDARG &amp;&amp; cmdArgumentState.isInState()) {</span>
+<span class="fc" id="L1544">            return Tokens.kDO_BLOCK;</span>
+        }
+<span class="pc bpc" id="L1546" title="2 of 4 branches missed.">        if (state == LexState.EXPR_ENDARG || state == LexState.EXPR_BEG) {</span>
+<span class="nc" id="L1547">            return Tokens.kDO_BLOCK;</span>
+        }
+<span class="fc" id="L1549">        return Tokens.kDO;</span>
+    }
+    
+    private int dollar() throws IOException {
+<span class="fc" id="L1553">        newtok();</span>
+<span class="fc" id="L1554">        last_state = lex_state;</span>
+<span class="fc" id="L1555">        setState(LexState.EXPR_END);</span>
+<span class="fc" id="L1556">        int c = src.read();</span>
+        
+<span class="fc bfc" id="L1558" title="All 7 branches covered.">        switch (c) {</span>
+        case '_':       /* $_: last read line string */
+<span class="fc" id="L1560">            c = src.read();</span>
+<span class="fc bfc" id="L1561" title="All 2 branches covered.">            if (isIdentifierChar(c)) {</span>
+<span class="fc" id="L1562">                tokenBuffer.setLength(0);</span>
+<span class="fc" id="L1563">                tokenBuffer.append(&quot;$_&quot;);</span>
+<span class="fc" id="L1564">                getIdentifier(c);</span>
+<span class="fc" id="L1565">                last_state = lex_state;</span>
+<span class="fc" id="L1566">                setState(LexState.EXPR_END);</span>
+
+<span class="fc" id="L1568">                return identifierToken(Tokens.tGVAR, tokenBuffer.toString().intern());</span>
+            }
+<span class="fc" id="L1570">            src.unread(c);</span>
+<span class="fc" id="L1571">            c = '_';</span>
+            
+            // fall through
+        case '~':       /* $~: match-data */
+        case '*':       /* $*: argv */
+        case '$':       /* $$: pid */
+        case '?':       /* $?: last status */
+        case '!':       /* $!: error string */
+        case '@':       /* $@: error position */
+        case '/':       /* $/: input record separator */
+        case '\\':      /* $\: output record separator */
+        case ';':       /* $;: field separator */
+        case ',':       /* $,: output field separator */
+        case '.':       /* $.: last read line number */
+        case '=':       /* $=: ignorecase */
+        case ':':       /* $:: load path */
+        case '&lt;':       /* $&lt;: reading filename */
+        case '&gt;':       /* $&gt;: default output handle */
+        case '\&quot;':      /* $&quot;: already loaded files */
+<span class="fc" id="L1590">            yaccValue = &quot;$&quot; + (char) c;</span>
+<span class="fc" id="L1591">            return Tokens.tGVAR;</span>
+
+        case '-':
+<span class="fc" id="L1594">            tokenBuffer.setLength(0);</span>
+<span class="fc" id="L1595">            tokenBuffer.append('$');</span>
+<span class="fc" id="L1596">            tokenBuffer.append((char) c);</span>
+<span class="fc" id="L1597">            c = src.read();</span>
+<span class="pc bpc" id="L1598" title="1 of 2 branches missed.">            if (isIdentifierChar(c)) {</span>
+<span class="fc" id="L1599">                tokenBuffer.append((char) c);</span>
+            } else {
+<span class="nc" id="L1601">                src.unread(c);</span>
+            }
+<span class="fc" id="L1603">            yaccValue = tokenBuffer.toString();</span>
+            /* xxx shouldn't check if valid option variable */
+<span class="fc" id="L1605">            return Tokens.tGVAR;</span>
+
+        case '&amp;':       /* $&amp;: last match */
+        case '`':       /* $`: string before last match */
+        case '\'':      /* $': string after last match */
+        case '+':       /* $+: string matches last paren. */
+            // Explicit reference to these vars as symbols...
+<span class="pc bpc" id="L1612" title="1 of 2 branches missed.">            if (last_state == LexState.EXPR_FNAME) {</span>
+<span class="nc" id="L1613">                yaccValue = &quot;$&quot; + (char) c;</span>
+<span class="nc" id="L1614">                return Tokens.tGVAR;</span>
+            }
+            
+<span class="fc" id="L1617">            yaccValue = new BackRefNode(getPosition(), c);</span>
+<span class="fc" id="L1618">            return Tokens.tBACK_REF;</span>
+
+        case '1': case '2': case '3': case '4': case '5': case '6':
+        case '7': case '8': case '9':
+<span class="fc" id="L1622">            tokenBuffer.setLength(0);</span>
+<span class="fc" id="L1623">            tokenBuffer.append('$');</span>
+            do {
+<span class="fc" id="L1625">                tokenBuffer.append((char) c);</span>
+<span class="fc" id="L1626">                c = src.read();</span>
+<span class="pc bpc" id="L1627" title="1 of 2 branches missed.">            } while (Character.isDigit(c));</span>
+<span class="fc" id="L1628">            src.unread(c);</span>
+<span class="pc bpc" id="L1629" title="1 of 2 branches missed.">            if (last_state == LexState.EXPR_FNAME) {</span>
+<span class="nc" id="L1630">                yaccValue = tokenBuffer.toString();</span>
+<span class="nc" id="L1631">                return Tokens.tGVAR;</span>
+            }
+            
+<span class="fc" id="L1634">            yaccValue = new NthRefNode(getPosition(), Integer.parseInt(tokenBuffer.substring(1)));</span>
+<span class="fc" id="L1635">            return Tokens.tNTH_REF;</span>
+        case '0':
+<span class="fc" id="L1637">            setState(LexState.EXPR_END);</span>
+
+<span class="fc" id="L1639">            return identifierToken(Tokens.tGVAR, (&quot;$&quot; + (char) c).intern());</span>
+        default:
+<span class="pc bpc" id="L1641" title="1 of 2 branches missed.">            if (!isIdentifierChar(c)) {</span>
+<span class="nc" id="L1642">                src.unread(c);</span>
+<span class="nc" id="L1643">                yaccValue = &quot;$&quot;;</span>
+<span class="nc" id="L1644">                return '$';</span>
+            }
+        
+            // $blah
+<span class="fc" id="L1648">            tokenBuffer.setLength(0);</span>
+<span class="fc" id="L1649">            tokenBuffer.append('$');</span>
+<span class="fc" id="L1650">            getIdentifier(c);</span>
+<span class="fc" id="L1651">            last_state = lex_state;</span>
+<span class="fc" id="L1652">            setState(LexState.EXPR_END);</span>
+
+<span class="fc" id="L1654">            return identifierToken(Tokens.tGVAR, tokenBuffer.toString().intern());</span>
+        }
+    }
+
+    // FIXME: I added number gvars here and they did not.
+    public boolean isGlobalCharPunct(int c) {
+<span class="pc bpc" id="L1660" title="1 of 2 branches missed.">        switch (c) {</span>
+            case '_': case '~': case '*': case '$': case '?': case '!': case '@':
+            case '/': case '\\': case ';': case ',': case '.': case '=': case ':':
+            case '&lt;': case '&gt;': case '\&quot;': case '-': case '&amp;': case '`': case '\'':
+            case '+': case '1': case '2': case '3': case '4': case '5': case '6':
+            case '7': case '8': case '9': case '0':
+<span class="nc" id="L1666">                return true;</span>
+        }
+<span class="fc" id="L1668">        return isIdentifierChar(c);</span>
+    }
+
+    private int dot() throws IOException {
+        int c;
+        
+<span class="fc" id="L1674">        setState(LexState.EXPR_BEG);</span>
+<span class="fc bfc" id="L1675" title="All 2 branches covered.">        if ((c = src.read()) == '.') {</span>
+<span class="fc bfc" id="L1676" title="All 2 branches covered.">            if ((c = src.read()) == '.') {</span>
+<span class="fc" id="L1677">                yaccValue = &quot;...&quot;;</span>
+<span class="fc" id="L1678">                return Tokens.tDOT3;</span>
+            }
+<span class="fc" id="L1680">            src.unread(c);</span>
+<span class="fc" id="L1681">            yaccValue = &quot;..&quot;;</span>
+<span class="fc" id="L1682">            return Tokens.tDOT2;</span>
+        }
+        
+<span class="fc" id="L1685">        src.unread(c);</span>
+<span class="fc bfc" id="L1686" title="All 2 branches covered.">        if (Character.isDigit(c)) {</span>
+<span class="fc" id="L1687">            throw new SyntaxException(PID.FLOAT_MISSING_ZERO, getPosition(), getCurrentLine(),</span>
+                    &quot;no .&lt;digit&gt; floating literal anymore; put 0 before dot&quot;);
+        }
+        
+<span class="fc" id="L1691">        setState(LexState.EXPR_DOT);</span>
+<span class="fc" id="L1692">        yaccValue = &quot;.&quot;;</span>
+<span class="fc" id="L1693">        return Tokens.tDOT;</span>
+    }
+    
+    private int doubleQuote() throws IOException {
+<span class="fc" id="L1697">        lex_strterm = new StringTerm(str_dquote, '\0', '&quot;');</span>
+<span class="fc" id="L1698">        yaccValue = &quot;\&quot;&quot;;</span>
+
+<span class="fc" id="L1700">        return Tokens.tSTRING_BEG;</span>
+    }
+    
+    private int greaterThan() throws IOException {
+<span class="fc" id="L1704">        determineExpressionState();</span>
+
+<span class="fc" id="L1706">        int c = src.read();</span>
+
+<span class="fc bfc" id="L1708" title="All 3 branches covered.">        switch (c) {</span>
+        case '=':
+<span class="fc" id="L1710">            yaccValue = &quot;&gt;=&quot;;</span>
+            
+<span class="fc" id="L1712">            return Tokens.tGEQ;</span>
+        case '&gt;':
+<span class="fc bfc" id="L1714" title="All 2 branches covered.">            if ((c = src.read()) == '=') {</span>
+<span class="fc" id="L1715">                setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1716">                yaccValue = &quot;&gt;&gt;&quot;;</span>
+<span class="fc" id="L1717">                return Tokens.tOP_ASGN;</span>
+            }
+<span class="fc" id="L1719">            src.unread(c);</span>
+            
+<span class="fc" id="L1721">            yaccValue = &quot;&gt;&gt;&quot;;</span>
+<span class="fc" id="L1722">            return Tokens.tRSHFT;</span>
+        default:
+<span class="fc" id="L1724">            src.unread(c);</span>
+<span class="fc" id="L1725">            yaccValue = &quot;&gt;&quot;;</span>
+<span class="fc" id="L1726">            return Tokens.tGT;</span>
+        }
+    }
+    
+    private int identifier(int c, boolean commandState) throws IOException {
+<span class="pc bpc" id="L1731" title="1 of 2 branches missed.">        if (!isIdentifierChar(c)) {</span>
+<span class="nc" id="L1732">            String badChar = &quot;\\&quot; + Integer.toOctalString(c &amp; 0xff);</span>
+<span class="nc" id="L1733">            throw new SyntaxException(PID.CHARACTER_BAD, getPosition(), getCurrentLine(),</span>
+                    &quot;Invalid char `&quot; + badChar + &quot;' ('&quot; + (char) c + &quot;') in expression&quot;, badChar);
+        }
+
+<span class="fc" id="L1737">        newtok();</span>
+<span class="fc" id="L1738">        tokenBuffer.setLength(0);</span>
+<span class="fc" id="L1739">        int first = getIdentifier(c);</span>
+<span class="fc" id="L1740">        c = src.read();</span>
+<span class="fc" id="L1741">        boolean lastBangOrPredicate = false;</span>
+
+        // methods 'foo!' and 'foo?' are possible but if followed by '=' it is relop
+<span class="fc bfc" id="L1744" title="All 4 branches covered.">        if (c == '!' || c == '?') {</span>
+<span class="pc bpc" id="L1745" title="1 of 2 branches missed.">            if (!src.peek('=')) {</span>
+<span class="fc" id="L1746">                lastBangOrPredicate = true;</span>
+<span class="fc" id="L1747">                tokenBuffer.append((char) c);</span>
+            } else {
+<span class="nc" id="L1749">                src.unread(c);</span>
+            }
+        } else {
+<span class="fc" id="L1752">            src.unread(c);</span>
+        }
+        
+<span class="fc" id="L1755">        int result = 0;</span>
+
+<span class="fc" id="L1757">        last_state = lex_state;</span>
+<span class="fc bfc" id="L1758" title="All 2 branches covered.">        if (lastBangOrPredicate) {</span>
+<span class="fc" id="L1759">            result = Tokens.tFID;</span>
+        } else {
+<span class="fc bfc" id="L1761" title="All 2 branches covered.">            if (lex_state == LexState.EXPR_FNAME) {</span>
+<span class="fc bfc" id="L1762" title="All 2 branches covered.">                if ((c = src.read()) == '=') { </span>
+<span class="fc" id="L1763">                    int c2 = src.read();</span>
+
+<span class="pc bpc" id="L1765" title="1 of 6 branches missed.">                    if (c2 != '~' &amp;&amp; c2 != '&gt;' &amp;&amp;</span>
+<span class="pc bpc" id="L1766" title="1 of 2 branches missed.">                            (c2 != '=' || src.peek('&gt;'))) {</span>
+<span class="fc" id="L1767">                        result = Tokens.tIDENTIFIER;</span>
+<span class="fc" id="L1768">                        tokenBuffer.append((char) c);</span>
+<span class="fc" id="L1769">                        src.unread(c2);</span>
+                    } else { 
+<span class="fc" id="L1771">                        src.unread(c2);</span>
+<span class="fc" id="L1772">                        src.unread(c);</span>
+                    }
+<span class="fc" id="L1774">                } else {</span>
+<span class="fc" id="L1775">                    src.unread(c);</span>
+                }
+            }
+<span class="fc bfc" id="L1778" title="All 4 branches covered.">            if (result == 0 &amp;&amp; Character.isUpperCase(first)) {</span>
+<span class="fc" id="L1779">                result = Tokens.tCONSTANT;</span>
+            } else {
+<span class="fc" id="L1781">                result = Tokens.tIDENTIFIER;</span>
+            }
+        }
+
+<span class="fc" id="L1785">        String tempVal = tokenBuffer.toString().intern();</span>
+        
+<span class="fc bfc" id="L1787" title="All 2 branches covered.">        if (isLabelPossible(commandState)) {</span>
+<span class="fc" id="L1788">            int c2 = src.read();</span>
+<span class="fc bfc" id="L1789" title="All 4 branches covered.">            if (c2 == ':' &amp;&amp; !src.peek(':')) {</span>
+<span class="fc" id="L1790">                setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1791">                yaccValue = tempVal;</span>
+<span class="fc" id="L1792">                return Tokens.tLABEL;</span>
+            }
+<span class="fc" id="L1794">            src.unread(c2);</span>
+        }
+
+<span class="fc bfc" id="L1797" title="All 2 branches covered.">        if (lex_state != LexState.EXPR_DOT) {</span>
+<span class="fc" id="L1798">            Keyword keyword = getKeyword(tempVal); // Is it is a keyword?</span>
+
+<span class="fc bfc" id="L1800" title="All 2 branches covered.">            if (keyword != null) {</span>
+<span class="fc" id="L1801">                LexState state = lex_state; // Save state at time keyword is encountered</span>
+
+<span class="fc bfc" id="L1803" title="All 2 branches covered.">                if (keyword == Keyword.NOT) {</span>
+<span class="fc" id="L1804">                    setState(LexState.EXPR_ARG);</span>
+                } else {
+<span class="fc" id="L1806">                    setState(keyword.state);</span>
+                }
+<span class="fc bfc" id="L1808" title="All 2 branches covered.">                if (state == LexState.EXPR_FNAME) {</span>
+<span class="fc" id="L1809">                    yaccValue = keyword.name;</span>
+                } else {
+<span class="fc" id="L1811">                    yaccValue = getPosition();</span>
+<span class="fc bfc" id="L1812" title="All 2 branches covered.">                    if (keyword.id0 == Tokens.kDO) return doKeyword(state);</span>
+                }
+
+<span class="fc bfc" id="L1815" title="All 4 branches covered.">                if (state == LexState.EXPR_BEG || state == LexState.EXPR_VALUE) return keyword.id0;</span>
+
+<span class="fc bfc" id="L1817" title="All 2 branches covered.">                if (keyword.id0 != keyword.id1) setState(LexState.EXPR_BEG);</span>
+
+<span class="fc" id="L1819">                return keyword.id1;</span>
+            }
+        }
+
+<span class="fc bfc" id="L1823" title="All 6 branches covered.">        if (isBEG() || lex_state == LexState.EXPR_DOT || isARG()) {</span>
+<span class="fc bfc" id="L1824" title="All 2 branches covered.">            setState(commandState ? LexState.EXPR_CMDARG : LexState.EXPR_ARG);</span>
+<span class="fc bfc" id="L1825" title="All 2 branches covered.">        } else if (lex_state == LexState.EXPR_FNAME) {</span>
+<span class="fc" id="L1826">            setState(LexState.EXPR_ENDFN);</span>
+        } else {
+<span class="fc" id="L1828">            setState(LexState.EXPR_END);</span>
+        }
+        
+<span class="fc" id="L1831">        return identifierToken(result, tempVal);</span>
+    }
+
+    private int leftBracket(boolean spaceSeen) throws IOException {
+<span class="fc" id="L1835">        parenNest++;</span>
+<span class="fc" id="L1836">        int c = '[';</span>
+<span class="fc bfc" id="L1837" title="All 4 branches covered.">        if (lex_state == LexState.EXPR_FNAME || lex_state == LexState.EXPR_DOT) {</span>
+<span class="fc" id="L1838">            setState(LexState.EXPR_ARG);</span>
+            
+<span class="pc bpc" id="L1840" title="1 of 2 branches missed.">            if ((c = src.read()) == ']') {</span>
+<span class="fc bfc" id="L1841" title="All 2 branches covered.">                if (src.peek('=')) {</span>
+<span class="fc" id="L1842">                    src.read();</span>
+<span class="fc" id="L1843">                    yaccValue = &quot;[]=&quot;;</span>
+<span class="fc" id="L1844">                    return Tokens.tASET;</span>
+                }
+<span class="fc" id="L1846">                yaccValue = &quot;[]&quot;;</span>
+<span class="fc" id="L1847">                return Tokens.tAREF;</span>
+            }
+<span class="nc" id="L1849">            src.unread(c);</span>
+<span class="nc" id="L1850">            yaccValue = &quot;[&quot;;</span>
+<span class="nc" id="L1851">            return '[';</span>
+<span class="fc bfc" id="L1852" title="All 6 branches covered.">        } else if (isBEG() || (isARG() &amp;&amp; spaceSeen)) {</span>
+<span class="fc" id="L1853">            c = Tokens.tLBRACK;</span>
+        }
+
+<span class="fc" id="L1856">        setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1857">        conditionState.stop();</span>
+<span class="fc" id="L1858">        cmdArgumentState.stop();</span>
+<span class="fc" id="L1859">        yaccValue = &quot;[&quot;;</span>
+<span class="fc" id="L1860">        return c;</span>
+    }
+    
+    private int leftCurly() {
+<span class="fc bfc" id="L1864" title="All 4 branches covered.">        if (leftParenBegin &gt; 0 &amp;&amp; leftParenBegin == parenNest) {</span>
+<span class="fc" id="L1865">            setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1866">            leftParenBegin = 0;</span>
+<span class="fc" id="L1867">            parenNest--;</span>
+<span class="fc" id="L1868">            conditionState.stop();</span>
+<span class="fc" id="L1869">            cmdArgumentState.stop();</span>
+<span class="fc" id="L1870">            yaccValue = &quot;{&quot;;</span>
+<span class="fc" id="L1871">            return Tokens.tLAMBEG;</span>
+        }
+
+        char c;
+<span class="fc bfc" id="L1875" title="All 6 branches covered.">        if (isARG() || lex_state == LexState.EXPR_END || lex_state == LexState.EXPR_ENDFN) { // block (primary)</span>
+<span class="fc" id="L1876">            c = Tokens.tLCURLY;</span>
+<span class="fc bfc" id="L1877" title="All 2 branches covered.">        } else if (lex_state == LexState.EXPR_ENDARG) { // block (expr)</span>
+<span class="fc" id="L1878">            c = Tokens.tLBRACE_ARG;</span>
+        } else { // hash
+<span class="fc" id="L1880">            c = Tokens.tLBRACE;</span>
+        }
+
+<span class="fc" id="L1883">        conditionState.stop();</span>
+<span class="fc" id="L1884">        cmdArgumentState.stop();</span>
+<span class="fc" id="L1885">        setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1886">        yaccValue = getPosition();</span>
+
+<span class="fc bfc" id="L1888" title="All 2 branches covered.">        if (c != Tokens.tLBRACE) commandStart = true;</span>
+<span class="fc" id="L1889">        return c;</span>
+    }
+
+    private int leftParen(boolean spaceSeen) throws IOException {
+<span class="fc" id="L1893">        int result = Tokens.tLPAREN2;</span>
+<span class="fc bfc" id="L1894" title="All 2 branches covered.">        if (isBEG()) {</span>
+<span class="fc" id="L1895">            result = Tokens.tLPAREN;</span>
+<span class="fc bfc" id="L1896" title="All 2 branches covered.">        } else if (spaceSeen) {</span>
+            // ENEBO: 1.9 is IS_ARG, but we need to break apart for 1.8 support.
+<span class="fc bfc" id="L1898" title="All 2 branches covered.">            if (lex_state == LexState.EXPR_CMDARG) {</span>
+<span class="fc" id="L1899">                result = Tokens.tLPAREN_ARG;</span>
+<span class="fc bfc" id="L1900" title="All 2 branches covered.">            } else if (lex_state == LexState.EXPR_ARG) {</span>
+<span class="fc" id="L1901">                result = Tokens.tLPAREN_ARG;</span>
+            }
+
+<span class="fc bfc" id="L1904" title="All 2 branches covered.">            if (token == Tokens.tLAMBDA) {</span>
+<span class="fc" id="L1905">                result = Tokens.tLPAREN2;</span>
+            }
+        }
+
+<span class="fc" id="L1909">        parenNest++;</span>
+<span class="fc" id="L1910">        conditionState.stop();</span>
+<span class="fc" id="L1911">        cmdArgumentState.stop();</span>
+<span class="fc" id="L1912">        setState(LexState.EXPR_BEG);</span>
+        
+<span class="fc" id="L1914">        yaccValue = getPosition();</span>
+<span class="fc" id="L1915">        return result;</span>
+    }
+    
+    private int lessThan(boolean spaceSeen) throws IOException {
+<span class="fc" id="L1919">        last_state = lex_state;</span>
+<span class="fc" id="L1920">        int c = src.read();</span>
+<span class="fc bfc" id="L1921" title="All 6 branches covered.">        if (c == '&lt;' &amp;&amp; lex_state != LexState.EXPR_DOT &amp;&amp; lex_state != LexState.EXPR_CLASS &amp;&amp;</span>
+<span class="pc bpc" id="L1922" title="1 of 6 branches missed.">                !isEND() &amp;&amp; (!isARG() || spaceSeen)) {</span>
+<span class="fc" id="L1923">            int tok = hereDocumentIdentifier();</span>
+            
+<span class="fc bfc" id="L1925" title="All 2 branches covered.">            if (tok != 0) return tok;</span>
+        }
+        
+<span class="fc" id="L1928">        determineExpressionState();</span>
+        
+<span class="fc bfc" id="L1930" title="All 3 branches covered.">        switch (c) {</span>
+        case '=':
+<span class="fc bfc" id="L1932" title="All 2 branches covered.">            if ((c = src.read()) == '&gt;') {</span>
+<span class="fc" id="L1933">                yaccValue = &quot;&lt;=&gt;&quot;;</span>
+<span class="fc" id="L1934">                return Tokens.tCMP;</span>
+            }
+<span class="fc" id="L1936">            src.unread(c);</span>
+<span class="fc" id="L1937">            yaccValue = &quot;&lt;=&quot;;</span>
+<span class="fc" id="L1938">            return Tokens.tLEQ;</span>
+        case '&lt;':
+<span class="fc bfc" id="L1940" title="All 2 branches covered.">            if ((c = src.read()) == '=') {</span>
+<span class="fc" id="L1941">                setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1942">                yaccValue = &quot;&lt;&lt;&quot;;</span>
+<span class="fc" id="L1943">                return Tokens.tOP_ASGN;</span>
+            }
+<span class="fc" id="L1945">            src.unread(c);</span>
+<span class="fc" id="L1946">            yaccValue = &quot;&lt;&lt;&quot;;</span>
+<span class="fc" id="L1947">            warn_balanced(c, spaceSeen, &quot;&lt;&lt;&quot;, &quot;here document&quot;);</span>
+<span class="fc" id="L1948">            return Tokens.tLSHFT;</span>
+        default:
+<span class="fc" id="L1950">            yaccValue = &quot;&lt;&quot;;</span>
+<span class="fc" id="L1951">            src.unread(c);</span>
+<span class="fc" id="L1952">            return Tokens.tLT;</span>
+        }
+    }
+    
+    private int minus(boolean spaceSeen) throws IOException {
+<span class="fc" id="L1957">        int c = src.read();</span>
+        
+<span class="pc bpc" id="L1959" title="1 of 4 branches missed.">        if (lex_state == LexState.EXPR_FNAME || lex_state == LexState.EXPR_DOT) {</span>
+<span class="fc" id="L1960">            setState(LexState.EXPR_ARG);</span>
+<span class="fc bfc" id="L1961" title="All 2 branches covered.">            if (c == '@') {</span>
+<span class="fc" id="L1962">                yaccValue = &quot;-@&quot;;</span>
+<span class="fc" id="L1963">                return Tokens.tUMINUS;</span>
+            }
+<span class="fc" id="L1965">            src.unread(c);</span>
+<span class="fc" id="L1966">            yaccValue = &quot;-&quot;;</span>
+<span class="fc" id="L1967">            return Tokens.tMINUS;</span>
+        }
+<span class="fc bfc" id="L1969" title="All 2 branches covered.">        if (c == '=') {</span>
+<span class="fc" id="L1970">            setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1971">            yaccValue = &quot;-&quot;;</span>
+<span class="fc" id="L1972">            return Tokens.tOP_ASGN;</span>
+        }
+<span class="fc bfc" id="L1974" title="All 2 branches covered.">        if (c == '&gt;') {</span>
+<span class="fc" id="L1975">            setState(LexState.EXPR_ARG);</span>
+<span class="fc" id="L1976">            yaccValue = &quot;-&gt;&quot;;</span>
+<span class="fc" id="L1977">            return Tokens.tLAMBDA;</span>
+        }
+<span class="fc bfc" id="L1979" title="All 4 branches covered.">        if (isBEG() || isSpaceArg(c, spaceSeen)) {</span>
+<span class="fc bfc" id="L1980" title="All 2 branches covered.">            if (isARG()) arg_ambiguous();</span>
+<span class="fc" id="L1981">            setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1982">            src.unread(c);</span>
+<span class="fc" id="L1983">            yaccValue = &quot;-&quot;;</span>
+<span class="fc bfc" id="L1984" title="All 2 branches covered.">            if (Character.isDigit(c)) {</span>
+<span class="fc" id="L1985">                return Tokens.tUMINUS_NUM;</span>
+            }
+<span class="fc" id="L1987">            return Tokens.tUMINUS;</span>
+        }
+<span class="fc" id="L1989">        setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L1990">        src.unread(c);</span>
+<span class="fc" id="L1991">        yaccValue = &quot;-&quot;;</span>
+<span class="fc" id="L1992">        warn_balanced(c, spaceSeen, &quot;-&quot;, &quot;unary operator&quot;);</span>
+<span class="fc" id="L1993">        return Tokens.tMINUS;</span>
+    }
+
+    private int percent(boolean spaceSeen) throws IOException {
+<span class="fc bfc" id="L1997" title="All 2 branches covered.">        if (isBEG()) return parseQuote(src.read());</span>
+
+<span class="fc" id="L1999">        int c = src.read();</span>
+
+<span class="fc bfc" id="L2001" title="All 2 branches covered.">        if (c == '=') {</span>
+<span class="fc" id="L2002">            setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L2003">            yaccValue = &quot;%&quot;;</span>
+<span class="fc" id="L2004">            return Tokens.tOP_ASGN;</span>
+        }
+
+<span class="fc bfc" id="L2007" title="All 2 branches covered.">        if (isSpaceArg(c, spaceSeen)) return parseQuote(c);</span>
+        
+<span class="fc" id="L2009">        determineExpressionState();</span>
+        
+<span class="fc" id="L2011">        src.unread(c);</span>
+<span class="fc" id="L2012">        yaccValue = &quot;%&quot;;</span>
+<span class="fc" id="L2013">        warn_balanced(c, spaceSeen, &quot;%%&quot;, &quot;string literal&quot;);</span>
+<span class="fc" id="L2014">        return Tokens.tPERCENT;</span>
+    }
+
+    private int pipe() throws IOException {
+<span class="fc" id="L2018">        int c = src.read();</span>
+        
+<span class="fc bfc" id="L2020" title="All 3 branches covered.">        switch (c) {</span>
+        case '|':
+<span class="fc" id="L2022">            setState(LexState.EXPR_BEG);</span>
+<span class="fc bfc" id="L2023" title="All 2 branches covered.">            if ((c = src.read()) == '=') {</span>
+<span class="fc" id="L2024">                setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L2025">                yaccValue = &quot;||&quot;;</span>
+<span class="fc" id="L2026">                return Tokens.tOP_ASGN;</span>
+            }
+<span class="fc" id="L2028">            src.unread(c);</span>
+<span class="fc" id="L2029">            yaccValue = &quot;||&quot;;</span>
+<span class="fc" id="L2030">            return Tokens.tOROP;</span>
+        case '=':
+<span class="fc" id="L2032">            setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L2033">            yaccValue = &quot;|&quot;;</span>
+<span class="fc" id="L2034">            return Tokens.tOP_ASGN;</span>
+        default:
+<span class="fc" id="L2036">            determineExpressionState();</span>
+            
+<span class="fc" id="L2038">            src.unread(c);</span>
+<span class="fc" id="L2039">            yaccValue = &quot;|&quot;;</span>
+<span class="fc" id="L2040">            return Tokens.tPIPE;</span>
+        }
+    }
+    
+    private int plus(boolean spaceSeen) throws IOException {
+<span class="fc" id="L2045">        int c = src.read();</span>
+<span class="pc bpc" id="L2046" title="1 of 4 branches missed.">        if (lex_state == LexState.EXPR_FNAME || lex_state == LexState.EXPR_DOT) {</span>
+<span class="fc" id="L2047">            setState(LexState.EXPR_ARG);</span>
+<span class="fc bfc" id="L2048" title="All 2 branches covered.">            if (c == '@') {</span>
+<span class="fc" id="L2049">                yaccValue = &quot;+@&quot;;</span>
+<span class="fc" id="L2050">                return Tokens.tUPLUS;</span>
+            }
+<span class="fc" id="L2052">            src.unread(c);</span>
+<span class="fc" id="L2053">            yaccValue = &quot;+&quot;;</span>
+<span class="fc" id="L2054">            return Tokens.tPLUS;</span>
+        }
+        
+<span class="fc bfc" id="L2057" title="All 2 branches covered.">        if (c == '=') {</span>
+<span class="fc" id="L2058">            setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L2059">            yaccValue = &quot;+&quot;;</span>
+<span class="fc" id="L2060">            return Tokens.tOP_ASGN;</span>
+        }
+        
+<span class="pc bpc" id="L2063" title="1 of 4 branches missed.">        if (isBEG() || isSpaceArg(c, spaceSeen)) { //FIXME: arg_ambiguous missing</span>
+<span class="pc bpc" id="L2064" title="1 of 2 branches missed.">            if (isARG()) arg_ambiguous();</span>
+<span class="fc" id="L2065">            setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L2066">            src.unread(c);</span>
+<span class="fc bfc" id="L2067" title="All 2 branches covered.">            if (Character.isDigit(c)) {</span>
+<span class="fc" id="L2068">                c = '+';</span>
+<span class="fc" id="L2069">                return parseNumber(c);</span>
+            }
+<span class="fc" id="L2071">            yaccValue = &quot;+&quot;;</span>
+<span class="fc" id="L2072">            return Tokens.tUPLUS;</span>
+        }
+        
+<span class="fc" id="L2075">        setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L2076">        src.unread(c);</span>
+<span class="fc" id="L2077">        yaccValue = &quot;+&quot;;</span>
+<span class="fc" id="L2078">        warn_balanced(c, spaceSeen, &quot;+&quot;, &quot;unary operator&quot;);</span>
+<span class="fc" id="L2079">        return Tokens.tPLUS;</span>
+    }
+    
+    private int questionMark() throws IOException {
+        int c;
+        
+<span class="fc bfc" id="L2085" title="All 2 branches covered.">        if (isEND()) {</span>
+<span class="fc" id="L2086">            setState(LexState.EXPR_VALUE);</span>
+<span class="fc" id="L2087">            yaccValue = &quot;?&quot;;</span>
+<span class="fc" id="L2088">            return '?';</span>
+        }
+        
+<span class="fc" id="L2091">        c = src.read();</span>
+<span class="pc bpc" id="L2092" title="1 of 2 branches missed.">        if (c == EOF) throw new SyntaxException(PID.INCOMPLETE_CHAR_SYNTAX, getPosition(), </span>
+<span class="nc" id="L2093">                getCurrentLine(), &quot;incomplete character syntax&quot;);</span>
+
+<span class="fc bfc" id="L2095" title="All 2 branches covered.">        if (Character.isWhitespace(c)){</span>
+<span class="pc bpc" id="L2096" title="1 of 2 branches missed.">            if (!isARG()) {</span>
+<span class="nc" id="L2097">                int c2 = 0;</span>
+<span class="nc bnc" id="L2098" title="All 6 branches missed.">                switch (c) {</span>
+                case ' ':
+<span class="nc" id="L2100">                    c2 = 's';</span>
+<span class="nc" id="L2101">                    break;</span>
+                case '\n':
+<span class="nc" id="L2103">                    c2 = 'n';</span>
+<span class="nc" id="L2104">                    break;</span>
+                case '\t':
+<span class="nc" id="L2106">                    c2 = 't';</span>
+<span class="nc" id="L2107">                    break;</span>
+                        /* What is \v in C?
+                    case '\v':
+                        c2 = 'v';
+                        break;
+                        */
+                case '\r':
+<span class="nc" id="L2114">                    c2 = 'r';</span>
+<span class="nc" id="L2115">                    break;</span>
+                case '\f':
+<span class="nc" id="L2117">                    c2 = 'f';</span>
+                    break;
+                }
+<span class="nc bnc" id="L2120" title="All 2 branches missed.">                if (c2 != 0) {</span>
+<span class="nc" id="L2121">                    warnings.warn(ID.INVALID_CHAR_SEQUENCE, getPosition(), &quot;invalid character syntax; use ?\\&quot; + c2);</span>
+                }
+            }
+<span class="fc" id="L2124">            src.unread(c);</span>
+<span class="fc" id="L2125">            setState(LexState.EXPR_VALUE);</span>
+<span class="fc" id="L2126">            yaccValue = &quot;?&quot;;</span>
+<span class="fc" id="L2127">            return '?';</span>
+            /*} else if (ismbchar(c)) { // ruby - we don't support them either?
+                rb_warn(&quot;multibyte character literal not supported yet; use ?\\&quot; + c);
+                support.unread(c);
+                lexState = LexState.EXPR_BEG;
+                return '?';*/
+<span class="pc bpc" id="L2133" title="1 of 6 branches missed.">        } else if (isIdentifierChar(c) &amp;&amp; !src.peek('\n') &amp;&amp; isNext_identchar()) {</span>
+<span class="nc" id="L2134">            newtok();</span>
+<span class="nc" id="L2135">            src.unread(c);</span>
+<span class="nc" id="L2136">            setState(LexState.EXPR_VALUE);</span>
+<span class="nc" id="L2137">            yaccValue = &quot;?&quot;;</span>
+<span class="nc" id="L2138">            return '?';</span>
+<span class="fc bfc" id="L2139" title="All 2 branches covered.">        } else if (c == '\\') {</span>
+<span class="fc" id="L2140">            newtok();</span>
+<span class="pc bpc" id="L2141" title="1 of 2 branches missed.">            if (src.peek('u')) {</span>
+<span class="nc" id="L2142">                src.read(); // Eat 'u'</span>
+<span class="nc" id="L2143">                ByteList oneCharBL = new ByteList(2);</span>
+<span class="nc" id="L2144">                c = readUTFEscape(oneCharBL, false, false);</span>
+                
+<span class="nc bnc" id="L2146" title="All 2 branches missed.">                if (c &gt;= 0x80) {</span>
+<span class="nc" id="L2147">                    tokenAddMBC(c, oneCharBL);</span>
+                } else {
+<span class="nc" id="L2149">                    oneCharBL.append(c);</span>
+                }
+                
+<span class="nc" id="L2152">                setState(LexState.EXPR_END);</span>
+<span class="nc" id="L2153">                yaccValue = new StrNode(getPosition(), oneCharBL);</span>
+                
+<span class="nc" id="L2155">                return Tokens.tINTEGER; // FIXME: This should be something else like a tCHAR in 1.9/2.0</span>
+            } else {
+<span class="fc" id="L2157">                c = readEscape();</span>
+            }
+        } else {
+<span class="fc" id="L2160">            newtok();</span>
+        }
+        
+<span class="fc" id="L2163">        setState(LexState.EXPR_END);</span>
+<span class="fc" id="L2164">        ByteList oneCharBL = new ByteList(1);</span>
+<span class="fc" id="L2165">        oneCharBL.append(c);</span>
+<span class="fc" id="L2166">        yaccValue = new StrNode(getPosition(), oneCharBL);</span>
+        
+<span class="fc" id="L2168">        return Tokens.tINTEGER;</span>
+    }
+    
+    private int rightBracket() {
+<span class="fc" id="L2172">        parenNest--;</span>
+<span class="fc" id="L2173">        conditionState.restart();</span>
+<span class="fc" id="L2174">        cmdArgumentState.restart();</span>
+<span class="fc" id="L2175">        setState(LexState.EXPR_ENDARG);</span>
+<span class="fc" id="L2176">        yaccValue = &quot;]&quot;;</span>
+<span class="fc" id="L2177">        return Tokens.tRBRACK;</span>
+    }
+
+    private int rightCurly() {
+<span class="fc" id="L2181">        conditionState.restart();</span>
+<span class="fc" id="L2182">        cmdArgumentState.restart();</span>
+<span class="fc" id="L2183">        setState(LexState.EXPR_ENDARG);</span>
+<span class="fc" id="L2184">        yaccValue = &quot;}&quot;;</span>
+<span class="fc" id="L2185">        return Tokens.tRCURLY;</span>
+    }
+
+    private int rightParen() {
+<span class="fc" id="L2189">        parenNest--;</span>
+<span class="fc" id="L2190">        conditionState.restart();</span>
+<span class="fc" id="L2191">        cmdArgumentState.restart();</span>
+<span class="fc" id="L2192">        setState(LexState.EXPR_ENDFN);</span>
+<span class="fc" id="L2193">        yaccValue = &quot;)&quot;;</span>
+<span class="fc" id="L2194">        return Tokens.tRPAREN;</span>
+    }
+    
+    private int singleQuote() throws IOException {
+<span class="fc" id="L2198">        lex_strterm = new StringTerm(str_squote, '\0', '\'');</span>
+<span class="fc" id="L2199">        yaccValue = &quot;'&quot;;</span>
+
+<span class="fc" id="L2201">        return Tokens.tSTRING_BEG;</span>
+    }
+    
+    private int slash(boolean spaceSeen) throws IOException {
+<span class="fc bfc" id="L2205" title="All 2 branches covered.">        if (isBEG()) {</span>
+<span class="fc" id="L2206">            lex_strterm = new StringTerm(str_regexp, '\0', '/');</span>
+<span class="fc" id="L2207">            yaccValue = &quot;/&quot;;</span>
+<span class="fc" id="L2208">            return Tokens.tREGEXP_BEG;</span>
+        }
+        
+<span class="fc" id="L2211">        int c = src.read();</span>
+        
+<span class="fc bfc" id="L2213" title="All 2 branches covered.">        if (c == '=') {</span>
+<span class="fc" id="L2214">            yaccValue = &quot;/&quot;;</span>
+<span class="fc" id="L2215">            setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L2216">            return Tokens.tOP_ASGN;</span>
+        }
+<span class="fc" id="L2218">        src.unread(c);</span>
+<span class="fc bfc" id="L2219" title="All 2 branches covered.">        if (isSpaceArg(c, spaceSeen)) {</span>
+<span class="fc" id="L2220">            arg_ambiguous();</span>
+<span class="fc" id="L2221">            lex_strterm = new StringTerm(str_regexp, '\0', '/');</span>
+<span class="fc" id="L2222">            yaccValue = &quot;/&quot;;</span>
+<span class="fc" id="L2223">            return Tokens.tREGEXP_BEG;</span>
+        }
+        
+<span class="fc" id="L2226">        determineExpressionState();</span>
+        
+<span class="fc" id="L2228">        yaccValue = &quot;/&quot;;</span>
+<span class="fc" id="L2229">        warn_balanced(c, spaceSeen, &quot;/&quot;, &quot;regexp literal&quot;);</span>
+<span class="fc" id="L2230">        return Tokens.tDIVIDE;</span>
+    }
+
+    private int star(boolean spaceSeen) throws IOException {
+<span class="fc" id="L2234">        int c = src.read();</span>
+        
+<span class="fc bfc" id="L2236" title="All 3 branches covered.">        switch (c) {</span>
+        case '*':
+<span class="fc bfc" id="L2238" title="All 2 branches covered.">            if ((c = src.read()) == '=') {</span>
+<span class="fc" id="L2239">                setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L2240">                yaccValue = &quot;**&quot;;</span>
+<span class="fc" id="L2241">                return Tokens.tOP_ASGN;</span>
+            }
+
+<span class="fc" id="L2244">            src.unread(c); // not a '=' put it back</span>
+<span class="fc" id="L2245">            yaccValue = &quot;**&quot;;</span>
+
+<span class="fc bfc" id="L2247" title="All 2 branches covered.">            if (isSpaceArg(c, spaceSeen)) {</span>
+<span class="pc bpc" id="L2248" title="3 of 4 branches missed.">                if (warnings.isVerbose() &amp;&amp; Options.PARSER_WARN_ARGUMENT_PREFIX.load())</span>
+<span class="nc" id="L2249">                    warnings.warning(ID.ARGUMENT_AS_PREFIX, getPosition(), &quot;`**' interpreted as argument prefix&quot;);</span>
+<span class="fc" id="L2250">                c = Tokens.tDSTAR;</span>
+<span class="fc bfc" id="L2251" title="All 2 branches covered.">            } else if (isBEG()) {</span>
+<span class="fc" id="L2252">                c = Tokens.tDSTAR;</span>
+            } else {
+<span class="fc" id="L2254">                warn_balanced(c, spaceSeen, &quot;*&quot;, &quot;argument prefix&quot;);</span>
+<span class="fc" id="L2255">                c = Tokens.tPOW;</span>
+            }
+<span class="fc" id="L2257">            break;</span>
+        case '=':
+<span class="fc" id="L2259">            setState(LexState.EXPR_BEG);</span>
+<span class="fc" id="L2260">            yaccValue = &quot;*&quot;;</span>
+<span class="fc" id="L2261">            return Tokens.tOP_ASGN;</span>
+        default:
+<span class="fc" id="L2263">            src.unread(c);</span>
+<span class="fc bfc" id="L2264" title="All 2 branches covered.">            if (isSpaceArg(c, spaceSeen)) {</span>
+<span class="pc bpc" id="L2265" title="3 of 4 branches missed.">                if (warnings.isVerbose() &amp;&amp; Options.PARSER_WARN_ARGUMENT_PREFIX.load())</span>
+<span class="nc" id="L2266">                    warnings.warning(ID.ARGUMENT_AS_PREFIX, getPosition(), &quot;`*' interpreted as argument prefix&quot;);</span>
+<span class="fc" id="L2267">                c = Tokens.tSTAR;</span>
+<span class="fc bfc" id="L2268" title="All 2 branches covered.">            } else if (isBEG()) {</span>
+<span class="fc" id="L2269">                c = Tokens.tSTAR;</span>
+            } else {
+<span class="fc" id="L2271">                warn_balanced(c, spaceSeen, &quot;*&quot;, &quot;argument prefix&quot;);</span>
+<span class="fc" id="L2272">                c = Tokens.tSTAR2;</span>
+            }
+<span class="fc" id="L2274">            yaccValue = &quot;*&quot;;</span>
+        }
+        
+<span class="fc" id="L2277">        determineExpressionState();</span>
+<span class="fc" id="L2278">        return c;</span>
+    }
+
+    private int tilde() throws IOException {
+        int c;
+        
+<span class="pc bpc" id="L2284" title="1 of 4 branches missed.">        if (lex_state == LexState.EXPR_FNAME || lex_state == LexState.EXPR_DOT) {</span>
+<span class="pc bpc" id="L2285" title="1 of 2 branches missed.">            if ((c = src.read()) != '@') src.unread(c);</span>
+<span class="fc" id="L2286">            setState(LexState.EXPR_ARG);</span>
+        } else {
+<span class="fc" id="L2288">            setState(LexState.EXPR_BEG);</span>
+        }
+        
+<span class="fc" id="L2291">        yaccValue = &quot;~&quot;;</span>
+<span class="fc" id="L2292">        return Tokens.tTILDE;</span>
+    }
+
+    /**
+     *  Parse a number from the input stream.
+     *
+     *@param c The first character of the number.
+     *@return A int constant wich represents a token.
+     */
+    private int parseNumber(int c) throws IOException {
+<span class="fc" id="L2302">        setState(LexState.EXPR_END);</span>
+<span class="fc" id="L2303">        newtok();</span>
+
+<span class="fc" id="L2305">        tokenBuffer.setLength(0);</span>
+
+<span class="pc bpc" id="L2307" title="1 of 2 branches missed.">        if (c == '-') {</span>
+<span class="nc" id="L2308">        	tokenBuffer.append((char) c);</span>
+<span class="nc" id="L2309">            c = src.read();</span>
+<span class="fc bfc" id="L2310" title="All 2 branches covered.">        } else if (c == '+') {</span>
+        	// We don't append '+' since Java number parser gets confused
+<span class="fc" id="L2312">            c = src.read();</span>
+        }
+        
+<span class="fc" id="L2315">        int nondigit = 0;</span>
+
+<span class="fc bfc" id="L2317" title="All 2 branches covered.">        if (c == '0') {</span>
+<span class="fc" id="L2318">            int startLen = tokenBuffer.length();</span>
+
+<span class="pc bpc" id="L2320" title="1 of 8 branches missed.">            switch (c = src.read()) {</span>
+                case 'x' :
+                case 'X' : //  hexadecimal
+<span class="fc" id="L2323">                    c = src.read();</span>
+<span class="pc bpc" id="L2324" title="1 of 2 branches missed.">                    if (isHexChar(c)) {</span>
+<span class="fc" id="L2325">                        for (;; c = src.read()) {</span>
+<span class="fc bfc" id="L2326" title="All 2 branches covered.">                            if (c == '_') {</span>
+<span class="pc bpc" id="L2327" title="1 of 2 branches missed.">                                if (nondigit != '\0') break;</span>
+<span class="fc" id="L2328">                                nondigit = c;</span>
+<span class="fc bfc" id="L2329" title="All 2 branches covered.">                            } else if (isHexChar(c)) {</span>
+<span class="fc" id="L2330">                                nondigit = '\0';</span>
+<span class="fc" id="L2331">                                tokenBuffer.append((char) c);</span>
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+<span class="fc" id="L2337">                    src.unread(c);</span>
+
+<span class="pc bpc" id="L2339" title="1 of 2 branches missed.">                    if (tokenBuffer.length() == startLen) {</span>
+<span class="nc" id="L2340">                        throw new SyntaxException(PID.BAD_HEX_NUMBER, getPosition(), </span>
+<span class="nc" id="L2341">                                getCurrentLine(), &quot;Hexadecimal number without hex-digits.&quot;);</span>
+<span class="pc bpc" id="L2342" title="1 of 2 branches missed.">                    } else if (nondigit != '\0') {</span>
+<span class="nc" id="L2343">                        throw new SyntaxException(PID.TRAILING_UNDERSCORE_IN_NUMBER,</span>
+<span class="nc" id="L2344">                                getPosition(), getCurrentLine(), &quot;Trailing '_' in number.&quot;);</span>
+                    }
+<span class="fc" id="L2346">                    return getIntegerToken(tokenBuffer.toString(), 16, numberLiteralSuffix(SUFFIX_ALL));</span>
+                case 'b' :
+                case 'B' : // binary
+<span class="fc" id="L2349">                    c = src.read();</span>
+<span class="pc bpc" id="L2350" title="1 of 4 branches missed.">                    if (c == '0' || c == '1') {</span>
+<span class="fc" id="L2351">                        for (;; c = src.read()) {</span>
+<span class="pc bpc" id="L2352" title="1 of 2 branches missed.">                            if (c == '_') {</span>
+<span class="nc bnc" id="L2353" title="All 2 branches missed.">                                if (nondigit != '\0') break;</span>
+<span class="nc" id="L2354">								nondigit = c;</span>
+<span class="fc bfc" id="L2355" title="All 4 branches covered.">                            } else if (c == '0' || c == '1') {</span>
+<span class="fc" id="L2356">                                nondigit = '\0';</span>
+<span class="fc" id="L2357">                                tokenBuffer.append((char) c);</span>
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+<span class="fc" id="L2363">                    src.unread(c);</span>
+
+<span class="pc bpc" id="L2365" title="1 of 2 branches missed.">                    if (tokenBuffer.length() == startLen) {</span>
+<span class="nc" id="L2366">                        throw new SyntaxException(PID.EMPTY_BINARY_NUMBER, getPosition(),</span>
+<span class="nc" id="L2367">                                getCurrentLine(), &quot;Binary number without digits.&quot;);</span>
+<span class="pc bpc" id="L2368" title="1 of 2 branches missed.">                    } else if (nondigit != '\0') {</span>
+<span class="nc" id="L2369">                        throw new SyntaxException(PID.TRAILING_UNDERSCORE_IN_NUMBER,</span>
+<span class="nc" id="L2370">                                getPosition(), getCurrentLine(), &quot;Trailing '_' in number.&quot;);</span>
+                    }
+<span class="fc" id="L2372">                    return getIntegerToken(tokenBuffer.toString(), 2, numberLiteralSuffix(SUFFIX_ALL));</span>
+                case 'd' :
+                case 'D' : // decimal
+<span class="fc" id="L2375">                    c = src.read();</span>
+<span class="pc bpc" id="L2376" title="1 of 2 branches missed.">                    if (Character.isDigit(c)) {</span>
+<span class="fc" id="L2377">                        for (;; c = src.read()) {</span>
+<span class="pc bpc" id="L2378" title="1 of 2 branches missed.">                            if (c == '_') {</span>
+<span class="nc bnc" id="L2379" title="All 2 branches missed.">                                if (nondigit != '\0') break;</span>
+<span class="nc" id="L2380">								nondigit = c;</span>
+<span class="fc bfc" id="L2381" title="All 2 branches covered.">                            } else if (Character.isDigit(c)) {</span>
+<span class="fc" id="L2382">                                nondigit = '\0';</span>
+<span class="fc" id="L2383">                                tokenBuffer.append((char) c);</span>
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+<span class="fc" id="L2389">                    src.unread(c);</span>
+
+<span class="pc bpc" id="L2391" title="1 of 2 branches missed.">                    if (tokenBuffer.length() == startLen) {</span>
+<span class="nc" id="L2392">                        throw new SyntaxException(PID.EMPTY_BINARY_NUMBER, getPosition(), </span>
+<span class="nc" id="L2393">                                getCurrentLine(), &quot;Binary number without digits.&quot;);</span>
+<span class="pc bpc" id="L2394" title="1 of 2 branches missed.">                    } else if (nondigit != '\0') {</span>
+<span class="nc" id="L2395">                        throw new SyntaxException(PID.TRAILING_UNDERSCORE_IN_NUMBER, getPosition(),</span>
+<span class="nc" id="L2396">                                getCurrentLine(), &quot;Trailing '_' in number.&quot;);</span>
+                    }
+<span class="fc" id="L2398">                    return getIntegerToken(tokenBuffer.toString(), 10, numberLiteralSuffix(SUFFIX_ALL));</span>
+                case 'o':
+                case 'O':
+<span class="fc" id="L2401">                    c = src.read();</span>
+                case '0': case '1': case '2': case '3': case '4': //Octal
+                case '5': case '6': case '7': case '_': 
+<span class="fc" id="L2404">                    for (;; c = src.read()) {</span>
+<span class="fc bfc" id="L2405" title="All 2 branches covered.">                        if (c == '_') {</span>
+<span class="pc bpc" id="L2406" title="1 of 2 branches missed.">                            if (nondigit != '\0') break;</span>
+
+<span class="fc" id="L2408">							nondigit = c;</span>
+<span class="fc bfc" id="L2409" title="All 4 branches covered.">                        } else if (c &gt;= '0' &amp;&amp; c &lt;= '7') {</span>
+<span class="fc" id="L2410">                            nondigit = '\0';</span>
+<span class="fc" id="L2411">                            tokenBuffer.append((char) c);</span>
+                        } else {
+                            break;
+                        }
+                    }
+<span class="pc bpc" id="L2416" title="1 of 2 branches missed.">                    if (tokenBuffer.length() &gt; startLen) {</span>
+<span class="fc" id="L2417">                        src.unread(c);</span>
+
+<span class="pc bpc" id="L2419" title="1 of 2 branches missed.">                        if (nondigit != '\0') {</span>
+<span class="nc" id="L2420">                            throw new SyntaxException(PID.TRAILING_UNDERSCORE_IN_NUMBER, </span>
+<span class="nc" id="L2421">                                    getPosition(), getCurrentLine(), &quot;Trailing '_' in number.&quot;);</span>
+                        }
+
+<span class="fc" id="L2424">                        return getIntegerToken(tokenBuffer.toString(), 8, numberLiteralSuffix(SUFFIX_ALL));</span>
+                    }
+                case '8' :
+                case '9' :
+<span class="nc" id="L2428">                    throw new SyntaxException(PID.BAD_OCTAL_DIGIT, getPosition(),</span>
+<span class="nc" id="L2429">                            getCurrentLine(), &quot;Illegal octal digit.&quot;);</span>
+                case '.' :
+                case 'e' :
+                case 'E' :
+<span class="fc" id="L2433">                	tokenBuffer.append('0');</span>
+<span class="fc" id="L2434">                    break;</span>
+                default :
+<span class="fc" id="L2436">                    src.unread(c);</span>
+<span class="fc" id="L2437">                    yaccValue = new FixnumNode(getPosition(), 0);</span>
+<span class="fc" id="L2438">                    return Tokens.tINTEGER;</span>
+            }
+        }
+
+<span class="fc" id="L2442">        boolean seen_point = false;</span>
+<span class="fc" id="L2443">        boolean seen_e = false;</span>
+
+<span class="fc" id="L2445">        for (;; c = src.read()) {</span>
+<span class="fc bfc" id="L2446" title="All 5 branches covered.">            switch (c) {</span>
+                case '0' :
+                case '1' :
+                case '2' :
+                case '3' :
+                case '4' :
+                case '5' :
+                case '6' :
+                case '7' :
+                case '8' :
+                case '9' :
+<span class="fc" id="L2457">                    nondigit = '\0';</span>
+<span class="fc" id="L2458">                    tokenBuffer.append((char) c);</span>
+<span class="fc" id="L2459">                    break;</span>
+                case '.' :
+<span class="pc bpc" id="L2461" title="1 of 2 branches missed.">                    if (nondigit != '\0') {</span>
+<span class="nc" id="L2462">                        src.unread(c);</span>
+<span class="nc" id="L2463">                        throw new SyntaxException(PID.TRAILING_UNDERSCORE_IN_NUMBER, getPosition(),</span>
+<span class="nc" id="L2464">                                getCurrentLine(), &quot;Trailing '_' in number.&quot;);</span>
+<span class="fc bfc" id="L2465" title="All 4 branches covered.">                    } else if (seen_point || seen_e) {</span>
+<span class="fc" id="L2466">                        src.unread(c);</span>
+<span class="fc" id="L2467">                        return getNumberToken(tokenBuffer.toString(), seen_e, seen_point, nondigit);</span>
+                    } else {
+                    	int c2;
+<span class="fc bfc" id="L2470" title="All 2 branches covered.">                        if (!Character.isDigit(c2 = src.read())) {</span>
+<span class="fc" id="L2471">                            src.unread(c2);</span>
+<span class="fc" id="L2472">                        	src.unread('.');</span>
+<span class="pc bpc" id="L2473" title="1 of 2 branches missed.">                            if (c == '_') { </span>
+                            		// Enebo:  c can never be antrhign but '.'
+                            		// Why did I put this here?
+                            } else {
+<span class="fc" id="L2477">                                return getIntegerToken(tokenBuffer.toString(), 10, numberLiteralSuffix(SUFFIX_ALL));</span>
+                            }
+                        } else {
+<span class="fc" id="L2480">                            tokenBuffer.append('.');</span>
+<span class="fc" id="L2481">                            tokenBuffer.append((char) c2);</span>
+<span class="fc" id="L2482">                            seen_point = true;</span>
+<span class="fc" id="L2483">                            nondigit = '\0';</span>
+                        }
+                    }
+<span class="fc" id="L2486">                    break;</span>
+                case 'e' :
+                case 'E' :
+<span class="pc bpc" id="L2489" title="1 of 2 branches missed.">                    if (nondigit != '\0') {</span>
+<span class="nc" id="L2490">                        throw new SyntaxException(PID.TRAILING_UNDERSCORE_IN_NUMBER, getPosition(),</span>
+<span class="nc" id="L2491">                                getCurrentLine(), &quot;Trailing '_' in number.&quot;);</span>
+<span class="pc bpc" id="L2492" title="1 of 2 branches missed.">                    } else if (seen_e) {</span>
+<span class="nc" id="L2493">                        src.unread(c);</span>
+<span class="nc" id="L2494">                        return getNumberToken(tokenBuffer.toString(), seen_e, seen_point, nondigit);</span>
+                    } else {
+<span class="fc" id="L2496">                        tokenBuffer.append((char) c);</span>
+<span class="fc" id="L2497">                        seen_e = true;</span>
+<span class="fc" id="L2498">                        nondigit = c;</span>
+<span class="fc" id="L2499">                        c = src.read();</span>
+<span class="fc bfc" id="L2500" title="All 4 branches covered.">                        if (c == '-' || c == '+') {</span>
+<span class="fc" id="L2501">                            tokenBuffer.append((char) c);</span>
+<span class="fc" id="L2502">                            nondigit = c;</span>
+                        } else {
+<span class="fc" id="L2504">                            src.unread(c);</span>
+                        }
+                    }
+<span class="fc" id="L2507">                    break;</span>
+                case '_' : //  '_' in number just ignored
+<span class="pc bpc" id="L2509" title="1 of 2 branches missed.">                    if (nondigit != '\0') {</span>
+<span class="nc" id="L2510">                        throw new SyntaxException(PID.TRAILING_UNDERSCORE_IN_NUMBER, getPosition(),</span>
+<span class="nc" id="L2511">                                getCurrentLine(), &quot;Trailing '_' in number.&quot;);</span>
+                    }
+<span class="fc" id="L2513">                    nondigit = c;</span>
+<span class="fc" id="L2514">                    break;</span>
+                default :
+<span class="fc" id="L2516">                    src.unread(c);</span>
+<span class="fc" id="L2517">                return getNumberToken(tokenBuffer.toString(), seen_e, seen_point, nondigit);</span>
+            }
+        }
+    }
+
+    private int getNumberToken(String number, boolean seen_e, boolean seen_point, int nondigit) throws IOException {
+<span class="fc bfc" id="L2523" title="All 4 branches covered.">        boolean isFloat = seen_e || seen_point;</span>
+<span class="pc bpc" id="L2524" title="1 of 2 branches missed.">        if (nondigit != '\0') {</span>
+<span class="nc" id="L2525">            throw new SyntaxException(PID.TRAILING_UNDERSCORE_IN_NUMBER, getPosition(),</span>
+<span class="nc" id="L2526">                    getCurrentLine(), &quot;Trailing '_' in number.&quot;);</span>
+<span class="fc bfc" id="L2527" title="All 2 branches covered.">        } else if (isFloat) {</span>
+<span class="fc bfc" id="L2528" title="All 2 branches covered.">            int suffix = numberLiteralSuffix(seen_e ? SUFFIX_I : SUFFIX_ALL);</span>
+<span class="fc" id="L2529">            return getFloatToken(number, suffix);</span>
+        }
+<span class="fc" id="L2531">        return getIntegerToken(number, 10, numberLiteralSuffix(SUFFIX_ALL));</span>
+    }
+
+    // Note: parser_tokadd_utf8 variant just for regexp literal parsing.  This variant is to be
+    // called when string_literal and regexp_literal.
+    public void readUTFEscapeRegexpLiteral(ByteList buffer) throws IOException {
+<span class="fc" id="L2537">        buffer.append('\\');</span>
+<span class="fc" id="L2538">        buffer.append('u');</span>
+
+<span class="pc bpc" id="L2540" title="1 of 2 branches missed.">        if (src.peek('{')) { // handle \\u{...}</span>
+            do {
+<span class="fc" id="L2542">                buffer.append(src.read());</span>
+<span class="pc bpc" id="L2543" title="1 of 2 branches missed.">                if (scanHexLiteral(buffer, 6, false, &quot;invalid Unicode escape&quot;) &gt; 0x10ffff) {</span>
+<span class="nc" id="L2544">                    throw new SyntaxException(PID.INVALID_ESCAPE_SYNTAX, getPosition(),</span>
+<span class="nc" id="L2545">                            getCurrentLine(), &quot;invalid Unicode codepoint (too large)&quot;);</span>
+                }
+<span class="pc bpc" id="L2547" title="2 of 4 branches missed.">            } while (src.peek(' ') || src.peek('\t'));</span>
+
+<span class="fc" id="L2549">            int c = src.read();</span>
+<span class="pc bpc" id="L2550" title="1 of 2 branches missed.">            if (c != '}') {</span>
+<span class="nc" id="L2551">                throw new SyntaxException(PID.INVALID_ESCAPE_SYNTAX, getPosition(),</span>
+<span class="nc" id="L2552">                        getCurrentLine(), &quot;unterminated Unicode escape&quot;);</span>
+            }
+<span class="fc" id="L2554">            buffer.append((char) c);</span>
+<span class="fc" id="L2555">        } else { // handle \\uxxxx</span>
+<span class="nc" id="L2556">            scanHexLiteral(buffer, 4, true, &quot;Invalid Unicode escape&quot;);</span>
+        }
+<span class="fc" id="L2558">    }</span>
+
+<span class="fc" id="L2560">    private byte[] mbcBuf = new byte[6];</span>
+
+    //FIXME: This seems like it could be more efficient to ensure size in bytelist and then pass
+    // in bytelists byte backing store.  This method would look ugly since realSize would need
+    // to be tweaked and I don't know how many bytes this codepoint has up front so I would need
+    // to grow by 6 (which may be wasteful).  Another idea is to make Encoding accept an interface
+    // for populating bytes and then make ByteList implement that interface.  I like this last idea
+    // since it would not leak bytelist impl details all over the place.
+    public int tokenAddMBC(int codepoint, ByteList buffer) {
+<span class="fc" id="L2569">        int length = buffer.getEncoding().codeToMbc(codepoint, mbcBuf, 0);</span>
+
+<span class="pc bpc" id="L2571" title="1 of 2 branches missed.">        if (length &lt;= 0) return EOF;</span>
+
+<span class="fc" id="L2573">        buffer.append(mbcBuf, 0, length);</span>
+
+<span class="fc" id="L2575">        return length;</span>
+    }
+
+    public void tokenAddMBCFromSrc(int c, ByteList buffer) throws IOException {
+        // read bytes for length of character
+<span class="nc" id="L2580">        int length = buffer.getEncoding().length((byte)c);</span>
+<span class="nc" id="L2581">        buffer.append((byte)c);</span>
+<span class="nc bnc" id="L2582" title="All 2 branches missed.">        for (int off = 0; off &lt; length - 1; off++) {</span>
+<span class="nc" id="L2583">            buffer.append((byte)src.read());</span>
+        }
+<span class="nc" id="L2585">    }</span>
+
+    // MRI: parser_tokadd_utf8 sans regexp literal parsing
+    public int readUTFEscape(ByteList buffer, boolean stringLiteral, boolean symbolLiteral) throws IOException {
+        int codepoint;
+        int c;
+
+<span class="fc bfc" id="L2592" title="All 2 branches covered.">        if (src.peek('{')) { // handle \\u{...}</span>
+            do {
+<span class="fc" id="L2594">                src.read(); // Eat curly or whitespace</span>
+<span class="fc" id="L2595">                codepoint = scanHex(6, false, &quot;invalid Unicode escape&quot;);</span>
+<span class="pc bpc" id="L2596" title="1 of 2 branches missed.">                if (codepoint &gt; 0x10ffff) {</span>
+<span class="nc" id="L2597">                    throw new SyntaxException(PID.INVALID_ESCAPE_SYNTAX, getPosition(),</span>
+<span class="nc" id="L2598">                            getCurrentLine(), &quot;invalid Unicode codepoint (too large)&quot;);</span>
+                }
+<span class="pc bpc" id="L2600" title="1 of 2 branches missed.">                if (buffer != null) readUTF8EscapeIntoBuffer(codepoint, buffer, stringLiteral);</span>
+<span class="pc bpc" id="L2601" title="1 of 4 branches missed.">            } while (src.peek(' ') || src.peek('\t'));</span>
+
+<span class="fc" id="L2603">            c = src.read();</span>
+<span class="pc bpc" id="L2604" title="1 of 2 branches missed.">            if (c != '}') {</span>
+<span class="nc" id="L2605">                throw new SyntaxException(PID.INVALID_ESCAPE_SYNTAX, getPosition(),</span>
+<span class="nc" id="L2606">                        getCurrentLine(), &quot;unterminated Unicode escape&quot;);</span>
+            }
+        } else { // handle \\uxxxx
+<span class="fc" id="L2609">            codepoint = scanHex(4, true, &quot;Invalid Unicode escape&quot;);</span>
+<span class="pc bpc" id="L2610" title="1 of 2 branches missed.">            if (buffer != null) readUTF8EscapeIntoBuffer(codepoint, buffer, stringLiteral);</span>
+        }
+
+<span class="fc" id="L2613">        return codepoint;</span>
+    }
+    
+    private void readUTF8EscapeIntoBuffer(int codepoint, ByteList buffer, boolean stringLiteral) {
+<span class="fc bfc" id="L2617" title="All 2 branches covered.">        if (codepoint &gt;= 0x80) {</span>
+<span class="fc" id="L2618">            buffer.setEncoding(UTF8_ENCODING);</span>
+<span class="pc bpc" id="L2619" title="1 of 2 branches missed.">            if (stringLiteral) tokenAddMBC(codepoint, buffer);</span>
+<span class="pc bpc" id="L2620" title="1 of 2 branches missed.">        } else if (stringLiteral) {</span>
+<span class="fc" id="L2621">            buffer.append((char) codepoint);</span>
+        }
+<span class="fc" id="L2623">    }</span>
+ 
+    
+    public int readEscape() throws IOException {
+<span class="fc" id="L2627">        int c = src.read();</span>
+
+<span class="pc bpc" id="L2629" title="2 of 17 branches missed.">        switch (c) {</span>
+            case '\\' : // backslash
+<span class="nc" id="L2631">                return c;</span>
+            case 'n' : // newline
+<span class="fc" id="L2633">                return '\n';</span>
+            case 't' : // horizontal tab
+<span class="fc" id="L2635">                return '\t';</span>
+            case 'r' : // carriage return
+<span class="fc" id="L2637">                return '\r';</span>
+            case 'f' : // form feed
+<span class="fc" id="L2639">                return '\f';</span>
+            case 'v' : // vertical tab
+<span class="fc" id="L2641">                return '\u000B';</span>
+            case 'a' : // alarm(bell)
+<span class="fc" id="L2643">                return '\u0007';</span>
+            case 'e' : // escape
+<span class="fc" id="L2645">                return '\u001B';</span>
+            case '0' : case '1' : case '2' : case '3' : // octal constant
+            case '4' : case '5' : case '6' : case '7' :
+<span class="fc" id="L2648">                src.unread(c);</span>
+<span class="fc" id="L2649">                return scanOct(3);</span>
+            case 'x' : // hex constant
+<span class="fc" id="L2651">                return scanHex(2, false, &quot;Invalid escape character syntax&quot;);</span>
+            case 'b' : // backspace
+<span class="fc" id="L2653">                return '\010';</span>
+            case 's' : // space
+<span class="fc" id="L2655">                return ' ';</span>
+            case 'M' :
+<span class="pc bpc" id="L2657" title="1 of 2 branches missed.">                if ((c = src.read()) != '-') {</span>
+<span class="nc" id="L2658">                    throw new SyntaxException(PID.INVALID_ESCAPE_SYNTAX, getPosition(),</span>
+<span class="nc" id="L2659">                            getCurrentLine(), &quot;Invalid escape character syntax&quot;);</span>
+<span class="fc bfc" id="L2660" title="All 2 branches covered.">                } else if ((c = src.read()) == '\\') {</span>
+<span class="fc" id="L2661">                    return (char) (readEscape() | 0x80);</span>
+<span class="pc bpc" id="L2662" title="1 of 2 branches missed.">                } else if (c == EOF) {</span>
+<span class="nc" id="L2663">                    throw new SyntaxException(PID.INVALID_ESCAPE_SYNTAX, getPosition(),</span>
+<span class="nc" id="L2664">                            getCurrentLine(), &quot;Invalid escape character syntax&quot;);</span>
+                } 
+<span class="fc" id="L2666">                return (char) ((c &amp; 0xff) | 0x80);</span>
+            case 'C' :
+<span class="pc bpc" id="L2668" title="1 of 2 branches missed.">                if (src.read() != '-') {</span>
+<span class="nc" id="L2669">                    throw new SyntaxException(PID.INVALID_ESCAPE_SYNTAX, getPosition(),</span>
+<span class="nc" id="L2670">                            getCurrentLine(), &quot;Invalid escape character syntax&quot;);</span>
+                }
+            case 'c' :
+<span class="fc bfc" id="L2673" title="All 2 branches covered.">                if ((c = src.read()) == '\\') {</span>
+<span class="fc" id="L2674">                    c = readEscape();</span>
+<span class="pc bpc" id="L2675" title="1 of 2 branches missed.">                } else if (c == '?') {</span>
+<span class="nc" id="L2676">                    return '\177';</span>
+<span class="pc bpc" id="L2677" title="1 of 2 branches missed.">                } else if (c == EOF) {</span>
+<span class="nc" id="L2678">                    throw new SyntaxException(PID.INVALID_ESCAPE_SYNTAX, getPosition(),</span>
+<span class="nc" id="L2679">                            getCurrentLine(), &quot;Invalid escape character syntax&quot;);</span>
+                }
+<span class="fc" id="L2681">                return (char) (c &amp; 0x9f);</span>
+            case EOF :
+<span class="nc" id="L2683">                throw new SyntaxException(PID.INVALID_ESCAPE_SYNTAX, getPosition(),</span>
+<span class="nc" id="L2684">                        getCurrentLine(), &quot;Invalid escape character syntax&quot;);</span>
+            default :
+<span class="fc" id="L2686">                return c;</span>
+        }
+    }
+
+    /**
+     * Read up to count hexadecimal digits and store those digits in a token buffer.  If strict is
+     * provided then count number of hex digits must be present. If no digits can be read a syntax
+     * exception will be thrown.  This will also return the codepoint as a value so codepoint
+     * ranges can be checked.
+     */
+    private char scanHexLiteral(ByteList buffer, int count, boolean strict, String errorMessage)
+            throws IOException {
+<span class="fc" id="L2698">        int i = 0;</span>
+<span class="fc" id="L2699">        char hexValue = '\0';</span>
+
+<span class="pc bpc" id="L2701" title="1 of 2 branches missed.">        for (; i &lt; count; i++) {</span>
+<span class="fc" id="L2702">            int h1 = src.read();</span>
+
+<span class="fc bfc" id="L2704" title="All 2 branches covered.">            if (!isHexChar(h1)) {</span>
+<span class="fc" id="L2705">                src.unread(h1);</span>
+<span class="fc" id="L2706">                break;</span>
+            }
+
+<span class="fc" id="L2709">            buffer.append(h1);</span>
+
+<span class="fc" id="L2711">            hexValue &lt;&lt;= 4;</span>
+<span class="fc" id="L2712">            hexValue |= Integer.parseInt(&quot;&quot; + (char) h1, 16) &amp; 15;</span>
+        }
+
+        // No hex value after the 'x'.
+<span class="pc bpc" id="L2716" title="4 of 6 branches missed.">        if (i == 0 || strict &amp;&amp; count != i) {</span>
+<span class="nc" id="L2717">            throw new SyntaxException(PID.INVALID_ESCAPE_SYNTAX, getPosition(),</span>
+<span class="nc" id="L2718">                    getCurrentLine(), errorMessage);</span>
+        }
+
+<span class="fc" id="L2721">        return hexValue;</span>
+    }
+
+    /**
+     * Read up to count hexadecimal digits.  If strict is provided then count number of hex
+     * digits must be present. If no digits can be read a syntax exception will be thrown.
+     */
+    private int scanHex(int count, boolean strict, String errorMessage) throws IOException {
+<span class="fc" id="L2729">        int i = 0;</span>
+<span class="fc" id="L2730">        int hexValue = '\0';</span>
+
+<span class="fc bfc" id="L2732" title="All 2 branches covered.">        for (; i &lt; count; i++) {</span>
+<span class="fc" id="L2733">            int h1 = src.read();</span>
+
+<span class="fc bfc" id="L2735" title="All 2 branches covered.">            if (!isHexChar(h1)) {</span>
+<span class="fc" id="L2736">                src.unread(h1);</span>
+<span class="fc" id="L2737">                break;</span>
+            }
+
+<span class="fc" id="L2740">            hexValue &lt;&lt;= 4;</span>
+<span class="fc" id="L2741">            hexValue |= Integer.parseInt(&quot;&quot; + (char) h1, 16) &amp; 15;</span>
+        }
+
+        // No hex value after the 'x'.
+<span class="pc bpc" id="L2745" title="2 of 6 branches missed.">        if (i == 0 || (strict &amp;&amp; count != i)) {</span>
+<span class="nc" id="L2746">            throw new SyntaxException(PID.INVALID_ESCAPE_SYNTAX, getPosition(),</span>
+<span class="nc" id="L2747">                    getCurrentLine(), errorMessage);</span>
+        }
+
+<span class="fc" id="L2750">        return hexValue;</span>
+    }
+
+    private char scanOct(int count) throws IOException {
+<span class="fc" id="L2754">        char value = '\0';</span>
+
+<span class="fc bfc" id="L2756" title="All 2 branches covered.">        for (int i = 0; i &lt; count; i++) {</span>
+<span class="fc" id="L2757">            int c = src.read();</span>
+
+<span class="fc bfc" id="L2759" title="All 2 branches covered.">            if (!isOctChar(c)) {</span>
+<span class="fc" id="L2760">                src.unread(c);</span>
+<span class="fc" id="L2761">                break;</span>
+            }
+
+<span class="fc" id="L2764">            value &lt;&lt;= 3;</span>
+<span class="fc" id="L2765">            value |= Integer.parseInt(&quot;&quot; + (char) c, 8);</span>
+        }
+
+<span class="fc" id="L2768">        return value;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

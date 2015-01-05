@@ -1,0 +1,380 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IRClosure.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir</a> &gt; <span class="el_source">IRClosure.java</span></div><h1>IRClosure.java</h1><pre class="source lang-java linenums">package org.jruby.ir;
+
+import org.jcodings.specific.USASCIIEncoding;
+import org.jruby.ir.instructions.*;
+import org.jruby.ir.interpreter.ClosureInterpreterContext;
+import org.jruby.ir.interpreter.InterpreterContext;
+import org.jruby.ir.operands.*;
+import org.jruby.ir.representations.CFG;
+import org.jruby.ir.transformations.inlining.CloneInfo;
+import org.jruby.ir.transformations.inlining.SimpleCloneInfo;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.BlockBody;
+import org.jruby.runtime.InterpretedIRBlockBody;
+import org.jruby.util.KeyValuePair;
+import org.objectweb.asm.Handle;
+
+import java.util.ArrayList;
+import java.util.List;
+
+// Closures are contexts/scopes for the purpose of IR building.  They are self-contained and accumulate instructions
+// that don't merge into the flow of the containing scope.  They are manipulated as an unit.
+// Their parents are always execution scopes.
+
+public class IRClosure extends IRScope {
+    public final Label startLabel; // Label for the start of the closure (used to implement redo)
+    public final Label endLabel;   // Label for the end of the closure (used to implement retry)
+    public final int closureId;    // Unique id for this closure within the nearest ancestor method.
+
+    private int nestingDepth;      // How many nesting levels within a method is this closure nested in?
+
+    private boolean isBeginEndBlock;
+
+    // Block parameters
+    private List&lt;Operand&gt; blockArgs;
+    private List&lt;KeyValuePair&lt;Operand, Operand&gt;&gt; keywordArgs;
+
+    /** The parameter names, for Proc#parameters */
+    private String[] parameterList;
+
+    private Arity arity;
+    private int argumentType;
+
+    /** Added for interp/JIT purposes */
+    private BlockBody body;
+
+    /** Added for JIT purposes */
+    private Handle handle;
+
+    // Used by other constructions and by IREvalScript as well
+    protected IRClosure(IRManager manager, IRScope lexicalParent, String fileName, int lineNumber, StaticScope staticScope, String prefix) {
+<span class="fc" id="L52">        super(manager, lexicalParent, null, fileName, lineNumber, staticScope);</span>
+
+<span class="fc" id="L54">        this.startLabel = getNewLabel(prefix + &quot;START&quot;);</span>
+<span class="fc" id="L55">        this.endLabel = getNewLabel(prefix + &quot;END&quot;);</span>
+<span class="fc" id="L56">        this.closureId = lexicalParent.getNextClosureId();</span>
+<span class="fc" id="L57">        setName(prefix + closureId);</span>
+<span class="fc" id="L58">        this.body = null;</span>
+<span class="fc" id="L59">        this.parameterList = new String[] {};</span>
+
+        // set nesting depth
+<span class="fc" id="L62">        int n = 0;</span>
+<span class="fc" id="L63">        IRScope s = this.getLexicalParent();</span>
+<span class="fc bfc" id="L64" title="All 2 branches covered.">        while (s instanceof IRClosure) {</span>
+<span class="fc" id="L65">            n++;</span>
+<span class="fc" id="L66">            s = s.getLexicalParent();</span>
+        }
+<span class="fc" id="L68">        this.nestingDepth = n;</span>
+<span class="fc" id="L69">    }</span>
+
+    /** Used by cloning code */
+    /* Inlining generates a new name and id and basic cloning will reuse the originals name */
+    protected IRClosure(IRClosure c, IRScope lexicalParent, int closureId, String fullName) {
+<span class="fc" id="L74">        super(c, lexicalParent);</span>
+<span class="fc" id="L75">        this.closureId = closureId;</span>
+<span class="fc" id="L76">        super.setName(fullName);</span>
+<span class="fc" id="L77">        this.startLabel = getNewLabel(getName() + &quot;_START&quot;);</span>
+<span class="fc" id="L78">        this.endLabel = getNewLabel(getName() + &quot;_END&quot;);</span>
+<span class="pc bpc" id="L79" title="1 of 2 branches missed.">        if (getManager().isDryRun()) {</span>
+<span class="nc" id="L80">            this.body = null;</span>
+        } else {
+<span class="fc" id="L82">            this.body = new InterpretedIRBlockBody(this, c.body.arity());</span>
+        }
+<span class="fc" id="L84">        this.blockArgs = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L85">        this.keywordArgs = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L86">        this.arity = c.arity;</span>
+<span class="fc" id="L87">    }</span>
+
+    public IRClosure(IRManager manager, IRScope lexicalParent, int lineNumber, StaticScope staticScope, Arity arity, int argumentType) {
+<span class="fc" id="L90">        this(manager, lexicalParent, lineNumber, staticScope, arity, argumentType, &quot;_CLOSURE_&quot;);</span>
+<span class="fc" id="L91">    }</span>
+
+    public IRClosure(IRManager manager, IRScope lexicalParent, int lineNumber, StaticScope staticScope, Arity arity, int argumentType, String prefix) {
+<span class="fc" id="L94">        this(manager, lexicalParent, lineNumber, staticScope, arity, argumentType, prefix, false);</span>
+<span class="fc" id="L95">    }</span>
+
+    public IRClosure(IRManager manager, IRScope lexicalParent, int lineNumber, StaticScope staticScope, Arity arity, int argumentType, String prefix, boolean isBeginEndBlock) {
+<span class="fc" id="L98">        this(manager, lexicalParent, lexicalParent.getFileName(), lineNumber, staticScope, prefix);</span>
+<span class="fc" id="L99">        this.blockArgs = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L100">        this.keywordArgs = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L101">        this.argumentType = argumentType;</span>
+<span class="fc" id="L102">        this.arity = arity;</span>
+<span class="fc" id="L103">        lexicalParent.addClosure(this);</span>
+
+<span class="pc bpc" id="L105" title="1 of 2 branches missed.">        if (getManager().isDryRun()) {</span>
+<span class="nc" id="L106">            this.body = null;</span>
+        } else {
+<span class="fc" id="L108">            this.body = new InterpretedIRBlockBody(this, arity);</span>
+<span class="pc bpc" id="L109" title="1 of 4 branches missed.">            if (staticScope != null &amp;&amp; !isBeginEndBlock) {</span>
+<span class="fc" id="L110">                staticScope.setIRScope(this);</span>
+<span class="fc" id="L111">                staticScope.setScopeType(this.getScopeType());</span>
+            }
+        }
+
+<span class="fc" id="L115">        this.nestingDepth++;</span>
+<span class="fc" id="L116">    }</span>
+
+    @Override
+    public InterpreterContext allocateInterpreterContext(Instr[] instructionList) {
+<span class="fc" id="L120">        return new ClosureInterpreterContext(this, instructionList);</span>
+    }
+
+    public void setBeginEndBlock() {
+<span class="fc" id="L124">        this.isBeginEndBlock = true;</span>
+<span class="fc" id="L125">    }</span>
+
+    public boolean isBeginEndBlock() {
+<span class="fc" id="L128">        return isBeginEndBlock;</span>
+    }
+
+    public void setParameterList(String[] parameterList) {
+<span class="fc" id="L132">        this.parameterList = parameterList;</span>
+<span class="pc bpc" id="L133" title="1 of 2 branches missed.">        if (!getManager().isDryRun()) {</span>
+<span class="fc" id="L134">            ((InterpretedIRBlockBody)this.body).setParameterList(parameterList);</span>
+        }
+<span class="fc" id="L136">    }</span>
+
+    public String[] getParameterList() {
+<span class="fc" id="L139">        return this.parameterList;</span>
+    }
+
+    @Override
+    public int getNextClosureId() {
+<span class="fc" id="L144">        return getLexicalParent().getNextClosureId();</span>
+    }
+
+    @Override
+    public LocalVariable getNewFlipStateVariable() {
+<span class="nc" id="L149">        throw new RuntimeException(&quot;Cannot get flip variables from closures.&quot;);</span>
+    }
+
+    @Override
+    public TemporaryLocalVariable createTemporaryVariable() {
+<span class="fc" id="L154">        return getNewTemporaryVariable(TemporaryVariableType.CLOSURE);</span>
+    }
+
+    @Override
+    public TemporaryLocalVariable getNewTemporaryVariable(TemporaryVariableType type) {
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">        if (type == TemporaryVariableType.CLOSURE) {</span>
+<span class="fc" id="L160">            temporaryVariableIndex++;</span>
+<span class="fc" id="L161">            return new TemporaryClosureVariable(closureId, temporaryVariableIndex);</span>
+        }
+
+<span class="nc" id="L164">        return super.getNewTemporaryVariable(type);</span>
+    }
+
+    @Override
+    public Label getNewLabel() {
+<span class="fc" id="L169">        return getNewLabel(&quot;CL&quot; + closureId + &quot;_LBL&quot;);</span>
+    }
+
+    @Override
+    public IRScopeType getScopeType() {
+<span class="fc" id="L174">        return IRScopeType.CLOSURE;</span>
+    }
+
+    @Override
+    public boolean isTopLocalVariableScope() {
+<span class="fc" id="L179">        return false;</span>
+    }
+
+    @Override
+    public boolean isFlipScope() {
+<span class="fc" id="L184">        return false;</span>
+    }
+
+    @Override
+    public void addInstr(Instr i) {
+        // Accumulate block arguments
+<span class="fc bfc" id="L190" title="All 2 branches covered.">        if (i instanceof ReceiveKeywordRestArgInstr) {</span>
+            // Always add the keyword rest arg to the beginning
+<span class="fc" id="L192">            keywordArgs.add(0, new KeyValuePair&lt;Operand, Operand&gt;(Symbol.KW_REST_ARG_DUMMY, ((ReceiveArgBase) i).getResult()));</span>
+<span class="fc bfc" id="L193" title="All 2 branches covered.">        } else if (i instanceof ReceiveKeywordArgInstr) {</span>
+<span class="fc" id="L194">            ReceiveKeywordArgInstr rkai = (ReceiveKeywordArgInstr)i;</span>
+            // FIXME: This lost encoding information when name was converted to string earlier in IRBuilder
+<span class="fc" id="L196">            keywordArgs.add(new KeyValuePair&lt;Operand, Operand&gt;(new Symbol(rkai.argName, USASCIIEncoding.INSTANCE), rkai.getResult()));</span>
+<span class="fc bfc" id="L197" title="All 2 branches covered.">        } else if (i instanceof ReceiveRestArgInstr) {</span>
+<span class="fc" id="L198">            blockArgs.add(new Splat(((ReceiveRestArgInstr)i).getResult(), true));</span>
+<span class="fc bfc" id="L199" title="All 2 branches covered.">        } else if (i instanceof ReceiveArgBase) {</span>
+<span class="fc" id="L200">            blockArgs.add(((ReceiveArgBase) i).getResult());</span>
+        }
+
+<span class="fc" id="L203">        super.addInstr(i);</span>
+<span class="fc" id="L204">    }</span>
+
+    public Operand[] getBlockArgs() {
+<span class="pc bpc" id="L207" title="1 of 2 branches missed.">        if (receivesKeywordArgs()) {</span>
+<span class="nc" id="L208">            int i = 0;</span>
+<span class="nc" id="L209">            Operand[] args = new Operand[blockArgs.size() + 1];</span>
+<span class="nc bnc" id="L210" title="All 2 branches missed.">            for (Operand arg: blockArgs) {</span>
+<span class="nc" id="L211">                args[i++] = arg;</span>
+<span class="nc" id="L212">            }</span>
+<span class="nc" id="L213">            args[i] = new Hash(keywordArgs, true);</span>
+<span class="nc" id="L214">            return args;</span>
+        } else {
+<span class="fc" id="L216">            return blockArgs.toArray(new Operand[blockArgs.size()]);</span>
+        }
+    }
+
+    public String toStringBody() {
+<span class="nc" id="L221">        StringBuilder buf = new StringBuilder();</span>
+<span class="nc" id="L222">        buf.append(getName()).append(&quot; = { \n&quot;);</span>
+
+<span class="nc" id="L224">        CFG c = getCFG();</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">        if (c != null) {</span>
+<span class="nc" id="L226">            buf.append(&quot;\nCFG:\n&quot;).append(c.toStringGraph()).append(&quot;\nInstructions:\n&quot;).append(c.toStringInstrs());</span>
+        } else {
+<span class="nc" id="L228">            buf.append(toStringInstrs());</span>
+        }
+<span class="nc" id="L230">        buf.append(&quot;\n}\n\n&quot;);</span>
+<span class="nc" id="L231">        return buf.toString();</span>
+    }
+
+    public BlockBody getBlockBody() {
+<span class="fc" id="L235">        return body;</span>
+    }
+
+    @Override
+    protected LocalVariable findExistingLocalVariable(String name, int scopeDepth) {
+<span class="fc" id="L240">        LocalVariable lvar = lookupExistingLVar(name);</span>
+<span class="fc bfc" id="L241" title="All 2 branches covered.">        if (lvar != null) return lvar;</span>
+
+<span class="fc" id="L243">        int newDepth = scopeDepth - 1;</span>
+
+<span class="pc bpc" id="L245" title="1 of 2 branches missed.">        return newDepth &gt;= 0 ? getLexicalParent().findExistingLocalVariable(name, newDepth) : null;</span>
+    }
+
+    public LocalVariable getNewLocalVariable(String name, int depth) {
+<span class="pc bpc" id="L249" title="2 of 4 branches missed.">        if (depth == 0 &amp;&amp; !(this instanceof IRFor)) {</span>
+<span class="fc" id="L250">            LocalVariable lvar = new ClosureLocalVariable(this, name, 0, getStaticScope().addVariableThisScope(name));</span>
+<span class="fc" id="L251">            localVars.put(name, lvar);</span>
+<span class="fc" id="L252">            return lvar;</span>
+        } else {
+<span class="nc" id="L254">            IRScope s = this;</span>
+<span class="nc" id="L255">            int     d = depth;</span>
+            do {
+                // account for for-loops
+<span class="nc bnc" id="L258" title="All 2 branches missed.">                while (s instanceof IRFor) {</span>
+<span class="nc" id="L259">                    depth++;</span>
+<span class="nc" id="L260">                    s = s.getLexicalParent();</span>
+                }
+
+                // walk up
+<span class="nc" id="L264">                d--;</span>
+<span class="nc bnc" id="L265" title="All 2 branches missed.">                if (d &gt;= 0) s = s.getLexicalParent();</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">            } while (d &gt;= 0);</span>
+
+<span class="nc" id="L268">            return s.getNewLocalVariable(name, 0).cloneForDepth(depth);</span>
+        }
+    }
+
+    @Override
+    public LocalVariable getLocalVariable(String name, int depth) {
+        // AST doesn't seem to be implementing shadowing properly and sometimes
+        // has the wrong depths which screws up variable access. So, we implement
+        // shadowing here by searching for an existing local var from depth 0 and upwards.
+        //
+        // Check scope depths for 'a' in the closure in the following snippet:
+        //
+        //   &quot;a = 1; foo(1) { |(a)| a }&quot;
+        //
+        // In &quot;(a)&quot;, it is 0 (correct), but in the body, it is 1 (incorrect)
+
+        LocalVariable lvar;
+<span class="fc" id="L285">        IRScope s = this;</span>
+<span class="fc" id="L286">        int d = depth;</span>
+        do {
+            // account for for-loops
+<span class="fc bfc" id="L289" title="All 2 branches covered.">            while (s instanceof IRFor) {</span>
+<span class="fc" id="L290">                depth++;</span>
+<span class="fc" id="L291">                s = s.getLexicalParent();</span>
+            }
+
+            // lookup
+<span class="fc" id="L295">            lvar = s.lookupExistingLVar(name);</span>
+
+            // walk up
+<span class="fc" id="L298">            d--;</span>
+<span class="fc bfc" id="L299" title="All 2 branches covered.">            if (d &gt;= 0) s = s.getLexicalParent();</span>
+<span class="fc bfc" id="L300" title="All 4 branches covered.">        } while (lvar == null &amp;&amp; d &gt;= 0);</span>
+
+<span class="fc bfc" id="L302" title="All 2 branches covered.">        if (lvar == null) {</span>
+            // Create a new var at requested/adjusted depth
+<span class="fc" id="L304">            lvar = s.getNewLocalVariable(name, 0).cloneForDepth(depth);</span>
+        } else {
+            // Find # of lexical scopes we walked up to find 'lvar'.
+            // We need a copy of 'lvar' usable at that depth
+<span class="fc" id="L308">            int lvarDepth = depth - (d + 1);</span>
+<span class="fc bfc" id="L309" title="All 2 branches covered.">            if (lvar.getScopeDepth() != lvarDepth) lvar = lvar.cloneForDepth(lvarDepth);</span>
+        }
+
+<span class="fc" id="L312">        return lvar;</span>
+    }
+
+    public int getNestingDepth() {
+<span class="nc" id="L316">        return nestingDepth;</span>
+    }
+
+    protected IRClosure cloneForInlining(CloneInfo ii, IRClosure clone) {
+<span class="fc" id="L320">        clone.nestingDepth  = this.nestingDepth;</span>
+        // SSS FIXME: This is fragile. Untangle this state.
+        // Why is this being copied over to InterpretedIRBlockBody?
+<span class="fc" id="L323">        clone.setParameterList(this.parameterList);</span>
+<span class="fc" id="L324">        clone.isBeginEndBlock = this.isBeginEndBlock;</span>
+
+<span class="fc" id="L326">        SimpleCloneInfo clonedII = ii.cloneForCloningClosure(clone);</span>
+
+<span class="pc bpc" id="L328" title="1 of 2 branches missed.">        if (getCFG() != null) {</span>
+<span class="nc" id="L329">            clone.setCFG(getCFG().clone(clonedII, clone));</span>
+        } else {
+<span class="fc bfc" id="L331" title="All 2 branches covered.">            for (Instr i: getInstrs()) {</span>
+<span class="fc" id="L332">                clone.addInstr(i.clone(clonedII));</span>
+<span class="fc" id="L333">            }</span>
+        }
+
+<span class="fc" id="L336">        return clone;</span>
+    }
+
+    public IRClosure cloneForInlining(CloneInfo ii) {
+        IRClosure clonedClosure;
+<span class="fc" id="L341">        IRScope lexicalParent = ii.getScope();</span>
+
+<span class="pc bpc" id="L343" title="2 of 4 branches missed.">        if (ii instanceof SimpleCloneInfo &amp;&amp; !((SimpleCloneInfo)ii).isEnsureBlockCloneMode()) {</span>
+<span class="nc" id="L344">            clonedClosure = new IRClosure(this, lexicalParent, closureId, getName());</span>
+        } else {
+<span class="fc" id="L346">            int id = lexicalParent.getNextClosureId();</span>
+<span class="fc" id="L347">            String fullName = lexicalParent.getName() + &quot;_CLOSURE_CLONE_&quot; + id;</span>
+<span class="fc" id="L348">            clonedClosure = new IRClosure(this, lexicalParent, id, fullName);</span>
+        }
+
+        // WrappedIRClosure should always have a single unique IRClosure in them so we should
+        // not end up adding n copies of the same closure as distinct clones...
+<span class="fc" id="L353">        lexicalParent.addClosure(clonedClosure);</span>
+
+<span class="fc" id="L355">        return cloneForInlining(ii, clonedClosure);</span>
+    }
+
+    @Override
+    public void setName(String name) {
+        // We can distinguish closures only with parent scope name
+<span class="fc" id="L361">        super.setName(getLexicalParent().getName() + name);</span>
+<span class="fc" id="L362">    }</span>
+
+    public Arity getArity() {
+<span class="fc" id="L365">        return arity;</span>
+    }
+
+    public int getArgumentType() {
+<span class="nc" id="L369">        return argumentType;</span>
+    }
+
+    public void setHandle(Handle handle) {
+<span class="fc" id="L373">        this.handle = handle;</span>
+<span class="fc" id="L374">    }</span>
+
+    public Handle getHandle() {
+<span class="fc" id="L377">        return handle;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

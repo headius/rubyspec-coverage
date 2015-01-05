@@ -1,0 +1,495 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>CallBase.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.instructions</a> &gt; <span class="el_source">CallBase.java</span></div><h1>CallBase.java</h1><pre class="source lang-java linenums">package org.jruby.ir.instructions;
+
+import org.jruby.RubyArray;
+import org.jruby.ir.IRScope;
+import org.jruby.ir.Operation;
+import org.jruby.ir.operands.*;
+import org.jruby.ir.operands.Float;
+import org.jruby.ir.runtime.IRRuntimeHelpers;
+import org.jruby.ir.transformations.inlining.CloneInfo;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.*;
+import org.jruby.runtime.builtin.IRubyObject;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+
+import static org.jruby.ir.IRFlags.*;
+
+<span class="pc bpc" id="L21" title="1 of 2 branches missed.">public abstract class CallBase extends Instr implements Specializeable, ClosureAcceptingInstr {</span>
+<span class="fc" id="L22">    private static long callSiteCounter = 1;</span>
+
+    public final long callSiteId;
+    private final CallType callType;
+    protected Operand   receiver;
+    protected Operand[] arguments;
+    protected Operand   closure;
+    protected String name;
+    protected CallSite callSite;
+
+    private boolean flagsComputed;
+    private boolean canBeEval;
+    private boolean targetRequiresCallersBinding;    // Does this call make use of the caller's binding?
+    private boolean targetRequiresCallersFrame;    // Does this call make use of the caller's frame?
+    private boolean dontInline;
+    private boolean containsArgSplat;
+    private boolean procNew;
+
+    protected CallBase(Operation op, CallType callType, String name, Operand receiver, Operand[] args, Operand closure) {
+<span class="fc" id="L41">        super(op);</span>
+
+<span class="fc" id="L43">        this.callSiteId = callSiteCounter++;</span>
+<span class="fc" id="L44">        this.receiver = receiver;</span>
+<span class="fc" id="L45">        this.arguments = args;</span>
+<span class="fc" id="L46">        this.closure = closure;</span>
+<span class="fc" id="L47">        this.name = name;</span>
+<span class="fc" id="L48">        this.callType = callType;</span>
+<span class="fc" id="L49">        this.callSite = getCallSiteFor(callType, name);</span>
+<span class="fc" id="L50">        containsArgSplat = containsArgSplat(args);</span>
+<span class="fc" id="L51">        flagsComputed = false;</span>
+<span class="fc" id="L52">        canBeEval = true;</span>
+<span class="fc" id="L53">        targetRequiresCallersBinding = true;</span>
+<span class="fc" id="L54">        targetRequiresCallersFrame = true;</span>
+<span class="fc" id="L55">        dontInline = false;</span>
+<span class="fc" id="L56">        procNew = false;</span>
+<span class="fc" id="L57">    }</span>
+
+    @Override
+    public Operand[] getOperands() {
+        // -0 is not possible so we add 1 to arguments with closure so we get a valid negative value.
+<span class="fc bfc" id="L62" title="All 2 branches covered.">        Fixnum arity = new Fixnum(closure != null ? -1*(arguments.length + 1) : arguments.length);</span>
+<span class="fc" id="L63">        return buildAllArgs(new Fixnum(callType.ordinal()), receiver, arity, arguments, closure);</span>
+    }
+
+    public String getName() {
+<span class="fc" id="L67">        return name;</span>
+    }
+
+    /** From interface ClosureAcceptingInstr */
+    public Operand getClosureArg() {
+<span class="fc" id="L72">        return closure;</span>
+    }
+
+    public Operand getClosureArg(Operand ifUnspecified) {
+<span class="fc bfc" id="L76" title="All 2 branches covered.">        return closure == null ? ifUnspecified : closure;</span>
+    }
+
+    public Operand getReceiver() {
+<span class="fc" id="L80">        return receiver;</span>
+    }
+
+    public Operand[] getCallArgs() {
+<span class="fc" id="L84">        return arguments;</span>
+    }
+
+    public CallSite getCallSite() {
+<span class="fc" id="L88">        return callSite;</span>
+    }
+
+    public CallType getCallType() {
+<span class="fc" id="L92">        return callType;</span>
+    }
+
+    public boolean containsArgSplat() {
+<span class="fc" id="L96">        return containsArgSplat;</span>
+    }
+
+    public boolean isProcNew() {
+<span class="nc" id="L100">        return procNew;</span>
+    }
+
+    public void setProcNew(boolean procNew) {
+<span class="fc" id="L104">        this.procNew = procNew;</span>
+<span class="fc" id="L105">    }</span>
+
+    public void blockInlining() {
+<span class="nc" id="L108">        dontInline = true;</span>
+<span class="nc" id="L109">    }</span>
+
+    public boolean inliningBlocked() {
+<span class="nc" id="L112">        return dontInline;</span>
+    }
+
+    private static CallSite getCallSiteFor(CallType callType, String name) {
+<span class="pc bpc" id="L116" title="3 of 4 branches missed.">        assert callType != null: &quot;Calltype should never be null&quot;;</span>
+
+<span class="pc bfc" id="L118" title="All 5 branches covered.">        switch (callType) {</span>
+<span class="fc" id="L119">            case NORMAL: return MethodIndex.getCallSite(name);</span>
+<span class="fc" id="L120">            case FUNCTIONAL: return MethodIndex.getFunctionalCallSite(name);</span>
+<span class="fc" id="L121">            case VARIABLE: return MethodIndex.getVariableCallSite(name);</span>
+<span class="fc" id="L122">            case SUPER: return MethodIndex.getSuperCallSite();</span>
+            case UNKNOWN:
+        }
+
+<span class="fc" id="L126">        return null; // fallthrough for unknown</span>
+    }
+
+    public boolean hasClosure() {
+<span class="fc bfc" id="L130" title="All 2 branches covered.">        return closure != null;</span>
+    }
+
+    public boolean hasLiteralClosure() {
+<span class="fc" id="L134">        return closure instanceof WrappedIRClosure;</span>
+    }
+
+    public boolean isAllConstants() {
+<span class="nc bnc" id="L138" title="All 2 branches missed.">        for (Operand argument : arguments) {</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">            if (!(argument instanceof ImmutableLiteral)) return false;</span>
+        }
+
+<span class="nc" id="L142">        return true;</span>
+    }
+
+    public static boolean isAllFixnums(Operand[] args) {
+<span class="fc bfc" id="L146" title="All 2 branches covered.">        for (Operand argument : args) {</span>
+<span class="fc bfc" id="L147" title="All 2 branches covered.">            if (!(argument instanceof Fixnum)) return false;</span>
+        }
+
+<span class="fc" id="L150">        return true;</span>
+    }
+
+    public boolean isAllFixnums() {
+<span class="nc" id="L154">        return isAllFixnums(arguments);</span>
+    }
+
+    public static boolean isAllFloats(Operand[] args) {
+<span class="fc bfc" id="L158" title="All 2 branches covered.">        for (Operand argument : args) {</span>
+<span class="fc bfc" id="L159" title="All 2 branches covered.">            if (!(argument instanceof Float)) return false;</span>
+        }
+
+<span class="fc" id="L162">        return true;</span>
+    }
+
+    public boolean isAllFloats() {
+<span class="nc" id="L166">        return isAllFloats(arguments);</span>
+    }
+
+    @Override
+    public boolean computeScopeFlags(IRScope scope) {
+<span class="fc" id="L171">        boolean modifiedScope = false;</span>
+
+<span class="fc bfc" id="L173" title="All 2 branches covered.">        if (targetRequiresCallersBinding()) {</span>
+<span class="fc" id="L174">            modifiedScope = true;</span>
+<span class="fc" id="L175">            scope.getFlags().add(BINDING_HAS_ESCAPED);</span>
+        }
+
+<span class="fc bfc" id="L178" title="All 2 branches covered.">        if (targetRequiresCallersFrame()) {</span>
+<span class="fc" id="L179">            modifiedScope = true;</span>
+<span class="fc" id="L180">            scope.getFlags().add(REQUIRES_FRAME);</span>
+        }
+
+<span class="fc bfc" id="L183" title="All 2 branches covered.">        if (canBeEval()) {</span>
+<span class="fc" id="L184">            modifiedScope = true;</span>
+<span class="fc" id="L185">            scope.getFlags().add(USES_EVAL);</span>
+
+            // If this method receives a closure arg, and this call is an eval that has more than 1 argument,
+            // it could be using the closure as a binding -- which means it could be using pretty much any
+            // variable from the caller's binding!
+<span class="fc bfc" id="L190" title="All 4 branches covered.">            if (scope.getFlags().contains(RECEIVES_CLOSURE_ARG) &amp;&amp; (getCallArgs().length &gt; 1)) {</span>
+<span class="fc" id="L191">                scope.getFlags().add(CAN_CAPTURE_CALLERS_BINDING);</span>
+            }
+        }
+
+        // Kernel.local_variables inspects variables.
+        // and JRuby implementation uses dyn-scope to access the static-scope
+        // to output the local variables =&gt; we cannot strip dynscope in those cases.
+        // FIXME: We need to decouple static-scope and dyn-scope.
+<span class="fc" id="L199">        String mname = getName();</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">        if (mname.equals(&quot;local_variables&quot;)) {</span>
+<span class="fc" id="L201">            scope.getFlags().add(REQUIRES_DYNSCOPE);</span>
+<span class="fc bfc" id="L202" title="All 4 branches covered.">        } else if (mname.equals(&quot;send&quot;) || mname.equals(&quot;__send__&quot;)) {</span>
+<span class="fc" id="L203">            Operand[] args = getCallArgs();</span>
+<span class="fc bfc" id="L204" title="All 2 branches covered.">            if (args.length &gt;= 1) {</span>
+<span class="fc" id="L205">                Operand meth = args[0];</span>
+<span class="pc bpc" id="L206" title="3 of 4 branches missed.">                if (meth instanceof StringLiteral &amp;&amp; &quot;local_variables&quot;.equals(((StringLiteral)meth).string)) {</span>
+<span class="nc" id="L207">                    scope.getFlags().add(REQUIRES_DYNSCOPE);</span>
+                }
+            }
+        }
+
+<span class="fc" id="L212">        return modifiedScope;</span>
+    }
+    /**
+     * Interpreter can ask the instruction if it knows how to make a more
+     * efficient instruction for direct interpretation.
+     *
+     * @return itself or more efficient but semantically equivalent instr
+     */
+    public CallBase specializeForInterpretation() {
+<span class="fc" id="L221">        return this;</span>
+    }
+
+    @Override
+    public void simplifyOperands(Map&lt;Operand, Operand&gt; valueMap, boolean force) {
+        // FIXME: receiver should never be null (checkArity seems to be one culprit)
+<span class="pc bpc" id="L227" title="1 of 2 branches missed.">        if (receiver != null) receiver = receiver.getSimplifiedOperand(valueMap, force);</span>
+
+<span class="fc bfc" id="L229" title="All 2 branches covered.">        for (int i = 0; i &lt; arguments.length; i++) {</span>
+<span class="fc" id="L230">            arguments[i] = arguments[i].getSimplifiedOperand(valueMap, force);</span>
+        }
+
+        // Recompute containsArgSplat flag
+<span class="fc" id="L234">        containsArgSplat = containsArgSplat(arguments);</span>
+
+<span class="fc bfc" id="L236" title="All 2 branches covered.">        if (closure != null) closure = closure.getSimplifiedOperand(valueMap, force);</span>
+<span class="fc" id="L237">        flagsComputed = false; // Forces recomputation of flags</span>
+
+        // recompute whenever instr operands change! (can this really change though?)
+<span class="fc" id="L240">        callSite = getCallSiteFor(callType, name);</span>
+<span class="fc" id="L241">    }</span>
+
+    public Operand[] cloneCallArgs(CloneInfo ii) {
+<span class="fc" id="L244">        int i = 0;</span>
+<span class="fc" id="L245">        Operand[] clonedArgs = new Operand[arguments.length];</span>
+
+<span class="fc bfc" id="L247" title="All 2 branches covered.">        for (Operand a: arguments) {</span>
+<span class="fc" id="L248">            clonedArgs[i++] = a.cloneForInlining(ii);</span>
+        }
+
+<span class="fc" id="L251">        return clonedArgs;</span>
+    }
+
+    public boolean isRubyInternalsCall() {
+<span class="nc" id="L255">        return false;</span>
+    }
+
+    public boolean isStaticCallTarget() {
+<span class="nc" id="L259">        return false;</span>
+    }
+
+    // SSS FIXME: Are all bases covered?
+    // How about aliasing of 'call', 'eval', 'send', 'module_eval', 'class_eval', 'instance_eval'?
+    private boolean computeEvalFlag() {
+        // ENEBO: This could be made into a recursive two-method thing so then: send(:send, :send, :send, :send, :eval, &quot;Hosed&quot;) works
+<span class="fc" id="L266">        String mname = getName();</span>
+        // checking for &quot;call&quot; is conservative.  It can be eval only if the receiver is a Method
+        // CON: Removed &quot;call&quot; check because we didn't do it in 1.7 and it deopts all callers of Method or Proc objects.
+<span class="fc bfc" id="L269" title="All 8 branches covered.">        if (/*mname.equals(&quot;call&quot;) ||*/ mname.equals(&quot;eval&quot;) || mname.equals(&quot;module_eval&quot;) || mname.equals(&quot;class_eval&quot;) || mname.equals(&quot;instance_eval&quot;)) return true;</span>
+
+        // Calls to 'send' where the first arg is either unknown or is eval or send (any others?)
+<span class="fc bfc" id="L272" title="All 4 branches covered.">        if (mname.equals(&quot;send&quot;) || mname.equals(&quot;__send__&quot;)) {</span>
+<span class="fc" id="L273">            Operand[] args = getCallArgs();</span>
+<span class="fc bfc" id="L274" title="All 2 branches covered.">            if (args.length &gt;= 2) {</span>
+<span class="fc" id="L275">                Operand meth = args[0];</span>
+<span class="pc bpc" id="L276" title="1 of 2 branches missed.">                if (!(meth instanceof StringLiteral)) return true; // We don't know</span>
+
+<span class="nc" id="L278">                String name = ((StringLiteral) meth).string;</span>
+<span class="nc bnc" id="L279" title="All 2 branches missed.">                if (   name.equals(&quot;call&quot;)</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">                    || name.equals(&quot;eval&quot;)</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">                    || mname.equals(&quot;module_eval&quot;)</span>
+<span class="nc bnc" id="L282" title="All 2 branches missed.">                    || mname.equals(&quot;class_eval&quot;)</span>
+<span class="nc bnc" id="L283" title="All 2 branches missed.">                    || mname.equals(&quot;instance_eval&quot;)</span>
+<span class="nc bnc" id="L284" title="All 2 branches missed.">                    || name.equals(&quot;send&quot;)</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">                    || name.equals(&quot;__send__&quot;)) return true;</span>
+            }
+        }
+
+<span class="fc" id="L289">        return false; // All checks passed</span>
+    }
+
+    private boolean computeRequiresCallersBindingFlag() {
+<span class="pc bpc" id="L293" title="1 of 2 branches missed.">        if (canBeEval()) return true;</span>
+
+        // literal closures can be used to capture surrounding binding
+<span class="fc bfc" id="L296" title="All 2 branches covered.">        if (hasLiteralClosure()) return true;</span>
+
+<span class="fc" id="L298">        String mname = getName();</span>
+<span class="fc bfc" id="L299" title="All 2 branches covered.">        if (MethodIndex.SCOPE_AWARE_METHODS.contains(mname)) {</span>
+<span class="fc" id="L300">            return true;</span>
+<span class="fc bfc" id="L301" title="All 4 branches covered.">        } else if (mname.equals(&quot;send&quot;) || mname.equals(&quot;__send__&quot;)) {</span>
+<span class="fc" id="L302">            Operand[] args = getCallArgs();</span>
+<span class="fc bfc" id="L303" title="All 2 branches covered.">            if (args.length &gt;= 1) {</span>
+<span class="fc" id="L304">                Operand meth = args[0];</span>
+<span class="pc bpc" id="L305" title="1 of 2 branches missed.">                if (!(meth instanceof StringLiteral)) return true; // We don't know -- could be anything</span>
+
+<span class="nc" id="L307">                String name = ((StringLiteral) meth).string;</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">                if (MethodIndex.SCOPE_AWARE_METHODS.contains(name)) {</span>
+<span class="nc" id="L309">                    return true;</span>
+                }
+            }
+        }
+
+        /* -------------------------------------------------------------
+         * SSS FIXME: What about aliased accesses to these same methods?
+         * See problem snippet below. To be clear, the problem with this
+         * Module.nesting below is because that method uses DynamicScope
+         * to access the static-scope. However, even if we moved the static-scope
+         * to Frame, the problem just shifts over to optimizations that eliminate
+         * push/pop of Frame objects from certain scopes.
+         *
+         * [subbu@earth ~/jruby] cat /tmp/pgm.rb
+         * class Module
+         *   class &lt;&lt; self
+         *     alias_method :foobar, :nesting
+         *   end
+         * end
+         *
+         * module X
+         *   puts &quot;X. Nesting is: #{Module.foobar}&quot;
+         * end
+         *
+         * module Y
+         *   puts &quot;Y. Nesting is: #{Module.nesting}&quot;
+         * end
+         *
+         * [subbu@earth ~/jruby] jruby -X-CIR -Xir.passes=OptimizeTempVarsPass,LocalOptimizationPass,AddLocalVarLoadStoreInstructions,AddCallProtocolInstructions,LinearizeCFG /tmp/pgm.rb
+         * X. Nesting is: []
+         * Y. Nesting is: [Y]
+         * [subbu@earth ~/jruby] jruby -X-CIR -Xir.passes=LinearizeCFG /tmp/pgm.rb
+         * X. Nesting is: [X]
+         * Y. Nesting is: [Y]
+         * ------------------------------------------------------------- */
+
+        // SSS FIXME: Are all bases covered?
+<span class="fc" id="L346">        return false;  // All checks done -- dont need one</span>
+    }
+
+    private boolean computeRequiresCallersFrameFlag() {
+<span class="pc bpc" id="L350" title="1 of 2 branches missed.">        if (canBeEval()) return true;</span>
+
+        // literal closures can be used to capture surrounding binding
+<span class="fc bfc" id="L353" title="All 2 branches covered.">        if (hasLiteralClosure()) return true;</span>
+
+<span class="fc bfc" id="L355" title="All 2 branches covered.">        if (procNew) return true;</span>
+
+<span class="fc" id="L357">        String mname = getName();</span>
+<span class="fc bfc" id="L358" title="All 2 branches covered.">        if (MethodIndex.FRAME_AWARE_METHODS.contains(mname)) {</span>
+            // Known frame-aware methods.
+<span class="fc" id="L360">            return true;</span>
+
+<span class="fc bfc" id="L362" title="All 4 branches covered.">        } else if (mname.equals(&quot;send&quot;) || mname.equals(&quot;__send__&quot;)) {</span>
+            // Allow send to access full binding, since someone might send :eval and friends.
+<span class="fc" id="L364">            Operand[] args = getCallArgs();</span>
+<span class="fc bfc" id="L365" title="All 2 branches covered.">            if (args.length &gt;= 1) {</span>
+<span class="fc" id="L366">                Operand meth = args[0];</span>
+<span class="pc bpc" id="L367" title="1 of 2 branches missed.">                if (!(meth instanceof StringLiteral)) return true; // We don't know -- could be anything</span>
+
+<span class="nc" id="L369">                String name = ((StringLiteral) meth).string;</span>
+<span class="nc bnc" id="L370" title="All 2 branches missed.">                if (MethodIndex.FRAME_AWARE_METHODS.contains(name)) {</span>
+<span class="nc" id="L371">                    return true;</span>
+                }
+            }
+        }
+
+<span class="fc" id="L376">        return false;</span>
+    }
+
+    private void computeFlags() {
+        // Order important!
+<span class="fc" id="L381">        flagsComputed = true;</span>
+<span class="fc" id="L382">        canBeEval = computeEvalFlag();</span>
+<span class="fc bfc" id="L383" title="All 4 branches covered.">        targetRequiresCallersBinding = canBeEval || computeRequiresCallersBindingFlag();</span>
+<span class="fc bfc" id="L384" title="All 4 branches covered.">        targetRequiresCallersFrame = canBeEval || computeRequiresCallersFrameFlag();</span>
+<span class="fc" id="L385">    }</span>
+
+    public boolean canBeEval() {
+<span class="pc bpc" id="L388" title="1 of 2 branches missed.">        if (!flagsComputed) computeFlags();</span>
+
+<span class="fc" id="L390">        return canBeEval;</span>
+    }
+
+    public boolean targetRequiresCallersBinding() {
+<span class="fc bfc" id="L394" title="All 2 branches covered.">        if (!flagsComputed) computeFlags();</span>
+
+<span class="fc" id="L396">        return targetRequiresCallersBinding;</span>
+    }
+
+    public boolean targetRequiresCallersFrame() {
+<span class="pc bpc" id="L400" title="1 of 2 branches missed.">        if (!flagsComputed) computeFlags();</span>
+
+<span class="fc" id="L402">        return targetRequiresCallersFrame;</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="nc" id="L407">        return &quot;&quot; + getOperation()  + &quot;(&quot; + callType + &quot;, &quot; + getName() + &quot;, &quot; + receiver +</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">                &quot;, &quot; + Arrays.toString(getCallArgs()) +</span>
+                (closure == null ? &quot;&quot; : &quot;, &amp;&quot; + closure) + &quot;)&quot;;
+    }
+
+    public static boolean containsArgSplat(Operand[] arguments) {
+<span class="fc bfc" id="L413" title="All 2 branches covered.">        for (Operand argument : arguments) {</span>
+<span class="pc bpc" id="L414" title="1 of 4 branches missed.">            if (argument instanceof Splat &amp;&amp; ((Splat)argument).unsplatArgs) return true;</span>
+        }
+
+<span class="fc" id="L417">        return false;</span>
+    }
+
+    private final static int REQUIRED_OPERANDS = 3;
+    private static Operand[] buildAllArgs(Operand callType, Operand receiver,
+            Fixnum argsCount, Operand[] callArgs, Operand closure) {
+<span class="fc bfc" id="L423" title="All 2 branches covered.">        Operand[] allArgs = new Operand[callArgs.length + REQUIRED_OPERANDS + (closure != null ? 1 : 0)];</span>
+
+<span class="pc bpc" id="L425" title="3 of 4 branches missed.">        assert receiver != null : &quot;RECEIVER is null&quot;;</span>
+
+
+<span class="fc" id="L428">        allArgs[0] = callType;</span>
+<span class="fc" id="L429">        allArgs[1] = receiver;</span>
+        // -0 not possible so if closure exists we are negative and we subtract one to get real arg count.
+<span class="fc" id="L431">        allArgs[2] = argsCount;</span>
+<span class="fc bfc" id="L432" title="All 2 branches covered.">        for (int i = 0; i &lt; callArgs.length; i++) {</span>
+<span class="pc bpc" id="L433" title="3 of 4 branches missed.">            assert callArgs[i] != null : &quot;ARG &quot; + i + &quot; is null&quot;;</span>
+
+<span class="fc" id="L435">            allArgs[i + REQUIRED_OPERANDS] = callArgs[i];</span>
+        }
+
+<span class="fc bfc" id="L438" title="All 2 branches covered.">        if (closure != null) allArgs[callArgs.length + REQUIRED_OPERANDS] = closure;</span>
+
+<span class="fc" id="L440">        return allArgs;</span>
+    }
+
+    @Override
+    public Object interpret(ThreadContext context, StaticScope currScope, DynamicScope dynamicScope, IRubyObject self, Object[] temp) {
+<span class="fc" id="L445">        IRubyObject object = (IRubyObject) receiver.retrieve(context, self, currScope, dynamicScope, temp);</span>
+<span class="fc" id="L446">        IRubyObject[] values = prepareArguments(context, self, arguments, currScope, dynamicScope, temp);</span>
+<span class="fc" id="L447">        Block preparedBlock = prepareBlock(context, self, currScope, dynamicScope, temp);</span>
+
+<span class="fc" id="L449">        return callSite.call(context, self, object, values, preparedBlock);</span>
+    }
+
+    protected IRubyObject[] prepareArguments(ThreadContext context, IRubyObject self, Operand[] arguments, StaticScope currScope, DynamicScope dynamicScope, Object[] temp) {
+<span class="fc bfc" id="L453" title="All 2 branches covered.">        return containsArgSplat ?</span>
+<span class="fc" id="L454">                prepareArgumentsComplex(context, self, arguments, currScope, dynamicScope, temp) :</span>
+<span class="fc" id="L455">                prepareArgumentsSimple(context, self, arguments, currScope, dynamicScope, temp);</span>
+    }
+
+    protected IRubyObject[] prepareArgumentsSimple(ThreadContext context, IRubyObject self, Operand[] args, StaticScope currScope, DynamicScope currDynScope, Object[] temp) {
+<span class="fc" id="L459">        IRubyObject[] newArgs = new IRubyObject[args.length];</span>
+
+<span class="fc bfc" id="L461" title="All 2 branches covered.">        for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="fc" id="L462">            newArgs[i] = (IRubyObject) args[i].retrieve(context, self, currScope, currDynScope, temp);</span>
+        }
+
+<span class="fc" id="L465">        return newArgs;</span>
+    }
+
+    protected IRubyObject[] prepareArgumentsComplex(ThreadContext context, IRubyObject self, Operand[] args, StaticScope currScope, DynamicScope currDynScope, Object[] temp) {
+        // SSS: For regular calls, IR builder never introduces splats except as the first argument
+        // But when zsuper is converted to SuperInstr with known args, splats can appear anywhere
+        // in the list.  So, this looping handles both these scenarios, although if we wanted to
+        // optimize for CallInstr which has splats only in the first position, we could do that.
+<span class="fc" id="L473">        List&lt;IRubyObject&gt; argList = new ArrayList&lt;IRubyObject&gt;(args.length * 2);</span>
+<span class="fc bfc" id="L474" title="All 2 branches covered.">        for (Operand arg : args) {</span>
+<span class="fc" id="L475">            IRubyObject rArg = (IRubyObject) arg.retrieve(context, self, currScope, currDynScope, temp);</span>
+<span class="fc bfc" id="L476" title="All 2 branches covered.">            if (arg instanceof Splat) {</span>
+<span class="fc" id="L477">                RubyArray array = (RubyArray) rArg;</span>
+<span class="fc bfc" id="L478" title="All 2 branches covered.">                for (int i = 0; i &lt; array.size(); i++) {</span>
+<span class="fc" id="L479">                    argList.add(array.eltOk(i));</span>
+                }
+<span class="fc" id="L481">            } else {</span>
+<span class="fc" id="L482">                argList.add(rArg);</span>
+            }
+        }
+
+<span class="fc" id="L486">        return argList.toArray(new IRubyObject[argList.size()]);</span>
+    }
+
+    public Block prepareBlock(ThreadContext context, IRubyObject self, StaticScope currScope, DynamicScope currDynScope, Object[] temp) {
+<span class="fc bfc" id="L490" title="All 2 branches covered.">        if (closure == null) return Block.NULL_BLOCK;</span>
+
+<span class="fc" id="L492">        return IRRuntimeHelpers.getBlockFromObject(context, closure.retrieve(context, self, currScope, currDynScope, temp));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

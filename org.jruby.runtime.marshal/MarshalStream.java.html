@@ -1,0 +1,529 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MarshalStream.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime.marshal</a> &gt; <span class="el_source">MarshalStream.java</span></div><h1>MarshalStream.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2002-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2006 Ola Bini &lt;ola.bini@ki.se&gt;
+ * Copyright (C) 2007 William N Dortch &lt;bill.dortch@gmail.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.runtime.marshal;
+
+import java.io.FilterOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.util.List;
+import org.jcodings.Encoding;
+import org.jcodings.specific.USASCIIEncoding;
+import org.jcodings.specific.UTF8Encoding;
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyBignum;
+import org.jruby.RubyBoolean;
+import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyFloat;
+import org.jruby.RubyHash;
+import org.jruby.RubyModule;
+import org.jruby.RubyRegexp;
+import org.jruby.RubyString;
+import org.jruby.RubyStruct;
+import org.jruby.RubySymbol;
+import org.jruby.IncludedModuleWrapper;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.Constants;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.builtin.Variable;
+import org.jruby.util.ByteList;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.runtime.encoding.MarshalEncoding;
+
+/**
+ * Marshals objects into Ruby's binary marshal format.
+ *
+ * @author Anders
+ */
+public class MarshalStream extends FilterOutputStream {
+    private final Ruby runtime;
+    private final MarshalCache cache;
+    private final int depthLimit;
+<span class="fc" id="L75">    private boolean tainted = false;</span>
+
+<span class="fc" id="L77">    private int depth = 0;</span>
+
+    private final static char TYPE_IVAR = 'I';
+    private final static char TYPE_USRMARSHAL = 'U';
+    private final static char TYPE_USERDEF = 'u';
+    private final static char TYPE_UCLASS = 'C';
+    public final static String SYMBOL_ENCODING_SPECIAL = &quot;E&quot;;
+    private final static String SYMBOL_ENCODING = &quot;encoding&quot;;
+
+    public MarshalStream(Ruby runtime, OutputStream out, int depthLimit) throws IOException {
+<span class="fc" id="L87">        super(out);</span>
+
+<span class="fc" id="L89">        this.runtime = runtime;</span>
+<span class="fc bfc" id="L90" title="All 2 branches covered.">        this.depthLimit = depthLimit &gt;= 0 ? depthLimit : Integer.MAX_VALUE;</span>
+<span class="fc" id="L91">        this.cache = new MarshalCache();</span>
+
+<span class="fc" id="L93">        out.write(Constants.MARSHAL_MAJOR);</span>
+<span class="fc" id="L94">        out.write(Constants.MARSHAL_MINOR);</span>
+<span class="fc" id="L95">    }</span>
+
+    public void dumpObject(IRubyObject value) throws IOException {
+<span class="fc" id="L98">        depth++;</span>
+        
+<span class="fc bfc" id="L100" title="All 2 branches covered.">        if (depth &gt; depthLimit) {</span>
+<span class="fc" id="L101">            throw runtime.newArgumentError(&quot;exceed depth limit&quot;);</span>
+        }
+
+<span class="fc" id="L104">        tainted |= value.isTaint();</span>
+
+<span class="fc" id="L106">        writeAndRegister(value);</span>
+
+<span class="fc" id="L108">        depth--;</span>
+<span class="fc bfc" id="L109" title="All 2 branches covered.">        if (depth == 0) {</span>
+<span class="fc" id="L110">            out.flush(); // flush afer whole dump is complete</span>
+        }
+<span class="fc" id="L112">    }</span>
+
+    public void registerLinkTarget(IRubyObject newObject) {
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">        if (shouldBeRegistered(newObject)) {</span>
+<span class="fc" id="L116">            cache.register(newObject);</span>
+        }
+<span class="fc" id="L118">    }</span>
+
+    public void registerSymbol(String sym) {
+<span class="fc" id="L121">        cache.registerSymbol(sym);</span>
+<span class="fc" id="L122">    }</span>
+
+    static boolean shouldBeRegistered(IRubyObject value) {
+<span class="pc bpc" id="L125" title="1 of 2 branches missed.">        if (value.isNil()) {</span>
+<span class="nc" id="L126">            return false;</span>
+<span class="pc bpc" id="L127" title="1 of 2 branches missed.">        } else if (value instanceof RubyBoolean) {</span>
+<span class="nc" id="L128">            return false;</span>
+<span class="fc bfc" id="L129" title="All 2 branches covered.">        } else if (value instanceof RubyFixnum) {</span>
+<span class="pc bpc" id="L130" title="1 of 2 branches missed.">            return ! isMarshalFixnum((RubyFixnum)value);</span>
+        }
+<span class="fc" id="L132">        return true;</span>
+    }
+
+    private static boolean isMarshalFixnum(RubyFixnum fixnum) {
+<span class="fc bfc" id="L136" title="All 4 branches covered.">        return fixnum.getLongValue() &lt;= RubyFixnum.MAX_MARSHAL_FIXNUM &amp;&amp; fixnum.getLongValue() &gt;= RubyFixnum.MIN_MARSHAL_FIXNUM;</span>
+    }
+
+    private void writeAndRegisterSymbol(String sym) throws IOException {
+<span class="fc bfc" id="L140" title="All 2 branches covered.">        if (cache.isSymbolRegistered(sym)) {</span>
+<span class="fc" id="L141">            cache.writeSymbolLink(this, sym);</span>
+        } else {
+<span class="fc" id="L143">            registerSymbol(sym);</span>
+<span class="fc" id="L144">            dumpSymbol(sym);</span>
+        }
+<span class="fc" id="L146">    }</span>
+
+    private void writeAndRegister(IRubyObject value) throws IOException {
+<span class="fc bfc" id="L149" title="All 2 branches covered.">        if (cache.isRegistered(value)) {</span>
+<span class="fc" id="L150">            cache.writeLink(this, value);</span>
+        } else {
+<span class="fc" id="L152">            value.getMetaClass().smartDump(this, value);</span>
+        }
+<span class="fc" id="L154">    }</span>
+
+    private List&lt;Variable&lt;Object&gt;&gt; getVariables(IRubyObject value) throws IOException {
+<span class="fc" id="L157">        List&lt;Variable&lt;Object&gt;&gt; variables = null;</span>
+<span class="pc bpc" id="L158" title="1 of 2 branches missed.">        if (value instanceof CoreObjectType) {</span>
+<span class="fc" id="L159">            ClassIndex nativeClassIndex = ((CoreObjectType)value).getNativeClassIndex();</span>
+            
+<span class="fc bfc" id="L161" title="All 4 branches covered.">            if (nativeClassIndex != ClassIndex.OBJECT &amp;&amp; nativeClassIndex != ClassIndex.BASICOBJECT) {</span>
+<span class="fc bfc" id="L162" title="All 2 branches covered.">                if (shouldMarshalEncoding(value) || (</span>
+<span class="fc bfc" id="L163" title="All 2 branches covered.">                        !value.isImmediate()</span>
+<span class="pc bpc" id="L164" title="2 of 6 branches missed.">                        &amp;&amp; value.hasVariables()</span>
+                        &amp;&amp; nativeClassIndex != ClassIndex.CLASS
+                        &amp;&amp; nativeClassIndex != ClassIndex.MODULE
+                        )) {
+                    // object has instance vars and isn't a class, get a snapshot to be marshalled
+                    // and output the ivar header here
+
+<span class="fc" id="L171">                    variables = value.getVariableList();</span>
+
+                    // write `I' instance var signet if class is NOT a direct subclass of Object
+<span class="fc" id="L174">                    write(TYPE_IVAR);</span>
+                }
+<span class="fc" id="L176">                RubyClass type = value.getMetaClass();</span>
+<span class="pc bfc" id="L177" title="All 2 branches covered.">                switch(nativeClassIndex) {</span>
+                case STRING:
+                case REGEXP:
+                case ARRAY:
+                case HASH:
+<span class="fc" id="L182">                    type = dumpExtended(type);</span>
+                    break;
+                }
+
+<span class="fc bfc" id="L186" title="All 4 branches covered.">                if (nativeClassIndex != value.getMetaClass().getClassIndex() &amp;&amp; nativeClassIndex != ClassIndex.STRUCT) {</span>
+                    // object is a custom class that extended one of the native types other than Object
+<span class="fc" id="L188">                    writeUserClass(value, type);</span>
+                }
+            }
+        }
+<span class="fc" id="L192">        return variables;</span>
+    }
+
+    private boolean shouldMarshalEncoding(IRubyObject value) {
+<span class="fc bfc" id="L196" title="All 2 branches covered.">        if (!(value instanceof MarshalEncoding)) return false;</span>
+<span class="fc" id="L197">        return ((MarshalEncoding) value).shouldMarshalEncoding();</span>
+    }
+
+    public void writeDirectly(IRubyObject value) throws IOException {
+<span class="fc" id="L201">        List&lt;Variable&lt;Object&gt;&gt; variables = getVariables(value);</span>
+<span class="fc" id="L202">        writeObjectData(value);</span>
+<span class="fc bfc" id="L203" title="All 2 branches covered.">        if (variables != null) {</span>
+<span class="fc" id="L204">            dumpVariablesWithEncoding(variables, value);</span>
+        }
+<span class="fc" id="L206">    }</span>
+
+    public static String getPathFromClass(RubyModule clazz) {
+<span class="fc" id="L209">        String path = clazz.getName();</span>
+        
+<span class="fc bfc" id="L211" title="All 2 branches covered.">        if (path.charAt(0) == '#') {</span>
+<span class="fc bfc" id="L212" title="All 2 branches covered.">            String classOrModule = clazz.isClass() ? &quot;class&quot; : &quot;module&quot;;</span>
+<span class="fc" id="L213">            throw clazz.getRuntime().newTypeError(&quot;can't dump anonymous &quot; + classOrModule + &quot; &quot; + path);</span>
+        }
+        
+<span class="fc bfc" id="L216" title="All 2 branches covered.">        RubyModule real = clazz.isModule() ? clazz : ((RubyClass)clazz).getRealClass();</span>
+
+<span class="pc bpc" id="L218" title="1 of 2 branches missed.">        if (clazz.getRuntime().getClassFromPath(path) != real) {</span>
+<span class="nc" id="L219">            throw clazz.getRuntime().newTypeError(path + &quot; can't be referred&quot;);</span>
+        }
+<span class="fc" id="L221">        return path;</span>
+    }
+    
+    private void writeObjectData(IRubyObject value) throws IOException {
+        // switch on the object's *native type*. This allows use-defined
+        // classes that have extended core native types to piggyback on their
+        // marshalling logic.
+<span class="pc bpc" id="L228" title="1 of 2 branches missed.">        if (value instanceof CoreObjectType) {</span>
+<span class="fc bfc" id="L229" title="All 2 branches covered.">            if (value instanceof DataType) {</span>
+<span class="fc" id="L230">                throw value.getRuntime().newTypeError(&quot;no marshal_dump is defined for class &quot; + value.getMetaClass().getName());</span>
+            }
+<span class="fc" id="L232">            ClassIndex nativeClassIndex = ((CoreObjectType)value).getNativeClassIndex();</span>
+
+<span class="fc bfc" id="L234" title="All 16 branches covered.">            switch (nativeClassIndex) {</span>
+            case ARRAY:
+<span class="fc" id="L236">                write('[');</span>
+<span class="fc" id="L237">                RubyArray.marshalTo((RubyArray)value, this);</span>
+<span class="fc" id="L238">                return;</span>
+            case FALSE:
+<span class="fc" id="L240">                write('F');</span>
+<span class="fc" id="L241">                return;</span>
+            case FIXNUM: {
+<span class="fc" id="L243">                RubyFixnum fixnum = (RubyFixnum)value;</span>
+
+<span class="fc bfc" id="L245" title="All 2 branches covered.">                if (isMarshalFixnum(fixnum)) {</span>
+<span class="fc" id="L246">                    write('i');</span>
+<span class="fc" id="L247">                    writeInt((int) fixnum.getLongValue());</span>
+<span class="fc" id="L248">                    return;</span>
+                }
+                // FIXME: inefficient; constructing a bignum just for dumping?
+<span class="fc" id="L251">                value = RubyBignum.newBignum(value.getRuntime(), fixnum.getLongValue());</span>
+
+                // fall through
+            }
+            case BIGNUM:
+<span class="fc" id="L256">                write('l');</span>
+<span class="fc" id="L257">                RubyBignum.marshalTo((RubyBignum)value, this);</span>
+<span class="fc" id="L258">                return;</span>
+            case CLASS:
+<span class="fc bfc" id="L260" title="All 2 branches covered.">                if (((RubyClass)value).isSingleton()) throw runtime.newTypeError(&quot;singleton class can't be dumped&quot;);</span>
+<span class="fc" id="L261">                write('c');</span>
+<span class="fc" id="L262">                RubyClass.marshalTo((RubyClass)value, this);</span>
+<span class="fc" id="L263">                return;</span>
+            case FLOAT:
+<span class="fc" id="L265">                write('f');</span>
+<span class="fc" id="L266">                RubyFloat.marshalTo((RubyFloat)value, this);</span>
+<span class="fc" id="L267">                return;</span>
+            case HASH: {
+<span class="fc" id="L269">                RubyHash hash = (RubyHash)value;</span>
+
+<span class="fc bfc" id="L271" title="All 2 branches covered.">                if(hash.getIfNone().isNil()){</span>
+<span class="fc" id="L272">                    write('{');</span>
+<span class="fc bfc" id="L273" title="All 2 branches covered.">                }else if (hash.hasDefaultProc()) {</span>
+<span class="fc" id="L274">                    throw hash.getRuntime().newTypeError(&quot;can't dump hash with default proc&quot;);</span>
+                } else {
+<span class="fc" id="L276">                    write('}');</span>
+                }
+
+<span class="fc" id="L279">                RubyHash.marshalTo(hash, this);</span>
+<span class="fc" id="L280">                return;</span>
+            }
+            case MODULE:
+<span class="fc" id="L283">                write('m');</span>
+<span class="fc" id="L284">                RubyModule.marshalTo((RubyModule)value, this);</span>
+<span class="fc" id="L285">                return;</span>
+            case NIL:
+<span class="fc" id="L287">                write('0');</span>
+<span class="fc" id="L288">                return;</span>
+            case OBJECT:
+            case BASICOBJECT:
+<span class="fc" id="L291">                dumpDefaultObjectHeader(value.getMetaClass());</span>
+<span class="fc" id="L292">                value.getMetaClass().getRealClass().marshal(value, this);</span>
+<span class="fc" id="L293">                return;</span>
+            case REGEXP:
+<span class="fc" id="L295">                write('/');</span>
+<span class="fc" id="L296">                RubyRegexp.marshalTo((RubyRegexp)value, this);</span>
+<span class="fc" id="L297">                return;</span>
+            case STRING:
+<span class="fc" id="L299">                registerLinkTarget(value);</span>
+<span class="fc" id="L300">                write('&quot;');</span>
+<span class="fc" id="L301">                writeString(value.convertToString().getByteList());</span>
+<span class="fc" id="L302">                return;</span>
+            case STRUCT:
+<span class="fc" id="L304">                RubyStruct.marshalTo((RubyStruct)value, this);</span>
+<span class="fc" id="L305">                return;</span>
+            case SYMBOL:
+<span class="fc" id="L307">                writeAndRegisterSymbol(((RubySymbol)value).asJavaString());</span>
+<span class="fc" id="L308">                return;</span>
+            case TRUE:
+<span class="fc" id="L310">                write('T');</span>
+<span class="fc" id="L311">                return;</span>
+            default:
+<span class="fc" id="L313">                throw runtime.newTypeError(&quot;can't dump &quot; + value.getMetaClass().getName());</span>
+            }
+        } else {
+<span class="nc" id="L316">            dumpDefaultObjectHeader(value.getMetaClass());</span>
+<span class="nc" id="L317">            value.getMetaClass().getRealClass().marshal(value, this);</span>
+        }
+<span class="nc" id="L319">    }</span>
+
+    public void userNewMarshal(IRubyObject value, DynamicMethod method) throws IOException {
+<span class="fc" id="L322">        userNewCommon(value, method);</span>
+<span class="fc" id="L323">    }</span>
+
+    public void userNewMarshal(IRubyObject value) throws IOException {
+<span class="nc" id="L326">        userNewCommon(value, null);</span>
+<span class="nc" id="L327">    }</span>
+
+    private void userNewCommon(IRubyObject value, DynamicMethod method) throws IOException {
+<span class="fc" id="L330">        registerLinkTarget(value);</span>
+<span class="fc" id="L331">        write(TYPE_USRMARSHAL);</span>
+<span class="fc" id="L332">        RubyClass metaclass = value.getMetaClass().getRealClass();</span>
+<span class="fc" id="L333">        writeAndRegisterSymbol(metaclass.getName());</span>
+
+        IRubyObject marshaled;
+<span class="pc bpc" id="L336" title="1 of 2 branches missed.">        if (method != null) {</span>
+<span class="fc" id="L337">            marshaled = method.call(runtime.getCurrentContext(), value, value.getMetaClass(), &quot;marshal_dump&quot;);</span>
+        } else {
+<span class="nc" id="L339">            marshaled = value.callMethod(runtime.getCurrentContext(), &quot;marshal_dump&quot;);</span>
+        }
+<span class="fc" id="L341">        dumpObject(marshaled);</span>
+<span class="fc" id="L342">    }</span>
+
+    public void userMarshal(IRubyObject value, DynamicMethod method) throws IOException {
+<span class="fc" id="L345">        userCommon(value, method);</span>
+<span class="fc" id="L346">    }</span>
+
+    public void userMarshal(IRubyObject value) throws IOException {
+<span class="nc" id="L349">        userCommon(value, null);</span>
+<span class="nc" id="L350">    }</span>
+
+    private void userCommon(IRubyObject value, DynamicMethod method) throws IOException {
+<span class="fc" id="L353">        RubyFixnum depthLimitFixnum = runtime.newFixnum(depthLimit);</span>
+
+        IRubyObject dumpResult;
+<span class="pc bpc" id="L356" title="1 of 2 branches missed.">        if (method != null) {</span>
+<span class="fc" id="L357">            dumpResult = method.call(runtime.getCurrentContext(), value, value.getMetaClass(), &quot;_dump&quot;, depthLimitFixnum);</span>
+        } else {
+<span class="nc" id="L359">            dumpResult = value.callMethod(runtime.getCurrentContext(), &quot;_dump&quot;, depthLimitFixnum);</span>
+        }
+        
+<span class="fc bfc" id="L362" title="All 2 branches covered.">        if (!(dumpResult instanceof RubyString)) {</span>
+<span class="fc" id="L363">            throw runtime.newTypeError(dumpResult, runtime.getString());</span>
+        }
+<span class="fc" id="L365">        RubyString marshaled = (RubyString)dumpResult;</span>
+
+        boolean hasVars;
+<span class="fc bfc" id="L368" title="All 2 branches covered.">        if (hasVars = marshaled.hasVariables()) {</span>
+<span class="fc" id="L369">            write(TYPE_IVAR);</span>
+        }
+
+<span class="fc" id="L372">        write(TYPE_USERDEF);</span>
+<span class="fc" id="L373">        RubyClass metaclass = value.getMetaClass().getRealClass();</span>
+
+<span class="fc" id="L375">        writeAndRegisterSymbol(metaclass.getName());</span>
+
+<span class="fc" id="L377">        writeString(marshaled.getByteList());</span>
+
+<span class="fc bfc" id="L379" title="All 2 branches covered.">        if (hasVars) {</span>
+<span class="fc" id="L380">            dumpVariables(marshaled.getVariableList());</span>
+        }
+
+<span class="fc" id="L383">        registerLinkTarget(value);</span>
+<span class="fc" id="L384">    }</span>
+    
+    public void writeUserClass(IRubyObject obj, RubyClass type) throws IOException {
+<span class="fc" id="L387">        write(TYPE_UCLASS);</span>
+        
+        // w_unique
+<span class="pc bpc" id="L390" title="1 of 2 branches missed.">        if (type.getName().charAt(0) == '#') {</span>
+<span class="nc" id="L391">            throw obj.getRuntime().newTypeError(&quot;can't dump anonymous class &quot; + type.getName());</span>
+        }
+        
+        // w_symbol
+<span class="fc" id="L395">        writeAndRegisterSymbol(type.getName());</span>
+<span class="fc" id="L396">    }</span>
+    
+    public void dumpVariablesWithEncoding(List&lt;Variable&lt;Object&gt;&gt; vars, IRubyObject obj) throws IOException {
+<span class="fc bfc" id="L399" title="All 2 branches covered.">        if (shouldMarshalEncoding(obj)) {</span>
+<span class="fc" id="L400">            writeInt(vars.size() + 1); // vars preceded by encoding</span>
+<span class="fc" id="L401">            writeEncoding(((MarshalEncoding)obj).getMarshalEncoding());</span>
+        } else {
+<span class="fc" id="L403">            writeInt(vars.size());</span>
+        }
+        
+<span class="fc" id="L406">        dumpVariablesShared(vars);</span>
+<span class="fc" id="L407">    }</span>
+
+    public void dumpVariables(List&lt;Variable&lt;Object&gt;&gt; vars) throws IOException {
+<span class="fc" id="L410">        writeInt(vars.size());</span>
+<span class="fc" id="L411">        dumpVariablesShared(vars);</span>
+<span class="fc" id="L412">    }</span>
+
+    private void dumpVariablesShared(List&lt;Variable&lt;Object&gt;&gt; vars) throws IOException {
+<span class="fc bfc" id="L415" title="All 2 branches covered.">        for (Variable&lt;Object&gt; var : vars) {</span>
+<span class="pc bpc" id="L416" title="1 of 2 branches missed.">            if (var.getValue() instanceof IRubyObject) {</span>
+<span class="fc" id="L417">                writeAndRegisterSymbol(var.getName());</span>
+<span class="fc" id="L418">                dumpObject((IRubyObject)var.getValue());</span>
+            }
+<span class="fc" id="L420">        }</span>
+<span class="fc" id="L421">    }</span>
+
+    public void writeEncoding(Encoding encoding) throws IOException {
+<span class="pc bpc" id="L424" title="1 of 4 branches missed.">        if (encoding == null || encoding == USASCIIEncoding.INSTANCE) {</span>
+<span class="fc" id="L425">            writeAndRegisterSymbol(SYMBOL_ENCODING_SPECIAL);</span>
+<span class="fc" id="L426">            writeObjectData(runtime.getFalse());</span>
+<span class="fc bfc" id="L427" title="All 2 branches covered.">        } else if (encoding == UTF8Encoding.INSTANCE) {</span>
+<span class="fc" id="L428">            writeAndRegisterSymbol(SYMBOL_ENCODING_SPECIAL);</span>
+<span class="fc" id="L429">            writeObjectData(runtime.getTrue());</span>
+        } else {
+<span class="fc" id="L431">            writeAndRegisterSymbol(SYMBOL_ENCODING);</span>
+<span class="fc" id="L432">            RubyString encodingString = new RubyString(runtime, runtime.getString(), encoding.getName());</span>
+<span class="fc" id="L433">            writeObjectData(encodingString);</span>
+        }
+<span class="fc" id="L435">    }</span>
+    
+    private boolean hasSingletonMethods(RubyClass type) {
+<span class="pc bpc" id="L438" title="1 of 2 branches missed.">        for(DynamicMethod method : type.getMethods().values()) {</span>
+            // We do not want to capture cached methods
+<span class="nc bnc" id="L440" title="All 2 branches missed.">            if(method.isImplementedBy(type)) {</span>
+<span class="nc" id="L441">                return true;</span>
+            }
+<span class="nc" id="L443">        }</span>
+<span class="fc" id="L444">        return false;</span>
+    }
+
+    /** w_extended
+     * 
+     */
+    private RubyClass dumpExtended(RubyClass type) throws IOException {
+<span class="fc bfc" id="L451" title="All 2 branches covered.">        if(type.isSingleton()) {</span>
+<span class="pc bpc" id="L452" title="2 of 4 branches missed.">            if (hasSingletonMethods(type) || type.hasVariables()) { // any ivars, since we don't have __attached__ ivar now</span>
+<span class="nc" id="L453">                throw type.getRuntime().newTypeError(&quot;singleton can't be dumped&quot;);</span>
+            }
+<span class="fc" id="L455">            type = type.getSuperClass();</span>
+        }
+<span class="fc bfc" id="L457" title="All 2 branches covered.">        while(type.isIncluded()) {</span>
+<span class="fc" id="L458">            write('e');</span>
+<span class="fc" id="L459">            writeAndRegisterSymbol(((IncludedModuleWrapper)type).getNonIncludedClass().getName());</span>
+<span class="fc" id="L460">            type = type.getSuperClass();</span>
+        }
+<span class="fc" id="L462">        return type;</span>
+    }
+
+    public void dumpDefaultObjectHeader(RubyClass type) throws IOException {
+<span class="fc" id="L466">        dumpDefaultObjectHeader('o',type);</span>
+<span class="fc" id="L467">    }</span>
+
+    public void dumpDefaultObjectHeader(char tp, RubyClass type) throws IOException {
+<span class="fc" id="L470">        dumpExtended(type);</span>
+<span class="fc" id="L471">        write(tp);</span>
+<span class="fc" id="L472">        writeAndRegisterSymbol(getPathFromClass(type.getRealClass()));</span>
+<span class="fc" id="L473">    }</span>
+
+    public void writeString(String value) throws IOException {
+<span class="fc" id="L476">        writeInt(value.length());</span>
+        // FIXME: should preserve unicode?
+<span class="fc" id="L478">        out.write(RubyString.stringToBytes(value));</span>
+<span class="fc" id="L479">    }</span>
+
+    public void writeString(ByteList value) throws IOException {
+<span class="fc" id="L482">        int len = value.length();</span>
+<span class="fc" id="L483">        writeInt(len);</span>
+<span class="fc" id="L484">        out.write(value.getUnsafeBytes(), value.begin(), len);</span>
+<span class="fc" id="L485">    }</span>
+
+    public void dumpSymbol(String value) throws IOException {
+<span class="fc" id="L488">        write(':');</span>
+<span class="fc" id="L489">        writeString(value);</span>
+<span class="fc" id="L490">    }</span>
+
+    public void writeInt(int value) throws IOException {
+<span class="fc bfc" id="L493" title="All 2 branches covered.">        if (value == 0) {</span>
+<span class="fc" id="L494">            out.write(0);</span>
+<span class="fc bfc" id="L495" title="All 4 branches covered.">        } else if (0 &lt; value &amp;&amp; value &lt; 123) {</span>
+<span class="fc" id="L496">            out.write(value + 5);</span>
+<span class="fc bfc" id="L497" title="All 4 branches covered.">        } else if (-124 &lt; value &amp;&amp; value &lt; 0) {</span>
+<span class="fc" id="L498">            out.write((value - 5) &amp; 0xff);</span>
+        } else {
+<span class="fc" id="L500">            byte[] buf = new byte[4];</span>
+<span class="fc" id="L501">            int i = 0;</span>
+<span class="pc bpc" id="L502" title="1 of 2 branches missed.">            for (; i &lt; buf.length; i++) {</span>
+<span class="fc" id="L503">                buf[i] = (byte)(value &amp; 0xff);</span>
+                
+<span class="fc" id="L505">                value = value &gt;&gt; 8;</span>
+<span class="fc bfc" id="L506" title="All 4 branches covered.">                if (value == 0 || value == -1) {</span>
+<span class="fc" id="L507">                    break;</span>
+                }
+            }
+<span class="fc" id="L510">            int len = i + 1;</span>
+<span class="fc bfc" id="L511" title="All 2 branches covered.">            out.write(value &lt; 0 ? -len : len);</span>
+<span class="fc" id="L512">            out.write(buf, 0, i + 1);</span>
+        }
+<span class="fc" id="L514">    }</span>
+
+    public void writeByte(int value) throws IOException {
+<span class="fc" id="L517">        out.write(value);</span>
+<span class="fc" id="L518">    }</span>
+
+    public boolean isTainted() {
+<span class="fc" id="L521">        return tainted;</span>
+    }
+
+    @Deprecated
+    public boolean isUntrusted() {
+<span class="nc" id="L526">        return tainted;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

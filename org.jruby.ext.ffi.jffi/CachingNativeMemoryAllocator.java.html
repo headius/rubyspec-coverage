@@ -1,0 +1,330 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>CachingNativeMemoryAllocator.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.ffi.jffi</a> &gt; <span class="el_source">CachingNativeMemoryAllocator.java</span></div><h1>CachingNativeMemoryAllocator.java</h1><pre class="source lang-java linenums">package org.jruby.ext.ffi.jffi;
+
+import jnr.ffi.util.ref.FinalizableWeakReference;
+import org.jruby.Ruby;
+import org.jruby.ext.ffi.AllocatedDirectMemoryIO;
+import org.jruby.ext.ffi.MemoryIO;
+
+import java.lang.ref.Reference;
+import java.lang.ref.SoftReference;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+<span class="nc" id="L14">final class CachingNativeMemoryAllocator {</span>
+<span class="nc" id="L15">    protected static final com.kenai.jffi.MemoryIO IO = com.kenai.jffi.MemoryIO.getInstance();</span>
+    /** Keeps strong references to the memory bucket until cleanup */
+<span class="nc" id="L17">    private static final Bucket[] buckets = new Bucket[32];</span>
+<span class="nc" id="L18">    private static final Map&lt;AllocationGroup, Boolean&gt; referenceSet = new ConcurrentHashMap&lt;AllocationGroup, Boolean&gt;();</span>
+<span class="nc" id="L19">    private static final ThreadLocal&lt;Reference&lt;Allocator&gt;&gt; currentAllocator = new ThreadLocal&lt;Reference&lt;Allocator&gt;&gt;();</span>
+
+
+    static int bucketIndex(int size) {
+<span class="nc" id="L23">        return Integer.numberOfTrailingZeros(size);</span>
+    }
+
+    static {
+<span class="nc bnc" id="L27" title="All 2 branches missed.">        for (int i = 0; i &lt; buckets.length; i++) {</span>
+<span class="nc" id="L28">            buckets[i] = new Bucket(1 &lt;&lt; i);</span>
+        }
+<span class="nc" id="L30">    }</span>
+
+    /**
+     * Allocates native memory, aligned to a minimum boundary.
+     *
+     * @param runtime The Ruby runtime
+     * @param size The number of bytes to allocate
+     * @param align The minimum alignment of the memory
+     * @param clear Whether the memory should be cleared (zeroed)
+     * @return A new {@link org.jruby.ext.ffi.AllocatedDirectMemoryIO}
+     */
+    static MemoryIO allocateAligned(Ruby runtime, int size, int align, boolean clear) {
+        // Caching seems to work best for small allocations (&lt;= 256 bytes).  For everything else, use the default allocator
+<span class="nc bnc" id="L43" title="All 4 branches missed.">        if (size &gt; 256 || align &gt; 8) {</span>
+<span class="nc" id="L44">            return AllocatedNativeMemoryIO.allocateAligned(runtime, size, align, clear);</span>
+        }
+
+<span class="nc" id="L47">        Reference&lt;Allocator&gt; allocatorReference = currentAllocator.get();</span>
+<span class="nc bnc" id="L48" title="All 2 branches missed.">        Allocator allocator = allocatorReference != null ? allocatorReference.get() : null;</span>
+<span class="nc bnc" id="L49" title="All 2 branches missed.">        if (allocator == null) {</span>
+<span class="nc" id="L50">            allocator = new Allocator();</span>
+<span class="nc" id="L51">            currentAllocator.set(new SoftReference&lt;Allocator&gt;(allocator));</span>
+        }
+
+<span class="nc" id="L54">        return allocator.allocate(runtime, size, clear);</span>
+    }
+
+    private static long align(long offset, long align) {
+<span class="nc" id="L58">        return (offset + align - 1L) &amp; ~(align - 1L);</span>
+    }
+
+    static int roundUpToPowerOf2(int n) {
+<span class="nc" id="L62">        --n;</span>
+<span class="nc" id="L63">        n |= (n &gt;&gt; 1);</span>
+<span class="nc" id="L64">        n |= (n &gt;&gt; 2);</span>
+<span class="nc" id="L65">        n |= (n &gt;&gt; 4);</span>
+<span class="nc" id="L66">        n |= (n &gt;&gt; 8);</span>
+<span class="nc" id="L67">        n |= (n &gt;&gt; 16);</span>
+
+<span class="nc" id="L69">        return n + 1;</span>
+    }
+
+
+    static final class AllocatedMemoryIO extends BoundedNativeMemoryIO implements AllocatedDirectMemoryIO {
+
+        private final MemoryAllocation allocation;
+        private Object sentinel;
+
+        private AllocatedMemoryIO(Ruby runtime, Object sentinel, MemoryAllocation allocation, int size) {
+<span class="nc" id="L79">            super(runtime, allocation.address, size);</span>
+<span class="nc" id="L80">            this.sentinel = sentinel;</span>
+<span class="nc" id="L81">            this.allocation = allocation;</span>
+<span class="nc" id="L82">        }</span>
+
+        public void free() {
+<span class="nc bnc" id="L85" title="All 2 branches missed.">            if (allocation.isReleased()) {</span>
+<span class="nc" id="L86">                throw getRuntime().newRuntimeError(&quot;memory already freed&quot;);</span>
+            }
+
+<span class="nc" id="L89">            allocation.free();</span>
+<span class="nc" id="L90">            sentinel = null;</span>
+<span class="nc" id="L91">        }</span>
+
+        public void setAutoRelease(boolean autorelease) {
+<span class="nc" id="L94">            allocation.setAutoRelease(autorelease);</span>
+<span class="nc" id="L95">        }</span>
+
+        public boolean isAutoRelease() {
+<span class="nc bnc" id="L98" title="All 2 branches missed.">            return !allocation.isUnmanaged();</span>
+        }
+    }
+
+
+    private static final class AllocationGroup extends FinalizableWeakReference&lt;Object&gt; {
+        final Magazine magazine;
+
+        AllocationGroup(Magazine magazine, Object sentinel) {
+<span class="nc" id="L107">            super(sentinel, NativeFinalizer.getInstance().getFinalizerQueue());</span>
+<span class="nc" id="L108">            this.magazine = magazine;</span>
+<span class="nc" id="L109">        }</span>
+
+        MemoryAllocation allocate(boolean clear) {
+<span class="nc" id="L112">            return magazine.allocate(clear);</span>
+        }
+
+        public void finalizeReferent() {
+<span class="nc" id="L116">            referenceSet.remove(this);</span>
+<span class="nc" id="L117">            magazine.recycle();</span>
+<span class="nc" id="L118">        }</span>
+    }
+
+
+    private static final class MemoryAllocation {
+        static final int UNMANAGED = 0x1;
+        static final int RELEASED = 0x2;
+        final Magazine magazine;
+        final long address;
+        volatile int flags;
+
+<span class="nc" id="L129">        MemoryAllocation(Magazine magazine, long address) {</span>
+<span class="nc" id="L130">            this.magazine = magazine;</span>
+<span class="nc" id="L131">            this.address = address;</span>
+<span class="nc" id="L132">        }</span>
+
+        final void dispose() {
+<span class="nc" id="L135">            IO.freeMemory(address);</span>
+<span class="nc" id="L136">        }</span>
+
+        final boolean isReleased() {
+<span class="nc bnc" id="L139" title="All 2 branches missed.">            return (flags &amp; RELEASED) != 0;</span>
+        }
+
+        final boolean isUnmanaged() {
+<span class="nc bnc" id="L143" title="All 2 branches missed.">            return (flags &amp; UNMANAGED) != 0;</span>
+        }
+
+        public void setAutoRelease(boolean autorelease) {
+<span class="nc bnc" id="L147" title="All 2 branches missed.">            if ((flags &amp; RELEASED) == 0) {</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">                flags |= !autorelease ? UNMANAGED : 0;</span>
+            }
+
+<span class="nc bnc" id="L151" title="All 2 branches missed.">            if (!autorelease) {</span>
+<span class="nc" id="L152">                magazine.setFragmented();</span>
+            }
+<span class="nc" id="L154">        }</span>
+
+        final void free() {
+<span class="nc bnc" id="L157" title="All 2 branches missed.">            if ((flags &amp; RELEASED) == 0) {</span>
+<span class="nc" id="L158">                flags = RELEASED | UNMANAGED;</span>
+<span class="nc" id="L159">                magazine.setFragmented();</span>
+<span class="nc" id="L160">                dispose();</span>
+            }
+<span class="nc" id="L162">        }</span>
+    }
+
+    private static final class Magazine {
+        static final int MAX_BYTES_PER_MAGAZINE = 16384;
+        final Bucket bucket;
+        private final MemoryAllocation[] allocations;
+        private int nextIndex;
+        private volatile boolean fragmented;
+
+<span class="nc" id="L172">        Magazine(Bucket bucket) {</span>
+<span class="nc" id="L173">            this.bucket = bucket;</span>
+<span class="nc" id="L174">            this.allocations = new MemoryAllocation[MAX_BYTES_PER_MAGAZINE / bucket.size];</span>
+<span class="nc" id="L175">            this.nextIndex = 0;</span>
+<span class="nc" id="L176">        }</span>
+
+        MemoryAllocation allocate(boolean clear) {
+<span class="nc bnc" id="L179" title="All 4 branches missed.">            if (nextIndex &lt; allocations.length &amp;&amp; allocations[nextIndex] != null) {</span>
+<span class="nc" id="L180">                MemoryAllocation allocation = allocations[nextIndex++];</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">                if (clear) {</span>
+<span class="nc" id="L182">                    clearMemory(allocation.address, bucket.size);</span>
+                }
+
+<span class="nc" id="L185">                return allocation;</span>
+            }
+
+<span class="nc bnc" id="L188" title="All 2 branches missed.">            if (nextIndex &gt;= allocations.length) {</span>
+<span class="nc" id="L189">                return null;</span>
+            }
+
+            // None on the freelist for this magazine, allocate more
+            long address;
+<span class="nc bnc" id="L194" title="All 2 branches missed.">            while ((address = IO.allocateMemory(bucket.size, clear)) == 0L) {</span>
+<span class="nc" id="L195">                System.gc();</span>
+            }
+
+<span class="nc" id="L198">            MemoryAllocation allocation = new MemoryAllocation(this, address);</span>
+<span class="nc" id="L199">            allocations[nextIndex++] = allocation;</span>
+
+<span class="nc" id="L201">            return allocation;</span>
+        }
+
+        void setFragmented() {
+<span class="nc" id="L205">            fragmented = true;</span>
+<span class="nc" id="L206">        }</span>
+
+        synchronized void dispose() {
+<span class="nc bnc" id="L209" title="All 2 branches missed.">            for (int i = 0; i &lt; allocations.length; i++) {</span>
+<span class="nc" id="L210">                MemoryAllocation m = allocations[i];</span>
+<span class="nc bnc" id="L211" title="All 4 branches missed.">                if (m != null &amp;&amp; !m.isUnmanaged()) {</span>
+<span class="nc" id="L212">                    m.dispose();</span>
+                }
+            }
+<span class="nc" id="L215">        }</span>
+
+        synchronized void recycle() {
+<span class="nc bnc" id="L218" title="All 2 branches missed.">            if (fragmented) {</span>
+<span class="nc" id="L219">                int size = bucket.size;</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">                for (int i = 0; i &lt; allocations.length; i++) {</span>
+<span class="nc" id="L221">                    MemoryAllocation m = allocations[i];</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">                    if (m != null) {</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">                        if (m.isUnmanaged()) {</span>
+<span class="nc" id="L224">                            allocations[i] = null;</span>
+                        } else {
+<span class="nc" id="L226">                            clearMemory(allocations[i].address, size);</span>
+                        }
+                    }
+                }
+<span class="nc" id="L230">                fragmented = false;</span>
+            }
+
+<span class="nc" id="L233">            nextIndex = 0;</span>
+<span class="nc" id="L234">            bucket.recycle(this);</span>
+<span class="nc" id="L235">        }</span>
+    }
+
+    private static final class Bucket {
+        final int size;
+<span class="nc" id="L240">        Set&lt;CacheElement&gt; cache = new HashSet&lt;CacheElement&gt;();</span>
+
+<span class="nc" id="L242">        Bucket(int size) {</span>
+<span class="nc" id="L243">            this.size = roundUpToPowerOf2(size);</span>
+<span class="nc" id="L244">        }</span>
+
+        synchronized Magazine getMagazine() {
+
+<span class="nc" id="L248">            Iterator&lt;CacheElement&gt; it = cache.iterator();</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">            while (it.hasNext()) {</span>
+<span class="nc" id="L250">                CacheElement e = it.next();</span>
+<span class="nc" id="L251">                it.remove();</span>
+<span class="nc" id="L252">                e.clear();</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">                if (!e.disposed.getAndSet(true)) {</span>
+<span class="nc" id="L254">                    return e.magazine;</span>
+                }
+<span class="nc" id="L256">            }</span>
+
+<span class="nc" id="L258">            return new Magazine(this);</span>
+        }
+
+        synchronized void recycle(Magazine magazine) {
+<span class="nc" id="L262">            cache.add(new CacheElement(magazine));</span>
+<span class="nc" id="L263">        }</span>
+
+        private synchronized void removeCacheElement(CacheElement e) {
+<span class="nc" id="L266">            cache.remove(e);</span>
+<span class="nc" id="L267">        }</span>
+
+        final class CacheElement extends FinalizableWeakReference&lt;Object&gt; {
+            private final Magazine magazine;
+<span class="nc" id="L271">            private final AtomicBoolean disposed = new AtomicBoolean(false);</span>
+<span class="nc" id="L272">            CacheElement(Magazine magazine) {</span>
+<span class="nc" id="L273">                super(new Object(), NativeFinalizer.getInstance().getFinalizerQueue());</span>
+<span class="nc" id="L274">                this.magazine = magazine;</span>
+<span class="nc" id="L275">            }</span>
+
+            public void finalizeReferent() {
+<span class="nc bnc" id="L278" title="All 2 branches missed.">                if (!disposed.getAndSet(true)) {</span>
+<span class="nc" id="L279">                    removeCacheElement(this);</span>
+<span class="nc" id="L280">                    magazine.dispose();</span>
+                }
+<span class="nc" id="L282">            }</span>
+        }
+    }
+
+<span class="nc" id="L286">    private static final class Allocator {</span>
+<span class="nc" id="L287">        AllocationGroup[] allocationGroups = new AllocationGroup[32];</span>
+
+        AllocatedMemoryIO allocate(Ruby runtime, int size, boolean clear) {
+            MemoryAllocation allocation;
+            Object sentinel;
+
+<span class="nc" id="L293">            int idx = bucketIndex(roundUpToPowerOf2(Math.max(8, size)));</span>
+<span class="nc" id="L294">            AllocationGroup group = allocationGroups[idx];</span>
+
+<span class="nc bnc" id="L296" title="All 6 branches missed.">            if (group == null || (sentinel = group.get()) == null || (allocation = group.allocate(clear)) == null) {</span>
+                // no existing group, or it is all used up.
+<span class="nc" id="L298">                allocationGroups[idx] = group = new AllocationGroup(buckets[idx].getMagazine(), sentinel = new Object());</span>
+<span class="nc" id="L299">                referenceSet.put(group, Boolean.TRUE);</span>
+<span class="nc" id="L300">                allocation = group.allocate(clear);</span>
+            }
+
+<span class="nc" id="L303">            return new AllocatedMemoryIO(runtime, sentinel, allocation, size);</span>
+        }
+    }
+
+    static void clearMemory(long address, int size) {
+<span class="nc bnc" id="L308" title="All 5 branches missed.">        switch (size) {</span>
+            case 1:
+<span class="nc" id="L310">                IO.putByte(address, (byte) 0);</span>
+<span class="nc" id="L311">                break;</span>
+
+            case 2:
+<span class="nc" id="L314">                IO.putShort(address, (short) 0);</span>
+<span class="nc" id="L315">                break;</span>
+
+            case 4:
+<span class="nc" id="L318">                IO.putInt(address, 0);</span>
+<span class="nc" id="L319">                break;</span>
+
+            case 8:
+<span class="nc" id="L322">                IO.putLong(address, 0L);</span>
+<span class="nc" id="L323">                break;</span>
+
+            default:
+<span class="nc" id="L326">                IO.setMemory(address, size, (byte) 0);</span>
+        }
+<span class="nc" id="L328">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

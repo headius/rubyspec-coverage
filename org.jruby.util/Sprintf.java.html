@@ -1,0 +1,1573 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Sprintf.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util</a> &gt; <span class="el_source">Sprintf.java</span></div><h1>Sprintf.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2007 William N Dortch &lt;bill.dortch@gmail.com&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.util;
+
+import java.math.BigInteger;
+import java.text.DecimalFormatSymbols;
+import java.text.NumberFormat;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+
+import org.jcodings.Encoding;
+import org.jcodings.specific.UTF8Encoding;
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyBignum;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyFloat;
+import org.jruby.RubyHash;
+import org.jruby.RubyInteger;
+import org.jruby.RubyKernel;
+import org.jruby.RubyNumeric;
+import org.jruby.RubyString;
+import org.jruby.common.IRubyWarnings.ID;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.builtin.IRubyObject;
+
+
+/**
+ * @author Bill Dortch
+ *
+ */
+public class Sprintf {
+    private static final int FLAG_NONE        = 0;
+    private static final int FLAG_SPACE       = 1;
+    private static final int FLAG_ZERO        = 1 &lt;&lt; 1;
+    private static final int FLAG_PLUS        = 1 &lt;&lt; 2;
+    private static final int FLAG_MINUS       = 1 &lt;&lt; 3;
+    private static final int FLAG_SHARP       = 1 &lt;&lt; 4;
+    private static final int FLAG_WIDTH       = 1 &lt;&lt; 5;
+    private static final int FLAG_PRECISION   = 1 &lt;&lt; 6;
+
+<span class="fc" id="L68">    private static final byte[] PREFIX_OCTAL     = {'0'};</span>
+<span class="fc" id="L69">    private static final byte[] PREFIX_HEX_LC    = {'0','x'};</span>
+<span class="fc" id="L70">    private static final byte[] PREFIX_HEX_UC    = {'0','X'};</span>
+<span class="fc" id="L71">    private static final byte[] PREFIX_BINARY_LC = {'0','b'};</span>
+<span class="fc" id="L72">    private static final byte[] PREFIX_BINARY_UC = {'0','B'};</span>
+
+<span class="fc" id="L74">    private static final byte[] PREFIX_NEGATIVE = {'.','.'};</span>
+
+<span class="fc" id="L76">    private static final byte[] NAN_VALUE       = {'N','a','N'};</span>
+<span class="fc" id="L77">    private static final byte[] INFINITY_VALUE  = {'I','n','f'};</span>
+
+<span class="fc" id="L79">    private static final BigInteger BIG_32 = BigInteger.valueOf(((long)Integer.MAX_VALUE + 1L) &lt;&lt; 1);</span>
+<span class="fc" id="L80">    private static final BigInteger BIG_64 = BIG_32.shiftLeft(32);</span>
+<span class="fc" id="L81">    private static final BigInteger BIG_MINUS_32 = BigInteger.valueOf((long)Integer.MIN_VALUE &lt;&lt; 1);</span>
+<span class="fc" id="L82">    private static final BigInteger BIG_MINUS_64 = BIG_MINUS_32.shiftLeft(32);</span>
+
+    private static final String ERR_MALFORMED_FORMAT = &quot;malformed format string&quot;;
+    private static final String ERR_MALFORMED_NUM = &quot;malformed format string - %[0-9]&quot;;
+    private static final String ERR_MALFORMED_DOT_NUM = &quot;malformed format string - %.[0-9]&quot;;
+    private static final String ERR_MALFORMED_STAR_NUM = &quot;malformed format string - %*[0-9]&quot;;
+    private static final String ERR_ILLEGAL_FORMAT_CHAR = &quot;illegal format character - %&quot;;
+    private static final String ERR_MALFORMED_NAME = &quot;malformed name - unmatched parenthesis&quot;;
+
+<span class="fc" id="L91">    private static final ThreadLocal&lt;Map&lt;Locale, NumberFormat&gt;&gt; LOCALE_NUMBER_FORMATS = new ThreadLocal&lt;Map&lt;Locale, NumberFormat&gt;&gt;();</span>
+<span class="fc" id="L92">    private static final ThreadLocal&lt;Map&lt;Locale, DecimalFormatSymbols&gt;&gt; LOCALE_DECIMAL_FORMATS = new ThreadLocal&lt;Map&lt;Locale, DecimalFormatSymbols&gt;&gt;();</span>
+
+    private static final class Args {
+        private final Ruby runtime;
+        private final Locale locale;
+        private final IRubyObject rubyObject;
+        private final RubyArray rubyArray;
+        private final RubyHash rubyHash;
+        private final int length;
+        private int unnumbered; // last index (+1) accessed by next()
+        private int numbered;   // last index (+1) accessed by get()
+
+<span class="fc" id="L104">        Args(Locale locale, IRubyObject rubyObject) {</span>
+<span class="pc bpc" id="L105" title="1 of 2 branches missed.">            if (rubyObject == null) throw new IllegalArgumentException(&quot;null IRubyObject passed to sprintf&quot;);</span>
+<span class="pc bpc" id="L106" title="1 of 2 branches missed.">            this.locale = locale == null ? Locale.getDefault() : locale;</span>
+<span class="fc" id="L107">            this.rubyObject = rubyObject;</span>
+<span class="fc bfc" id="L108" title="All 2 branches covered.">            if (rubyObject instanceof RubyArray) {</span>
+<span class="fc" id="L109">                this.rubyArray = (RubyArray)rubyObject;</span>
+<span class="fc" id="L110">                this.rubyHash = null;</span>
+<span class="fc" id="L111">                this.length = rubyArray.size();</span>
+<span class="fc bfc" id="L112" title="All 2 branches covered.">            } else if (rubyObject instanceof RubyHash) {</span>
+                // allow a hash for args if in 1.9 mode
+<span class="fc" id="L114">                this.rubyHash = (RubyHash)rubyObject;</span>
+<span class="fc" id="L115">                this.rubyArray = null;</span>
+<span class="fc" id="L116">                this.length = -1;</span>
+            } else {
+<span class="fc" id="L118">                this.length = 1;</span>
+<span class="fc" id="L119">                this.rubyArray = null;</span>
+<span class="fc" id="L120">                this.rubyHash = null;</span>
+            }
+<span class="fc" id="L122">            this.runtime = rubyObject.getRuntime();</span>
+<span class="fc" id="L123">        }</span>
+
+        Args(IRubyObject rubyObject) {
+<span class="fc" id="L126">            this(Locale.getDefault(),rubyObject);</span>
+<span class="fc" id="L127">        }</span>
+
+        // temporary hack to handle non-Ruby values
+        // will come up with better solution shortly
+        Args(Ruby runtime, long value) {
+<span class="fc" id="L132">            this(RubyFixnum.newFixnum(runtime,value));</span>
+<span class="fc" id="L133">        }</span>
+
+        void raiseArgumentError(String message) {
+<span class="fc" id="L136">            throw runtime.newArgumentError(message);</span>
+        }
+
+        void raiseKeyError(String message) {
+<span class="fc" id="L140">            throw runtime.newKeyError(message);</span>
+        }
+
+        void warn(ID id, String message) {
+<span class="nc" id="L144">            runtime.getWarnings().warn(id, message);</span>
+<span class="nc" id="L145">        }</span>
+
+        void warning(ID id, String message) {
+<span class="pc bpc" id="L148" title="1 of 2 branches missed.">            if (runtime.isVerbose()) runtime.getWarnings().warning(id, message);</span>
+<span class="fc" id="L149">        }</span>
+
+        IRubyObject next(ByteList name) {
+            // for 1.9 hash args
+<span class="fc bfc" id="L153" title="All 2 branches covered.">            if (name != null) {</span>
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">                if (rubyHash == null) raiseArgumentError(&quot;positional args mixed with named args&quot;);</span>
+
+<span class="fc" id="L156">                IRubyObject object = rubyHash.fastARef(runtime.newSymbol(name));</span>
+<span class="pc bpc" id="L157" title="1 of 2 branches missed.">                if (object == null) raiseKeyError(&quot;key&lt;&quot; + name + &quot;&gt; not found&quot;);</span>
+<span class="fc" id="L158">                return object;</span>
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">            } else if (rubyHash != null) {</span>
+<span class="nc" id="L160">                raiseArgumentError(&quot;positional args mixed with named args&quot;);</span>
+            }
+
+            // this is the order in which MRI does these two tests
+<span class="pc bpc" id="L164" title="1 of 2 branches missed.">            if (numbered &gt; 0) raiseArgumentError(&quot;unnumbered&quot; + (unnumbered + 1) + &quot;mixed with numbered&quot;);</span>
+<span class="pc bpc" id="L165" title="1 of 2 branches missed.">            if (unnumbered &gt;= length) raiseArgumentError(&quot;too few arguments&quot;);</span>
+<span class="fc bfc" id="L166" title="All 2 branches covered.">            IRubyObject object = rubyArray == null ? rubyObject : rubyArray.eltInternal(unnumbered);</span>
+<span class="fc" id="L167">            unnumbered++;</span>
+<span class="fc" id="L168">            return object;</span>
+        }
+
+        IRubyObject get(int index) {
+            // for 1.9 hash args
+<span class="pc bpc" id="L173" title="1 of 2 branches missed.">            if (rubyHash != null) raiseArgumentError(&quot;positional args mixed with named args&quot;);</span>
+            // this is the order in which MRI does these tests
+<span class="pc bpc" id="L175" title="1 of 2 branches missed.">            if (unnumbered &gt; 0) raiseArgumentError(&quot;numbered(&quot;+numbered+&quot;) after unnumbered(&quot;+unnumbered+&quot;)&quot;);</span>
+<span class="pc bpc" id="L176" title="1 of 2 branches missed.">            if (index &lt; 0) raiseArgumentError(&quot;invalid index - &quot; + (index + 1) + '$');</span>
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">            if (index &gt;= length) raiseArgumentError(&quot;too few arguments&quot;);</span>
+<span class="fc" id="L178">            numbered = index + 1;</span>
+<span class="fc bfc" id="L179" title="All 2 branches covered.">            return rubyArray == null ? rubyObject : rubyArray.eltInternal(index);</span>
+        }
+
+        IRubyObject getNth(int formatIndex) {
+<span class="fc" id="L183">            return get(formatIndex - 1);</span>
+        }
+
+        int nextInt() {
+<span class="fc" id="L187">            return intValue(next(null));</span>
+        }
+
+        int getNthInt(int formatIndex) {
+<span class="fc" id="L191">            return intValue(get(formatIndex - 1));</span>
+        }
+
+        int intValue(IRubyObject obj) {
+<span class="fc bfc" id="L195" title="All 2 branches covered.">            if (obj instanceof RubyNumeric) return (int)((RubyNumeric)obj).getLongValue();</span>
+
+            // basically just forcing a TypeError here to match MRI
+<span class="fc" id="L198">            obj = TypeConverter.convertToType(obj, obj.getRuntime().getFixnum(), &quot;to_int&quot;, true);</span>
+<span class="fc" id="L199">            return (int)((RubyFixnum)obj).getLongValue();</span>
+        }
+
+        byte getDecimalSeparator() {
+<span class="fc" id="L203">            return (byte)getDecimalFormat(locale).getDecimalSeparator();</span>
+        }
+    } // Args
+
+    // static methods only
+<span class="nc" id="L208">    private Sprintf () {}</span>
+
+    // Special form of sprintf that returns a RubyString and handles
+    // tainted strings correctly.
+    public static boolean sprintf(ByteList to, Locale locale, CharSequence format, IRubyObject args) {
+<span class="fc" id="L213">        return rubySprintfToBuffer(to, format, new Args(locale, args));</span>
+    }
+
+    // Special form of sprintf that returns a RubyString and handles
+    // tainted strings correctly. Version for 1.9.
+    public static boolean sprintf1_9(ByteList to, Locale locale, CharSequence format, IRubyObject args) {
+<span class="fc" id="L219">        return rubySprintfToBuffer(to, format, new Args(locale, args), false);</span>
+    }
+
+    public static boolean sprintf(ByteList to, CharSequence format, IRubyObject args) {
+<span class="fc" id="L223">        return rubySprintf(to, format, new Args(args));</span>
+    }
+
+    public static boolean sprintf(Ruby runtime, ByteList to, CharSequence format, int arg) {
+<span class="fc" id="L227">        return rubySprintf(to, format, new Args(runtime, (long)arg));</span>
+    }
+
+    public static boolean sprintf(ByteList to, RubyString format, IRubyObject args) {
+<span class="nc" id="L231">        return rubySprintf(to, format.getByteList(), new Args(args));</span>
+    }
+
+    private static boolean rubySprintf(ByteList to, CharSequence charFormat, Args args) {
+<span class="fc" id="L235">        return rubySprintfToBuffer(to, charFormat, args);</span>
+    }
+
+    private static boolean rubySprintfToBuffer(ByteList buf, CharSequence charFormat, Args args) {
+<span class="fc" id="L239">        return rubySprintfToBuffer(buf, charFormat, args, true);</span>
+    }
+
+    private static boolean rubySprintfToBuffer(ByteList buf, CharSequence charFormat, Args args, boolean usePrefixForZero) {
+<span class="fc" id="L243">        Ruby runtime = args.runtime;</span>
+<span class="fc" id="L244">        boolean tainted = false;</span>
+        final byte[] format;
+
+        int offset;
+        int length;
+        int start;
+        int mark;
+<span class="fc" id="L251">        ByteList name = null;</span>
+<span class="fc" id="L252">        Encoding encoding = null;</span>
+
+        // used for RubyString functions to manage encoding, etc
+<span class="fc" id="L255">        RubyString wrapper = RubyString.newString(runtime, buf);</span>
+
+<span class="fc bfc" id="L257" title="All 2 branches covered.">        if (charFormat instanceof ByteList) {</span>
+<span class="fc" id="L258">            ByteList list = (ByteList)charFormat;</span>
+<span class="fc" id="L259">            format = list.getUnsafeBytes();</span>
+<span class="fc" id="L260">            int begin = list.begin();</span>
+<span class="fc" id="L261">            offset = begin;</span>
+<span class="fc" id="L262">            length = begin + list.length();</span>
+<span class="fc" id="L263">            encoding = list.getEncoding();</span>
+<span class="fc" id="L264">        } else {</span>
+<span class="fc" id="L265">            format = stringToBytes(charFormat, false);</span>
+<span class="fc" id="L266">            offset = 0;</span>
+<span class="fc" id="L267">            length = charFormat.length();</span>
+<span class="fc" id="L268">            encoding = UTF8Encoding.INSTANCE;</span>
+        }
+
+<span class="fc bfc" id="L271" title="All 2 branches covered.">        while (offset &lt; length) {</span>
+<span class="fc" id="L272">            start = offset;</span>
+<span class="fc bfc" id="L273" title="All 4 branches covered.">            for ( ; offset &lt; length &amp;&amp; format[offset] != '%'; offset++) {}</span>
+
+<span class="fc bfc" id="L275" title="All 2 branches covered.">            if (offset &gt; start) {</span>
+<span class="fc" id="L276">                buf.append(format,start,offset-start);</span>
+<span class="fc" id="L277">                start = offset;</span>
+            }
+<span class="fc bfc" id="L279" title="All 2 branches covered.">            if (offset++ &gt;= length) break;</span>
+
+<span class="fc" id="L281">            IRubyObject arg = null;</span>
+<span class="fc" id="L282">            int flags = 0;</span>
+<span class="fc" id="L283">            int width = 0;</span>
+<span class="fc" id="L284">            int precision = 0;</span>
+<span class="fc" id="L285">            int number = 0;</span>
+<span class="fc" id="L286">            byte fchar = 0;</span>
+<span class="fc" id="L287">            boolean incomplete = true;</span>
+<span class="fc bfc" id="L288" title="All 4 branches covered.">            for ( ; incomplete &amp;&amp; offset &lt; length ; ) {</span>
+<span class="fc bfc" id="L289" title="All 17 branches covered.">                switch (fchar = format[offset]) {</span>
+                default:
+<span class="fc bfc" id="L291" title="All 4 branches covered.">                    if (fchar == '\0' &amp;&amp; flags == FLAG_NONE) {</span>
+                        // MRI 1.8.6 behavior: null byte after '%'
+                        // leads to &quot;%&quot; string. Null byte in
+                        // other places, like &quot;%5\0&quot;, leads to error.
+<span class="fc" id="L295">                        buf.append('%');</span>
+<span class="fc" id="L296">                        buf.append(fchar);</span>
+<span class="fc" id="L297">                        incomplete = false;</span>
+<span class="fc" id="L298">                        offset++;</span>
+<span class="fc" id="L299">                        break;</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">                    } else if (isPrintable(fchar)) {</span>
+<span class="nc" id="L301">                        raiseArgumentError(args,&quot;malformed format string - %&quot; + (char)fchar);</span>
+                    } else {
+<span class="nc" id="L303">                        raiseArgumentError(args,ERR_MALFORMED_FORMAT);</span>
+                    }
+<span class="nc" id="L305">                    break;</span>
+
+                case '&lt;': {
+                    // Ruby 1.9 named args
+<span class="fc" id="L309">                    int nameStart = ++offset;</span>
+<span class="fc" id="L310">                    int nameEnd = nameStart;</span>
+
+<span class="pc bpc" id="L312" title="1 of 2 branches missed.">                    for ( ; offset &lt; length ; offset++) {</span>
+<span class="fc bfc" id="L313" title="All 2 branches covered.">                        if (format[offset] == '&gt;') {</span>
+<span class="fc" id="L314">                            nameEnd = offset;</span>
+<span class="fc" id="L315">                            offset++;</span>
+<span class="fc" id="L316">                            break;</span>
+                        }
+                    }
+
+<span class="pc bpc" id="L320" title="1 of 2 branches missed.">                    if (nameEnd == nameStart) raiseArgumentError(args, ERR_MALFORMED_NAME);</span>
+
+<span class="fc" id="L322">                    ByteList oldName = name;</span>
+<span class="fc" id="L323">                    name = new ByteList(format, nameStart, nameEnd - nameStart, encoding, false);</span>
+
+<span class="pc bpc" id="L325" title="1 of 2 branches missed.">                    if (oldName != null) raiseArgumentError(args, &quot;name&lt;&quot; + name + &quot;&gt; after &lt;&quot; + oldName + &quot;&gt;&quot;);</span>
+
+                    break;
+                }
+
+                case '{': {
+                    // Ruby 1.9 named replacement
+<span class="fc" id="L332">                    int nameStart = ++offset;</span>
+<span class="fc" id="L333">                    int nameEnd = nameStart;</span>
+
+<span class="pc bpc" id="L335" title="1 of 2 branches missed.">                    for ( ; offset &lt; length ; offset++) {</span>
+<span class="fc bfc" id="L336" title="All 2 branches covered.">                        if (format[offset] == '}') {</span>
+<span class="fc" id="L337">                            nameEnd = offset;</span>
+<span class="fc" id="L338">                            offset++;</span>
+<span class="fc" id="L339">                            break;</span>
+                        }
+                    }
+
+<span class="pc bpc" id="L343" title="1 of 2 branches missed.">                    if (nameEnd == nameStart) raiseArgumentError(args, ERR_MALFORMED_NAME);</span>
+
+<span class="fc" id="L345">                    ByteList localName = new ByteList(format, nameStart, nameEnd - nameStart, encoding, false);</span>
+<span class="fc" id="L346">                    buf.append(args.next(localName).asString().getByteList());</span>
+<span class="fc" id="L347">                    incomplete = false;</span>
+
+<span class="fc" id="L349">                    break;</span>
+                }
+
+                case ' ':
+<span class="fc" id="L353">                    flags |= FLAG_SPACE;</span>
+<span class="fc" id="L354">                    offset++;</span>
+<span class="fc" id="L355">                    break;</span>
+                case '0':
+<span class="fc" id="L357">                    flags |= FLAG_ZERO;</span>
+<span class="fc" id="L358">                    offset++;</span>
+<span class="fc" id="L359">                    break;</span>
+                case '+':
+<span class="fc" id="L361">                    flags |= FLAG_PLUS;</span>
+<span class="fc" id="L362">                    offset++;</span>
+<span class="fc" id="L363">                    break;</span>
+                case '-':
+<span class="fc" id="L365">                    flags |= FLAG_MINUS;</span>
+<span class="fc" id="L366">                    offset++;</span>
+<span class="fc" id="L367">                    break;</span>
+                case '#':
+<span class="fc" id="L369">                    flags |= FLAG_SHARP;</span>
+<span class="fc" id="L370">                    offset++;</span>
+<span class="fc" id="L371">                    break;</span>
+                case '1':case '2':case '3':case '4':case '5':
+                case '6':case '7':case '8':case '9':
+                    // MRI doesn't flag it as an error if width is given multiple
+                    // times as a number (but it does for *)
+<span class="fc" id="L376">                    number = 0;</span>
+                    { // MRI: GETNUM macro
+<span class="fc bfc" id="L378" title="All 4 branches covered.">                        for (; offset &lt; length &amp;&amp; isDigit(fchar = format[offset]); offset++) {</span>
+<span class="fc" id="L379">                            number = extendWidth(args, number, fchar);</span>
+                        }
+<span class="fc" id="L381">                        checkOffset(args, offset, length, ERR_MALFORMED_NUM);</span>
+                    }
+<span class="fc bfc" id="L383" title="All 2 branches covered.">                    if (fchar == '$') {</span>
+<span class="pc bpc" id="L384" title="1 of 2 branches missed.">                        if (arg != null) {</span>
+<span class="nc" id="L385">                            raiseArgumentError(args,&quot;value given twice - &quot; + number + &quot;$&quot;);</span>
+                        }
+<span class="fc" id="L387">                        arg = args.getNth(number);</span>
+<span class="fc" id="L388">                        offset++;</span>
+                    } else {
+<span class="fc" id="L390">                        width = number;</span>
+<span class="fc" id="L391">                        flags |= FLAG_WIDTH;</span>
+                    }
+<span class="fc" id="L393">                    break;</span>
+
+                case '*':
+<span class="pc bpc" id="L396" title="1 of 2 branches missed.">                    if ((flags &amp; FLAG_WIDTH) != 0) {</span>
+<span class="nc" id="L397">                        raiseArgumentError(args,&quot;width given twice&quot;);</span>
+                    }
+<span class="fc" id="L399">                    flags |= FLAG_WIDTH;</span>
+                    // TODO: factor this chunk as in MRI/YARV GETASTER
+<span class="fc" id="L401">                    checkOffset(args,++offset,length,ERR_MALFORMED_STAR_NUM);</span>
+<span class="fc" id="L402">                    mark = offset;</span>
+<span class="fc" id="L403">                    number = 0;</span>
+<span class="pc bpc" id="L404" title="1 of 4 branches missed.">                    for ( ; offset &lt; length &amp;&amp; isDigit(fchar = format[offset]); offset++) {</span>
+<span class="fc" id="L405">                        number = extendWidth(args,number,fchar);</span>
+                    }
+<span class="fc" id="L407">                    checkOffset(args,offset,length,ERR_MALFORMED_STAR_NUM);</span>
+<span class="fc bfc" id="L408" title="All 2 branches covered.">                    if (fchar == '$') {</span>
+<span class="fc" id="L409">                        width = args.getNthInt(number);</span>
+<span class="fc bfc" id="L410" title="All 2 branches covered.">                        if (width &lt; 0) {</span>
+<span class="fc" id="L411">                            flags |= FLAG_MINUS;</span>
+<span class="fc" id="L412">                            width = -width;</span>
+                        }
+<span class="fc" id="L414">                        offset++;</span>
+                    } else {
+<span class="fc" id="L416">                        width = args.nextInt();</span>
+<span class="fc bfc" id="L417" title="All 2 branches covered.">                        if (width &lt; 0) {</span>
+<span class="fc" id="L418">                            flags |= FLAG_MINUS;</span>
+<span class="fc" id="L419">                            width = -width;</span>
+                        }
+                        // let the width (if any), get processed in the next loop,
+                        // so any leading 0 gets treated correctly
+<span class="fc" id="L423">                        offset = mark;</span>
+                    }
+<span class="fc" id="L425">                    break;</span>
+
+                case '.':
+<span class="pc bpc" id="L428" title="1 of 2 branches missed.">                    if ((flags &amp; FLAG_PRECISION) != 0) {</span>
+<span class="nc" id="L429">                        raiseArgumentError(args,&quot;precision given twice&quot;);</span>
+                    }
+<span class="fc" id="L431">                    flags |= FLAG_PRECISION;</span>
+<span class="fc" id="L432">                    checkOffset(args,++offset,length,ERR_MALFORMED_DOT_NUM);</span>
+<span class="fc" id="L433">                    fchar = format[offset];</span>
+<span class="fc bfc" id="L434" title="All 2 branches covered.">                    if (fchar == '*') {</span>
+                        // TODO: factor this chunk as in MRI/YARV GETASTER
+<span class="fc" id="L436">                        checkOffset(args,++offset,length,ERR_MALFORMED_STAR_NUM);</span>
+<span class="fc" id="L437">                        mark = offset;</span>
+<span class="fc" id="L438">                        number = 0;</span>
+                        { // MRI: GETNUM macro
+<span class="pc bpc" id="L440" title="1 of 4 branches missed.">                            for (; offset &lt; length &amp;&amp; isDigit(fchar = format[offset]); offset++) {</span>
+<span class="fc" id="L441">                                number = extendWidth(args, number, fchar);</span>
+                            }
+<span class="fc" id="L443">                            checkOffset(args, offset, length, ERR_MALFORMED_STAR_NUM);</span>
+                        }
+<span class="fc bfc" id="L445" title="All 2 branches covered.">                        if (fchar == '$') {</span>
+<span class="fc" id="L446">                            precision = args.getNthInt(number);</span>
+<span class="fc bfc" id="L447" title="All 2 branches covered.">                            if (precision &lt; 0) {</span>
+<span class="fc" id="L448">                                flags &amp;= ~FLAG_PRECISION;</span>
+                            }
+<span class="fc" id="L450">                            offset++;</span>
+                        } else {
+<span class="fc" id="L452">                            precision = args.nextInt();</span>
+<span class="pc bpc" id="L453" title="1 of 2 branches missed.">                            if (precision &lt; 0) {</span>
+<span class="nc" id="L454">                                flags &amp;= ~FLAG_PRECISION;</span>
+                            }
+                            // let the width (if any), get processed in the next loop,
+                            // so any leading 0 gets treated correctly
+<span class="fc" id="L458">                            offset = mark;</span>
+                        }
+                    } else {
+<span class="fc" id="L461">                        number = 0;</span>
+<span class="pc bpc" id="L462" title="1 of 4 branches missed.">                        for ( ; offset &lt; length &amp;&amp; isDigit(fchar = format[offset]); offset++) {</span>
+<span class="fc" id="L463">                            number = extendWidth(args,number,fchar);</span>
+                        }
+<span class="fc" id="L465">                        checkOffset(args,offset,length,ERR_MALFORMED_DOT_NUM);</span>
+<span class="fc" id="L466">                        precision = number;</span>
+                    }
+<span class="fc" id="L468">                    break;</span>
+
+                case '\n':
+<span class="fc" id="L471">                    offset--;</span>
+                case '%':
+<span class="pc bpc" id="L473" title="1 of 2 branches missed.">                    if (flags != FLAG_NONE) {</span>
+<span class="nc" id="L474">                        raiseArgumentError(args,ERR_ILLEGAL_FORMAT_CHAR);</span>
+                    }
+<span class="fc" id="L476">                    buf.append('%');</span>
+<span class="fc" id="L477">                    offset++;</span>
+<span class="fc" id="L478">                    incomplete = false;</span>
+<span class="fc" id="L479">                    break;</span>
+
+                case 'c': {
+<span class="pc bpc" id="L482" title="1 of 4 branches missed.">                    if (arg == null || name != null) {</span>
+<span class="fc" id="L483">                        arg = args.next(name);</span>
+<span class="fc" id="L484">                        name = null;</span>
+                    }
+
+<span class="fc" id="L487">                    int c = 0;</span>
+                    // MRI 1.8.5-p12 doesn't support 1-char strings, but
+                    // YARV 0.4.1 does. I don't think it hurts to include
+                    // this; sprintf('%c','a') is nicer than sprintf('%c','a'[0])
+<span class="fc bfc" id="L491" title="All 2 branches covered.">                    if (arg instanceof RubyString) {</span>
+<span class="fc" id="L492">                        ByteList bytes = ((RubyString)arg).getByteList();</span>
+<span class="pc bpc" id="L493" title="1 of 2 branches missed.">                        if (bytes.length() == 1) {</span>
+<span class="fc" id="L494">                            c = bytes.getUnsafeBytes()[bytes.begin()];</span>
+                        } else {
+<span class="nc" id="L496">                            raiseArgumentError(args,&quot;%c requires a character&quot;);</span>
+                        }
+<span class="fc" id="L498">                    } else {</span>
+<span class="fc" id="L499">                        c = args.intValue(arg);</span>
+                    }
+<span class="pc bpc" id="L501" title="1 of 4 branches missed.">                    if ((flags &amp; FLAG_WIDTH) != 0 &amp;&amp; width &gt; 1) {</span>
+<span class="fc bfc" id="L502" title="All 2 branches covered.">                        if ((flags &amp; FLAG_MINUS) != 0) {</span>
+<span class="fc" id="L503">                            buf.append(c);</span>
+<span class="fc" id="L504">                            buf.fill(' ', width-1);</span>
+                        } else {
+<span class="fc" id="L506">                            buf.fill(' ',width-1);</span>
+<span class="fc" id="L507">                            buf.append(c);</span>
+                        }
+                    } else {
+<span class="fc" id="L510">                        buf.append(c);</span>
+                    }
+<span class="fc" id="L512">                    offset++;</span>
+<span class="fc" id="L513">                    incomplete = false;</span>
+<span class="fc" id="L514">                    break;</span>
+                }
+                case 'p':
+                case 's': {
+<span class="pc bpc" id="L518" title="1 of 4 branches missed.">                    if (arg == null || name != null) {</span>
+<span class="fc" id="L519">                        arg = args.next(name);</span>
+<span class="fc" id="L520">                        name = null;</span>
+                    }
+
+<span class="fc bfc" id="L523" title="All 2 branches covered.">                    if (fchar == 'p') {</span>
+<span class="fc" id="L524">                        arg = arg.callMethod(arg.getRuntime().getCurrentContext(),&quot;inspect&quot;);</span>
+                    }
+<span class="fc" id="L526">                    RubyString strArg = arg.asString();</span>
+<span class="fc" id="L527">                    ByteList bytes = strArg.getByteList();</span>
+<span class="fc" id="L528">                    Encoding enc = wrapper.checkEncoding(strArg);</span>
+<span class="fc" id="L529">                    int len = bytes.length();</span>
+<span class="fc" id="L530">                    int strLen = strArg.strLength();</span>
+
+<span class="fc bfc" id="L532" title="All 2 branches covered.">                    if (arg.isTaint()) tainted = true;</span>
+
+<span class="pc bpc" id="L534" title="3 of 4 branches missed.">                    if ((flags &amp; FLAG_PRECISION) != 0 &amp;&amp; precision &lt; len) {</span>
+                        // TODO: precision is not considering actual character length
+                        // See below as well.
+<span class="nc" id="L537">                        len = precision;</span>
+<span class="nc" id="L538">                        strLen = precision;</span>
+                    }
+                    // TODO: adjust length so it won't fall in the middle
+                    // of a multi-byte character. MRI's sprintf.c uses tables
+                    // in a modified version of regex.c, which assume some
+                    // particular  encoding for a given installation/application.
+                    // (See regex.c#re_mbcinit in ruby-1.8.5-p12)
+                    //
+                    // This is only an issue if the user specifies a precision
+                    // that causes the string to be truncated. The same issue
+                    // would arise taking a substring of a ByteList-backed RubyString.
+
+<span class="fc bfc" id="L550" title="All 4 branches covered.">                    if ((flags &amp; FLAG_WIDTH) != 0 &amp;&amp; width &gt; strLen) {</span>
+<span class="fc" id="L551">                        width -= strLen;</span>
+<span class="fc bfc" id="L552" title="All 2 branches covered.">                        if ((flags &amp; FLAG_MINUS) != 0) {</span>
+<span class="fc" id="L553">                            buf.append(bytes.getUnsafeBytes(),bytes.begin(),len);</span>
+<span class="fc" id="L554">                            buf.fill(' ',width);</span>
+                        } else {
+<span class="fc" id="L556">                            buf.fill(' ',width);</span>
+<span class="fc" id="L557">                            buf.append(bytes.getUnsafeBytes(),bytes.begin(),len);</span>
+                        }
+                    } else {
+<span class="fc" id="L560">                        buf.append(bytes.getUnsafeBytes(),bytes.begin(),len);</span>
+                    }
+<span class="fc" id="L562">                    offset++;</span>
+<span class="fc" id="L563">                    incomplete = false;</span>
+<span class="fc" id="L564">                    buf.setEncoding(enc);</span>
+<span class="fc" id="L565">                    break;</span>
+                }
+                case 'd':
+                case 'i':
+                case 'o':
+                case 'x':
+                case 'X':
+                case 'b':
+                case 'B':
+                case 'u': {
+<span class="pc bpc" id="L575" title="1 of 4 branches missed.">                    if (arg == null || name != null) {</span>
+<span class="fc" id="L576">                        arg = args.next(name);</span>
+<span class="fc" id="L577">                        name = null;</span>
+                    }
+
+<span class="fc" id="L580">                    ClassIndex type = arg.getMetaClass().getClassIndex();</span>
+<span class="fc bfc" id="L581" title="All 4 branches covered.">                    if (type != ClassIndex.FIXNUM &amp;&amp; type != ClassIndex.BIGNUM) {</span>
+<span class="pc bpc" id="L582" title="1 of 3 branches missed.">                        switch(type) {</span>
+                        case FLOAT:
+<span class="nc" id="L584">                            arg = RubyNumeric.dbl2num(arg.getRuntime(),((RubyFloat)arg).getValue());</span>
+<span class="nc" id="L585">                            break;</span>
+                        case STRING:
+<span class="fc" id="L587">                            arg = ((RubyString)arg).stringToInum(0, true);</span>
+<span class="fc" id="L588">                            break;</span>
+                        default:
+<span class="fc bfc" id="L590" title="All 2 branches covered.">                            if (arg.respondsTo(&quot;to_int&quot;)) {</span>
+<span class="fc" id="L591">                                arg = TypeConverter.convertToType(arg, arg.getRuntime().getInteger(), &quot;to_int&quot;, true);</span>
+                            } else {
+<span class="fc" id="L593">                                arg = TypeConverter.convertToType(arg, arg.getRuntime().getInteger(), &quot;to_i&quot;, true);</span>
+                            }
+                            break;
+                        }
+<span class="fc" id="L597">                        type = arg.getMetaClass().getClassIndex();</span>
+                    }
+<span class="fc" id="L599">                    byte[] bytes = null;</span>
+<span class="fc" id="L600">                    int first = 0;</span>
+<span class="fc" id="L601">                    byte[] prefix = null;</span>
+                    boolean sign;
+                    boolean negative;
+<span class="fc" id="L604">                    byte signChar = 0;</span>
+<span class="fc" id="L605">                    byte leadChar = 0;</span>
+                    int base;
+
+                    // 'd' and 'i' are the same
+<span class="fc bfc" id="L609" title="All 2 branches covered.">                    if (fchar == 'i') fchar = 'd';</span>
+
+                    // 'u' with space or plus flags is same as 'd'
+<span class="fc bfc" id="L612" title="All 4 branches covered.">                    if (fchar == 'u' &amp;&amp; (flags &amp; (FLAG_SPACE | FLAG_PLUS)) != 0) {</span>
+<span class="fc" id="L613">                        fchar = 'd';</span>
+                    }
+<span class="fc bfc" id="L615" title="All 4 branches covered.">                    sign = (fchar == 'd' || (flags &amp; (FLAG_SPACE | FLAG_PLUS)) != 0);</span>
+
+<span class="fc bfc" id="L617" title="All 4 branches covered.">                    switch (fchar) {</span>
+                    case 'o':
+<span class="fc" id="L619">                        base = 8; break;</span>
+                    case 'x':
+                    case 'X':
+<span class="fc" id="L622">                        base = 16; break;</span>
+                    case 'b':
+                    case 'B':
+<span class="fc" id="L625">                        base = 2; break;</span>
+                    case 'u':
+                    case 'd':
+                    default:
+<span class="fc" id="L629">                        base = 10; break;</span>
+                    }
+                    // We depart here from strict adherence to MRI code, as MRI
+                    // uses C-sprintf, in part, to format numeric output, while
+                    // we'll use Java's numeric formatting code (and our own).
+                    boolean zero;
+<span class="fc bfc" id="L635" title="All 2 branches covered.">                    if (type == ClassIndex.FIXNUM) {</span>
+<span class="fc bfc" id="L636" title="All 2 branches covered.">                        negative = ((RubyFixnum)arg).getLongValue() &lt; 0;</span>
+<span class="fc bfc" id="L637" title="All 2 branches covered.">                        zero = ((RubyFixnum)arg).getLongValue() == 0;</span>
+<span class="pc bpc" id="L638" title="1 of 4 branches missed.">                        if (negative &amp;&amp; fchar == 'u') {</span>
+<span class="nc" id="L639">                            bytes = getUnsignedNegativeBytes((RubyFixnum)arg);</span>
+                        } else {
+<span class="fc bfc" id="L641" title="All 2 branches covered.">                            bytes = getFixnumBytes((RubyFixnum)arg,base,sign,fchar=='X');</span>
+                        }
+                    } else {
+<span class="pc bpc" id="L644" title="1 of 2 branches missed.">                        negative = ((RubyBignum)arg).getValue().signum() &lt; 0;</span>
+<span class="fc" id="L645">                        zero = ((RubyBignum)arg).getValue().equals(BigInteger.ZERO);</span>
+<span class="pc bpc" id="L646" title="2 of 6 branches missed.">                        if (negative &amp;&amp; fchar == 'u' &amp;&amp; usePrefixForZero) {</span>
+<span class="nc" id="L647">                            bytes = getUnsignedNegativeBytes((RubyBignum)arg);</span>
+                        } else {
+<span class="fc bfc" id="L649" title="All 2 branches covered.">                            bytes = getBignumBytes((RubyBignum)arg,base,sign,fchar=='X');</span>
+                        }
+                    }
+<span class="fc bfc" id="L652" title="All 2 branches covered.">                    if ((flags &amp; FLAG_SHARP) != 0) {</span>
+<span class="pc bpc" id="L653" title="1 of 4 branches missed.">                        if (!zero || usePrefixForZero) {</span>
+<span class="fc bfc" id="L654" title="All 6 branches covered.">                            switch (fchar) {</span>
+<span class="fc" id="L655">                            case 'o': prefix = PREFIX_OCTAL; break;</span>
+<span class="fc" id="L656">                            case 'x': prefix = PREFIX_HEX_LC; break;</span>
+<span class="fc" id="L657">                            case 'X': prefix = PREFIX_HEX_UC; break;</span>
+<span class="fc" id="L658">                            case 'b': prefix = PREFIX_BINARY_LC; break;</span>
+<span class="fc" id="L659">                            case 'B': prefix = PREFIX_BINARY_UC; break;</span>
+                            }
+                        }
+<span class="fc bfc" id="L662" title="All 2 branches covered.">                        if (prefix != null) width -= prefix.length;</span>
+                    }
+<span class="fc" id="L664">                    int len = 0;</span>
+<span class="fc bfc" id="L665" title="All 2 branches covered.">                    if (sign) {</span>
+<span class="fc bfc" id="L666" title="All 2 branches covered.">                        if (negative) {</span>
+<span class="fc" id="L667">                            signChar = '-';</span>
+<span class="fc" id="L668">                            width--;</span>
+<span class="fc" id="L669">                            first = 1; // skip '-' in bytes, will add where appropriate</span>
+<span class="fc bfc" id="L670" title="All 2 branches covered.">                        } else if ((flags &amp; FLAG_PLUS) != 0) {</span>
+<span class="fc" id="L671">                            signChar = '+';</span>
+<span class="fc" id="L672">                            width--;</span>
+<span class="fc bfc" id="L673" title="All 2 branches covered.">                        } else if ((flags &amp; FLAG_SPACE) != 0) {</span>
+<span class="fc" id="L674">                            signChar = ' ';</span>
+<span class="fc" id="L675">                            width--;</span>
+                        }
+<span class="fc bfc" id="L677" title="All 2 branches covered.">                    } else if (negative) {</span>
+<span class="fc bfc" id="L678" title="All 2 branches covered.">                        if (base == 10) {</span>
+<span class="fc" id="L679">                            warning(ID.NEGATIVE_NUMBER_FOR_U, args, &quot;negative number for %u specifier&quot;);</span>
+<span class="fc" id="L680">                            leadChar = '.';</span>
+<span class="fc" id="L681">                            len += 2;</span>
+                        } else {
+<span class="fc bfc" id="L683" title="All 2 branches covered.">                            if ((flags &amp; (FLAG_PRECISION | FLAG_ZERO)) == 0) len += 2; // ..</span>
+
+<span class="fc" id="L685">                            first = skipSignBits(bytes,base);</span>
+<span class="pc bpc" id="L686" title="1 of 5 branches missed.">                            switch(fchar) {</span>
+                            case 'b':
+                            case 'B':
+<span class="fc" id="L689">                                leadChar = '1';</span>
+<span class="fc" id="L690">                                break;</span>
+                            case 'o':
+<span class="fc" id="L692">                                leadChar = '7';</span>
+<span class="fc" id="L693">                                break;</span>
+                            case 'x':
+<span class="fc" id="L695">                                leadChar = 'f';</span>
+<span class="fc" id="L696">                                break;</span>
+                            case 'X':
+<span class="fc" id="L698">                                leadChar = 'F';</span>
+                                break;
+                            }
+<span class="pc bpc" id="L701" title="1 of 2 branches missed.">                            if (leadChar != 0) len++;</span>
+                        }
+                    }
+<span class="fc" id="L704">                    int numlen = bytes.length - first;</span>
+<span class="fc" id="L705">                    len += numlen;</span>
+
+<span class="fc bfc" id="L707" title="All 2 branches covered.">                    if ((flags &amp; (FLAG_ZERO|FLAG_PRECISION)) == FLAG_ZERO) {</span>
+<span class="fc" id="L708">                        precision = width;</span>
+<span class="fc" id="L709">                        width = 0;</span>
+                    } else {
+<span class="fc bfc" id="L711" title="All 2 branches covered.">                        if (precision &lt; len) precision = len;</span>
+
+<span class="fc" id="L713">                        width -= precision;</span>
+                    }
+<span class="fc bfc" id="L715" title="All 2 branches covered.">                    if ((flags &amp; FLAG_MINUS) == 0) {</span>
+<span class="fc" id="L716">                        buf.fill(' ',width);</span>
+<span class="fc" id="L717">                        width = 0;</span>
+                    }
+<span class="fc bfc" id="L719" title="All 2 branches covered.">                    if (signChar != 0) buf.append(signChar);</span>
+<span class="fc bfc" id="L720" title="All 2 branches covered.">                    if (prefix != null) buf.append(prefix);</span>
+
+<span class="fc bfc" id="L722" title="All 2 branches covered.">                    if (len &lt; precision) {</span>
+<span class="fc bfc" id="L723" title="All 2 branches covered.">                        if (leadChar == 0) {</span>
+<span class="pc bpc" id="L724" title="2 of 12 branches missed.">                            if (fchar != 'd' || usePrefixForZero || !negative ||</span>
+                                    (flags &amp; FLAG_PRECISION) != 0 ||
+                                    ((flags &amp; FLAG_ZERO) != 0 &amp;&amp; (flags &amp; FLAG_MINUS) == 0)) {
+<span class="fc" id="L727">                                buf.fill('0', precision - len);</span>
+                            }
+<span class="pc bpc" id="L729" title="1 of 2 branches missed.">                        } else if (leadChar == '.') {</span>
+<span class="nc" id="L730">                            buf.fill(leadChar,precision-len);</span>
+<span class="nc" id="L731">                            buf.append(PREFIX_NEGATIVE);</span>
+<span class="pc bpc" id="L732" title="1 of 2 branches missed.">                        } else if (!usePrefixForZero) {</span>
+<span class="fc" id="L733">                            buf.append(PREFIX_NEGATIVE);</span>
+<span class="fc" id="L734">                            buf.fill(leadChar,precision - len - 1);</span>
+                        } else {
+<span class="nc" id="L736">                            buf.fill(leadChar,precision-len+1); // the 1 is for the stripped sign char</span>
+                        }
+<span class="fc bfc" id="L738" title="All 2 branches covered.">                    } else if (leadChar != 0) {</span>
+<span class="pc bpc" id="L739" title="2 of 6 branches missed.">                        if (((flags &amp; (FLAG_PRECISION | FLAG_ZERO)) == 0 &amp;&amp; usePrefixForZero) ||</span>
+<span class="fc bfc" id="L740" title="All 2 branches covered.">                                (!usePrefixForZero &amp;&amp; &quot;xXbBo&quot;.indexOf(fchar) != -1)) {</span>
+<span class="fc" id="L741">                            buf.append(PREFIX_NEGATIVE);</span>
+                        }
+<span class="fc bfc" id="L743" title="All 2 branches covered.">                        if (leadChar != '.') buf.append(leadChar);</span>
+                    }
+<span class="fc" id="L745">                    buf.append(bytes,first,numlen);</span>
+
+<span class="fc bfc" id="L747" title="All 2 branches covered.">                    if (width &gt; 0) buf.fill(' ',width);</span>
+<span class="pc bpc" id="L748" title="1 of 10 branches missed.">                    if (len &lt; precision &amp;&amp; fchar == 'd' &amp;&amp; negative &amp;&amp;</span>
+                            !usePrefixForZero &amp;&amp; (flags &amp; FLAG_MINUS) != 0) {
+<span class="fc" id="L750">                        buf.fill(' ', precision - len);</span>
+                    }
+
+<span class="fc" id="L753">                    offset++;</span>
+<span class="fc" id="L754">                    incomplete = false;</span>
+<span class="fc" id="L755">                    break;</span>
+                }
+                case 'E':
+                case 'e':
+                case 'f':
+                case 'G':
+                case 'g': {
+<span class="pc bpc" id="L762" title="1 of 4 branches missed.">                    if (arg == null || name != null) {</span>
+<span class="fc" id="L763">                        arg = args.next(name);</span>
+<span class="fc" id="L764">                        name = null;</span>
+                    }
+
+<span class="fc bfc" id="L767" title="All 2 branches covered.">                    if (!(arg instanceof RubyFloat)) {</span>
+                        // FIXME: what is correct 'recv' argument?
+                        // (this does produce the desired behavior)
+<span class="pc bpc" id="L770" title="1 of 2 branches missed.">                        if (usePrefixForZero) {</span>
+<span class="nc" id="L771">                            arg = RubyKernel.new_float(arg,arg);</span>
+                        } else {
+<span class="fc" id="L773">                            arg = RubyKernel.new_float19(arg,arg);</span>
+                        }
+                    }
+<span class="fc" id="L776">                    double dval = ((RubyFloat)arg).getDoubleValue();</span>
+<span class="fc bfc" id="L777" title="All 2 branches covered.">                    boolean nan = dval != dval;</span>
+<span class="fc bfc" id="L778" title="All 4 branches covered.">                    boolean inf = dval == Double.POSITIVE_INFINITY || dval == Double.NEGATIVE_INFINITY;</span>
+<span class="fc bfc" id="L779" title="All 6 branches covered.">                    boolean negative = dval &lt; 0.0d || (dval == 0.0d &amp;&amp; (new Float(dval)).equals(new Float(-0.0)));</span>
+
+                    byte[] digits;
+<span class="fc" id="L782">                    int nDigits = 0;</span>
+<span class="fc" id="L783">                    int exponent = 0;</span>
+
+<span class="fc" id="L785">                    int len = 0;</span>
+                    byte signChar;
+
+<span class="fc bfc" id="L788" title="All 4 branches covered.">                    if (nan || inf) {</span>
+<span class="fc bfc" id="L789" title="All 2 branches covered.">                        if (nan) {</span>
+<span class="fc" id="L790">                            digits = NAN_VALUE;</span>
+<span class="fc" id="L791">                            len = NAN_VALUE.length;</span>
+                        } else {
+<span class="fc" id="L793">                            digits = INFINITY_VALUE;</span>
+<span class="fc" id="L794">                            len = INFINITY_VALUE.length;</span>
+                        }
+<span class="fc bfc" id="L796" title="All 2 branches covered.">                        if (negative) {</span>
+<span class="fc" id="L797">                            signChar = '-';</span>
+<span class="fc" id="L798">                            width--;</span>
+<span class="fc bfc" id="L799" title="All 2 branches covered.">                        } else if ((flags &amp; FLAG_PLUS) != 0) {</span>
+<span class="fc" id="L800">                            signChar = '+';</span>
+<span class="fc" id="L801">                            width--;</span>
+<span class="fc bfc" id="L802" title="All 2 branches covered.">                        } else if ((flags &amp; FLAG_SPACE) != 0) {</span>
+<span class="fc" id="L803">                            signChar = ' ';</span>
+<span class="fc" id="L804">                            width--;</span>
+                        } else {
+<span class="fc" id="L806">                            signChar = 0;</span>
+                        }
+<span class="fc" id="L808">                        width -= len;</span>
+
+<span class="fc bfc" id="L810" title="All 4 branches covered.">                        if (width &gt; 0 &amp;&amp; (flags &amp; (FLAG_ZERO|FLAG_MINUS)) == 0) {</span>
+<span class="fc" id="L811">                            buf.fill(' ',width);</span>
+<span class="fc" id="L812">                            width = 0;</span>
+                        }
+<span class="fc bfc" id="L814" title="All 2 branches covered.">                        if (signChar != 0) buf.append(signChar);</span>
+
+<span class="pc bpc" id="L816" title="1 of 4 branches missed.">                        if (width &gt; 0 &amp;&amp; (flags &amp; FLAG_MINUS) == 0) {</span>
+<span class="nc" id="L817">                            buf.fill('0',width);</span>
+<span class="nc" id="L818">                            width = 0;</span>
+                        }
+<span class="fc" id="L820">                        buf.append(digits);</span>
+<span class="fc bfc" id="L821" title="All 2 branches covered.">                        if (width &gt; 0) buf.fill(' ', width);</span>
+
+<span class="fc" id="L823">                        offset++;</span>
+<span class="fc" id="L824">                        incomplete = false;</span>
+<span class="fc" id="L825">                        break;</span>
+                    }
+
+<span class="fc" id="L828">                    NumberFormat nf = getNumberFormat(args.locale);</span>
+<span class="fc" id="L829">                    nf.setMaximumFractionDigits(Integer.MAX_VALUE);</span>
+<span class="fc" id="L830">                    String str = nf.format(dval);</span>
+
+                    // grrr, arghh, want to subclass sun.misc.FloatingDecimal, but can't,
+                    // so we must do all this (the next 70 lines of code), which has already
+                    // been done by FloatingDecimal.
+<span class="fc" id="L835">                    int strlen = str.length();</span>
+<span class="fc" id="L836">                    digits = new byte[strlen];</span>
+<span class="fc" id="L837">                    int nTrailingZeroes = 0;</span>
+<span class="fc bfc" id="L838" title="All 2 branches covered.">                    int i = negative ? 1 : 0;</span>
+<span class="fc" id="L839">                    int decPos = 0;</span>
+                    byte ival;
+                int_loop:
+<span class="fc bfc" id="L842" title="All 2 branches covered.">                    for ( ; i &lt; strlen ; ) {</span>
+<span class="fc bfc" id="L843" title="All 4 branches covered.">                        switch(ival = (byte)str.charAt(i++)) {</span>
+                        case '0':
+<span class="fc bfc" id="L845" title="All 2 branches covered.">                            if (nDigits &gt; 0) nTrailingZeroes++;</span>
+
+                            break; // switch
+                        case '1': case '2': case '3': case '4':
+                        case '5': case '6': case '7': case '8': case '9':
+<span class="fc bfc" id="L850" title="All 2 branches covered.">                            if (nTrailingZeroes &gt; 0) {</span>
+<span class="fc bfc" id="L851" title="All 2 branches covered.">                                for ( ; nTrailingZeroes &gt; 0 ; nTrailingZeroes-- ) {</span>
+<span class="fc" id="L852">                                    digits[nDigits++] = '0';</span>
+                                }
+                            }
+<span class="fc" id="L855">                            digits[nDigits++] = ival;</span>
+<span class="fc" id="L856">                            break; // switch</span>
+                        case '.':
+<span class="fc" id="L858">                            break int_loop;</span>
+                        }
+                    }
+<span class="fc" id="L861">                    decPos = nDigits + nTrailingZeroes;</span>
+                dec_loop:
+<span class="fc bfc" id="L863" title="All 2 branches covered.">                    for ( ; i &lt; strlen ; ) {</span>
+<span class="pc bpc" id="L864" title="2 of 4 branches missed.">                        switch(ival = (byte)str.charAt(i++)) {</span>
+                        case '0':
+<span class="fc bfc" id="L866" title="All 2 branches covered.">                            if (nDigits &gt; 0) {</span>
+<span class="fc" id="L867">                                nTrailingZeroes++;</span>
+                            } else {
+<span class="fc" id="L869">                                exponent--;</span>
+                            }
+<span class="fc" id="L871">                            break; // switch</span>
+                        case '1': case '2': case '3': case '4':
+                        case '5': case '6': case '7': case '8': case '9':
+<span class="fc bfc" id="L874" title="All 2 branches covered.">                            if (nTrailingZeroes &gt; 0) {</span>
+<span class="fc bfc" id="L875" title="All 2 branches covered.">                                for ( ; nTrailingZeroes &gt; 0 ; nTrailingZeroes--  ) {</span>
+<span class="fc" id="L876">                                    digits[nDigits++] = '0';</span>
+                                }
+                            }
+<span class="fc" id="L879">                            digits[nDigits++] = ival;</span>
+<span class="fc" id="L880">                            break; // switch</span>
+                        case 'E':
+<span class="pc" id="L882">                            break dec_loop;</span>
+                        }
+                    }
+<span class="pc bpc" id="L885" title="1 of 2 branches missed.">                    if (i &lt; strlen) {</span>
+                        int expSign;
+<span class="nc" id="L887">                        int expVal = 0;</span>
+<span class="nc bnc" id="L888" title="All 2 branches missed.">                        if (str.charAt(i) == '-') {</span>
+<span class="nc" id="L889">                            expSign = -1;</span>
+<span class="nc" id="L890">                            i++;</span>
+                        } else {
+<span class="nc" id="L892">                            expSign = 1;</span>
+                        }
+<span class="nc bnc" id="L894" title="All 2 branches missed.">                        for ( ; i &lt; strlen ; ) {</span>
+<span class="nc" id="L895">                            expVal = expVal * 10 + ((int)str.charAt(i++)-(int)'0');</span>
+                        }
+<span class="nc" id="L897">                        exponent += expVal * expSign;</span>
+                    }
+<span class="fc" id="L899">                    exponent += decPos - nDigits;</span>
+
+                    // gotta have at least a zero...
+<span class="fc bfc" id="L902" title="All 2 branches covered.">                    if (nDigits == 0) {</span>
+<span class="fc" id="L903">                        digits[0] = '0';</span>
+<span class="fc" id="L904">                        nDigits = 1;</span>
+<span class="fc" id="L905">                        exponent = 0;</span>
+                    }
+
+                    // OK, we now have the significand in digits[0...nDigits]
+                    // and the exponent in exponent.  We're ready to format.
+
+                    int intDigits, intZeroes, intLength;
+                    int decDigits, decZeroes, decLength;
+                    byte expChar;
+
+<span class="fc bfc" id="L915" title="All 2 branches covered.">                    if (negative) {</span>
+<span class="fc" id="L916">                        signChar = '-';</span>
+<span class="fc" id="L917">                        width--;</span>
+<span class="fc bfc" id="L918" title="All 2 branches covered.">                    } else if ((flags &amp; FLAG_PLUS) != 0) {</span>
+<span class="fc" id="L919">                        signChar = '+';</span>
+<span class="fc" id="L920">                        width--;</span>
+<span class="fc bfc" id="L921" title="All 2 branches covered.">                    } else if ((flags &amp; FLAG_SPACE) != 0) {</span>
+<span class="fc" id="L922">                        signChar = ' ';</span>
+<span class="fc" id="L923">                        width--;</span>
+                    } else {
+<span class="fc" id="L925">                        signChar = 0;</span>
+                    }
+<span class="fc bfc" id="L927" title="All 2 branches covered.">                    if ((flags &amp; FLAG_PRECISION) == 0) {</span>
+<span class="fc" id="L928">                        precision = 6;</span>
+                    }
+
+<span class="fc bfc" id="L931" title="All 3 branches covered.">                    switch(fchar) {</span>
+                    case 'E':
+                    case 'G':
+<span class="fc" id="L934">                        expChar = 'E';</span>
+<span class="fc" id="L935">                        break;</span>
+                    case 'e':
+                    case 'g':
+<span class="fc" id="L938">                        expChar = 'e';</span>
+<span class="fc" id="L939">                        break;</span>
+                    default:
+<span class="fc" id="L941">                        expChar = 0;</span>
+                    }
+
+<span class="pc bpc" id="L944" title="1 of 4 branches missed.">                    switch (fchar) {</span>
+                    case 'g':
+                    case 'G':
+                        // an empirically derived rule: precision applies to
+                        // significand length, irrespective of exponent
+
+                        // an official rule, clarified: if the exponent
+                        // &lt;clarif&gt;after adjusting for exponent form&lt;/clarif&gt;
+                        // is &lt; -4,  or the exponent &lt;clarif&gt;after adjusting
+                        // for exponent form&lt;/clarif&gt; is greater than the
+                        // precision, use exponent form
+<span class="pc bpc" id="L955" title="1 of 6 branches missed.">                        boolean expForm = (exponent + nDigits - 1 &lt; -4 ||</span>
+                            exponent + nDigits &gt; (precision == 0 ? 1 : precision));
+                        // it would be nice (and logical!) if exponent form
+                        // behaved like E/e, and decimal form behaved like f,
+                        // but no such luck. hence:
+<span class="fc bfc" id="L960" title="All 2 branches covered.">                        if (expForm) {</span>
+                            // intDigits isn't used here, but if it were, it would be 1
+                            /* intDigits = 1; */
+<span class="fc" id="L963">                            decDigits = nDigits - 1;</span>
+                            // precision for G/g includes integer digits
+<span class="fc" id="L965">                            precision = Math.max(0,precision - 1);</span>
+
+<span class="pc bpc" id="L967" title="1 of 2 branches missed.">                            if (precision &lt; decDigits) {</span>
+<span class="nc bnc" id="L968" title="All 2 branches missed.">                                int n = round(digits,nDigits,precision,precision!=0);</span>
+<span class="nc bnc" id="L969" title="All 2 branches missed.">                                if (n &gt; nDigits) nDigits = n;</span>
+<span class="nc" id="L970">                                decDigits = Math.min(nDigits - 1,precision);</span>
+                            }
+<span class="fc" id="L972">                            exponent += nDigits - 1;</span>
+
+<span class="fc bfc" id="L974" title="All 2 branches covered.">                            boolean isSharp = (flags &amp; FLAG_SHARP) != 0;</span>
+
+                            // deal with length/width
+
+<span class="fc" id="L978">                            len++; // first digit is always printed</span>
+
+                            // MRI behavior: Be default, 2 digits
+                            // in the exponent. Use 3 digits
+                            // only when necessary.
+                            // See comment for writeExp method for more details.
+<span class="pc bpc" id="L984" title="1 of 2 branches missed.">                            if (exponent &gt; 99) {</span>
+<span class="nc" id="L985">                            	len += 5; // 5 -&gt; e+nnn / e-nnn</span>
+                            } else {
+<span class="fc" id="L987">                            	len += 4; // 4 -&gt; e+nn / e-nn</span>
+                            }
+
+<span class="fc bfc" id="L990" title="All 2 branches covered.">                            if (isSharp) {</span>
+                            	// in this mode, '.' is always printed
+<span class="fc" id="L992">                            	len++;</span>
+                            }
+
+<span class="pc bpc" id="L995" title="1 of 2 branches missed.">                            if (precision &gt; 0) {</span>
+<span class="fc bfc" id="L996" title="All 2 branches covered.">                            	if (!isSharp) {</span>
+                            	    // MRI behavior: In this mode
+                            	    // trailing zeroes are removed:
+                            	    // 1.500E+05 -&gt; 1.5E+05
+<span class="fc" id="L1000">                            	    int j = decDigits;</span>
+<span class="pc bfc" id="L1001" title="All 2 branches covered.">                            	    for (; j &gt;= 1; j--) {</span>
+<span class="pc bpc" id="L1002" title="1 of 2 branches missed.">                            	        if (digits[j]== '0') {</span>
+<span class="nc" id="L1003">                            	            decDigits--;</span>
+                            	        } else {
+                            	            break;
+                            	        }
+                            	    }
+
+<span class="fc bfc" id="L1009" title="All 2 branches covered.">                            	    if (decDigits &gt; 0) {</span>
+<span class="fc" id="L1010">                            	        len += 1; // '.' is printed</span>
+<span class="fc" id="L1011">                            	        len += decDigits;</span>
+                            	    }
+<span class="fc" id="L1013">                            	} else  {</span>
+                            	    // all precision numebers printed
+<span class="fc" id="L1015">                            	    len += precision;</span>
+                            	}
+                            }
+
+<span class="fc" id="L1019">                            width -= len;</span>
+
+<span class="pc bpc" id="L1021" title="3 of 4 branches missed.">                            if (width &gt; 0 &amp;&amp; (flags &amp; (FLAG_ZERO|FLAG_MINUS)) == 0) {</span>
+<span class="nc" id="L1022">                                buf.fill(' ',width);</span>
+<span class="nc" id="L1023">                                width = 0;</span>
+                            }
+<span class="fc bfc" id="L1025" title="All 2 branches covered.">                            if (signChar != 0) {</span>
+<span class="fc" id="L1026">                                buf.append(signChar);</span>
+                            }
+<span class="pc bpc" id="L1028" title="3 of 4 branches missed.">                            if (width &gt; 0 &amp;&amp; (flags &amp; FLAG_MINUS) == 0) {</span>
+<span class="nc" id="L1029">                                buf.fill('0',width);</span>
+<span class="nc" id="L1030">                                width = 0;</span>
+                            }
+
+                            // now some data...
+<span class="fc" id="L1034">                            buf.append(digits[0]);</span>
+
+<span class="pc bpc" id="L1036" title="1 of 6 branches missed.">                            boolean dotToPrint = isSharp</span>
+                                    || (precision &gt; 0 &amp;&amp; decDigits &gt; 0);
+
+<span class="fc bfc" id="L1039" title="All 2 branches covered.">                            if (dotToPrint) {</span>
+<span class="fc" id="L1040">                            	buf.append(args.getDecimalSeparator()); // '.'</span>
+                            }
+
+<span class="pc bpc" id="L1043" title="1 of 4 branches missed.">                            if (precision &gt; 0 &amp;&amp; decDigits &gt; 0) {</span>
+<span class="fc" id="L1044">                            	buf.append(digits, 1, decDigits);</span>
+<span class="fc" id="L1045">                            	precision -= decDigits;</span>
+                            }
+
+<span class="pc bpc" id="L1048" title="1 of 4 branches missed.">                            if (precision &gt; 0 &amp;&amp; isSharp) {</span>
+<span class="fc" id="L1049">                            	buf.fill('0', precision);</span>
+                            }
+
+<span class="fc" id="L1052">                            writeExp(buf, exponent, expChar);</span>
+
+<span class="pc bpc" id="L1054" title="1 of 2 branches missed.">                            if (width &gt; 0) {</span>
+<span class="nc" id="L1055">                                buf.fill(' ', width);</span>
+                            }
+<span class="fc" id="L1057">                        } else { // decimal form, like (but not *just* like!) 'f'</span>
+<span class="fc" id="L1058">                            intDigits = Math.max(0,Math.min(nDigits + exponent,nDigits));</span>
+<span class="fc" id="L1059">                            intZeroes = Math.max(0,exponent);</span>
+<span class="fc" id="L1060">                            intLength = intDigits + intZeroes;</span>
+<span class="fc" id="L1061">                            decDigits = nDigits - intDigits;</span>
+<span class="fc" id="L1062">                            decZeroes = Math.max(0,-(decDigits + exponent));</span>
+<span class="fc" id="L1063">                            decLength = decZeroes + decDigits;</span>
+<span class="fc" id="L1064">                            precision = Math.max(0,precision - intLength);</span>
+
+<span class="fc bfc" id="L1066" title="All 2 branches covered.">                            if (precision &lt; decDigits) {</span>
+<span class="pc bpc" id="L1067" title="1 of 2 branches missed.">                                int n = round(digits,nDigits,intDigits+precision-1,precision!=0);</span>
+<span class="pc bpc" id="L1068" title="1 of 2 branches missed.">                                if (n &gt; nDigits) {</span>
+                                    // digits array shifted, update all
+<span class="nc" id="L1070">                                    nDigits = n;</span>
+<span class="nc" id="L1071">                                    intDigits = Math.max(0,Math.min(nDigits + exponent,nDigits));</span>
+<span class="nc" id="L1072">                                    intLength = intDigits + intZeroes;</span>
+<span class="nc" id="L1073">                                    decDigits = nDigits - intDigits;</span>
+<span class="nc" id="L1074">                                    decZeroes = Math.max(0,-(decDigits + exponent));</span>
+<span class="nc" id="L1075">                                    precision = Math.max(0,precision-1);</span>
+                                }
+<span class="fc" id="L1077">                                decDigits = precision;</span>
+<span class="fc" id="L1078">                                decLength = decZeroes + decDigits;</span>
+                            }
+<span class="fc" id="L1080">                            len += intLength;</span>
+<span class="fc bfc" id="L1081" title="All 2 branches covered.">                            if (decLength &gt; 0) {</span>
+<span class="fc" id="L1082">                                len += decLength + 1;</span>
+                            } else {
+<span class="fc bfc" id="L1084" title="All 2 branches covered.">                                if ((flags &amp; FLAG_SHARP) != 0) {</span>
+<span class="fc" id="L1085">                                    len++; // will have a trailing '.'</span>
+<span class="pc bpc" id="L1086" title="1 of 2 branches missed.">                                    if (precision &gt; 0) { // g fills trailing zeroes if #</span>
+<span class="fc" id="L1087">                                        len += precision;</span>
+                                    }
+                                }
+                            }
+
+<span class="fc" id="L1092">                            width -= len;</span>
+
+<span class="fc bfc" id="L1094" title="All 4 branches covered.">                            if (width &gt; 0 &amp;&amp; (flags &amp; (FLAG_ZERO|FLAG_MINUS)) == 0) {</span>
+<span class="fc" id="L1095">                                buf.fill(' ',width);</span>
+<span class="fc" id="L1096">                                width = 0;</span>
+                            }
+<span class="fc bfc" id="L1098" title="All 2 branches covered.">                            if (signChar != 0) {</span>
+<span class="fc" id="L1099">                                buf.append(signChar);</span>
+                            }
+<span class="fc bfc" id="L1101" title="All 4 branches covered.">                            if (width &gt; 0 &amp;&amp; (flags &amp; FLAG_MINUS) == 0) {</span>
+<span class="fc" id="L1102">                                buf.fill('0',width);</span>
+<span class="fc" id="L1103">                                width = 0;</span>
+                            }
+                            // now some data...
+<span class="fc bfc" id="L1106" title="All 2 branches covered.">                            if (intLength &gt; 0){</span>
+<span class="pc bpc" id="L1107" title="1 of 2 branches missed.">                                if (intDigits &gt; 0) { // s/b true, since intLength &gt; 0</span>
+<span class="fc" id="L1108">                                    buf.append(digits,0,intDigits);</span>
+                                }
+<span class="fc bfc" id="L1110" title="All 2 branches covered.">                                if (intZeroes &gt; 0) {</span>
+<span class="fc" id="L1111">                                    buf.fill('0',intZeroes);</span>
+                                }
+                            } else {
+                                // always need at least a 0
+<span class="fc" id="L1115">                                buf.append('0');</span>
+                            }
+<span class="fc bfc" id="L1117" title="All 4 branches covered.">                            if (decLength &gt; 0 || (flags &amp; FLAG_SHARP) != 0) {</span>
+<span class="fc" id="L1118">                                buf.append(args.getDecimalSeparator());</span>
+                            }
+<span class="fc bfc" id="L1120" title="All 2 branches covered.">                            if (decLength &gt; 0) {</span>
+<span class="fc bfc" id="L1121" title="All 2 branches covered.">                                if (decZeroes &gt; 0) {</span>
+<span class="fc" id="L1122">                                    buf.fill('0',decZeroes);</span>
+<span class="fc" id="L1123">                                    precision -= decZeroes;</span>
+                                }
+<span class="pc bpc" id="L1125" title="1 of 2 branches missed.">                                if (decDigits &gt; 0) {</span>
+<span class="fc" id="L1126">                                    buf.append(digits,intDigits,decDigits);</span>
+<span class="fc" id="L1127">                                    precision -= decDigits;</span>
+                                }
+<span class="pc bpc" id="L1129" title="1 of 4 branches missed.">                                if ((flags &amp; FLAG_SHARP) != 0 &amp;&amp; precision &gt; 0) {</span>
+<span class="fc" id="L1130">                                    buf.fill('0',precision);</span>
+                                }
+                            }
+<span class="pc bpc" id="L1133" title="1 of 4 branches missed.">                            if ((flags &amp; FLAG_SHARP) != 0 &amp;&amp; precision &gt; 0) buf.fill('0',precision);</span>
+<span class="fc bfc" id="L1134" title="All 2 branches covered.">                            if (width &gt; 0) buf.fill(' ', width);</span>
+                        }
+                        break;
+
+                    case 'f':
+<span class="fc" id="L1139">                        intDigits = Math.max(0,Math.min(nDigits + exponent,nDigits));</span>
+<span class="fc" id="L1140">                        intZeroes = Math.max(0,exponent);</span>
+<span class="fc" id="L1141">                        intLength = intDigits + intZeroes;</span>
+<span class="fc" id="L1142">                        decDigits = nDigits - intDigits;</span>
+<span class="fc" id="L1143">                        decZeroes = Math.max(0,-(decDigits + exponent));</span>
+<span class="fc" id="L1144">                        decLength = decZeroes + decDigits;</span>
+
+<span class="fc bfc" id="L1146" title="All 2 branches covered.">                        if (precision &lt; decLength) {</span>
+<span class="fc bfc" id="L1147" title="All 2 branches covered.">                            if (precision &lt; decZeroes) {</span>
+<span class="fc" id="L1148">                                decDigits = 0;</span>
+<span class="fc" id="L1149">                                decZeroes = precision;</span>
+                            } else {
+<span class="fc" id="L1151">                                int n = round(digits, nDigits, intDigits+precision-decZeroes-1, false);</span>
+<span class="pc bpc" id="L1152" title="1 of 2 branches missed.">                                if (n &gt; nDigits) {</span>
+                                    // digits arr shifted, update all
+<span class="nc" id="L1154">                                    nDigits = n;</span>
+<span class="nc" id="L1155">                                    intDigits = Math.max(0,Math.min(nDigits + exponent,nDigits));</span>
+<span class="nc" id="L1156">                                    intLength = intDigits + intZeroes;</span>
+<span class="nc" id="L1157">                                    decDigits = nDigits - intDigits;</span>
+<span class="nc" id="L1158">                                    decZeroes = Math.max(0,-(decDigits + exponent));</span>
+<span class="nc" id="L1159">                                    decLength = decZeroes + decDigits;</span>
+                                }
+<span class="fc" id="L1161">                                decDigits = precision - decZeroes;</span>
+                            }
+<span class="fc" id="L1163">                            decLength = decZeroes + decDigits;</span>
+                        }
+<span class="fc bfc" id="L1165" title="All 2 branches covered.">                        if (precision &gt; 0) {</span>
+<span class="fc" id="L1166">                            len += Math.max(1,intLength) + 1 + precision;</span>
+                            // (1|intlen).prec
+                        } else {
+<span class="fc" id="L1169">                            len += Math.max(1,intLength);</span>
+                            // (1|intlen)
+<span class="pc bpc" id="L1171" title="1 of 2 branches missed.">                            if ((flags &amp; FLAG_SHARP) != 0) {</span>
+<span class="nc" id="L1172">                                len++; // will have a trailing '.'</span>
+                            }
+                        }
+
+<span class="fc" id="L1176">                        width -= len;</span>
+
+<span class="fc bfc" id="L1178" title="All 4 branches covered.">                        if (width &gt; 0 &amp;&amp; (flags &amp; (FLAG_ZERO|FLAG_MINUS)) == 0) {</span>
+<span class="fc" id="L1179">                            buf.fill(' ',width);</span>
+<span class="fc" id="L1180">                            width = 0;</span>
+                        }
+<span class="fc bfc" id="L1182" title="All 2 branches covered.">                        if (signChar != 0) {</span>
+<span class="fc" id="L1183">                            buf.append(signChar);</span>
+                        }
+<span class="pc bpc" id="L1185" title="1 of 4 branches missed.">                        if (width &gt; 0 &amp;&amp; (flags &amp; FLAG_MINUS) == 0) {</span>
+<span class="fc" id="L1186">                            buf.fill('0',width);</span>
+<span class="fc" id="L1187">                            width = 0;</span>
+                        }
+                        // now some data...
+<span class="fc bfc" id="L1190" title="All 2 branches covered.">                        if (intLength &gt; 0){</span>
+<span class="pc bpc" id="L1191" title="1 of 2 branches missed.">                            if (intDigits &gt; 0) { // s/b true, since intLength &gt; 0</span>
+<span class="fc" id="L1192">                                buf.append(digits,0,intDigits);</span>
+                            }
+<span class="fc bfc" id="L1194" title="All 2 branches covered.">                            if (intZeroes &gt; 0) {</span>
+<span class="fc" id="L1195">                                buf.fill('0',intZeroes);</span>
+                            }
+                        } else {
+                            // always need at least a 0
+<span class="fc" id="L1199">                            buf.append('0');</span>
+                        }
+<span class="pc bpc" id="L1201" title="1 of 4 branches missed.">                        if (precision &gt; 0 || (flags &amp; FLAG_SHARP) != 0) {</span>
+<span class="fc" id="L1202">                            buf.append(args.getDecimalSeparator());</span>
+                        }
+<span class="fc bfc" id="L1204" title="All 2 branches covered.">                        if (precision &gt; 0) {</span>
+<span class="fc bfc" id="L1205" title="All 2 branches covered.">                            if (decZeroes &gt; 0) {</span>
+<span class="fc" id="L1206">                                buf.fill('0',decZeroes);</span>
+<span class="fc" id="L1207">                                precision -= decZeroes;</span>
+                            }
+<span class="fc bfc" id="L1209" title="All 2 branches covered.">                            if (decDigits &gt; 0) {</span>
+<span class="fc" id="L1210">                                buf.append(digits,intDigits,decDigits);</span>
+<span class="fc" id="L1211">                                precision -= decDigits;</span>
+                            }
+                            // fill up the rest with zeroes
+<span class="fc bfc" id="L1214" title="All 2 branches covered.">                            if (precision &gt; 0) {</span>
+<span class="fc" id="L1215">                                buf.fill('0',precision);</span>
+                            }
+                        }
+<span class="pc bpc" id="L1218" title="1 of 2 branches missed.">                        if (width &gt; 0) {</span>
+<span class="nc" id="L1219">                            buf.fill(' ', width);</span>
+                        }
+                        break;
+                    case 'E':
+                    case 'e':
+                        // intDigits isn't used here, but if it were, it would be 1
+                        /* intDigits = 1; */
+<span class="fc" id="L1226">                        decDigits = nDigits - 1;</span>
+
+<span class="pc bpc" id="L1228" title="1 of 2 branches missed.">                        if (precision &lt; decDigits) {</span>
+<span class="nc bnc" id="L1229" title="All 2 branches missed.">                            int n = round(digits,nDigits,precision,precision!=0);</span>
+<span class="nc bnc" id="L1230" title="All 2 branches missed.">                            if (n &gt; nDigits) {</span>
+<span class="nc" id="L1231">                                nDigits = n;</span>
+                            }
+<span class="nc" id="L1233">                            decDigits = Math.min(nDigits - 1,precision);</span>
+                        }
+<span class="fc" id="L1235">                        exponent += nDigits - 1;</span>
+
+<span class="fc bfc" id="L1237" title="All 2 branches covered.">                        boolean isSharp = (flags &amp; FLAG_SHARP) != 0;</span>
+
+                        // deal with length/width
+
+<span class="fc" id="L1241">                        len++; // first digit is always printed</span>
+
+                        // MRI behavior: Be default, 2 digits
+                        // in the exponent. Use 3 digits
+                        // only when necessary.
+                        // See comment for writeExp method for more details.
+<span class="pc bpc" id="L1247" title="1 of 2 branches missed.">                        if (exponent &gt; 99) {</span>
+<span class="nc" id="L1248">                            len += 5; // 5 -&gt; e+nnn / e-nnn</span>
+                        } else {
+<span class="fc" id="L1250">                            len += 4; // 4 -&gt; e+nn / e-nn</span>
+                        }
+
+<span class="pc bpc" id="L1253" title="1 of 2 branches missed.">                        if (precision &gt; 0) {</span>
+                            // '.' and all precision digits printed
+<span class="fc" id="L1255">                            len += 1 + precision;</span>
+<span class="nc bnc" id="L1256" title="All 2 branches missed.">                        } else  if (isSharp) {</span>
+<span class="nc" id="L1257">                            len++;  // in this mode, '.' is always printed</span>
+                        }
+
+<span class="fc" id="L1260">                        width -= len;</span>
+
+<span class="pc bpc" id="L1262" title="3 of 4 branches missed.">                        if (width &gt; 0 &amp;&amp; (flags &amp; (FLAG_ZERO|FLAG_MINUS)) == 0) {</span>
+<span class="nc" id="L1263">                            buf.fill(' ',width);</span>
+<span class="nc" id="L1264">                            width = 0;</span>
+                        }
+<span class="fc bfc" id="L1266" title="All 2 branches covered.">                        if (signChar != 0) {</span>
+<span class="fc" id="L1267">                            buf.append(signChar);</span>
+                        }
+<span class="pc bpc" id="L1269" title="3 of 4 branches missed.">                        if (width &gt; 0 &amp;&amp; (flags &amp; FLAG_MINUS) == 0) {</span>
+<span class="nc" id="L1270">                            buf.fill('0',width);</span>
+<span class="nc" id="L1271">                            width = 0;</span>
+                        }
+                        // now some data...
+<span class="fc" id="L1274">                        buf.append(digits[0]);</span>
+<span class="pc bpc" id="L1275" title="1 of 2 branches missed.">                        if (precision &gt; 0) {</span>
+<span class="fc" id="L1276">                            buf.append(args.getDecimalSeparator()); // '.'</span>
+<span class="fc bfc" id="L1277" title="All 2 branches covered.">                            if (decDigits &gt; 0) {</span>
+<span class="fc" id="L1278">                                buf.append(digits,1,decDigits);</span>
+<span class="fc" id="L1279">                                precision -= decDigits;</span>
+                            }
+<span class="fc bfc" id="L1281" title="All 2 branches covered.">                            if (precision &gt; 0) buf.fill('0',precision);</span>
+
+<span class="nc bnc" id="L1283" title="All 2 branches missed.">                        } else if ((flags &amp; FLAG_SHARP) != 0) {</span>
+<span class="nc" id="L1284">                            buf.append(args.getDecimalSeparator());</span>
+                        }
+
+<span class="fc" id="L1287">                        writeExp(buf, exponent, expChar);</span>
+
+<span class="pc bpc" id="L1289" title="1 of 2 branches missed.">                        if (width &gt; 0) buf.fill(' ', width);</span>
+                        break;
+                    } // switch (format char E,e,f,G,g)
+
+<span class="fc" id="L1293">                    offset++;</span>
+<span class="fc" id="L1294">                    incomplete = false;</span>
+<span class="fc" id="L1295">                    break;</span>
+                } // block (case E,e,f,G,g)
+                } // switch (each format char in spec)
+            } // for (each format spec)
+
+            // equivalent to MRI case '\0':
+<span class="fc bfc" id="L1301" title="All 2 branches covered.">            if (incomplete) {</span>
+<span class="pc bpc" id="L1302" title="1 of 2 branches missed.">                if (flags == FLAG_NONE) {</span>
+                    // dangling '%' char
+<span class="fc" id="L1304">                    buf.append('%');</span>
+                } else {
+<span class="nc" id="L1306">                    raiseArgumentError(args,ERR_ILLEGAL_FORMAT_CHAR);</span>
+                }
+            }
+<span class="fc" id="L1309">        } // main while loop (offset &lt; length)</span>
+
+        // MRI behavior: validate only the unnumbered arguments
+<span class="fc bfc" id="L1312" title="All 4 branches covered.">        if ((args.numbered == 0) &amp;&amp; args.unnumbered &lt; args.length) {</span>
+<span class="pc bpc" id="L1313" title="1 of 2 branches missed.">            if (args.runtime.getDebug().isTrue()) {</span>
+<span class="nc" id="L1314">                args.raiseArgumentError(&quot;too many arguments for format string&quot;);</span>
+<span class="pc bpc" id="L1315" title="1 of 2 branches missed.">            } else if (args.runtime.isVerbose()) {</span>
+<span class="nc" id="L1316">                args.warn(ID.TOO_MANY_ARGUMENTS, &quot;too many arguments for format string&quot;);</span>
+            }
+        }
+
+<span class="fc" id="L1320">        return tainted;</span>
+    }
+
+    public static NumberFormat getNumberFormat(Locale locale) {
+<span class="fc" id="L1324">        Map&lt;Locale, NumberFormat&gt; numberFormats = LOCALE_NUMBER_FORMATS.get();</span>
+<span class="fc bfc" id="L1325" title="All 2 branches covered.">        if (numberFormats == null) {</span>
+<span class="fc" id="L1326">            numberFormats = new HashMap&lt;Locale, NumberFormat&gt;(4);</span>
+<span class="fc" id="L1327">            LOCALE_NUMBER_FORMATS.set(numberFormats);</span>
+        }
+<span class="fc" id="L1329">        NumberFormat format = numberFormats.get(locale);</span>
+<span class="fc bfc" id="L1330" title="All 2 branches covered.">        if ( format == null ) {</span>
+<span class="fc" id="L1331">            format = NumberFormat.getNumberInstance(locale);</span>
+<span class="fc" id="L1332">            numberFormats.put(locale, format);</span>
+        }
+<span class="fc" id="L1334">        return format;</span>
+    }
+
+    public static DecimalFormatSymbols getDecimalFormat(Locale locale) {
+<span class="fc" id="L1338">        Map&lt;Locale, DecimalFormatSymbols&gt; decimalFormats = LOCALE_DECIMAL_FORMATS.get();</span>
+<span class="fc bfc" id="L1339" title="All 2 branches covered.">        if (decimalFormats == null) {</span>
+<span class="fc" id="L1340">            decimalFormats = new HashMap&lt;Locale, DecimalFormatSymbols&gt;(4);</span>
+<span class="fc" id="L1341">            LOCALE_DECIMAL_FORMATS.set(decimalFormats);</span>
+        }
+<span class="fc" id="L1343">        DecimalFormatSymbols format = decimalFormats.get(locale);</span>
+<span class="fc bfc" id="L1344" title="All 2 branches covered.">        if (format == null) {</span>
+<span class="fc" id="L1345">            format = new DecimalFormatSymbols(locale);</span>
+<span class="fc" id="L1346">            decimalFormats.put(locale, format);</span>
+        }
+<span class="fc" id="L1348">        return format;</span>
+    }
+
+    private static void writeExp(ByteList buf, int exponent, byte expChar) {
+        // Unfortunately, the number of digits in the exponent is
+        // not clearly defined in Ruby documentation. This is a
+        // platform/version-dependent behavior. On Linux/Mac/Cygwin/*nix,
+        // two digits are used. On Windows, 3 digits are used.
+        // It is desirable for JRuby to have consistent behavior, and
+        // the two digits behavior was selected. This is also in sync
+        // with &quot;Java-native&quot; sprintf behavior (java.util.Formatter).
+<span class="fc" id="L1359">        buf.append(expChar); // E or e</span>
+<span class="fc bfc" id="L1360" title="All 2 branches covered.">        buf.append(exponent &gt;= 0 ? '+' : '-');</span>
+<span class="fc bfc" id="L1361" title="All 2 branches covered.">        if (exponent &lt; 0) {</span>
+<span class="fc" id="L1362">            exponent = -exponent;</span>
+        }
+<span class="pc bpc" id="L1364" title="1 of 2 branches missed.">        if (exponent &gt; 99) {</span>
+<span class="nc" id="L1365">            buf.append(exponent / 100 + '0');</span>
+<span class="nc" id="L1366">            buf.append(exponent % 100 / 10 + '0');</span>
+        } else {
+<span class="fc" id="L1368">            buf.append(exponent / 10 + '0');</span>
+        }
+<span class="fc" id="L1370">        buf.append(exponent % 10 + '0');</span>
+<span class="fc" id="L1371">    }</span>
+
+    // debugging code, keeping for now
+    /*
+    private static final void showLiteral(byte[] format, int start, int offset) {
+        System.out.println(&quot;literal: [&quot;+ new String(format,start,offset-start)+ &quot;], &quot; +
+                &quot; s=&quot;+ start + &quot; o=&quot;+ offset);
+    }
+
+    // debugging code, keeping for now
+    private static final void showVals(byte[] format,int start,int offset, byte fchar,
+            int flags, int width, int precision, Object arg) {
+        System.out.println(new StringBuffer()
+        .append(&quot;value: &quot;).append(new String(format,start,offset-start+1)).append('\n')
+        .append(&quot;type: &quot;).append((char)fchar).append('\n')
+        .append(&quot;start: &quot;).append(start).append('\n')
+        .append(&quot;length: &quot;).append(offset-start).append('\n')
+        .append(&quot;flags: &quot;).append(Integer.toBinaryString(flags)).append('\n')
+        .append(&quot;width: &quot;).append(width).append('\n')
+        .append(&quot;precision: &quot;).append(precision).append('\n')
+        .append(&quot;arg: &quot;).append(arg).append('\n')
+        .toString());
+
+    }
+    */
+
+    private static void raiseArgumentError(Args args, String message) {
+<span class="nc" id="L1398">        args.raiseArgumentError(message);</span>
+<span class="nc" id="L1399">    }</span>
+
+    private static void warning(ID id, Args args, String message) {
+<span class="fc" id="L1402">        args.warning(id, message);</span>
+<span class="fc" id="L1403">    }</span>
+
+    private static void checkOffset(Args args, int offset, int length, String message) {
+<span class="pc bpc" id="L1406" title="1 of 2 branches missed.">        if (offset &gt;= length) {</span>
+<span class="nc" id="L1407">            raiseArgumentError(args,message);</span>
+        }
+<span class="fc" id="L1409">    }</span>
+
+    private static int extendWidth(Args args, int oldWidth, byte newChar) {
+<span class="fc" id="L1412">        int newWidth = oldWidth * 10 + (newChar - '0');</span>
+<span class="pc bpc" id="L1413" title="1 of 2 branches missed.">        if (newWidth / 10 != oldWidth) raiseArgumentError(args,&quot;width too big&quot;);</span>
+<span class="fc" id="L1414">        return newWidth;</span>
+    }
+
+    private static boolean isDigit(byte aChar) {
+<span class="fc bfc" id="L1418" title="All 4 branches covered.">        return (aChar &gt;= '0' &amp;&amp; aChar &lt;= '9');</span>
+    }
+
+    private static boolean isPrintable(byte aChar) {
+<span class="pc bpc" id="L1422" title="1 of 4 branches missed.">        return (aChar &gt; 32 &amp;&amp; aChar &lt; 127);</span>
+    }
+
+    private static int skipSignBits(byte[] bytes, int base) {
+<span class="fc" id="L1426">        int skip = 0;</span>
+<span class="fc" id="L1427">        int length = bytes.length;</span>
+        byte b;
+<span class="pc bpc" id="L1429" title="2 of 5 branches missed.">        switch(base) {</span>
+        case 2:
+<span class="pc bpc" id="L1431" title="1 of 4 branches missed.">            for ( ; skip &lt; length &amp;&amp; bytes[skip] == '1'; skip++ ) {}</span>
+            break;
+        case 8:
+<span class="pc bpc" id="L1434" title="1 of 4 branches missed.">            if (length &gt; 0 &amp;&amp; bytes[0] == '3') skip++;</span>
+<span class="pc bpc" id="L1435" title="1 of 4 branches missed.">            for ( ; skip &lt; length &amp;&amp; bytes[skip] == '7'; skip++ ) {}</span>
+            break;
+        case 10:
+<span class="nc bnc" id="L1438" title="All 4 branches missed.">            if (length &gt; 0 &amp;&amp; bytes[0] == '-') skip++;</span>
+            break;
+        case 16:
+<span class="pc bpc" id="L1441" title="1 of 6 branches missed.">            for ( ; skip &lt; length &amp;&amp; ((b = bytes[skip]) == 'f' || b == 'F'); skip++ ) {}</span>
+        }
+<span class="fc" id="L1443">        return skip;</span>
+    }
+
+    private static int round(byte[] bytes, int nDigits, int roundPos, boolean roundDown) {
+<span class="fc" id="L1447">        int next = roundPos + 1;</span>
+<span class="pc bpc" id="L1448" title="3 of 10 branches missed.">        if (next &gt;= nDigits || bytes[next] &lt; '5' ||</span>
+                // MRI rounds up on nnn5nnn, but not nnn5 --
+                // except for when they do
+                (roundDown &amp;&amp; bytes[next] == '5' &amp;&amp; next == nDigits - 1)) {
+<span class="fc" id="L1452">            return nDigits;</span>
+        }
+<span class="pc bpc" id="L1454" title="1 of 2 branches missed.">        if (roundPos &lt; 0) { // &quot;%.0f&quot; % 0.99</span>
+<span class="nc" id="L1455">            System.arraycopy(bytes,0,bytes,1,nDigits);</span>
+<span class="nc" id="L1456">            bytes[0] = '1';</span>
+<span class="nc" id="L1457">            return nDigits + 1;</span>
+        }
+<span class="fc" id="L1459">        bytes[roundPos] += 1;</span>
+<span class="pc bpc" id="L1460" title="1 of 2 branches missed.">        while (bytes[roundPos] &gt; '9') {</span>
+<span class="nc" id="L1461">            bytes[roundPos] = '0';</span>
+<span class="nc" id="L1462">            roundPos--;</span>
+<span class="nc bnc" id="L1463" title="All 2 branches missed.">            if (roundPos &gt;= 0) {</span>
+<span class="nc" id="L1464">                bytes[roundPos] += 1;</span>
+            } else {
+<span class="nc" id="L1466">                System.arraycopy(bytes,0,bytes,1,nDigits);</span>
+<span class="nc" id="L1467">                bytes[0] = '1';</span>
+<span class="nc" id="L1468">                return nDigits + 1;</span>
+            }
+        }
+<span class="fc" id="L1471">        return nDigits;</span>
+    }
+
+    private static byte[] getFixnumBytes(RubyFixnum arg, int base, boolean sign, boolean upper) {
+<span class="fc" id="L1475">        long val = arg.getLongValue();</span>
+
+        // limit the length of negatives if possible (also faster)
+<span class="pc bpc" id="L1478" title="1 of 4 branches missed.">        if (val &gt;= Integer.MIN_VALUE &amp;&amp; val &lt;= Integer.MAX_VALUE) {</span>
+<span class="fc bfc" id="L1479" title="All 2 branches covered.">            if (sign) {</span>
+<span class="fc" id="L1480">                return ConvertBytes.intToByteArray((int)val,base,upper);</span>
+            } else {
+<span class="fc bfc" id="L1482" title="All 4 branches covered.">                switch(base) {</span>
+<span class="fc" id="L1483">                case 2:  return ConvertBytes.intToBinaryBytes((int)val);</span>
+<span class="fc" id="L1484">                case 8:  return ConvertBytes.intToOctalBytes((int)val);</span>
+                case 10:
+<span class="fc" id="L1486">                default: return ConvertBytes.intToCharBytes((int)val);</span>
+<span class="fc" id="L1487">                case 16: return ConvertBytes.intToHexBytes((int)val,upper);</span>
+                }
+            }
+        } else {
+<span class="pc bpc" id="L1491" title="1 of 2 branches missed.">            if (sign) {</span>
+<span class="nc" id="L1492">                return ConvertBytes.longToByteArray(val,base,upper);</span>
+            } else {
+<span class="pc bpc" id="L1494" title="3 of 4 branches missed.">                switch(base) {</span>
+<span class="nc" id="L1495">                case 2:  return ConvertBytes.longToBinaryBytes(val);</span>
+<span class="nc" id="L1496">                case 8:  return ConvertBytes.longToOctalBytes(val);</span>
+                case 10:
+<span class="nc" id="L1498">                default: return ConvertBytes.longToCharBytes(val);</span>
+<span class="fc" id="L1499">                case 16: return ConvertBytes.longToHexBytes(val,upper);</span>
+                }
+            }
+        }
+    }
+
+    private static byte[] getBignumBytes(RubyBignum arg, int base, boolean sign, boolean upper) {
+<span class="fc" id="L1506">        BigInteger val = arg.getValue();</span>
+<span class="pc bpc" id="L1507" title="1 of 6 branches missed.">        if (sign || base == 10 || val.signum() &gt;= 0) {</span>
+<span class="fc" id="L1508">            return stringToBytes(val.toString(base),upper);</span>
+        }
+
+        // negative values
+<span class="fc" id="L1512">        byte[] bytes = val.toByteArray();</span>
+<span class="pc bpc" id="L1513" title="1 of 4 branches missed.">        switch(base) {</span>
+<span class="fc" id="L1514">        case 2:  return ConvertBytes.twosComplementToBinaryBytes(bytes);</span>
+<span class="fc" id="L1515">        case 8:  return ConvertBytes.twosComplementToOctalBytes(bytes);</span>
+<span class="fc" id="L1516">        case 16: return ConvertBytes.twosComplementToHexBytes(bytes,upper);</span>
+<span class="nc" id="L1517">        default: return stringToBytes(val.toString(base),upper);</span>
+        }
+    }
+
+    private static byte[] getUnsignedNegativeBytes(RubyInteger arg) {
+        // calculation for negatives when %u specified
+        // for values &gt;= Integer.MIN_VALUE * 2, MRI uses (the equivalent of)
+        //   long neg_u = (((long)Integer.MAX_VALUE + 1) &lt;&lt; 1) + val
+        // for smaller values, BigInteger math is required to conform to MRI's
+        // result.
+        long longval;
+        BigInteger bigval;
+
+<span class="nc bnc" id="L1530" title="All 2 branches missed.">        if (arg instanceof RubyFixnum) {</span>
+            // relatively cheap test for 32-bit values
+<span class="nc" id="L1532">            longval = ((RubyFixnum)arg).getLongValue();</span>
+<span class="nc bnc" id="L1533" title="All 2 branches missed.">            if (longval &gt;= Long.MIN_VALUE &lt;&lt; 1) {</span>
+<span class="nc" id="L1534">                return ConvertBytes.longToCharBytes(((Long.MAX_VALUE + 1L) &lt;&lt; 1) + longval);</span>
+            }
+            // no such luck...
+<span class="nc" id="L1537">            bigval = BigInteger.valueOf(longval);</span>
+        } else {
+<span class="nc" id="L1539">            bigval = ((RubyBignum)arg).getValue();</span>
+        }
+        // ok, now it gets expensive...
+<span class="nc" id="L1542">        int shift = 0;</span>
+        // go through negated powers of 32 until we find one small enough
+<span class="nc" id="L1544">        for (BigInteger minus = BIG_MINUS_64 ;</span>
+<span class="nc bnc" id="L1545" title="All 2 branches missed.">                bigval.compareTo(minus) &lt; 0 ;</span>
+<span class="nc" id="L1546">                minus = minus.shiftLeft(32), shift++) {}</span>
+        // add to the corresponding positive power of 32 for the result.
+        // meaningful? no. conformant? yes. I just write the code...
+<span class="nc bnc" id="L1549" title="All 2 branches missed.">        BigInteger nPower32 = shift &gt; 0 ? BIG_64.shiftLeft(32 * shift) : BIG_64;</span>
+<span class="nc" id="L1550">        return stringToBytes(nPower32.add(bigval).toString(),false);</span>
+    }
+
+    private static byte[] stringToBytes(CharSequence s, boolean upper) {
+<span class="fc" id="L1554">        int len = s.length();</span>
+<span class="fc" id="L1555">        byte[] bytes = new byte[len];</span>
+<span class="pc bpc" id="L1556" title="1 of 2 branches missed.">        if (upper) {</span>
+<span class="nc bnc" id="L1557" title="All 2 branches missed.">            for (int i = len; --i &gt;= 0; ) {</span>
+<span class="nc" id="L1558">                int b = (byte)((int)s.charAt(i) &amp; (int)0xff);</span>
+<span class="nc bnc" id="L1559" title="All 4 branches missed.">                if (b &gt;= 'a' &amp;&amp; b &lt;= 'z') {</span>
+<span class="nc" id="L1560">                    bytes[i] = (byte)(b &amp; ~0x20);</span>
+                } else {
+<span class="nc" id="L1562">                    bytes[i] = (byte)b;</span>
+                }
+<span class="nc" id="L1564">            }</span>
+        } else {
+<span class="fc bfc" id="L1566" title="All 2 branches covered.">            for (int i = len; --i &gt;= 0; ) {</span>
+<span class="fc" id="L1567">                bytes[i] = (byte)((int)s.charAt(i) &amp; (int)0xff);</span>
+            }
+        }
+<span class="fc" id="L1570">        return bytes;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

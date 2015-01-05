@@ -1,0 +1,736 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Interpreter.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.interpreter</a> &gt; <span class="el_source">Interpreter.java</span></div><h1>Interpreter.java</h1><pre class="source lang-java linenums">package org.jruby.ir.interpreter;
+
+import org.jruby.*;
+import org.jruby.ast.RootNode;
+import org.jruby.common.IRubyWarnings.ID;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.exceptions.Unrescuable;
+import org.jruby.internal.runtime.methods.InterpretedIRMethod;
+import org.jruby.ir.*;
+import org.jruby.ir.instructions.*;
+import org.jruby.ir.instructions.boxing.*;
+import org.jruby.ir.instructions.specialized.*;
+import org.jruby.ir.operands.*;
+import org.jruby.ir.operands.Float;
+import org.jruby.ir.runtime.IRBreakJump;
+import org.jruby.ir.runtime.IRRuntimeHelpers;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.*;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.ivars.VariableAccessor;
+import org.jruby.runtime.opto.ConstantCache;
+import org.jruby.runtime.scope.ManyVarsDynamicScope;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+
+import java.util.List;
+
+public class Interpreter extends IRTranslator&lt;IRubyObject, IRubyObject&gt; {
+
+<span class="fc" id="L30">    private static final Logger LOG = LoggerFactory.getLogger(&quot;Interpreter&quot;);</span>
+<span class="fc" id="L31">    private static final IRubyObject[] EMPTY_ARGS = new IRubyObject[]{};</span>
+<span class="fc" id="L32">    private static int interpInstrsCount = 0;</span>
+
+    // we do not need instances of Interpreter
+    // FIXME: Should we make it real singleton and get rid of static methods?
+<span class="fc" id="L36">    private Interpreter() { }</span>
+
+<span class="nc" id="L38">    private static class InterpreterHolder {</span>
+        // FIXME: Remove static reference unless lifus does later
+<span class="fc" id="L40">        public static final Interpreter instance = new Interpreter();</span>
+    }
+
+    public static Interpreter getInstance() {
+<span class="fc" id="L44">        return InterpreterHolder.instance;</span>
+    }
+
+    public static void dumpStats() {
+<span class="pc bpc" id="L48" title="4 of 6 branches missed.">        if ((IRRuntimeHelpers.isDebug() || IRRuntimeHelpers.inProfileMode()) &amp;&amp; interpInstrsCount &gt; 10000) {</span>
+<span class="nc" id="L49">            LOG.info(&quot;-- Interpreted instructions: {}&quot;, interpInstrsCount);</span>
+            /*
+            for (Operation o: opStats.keySet()) {
+                System.out.println(o + &quot; = &quot; + opStats.get(o).count);
+            }
+            */
+        }
+<span class="fc" id="L56">    }</span>
+
+    public static void runBeginBlocks(List&lt;IRClosure&gt; beBlocks, ThreadContext context, IRubyObject self, StaticScope currScope, Object[] temp) {
+<span class="fc bfc" id="L59" title="All 2 branches covered.">        if (beBlocks == null) return;</span>
+
+<span class="fc bfc" id="L61" title="All 2 branches covered.">        for (IRClosure b: beBlocks) {</span>
+            // SSS FIXME: Should I piggyback on WrappedIRClosure.retrieve or just copy that code here?
+<span class="fc" id="L63">            b.prepareForInterpretation();</span>
+<span class="fc" id="L64">            Block blk = (Block)(new WrappedIRClosure(b.getSelf(), b)).retrieve(context, self, currScope, context.getCurrentScope(), temp);</span>
+<span class="fc" id="L65">            blk.yield(context, null);</span>
+<span class="fc" id="L66">        }</span>
+<span class="fc" id="L67">    }</span>
+
+    @Override
+    protected IRubyObject execute(Ruby runtime, IRScriptBody irScope, IRubyObject self) {
+<span class="fc" id="L71">        BeginEndInterpreterContext ic = (BeginEndInterpreterContext) irScope.prepareForInterpretation();</span>
+<span class="fc" id="L72">        ThreadContext context = runtime.getCurrentContext();</span>
+<span class="fc" id="L73">        String name = &quot;(root)&quot;;</span>
+
+<span class="pc bpc" id="L75" title="1 of 2 branches missed.">        if (IRRuntimeHelpers.isDebug()) LOG.info(&quot;Executing &quot; + ic);</span>
+
+        // We get the live object ball rolling here.
+        // This give a valid value for the top of this lexical tree.
+        // All new scopes can then retrieve and set based on lexical parent.
+<span class="fc" id="L80">        StaticScope scope = ic.getStaticScope();</span>
+<span class="fc" id="L81">        RubyModule currModule = scope.getModule();</span>
+<span class="fc bfc" id="L82" title="All 2 branches covered.">        if (currModule == null) {</span>
+            // SSS FIXME: Looks like this has to do with Kernel#load
+            // and the wrap parameter. Figure it out and document it here.
+<span class="fc" id="L85">            currModule = context.getRuntime().getObject();</span>
+        }
+
+<span class="fc" id="L88">        scope.setModule(currModule);</span>
+<span class="fc" id="L89">        DynamicScope tlbScope = irScope.getToplevelScope();</span>
+<span class="pc bpc" id="L90" title="1 of 2 branches missed.">        if (tlbScope == null) {</span>
+<span class="nc" id="L91">            context.preMethodScopeOnly(scope);</span>
+        } else {
+<span class="fc" id="L93">            context.preScopedBody(tlbScope);</span>
+<span class="fc" id="L94">            tlbScope.growIfNeeded();</span>
+        }
+<span class="fc" id="L96">        context.setCurrentVisibility(Visibility.PRIVATE);</span>
+
+        try {
+<span class="fc" id="L99">            runBeginBlocks(ic.getBeginBlocks(), context, self, scope, null);</span>
+<span class="fc" id="L100">            return INTERPRET_ROOT(context, self, ic, currModule, name);</span>
+<span class="nc" id="L101">        } catch (IRBreakJump bj) {</span>
+<span class="nc" id="L102">            throw IRException.BREAK_LocalJumpError.getException(context.runtime);</span>
+        } finally {
+<span class="fc" id="L104">            dumpStats();</span>
+<span class="fc" id="L105">            context.popScope();</span>
+        }
+    }
+
+    private static void setResult(Object[] temp, DynamicScope currDynScope, Variable resultVar, Object result) {
+<span class="fc bfc" id="L110" title="All 2 branches covered.">        if (resultVar instanceof TemporaryVariable) {</span>
+            // Unboxed Java primitives (float/double/int/long) don't come here because result is an Object
+            // So, it is safe to use offset directly without any correction as long as IRScope uses
+            // three different allocators (each with its own 'offset' counter)
+            // * one for LOCAL, BOOLEAN, CURRENT_SCOPE, CURRENT_MODULE, CLOSURE tmpvars
+            // * one for FIXNUM
+            // * one for FLOAT
+<span class="fc" id="L117">            temp[((TemporaryLocalVariable)resultVar).offset] = result;</span>
+        } else {
+<span class="fc" id="L119">            LocalVariable lv = (LocalVariable)resultVar;</span>
+<span class="fc" id="L120">            currDynScope.setValue((IRubyObject)result, lv.getLocation(), lv.getScopeDepth());</span>
+        }
+<span class="fc" id="L122">    }</span>
+
+    private static void setResult(Object[] temp, DynamicScope currDynScope, Instr instr, Object result) {
+<span class="fc bfc" id="L125" title="All 2 branches covered.">        if (instr instanceof ResultInstr) {</span>
+<span class="fc" id="L126">            setResult(temp, currDynScope, ((ResultInstr) instr).getResult(), result);</span>
+        }
+<span class="fc" id="L128">    }</span>
+
+    private static Object retrieveOp(Operand r, ThreadContext context, IRubyObject self, DynamicScope currDynScope, StaticScope currScope, Object[] temp) {
+        Object res;
+<span class="fc bfc" id="L132" title="All 2 branches covered.">        if (r instanceof Self) {</span>
+<span class="fc" id="L133">            return self;</span>
+<span class="fc bfc" id="L134" title="All 2 branches covered.">        } else if (r instanceof TemporaryLocalVariable) {</span>
+<span class="fc" id="L135">            res = temp[((TemporaryLocalVariable)r).offset];</span>
+<span class="fc bfc" id="L136" title="All 2 branches covered.">            return res == null ? context.nil : res;</span>
+<span class="fc bfc" id="L137" title="All 2 branches covered.">        } else if (r instanceof LocalVariable) {</span>
+<span class="fc" id="L138">            LocalVariable lv = (LocalVariable)r;</span>
+<span class="fc" id="L139">            res = currDynScope.getValue(lv.getLocation(), lv.getScopeDepth());</span>
+<span class="fc bfc" id="L140" title="All 2 branches covered.">            return res == null ? context.nil : res;</span>
+        } else {
+<span class="fc" id="L142">            return r.retrieve(context, self, currScope, currDynScope, temp);</span>
+        }
+
+    }
+
+    private static double getFloatArg(double[] floats, Operand arg) {
+<span class="nc bnc" id="L148" title="All 2 branches missed.">        if (arg instanceof Float) {</span>
+<span class="nc" id="L149">            return ((Float)arg).value;</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">        } else if (arg instanceof Fixnum) {</span>
+<span class="nc" id="L151">            return (double)((Fixnum)arg).value;</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        } else if (arg instanceof Bignum) {</span>
+<span class="nc" id="L153">            return ((Bignum)arg).value.doubleValue();</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        } else if (arg instanceof TemporaryLocalVariable) {</span>
+<span class="nc" id="L155">            return floats[((TemporaryLocalVariable)arg).offset];</span>
+        } else {
+<span class="nc" id="L157">            throw new RuntimeException(&quot;invalid float operand: &quot; + arg);</span>
+        }
+    }
+
+    private static long getFixnumArg(long[] fixnums, Operand arg) {
+<span class="nc bnc" id="L162" title="All 2 branches missed.">        if (arg instanceof Float) {</span>
+<span class="nc" id="L163">            return (long)((Float)arg).value;</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        } else if (arg instanceof Fixnum) {</span>
+<span class="nc" id="L165">            return ((Fixnum)arg).value;</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">        } else if (arg instanceof Bignum) {</span>
+<span class="nc" id="L167">            return ((Bignum)arg).value.longValue();</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">        } else if (arg instanceof TemporaryLocalVariable) {</span>
+<span class="nc" id="L169">            return fixnums[((TemporaryLocalVariable)arg).offset];</span>
+        } else {
+<span class="nc" id="L171">            throw new RuntimeException(&quot;invalid fixnum operand: &quot; + arg);</span>
+        }
+    }
+
+    private static boolean getBooleanArg(boolean[] booleans, Operand arg) {
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        if (arg instanceof UnboxedBoolean) {</span>
+<span class="nc" id="L177">            return ((UnboxedBoolean)arg).isTrue();</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">        } else if (arg instanceof TemporaryLocalVariable) {</span>
+<span class="nc" id="L179">            return booleans[((TemporaryLocalVariable)arg).offset];</span>
+        } else {
+<span class="nc" id="L181">            throw new RuntimeException(&quot;invalid fixnum operand: &quot; + arg);</span>
+        }
+    }
+
+    private static void setFloatVar(double[] floats, TemporaryLocalVariable var, double val) {
+<span class="nc" id="L186">        floats[var.offset] = val;</span>
+<span class="nc" id="L187">    }</span>
+
+    private static void setFixnumVar(long[] fixnums, TemporaryLocalVariable var, long val) {
+<span class="nc" id="L190">        fixnums[var.offset] = val;</span>
+<span class="nc" id="L191">    }</span>
+
+    private static void setBooleanVar(boolean[] booleans, TemporaryLocalVariable var, boolean val) {
+<span class="nc" id="L194">        booleans[var.offset] = val;</span>
+<span class="nc" id="L195">    }</span>
+
+    private static void interpretIntOp(AluInstr instr, Operation op, long[] fixnums, boolean[] booleans) {
+<span class="nc" id="L198">        TemporaryLocalVariable dst = (TemporaryLocalVariable)instr.getResult();</span>
+<span class="nc" id="L199">        long i1 = getFixnumArg(fixnums, instr.getArg1());</span>
+<span class="nc" id="L200">        long i2 = getFixnumArg(fixnums, instr.getArg2());</span>
+<span class="pc bnc" id="L201" title="All 13 branches missed.">        switch (op) {</span>
+<span class="nc" id="L202">            case IADD: setFixnumVar(fixnums, dst, i1 + i2); break;</span>
+<span class="nc" id="L203">            case ISUB: setFixnumVar(fixnums, dst, i1 - i2); break;</span>
+<span class="nc" id="L204">            case IMUL: setFixnumVar(fixnums, dst, i1 * i2); break;</span>
+<span class="nc" id="L205">            case IDIV: setFixnumVar(fixnums, dst, i1 / i2); break;</span>
+<span class="nc" id="L206">            case IOR : setFixnumVar(fixnums, dst, i1 | i2); break;</span>
+<span class="nc" id="L207">            case IAND: setFixnumVar(fixnums, dst, i1 &amp; i2); break;</span>
+<span class="nc" id="L208">            case IXOR: setFixnumVar(fixnums, dst, i1 ^ i2); break;</span>
+<span class="nc" id="L209">            case ISHL: setFixnumVar(fixnums, dst, i1 &lt;&lt; i2); break;</span>
+<span class="nc" id="L210">            case ISHR: setFixnumVar(fixnums, dst, i1 &gt;&gt; i2); break;</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">            case ILT : setBooleanVar(booleans, dst, i1 &lt; i2); break;</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">            case IGT : setBooleanVar(booleans, dst, i1 &gt; i2); break;</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">            case IEQ : setBooleanVar(booleans, dst, i1 == i2); break;</span>
+<span class="nc" id="L214">            default: throw new RuntimeException(&quot;Unhandled int op: &quot; + op + &quot; for instr &quot; + instr);</span>
+        }
+<span class="nc" id="L216">    }</span>
+
+    private static void interpretFloatOp(AluInstr instr, Operation op, double[] floats, boolean[] booleans) {
+<span class="nc" id="L219">        TemporaryLocalVariable dst = (TemporaryLocalVariable)instr.getResult();</span>
+<span class="nc" id="L220">        double a1 = getFloatArg(floats, instr.getArg1());</span>
+<span class="nc" id="L221">        double a2 = getFloatArg(floats, instr.getArg2());</span>
+<span class="nc bnc" id="L222" title="All 8 branches missed.">        switch (op) {</span>
+<span class="nc" id="L223">            case FADD: setFloatVar(floats, dst, a1 + a2); break;</span>
+<span class="nc" id="L224">            case FSUB: setFloatVar(floats, dst, a1 - a2); break;</span>
+<span class="nc" id="L225">            case FMUL: setFloatVar(floats, dst, a1 * a2); break;</span>
+<span class="nc" id="L226">            case FDIV: setFloatVar(floats, dst, a1 / a2); break;</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">            case FLT : setBooleanVar(booleans, dst, a1 &lt; a2); break;</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">            case FGT : setBooleanVar(booleans, dst, a1 &gt; a2); break;</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">            case FEQ : setBooleanVar(booleans, dst, a1 == a2); break;</span>
+<span class="nc" id="L230">            default: throw new RuntimeException(&quot;Unhandled float op: &quot; + op + &quot; for instr &quot; + instr);</span>
+        }
+<span class="nc" id="L232">    }</span>
+
+    private static void receiveArg(ThreadContext context, Instr i, Operation operation, IRubyObject[] args, boolean acceptsKeywordArgument, DynamicScope currDynScope, Object[] temp, Object exception, Block block) {
+        Object result;
+<span class="fc" id="L236">        ResultInstr instr = (ResultInstr)i;</span>
+
+<span class="fc bfc" id="L238" title="All 6 branches covered.">        switch(operation) {</span>
+        case RECV_PRE_REQD_ARG:
+<span class="fc" id="L240">            int argIndex = ((ReceivePreReqdArgInstr)instr).getArgIndex();</span>
+<span class="fc" id="L241">            result = IRRuntimeHelpers.getPreArgSafe(context, args, argIndex);</span>
+<span class="fc" id="L242">            setResult(temp, currDynScope, instr.getResult(), result);</span>
+<span class="fc" id="L243">            return;</span>
+        case RECV_CLOSURE:
+<span class="fc" id="L245">            result = IRRuntimeHelpers.newProc(context.runtime, block);</span>
+<span class="fc" id="L246">            setResult(temp, currDynScope, instr.getResult(), result);</span>
+<span class="fc" id="L247">            return;</span>
+        case RECV_POST_REQD_ARG:
+<span class="fc" id="L249">            result = ((ReceivePostReqdArgInstr)instr).receivePostReqdArg(args, acceptsKeywordArgument);</span>
+            // For blocks, missing arg translates to nil
+<span class="fc bfc" id="L251" title="All 2 branches covered.">            setResult(temp, currDynScope, instr.getResult(), result == null ? context.nil : result);</span>
+<span class="fc" id="L252">            return;</span>
+        case RECV_RUBY_EXC:
+<span class="fc" id="L254">            setResult(temp, currDynScope, instr.getResult(), IRRuntimeHelpers.unwrapRubyException(exception));</span>
+<span class="fc" id="L255">            return;</span>
+        case RECV_JRUBY_EXC:
+<span class="fc" id="L257">            setResult(temp, currDynScope, instr.getResult(), exception);</span>
+<span class="fc" id="L258">            return;</span>
+        default:
+<span class="fc" id="L260">            result = ((ReceiveArgBase)instr).receiveArg(context, args, acceptsKeywordArgument);</span>
+<span class="fc" id="L261">            setResult(temp, currDynScope, instr.getResult(), result);</span>
+        }
+<span class="fc" id="L263">    }</span>
+
+    private static void processCall(ThreadContext context, Instr instr, Operation operation, DynamicScope currDynScope, StaticScope currScope, Object[] temp, IRubyObject self) {
+        Object result;
+
+<span class="fc bfc" id="L268" title="All 8 branches covered.">        switch(operation) {</span>
+        case CALL_1F: {
+<span class="fc" id="L270">            OneFixnumArgNoBlockCallInstr call = (OneFixnumArgNoBlockCallInstr)instr;</span>
+<span class="fc" id="L271">            IRubyObject r = (IRubyObject)retrieveOp(call.getReceiver(), context, self, currDynScope, currScope, temp);</span>
+<span class="fc" id="L272">            result = call.getCallSite().call(context, self, r, call.getFixnumArg());</span>
+<span class="fc" id="L273">            setResult(temp, currDynScope, call.getResult(), result);</span>
+<span class="fc" id="L274">            break;</span>
+        }
+        case CALL_1D: {
+<span class="fc" id="L277">            OneFloatArgNoBlockCallInstr call = (OneFloatArgNoBlockCallInstr)instr;</span>
+<span class="fc" id="L278">            IRubyObject r = (IRubyObject)retrieveOp(call.getReceiver(), context, self, currDynScope, currScope, temp);</span>
+<span class="fc" id="L279">            result = call.getCallSite().call(context, self, r, call.getFloatArg());</span>
+<span class="fc" id="L280">            setResult(temp, currDynScope, call.getResult(), result);</span>
+<span class="fc" id="L281">            break;</span>
+        }
+        case CALL_1O: {
+<span class="fc" id="L284">            OneOperandArgNoBlockCallInstr call = (OneOperandArgNoBlockCallInstr)instr;</span>
+<span class="fc" id="L285">            IRubyObject r = (IRubyObject)retrieveOp(call.getReceiver(), context, self, currDynScope, currScope, temp);</span>
+<span class="fc" id="L286">            IRubyObject o = (IRubyObject)call.getArg1().retrieve(context, self, currScope, currDynScope, temp);</span>
+<span class="fc" id="L287">            result = call.getCallSite().call(context, self, r, o);</span>
+<span class="fc" id="L288">            setResult(temp, currDynScope, call.getResult(), result);</span>
+<span class="fc" id="L289">            break;</span>
+        }
+        case CALL_1OB: {
+<span class="fc" id="L292">            OneOperandArgBlockCallInstr call = (OneOperandArgBlockCallInstr)instr;</span>
+<span class="fc" id="L293">            IRubyObject r = (IRubyObject)retrieveOp(call.getReceiver(), context, self, currDynScope, currScope, temp);</span>
+<span class="fc" id="L294">            IRubyObject o = (IRubyObject)call.getArg1().retrieve(context, self, currScope, currDynScope, temp);</span>
+<span class="fc" id="L295">            Block preparedBlock = call.prepareBlock(context, self, currScope, currDynScope, temp);</span>
+<span class="fc" id="L296">            result = call.getCallSite().call(context, self, r, o, preparedBlock);</span>
+<span class="fc" id="L297">            setResult(temp, currDynScope, call.getResult(), result);</span>
+<span class="fc" id="L298">            break;</span>
+        }
+        case CALL_0O: {
+<span class="fc" id="L301">            ZeroOperandArgNoBlockCallInstr call = (ZeroOperandArgNoBlockCallInstr)instr;</span>
+<span class="fc" id="L302">            IRubyObject r = (IRubyObject)retrieveOp(call.getReceiver(), context, self, currDynScope, currScope, temp);</span>
+<span class="fc" id="L303">            result = call.getCallSite().call(context, self, r);</span>
+<span class="fc" id="L304">            setResult(temp, currDynScope, call.getResult(), result);</span>
+<span class="fc" id="L305">            break;</span>
+        }
+        case NORESULT_CALL_1O: {
+<span class="fc" id="L308">            OneOperandArgNoBlockNoResultCallInstr call = (OneOperandArgNoBlockNoResultCallInstr)instr;</span>
+<span class="fc" id="L309">            IRubyObject r = (IRubyObject)retrieveOp(call.getReceiver(), context, self, currDynScope, currScope, temp);</span>
+<span class="fc" id="L310">            IRubyObject o = (IRubyObject)call.getArg1().retrieve(context, self, currScope, currDynScope, temp);</span>
+<span class="fc" id="L311">            call.getCallSite().call(context, self, r, o);</span>
+<span class="fc" id="L312">            break;</span>
+        }
+        case NORESULT_CALL:
+<span class="fc" id="L315">            instr.interpret(context, currScope, currDynScope, self, temp);</span>
+<span class="fc" id="L316">            break;</span>
+        case CALL:
+        default:
+<span class="fc" id="L319">            result = instr.interpret(context, currScope, currDynScope, self, temp);</span>
+<span class="fc" id="L320">            setResult(temp, currDynScope, instr, result);</span>
+            break;
+        }
+<span class="fc" id="L323">    }</span>
+
+    private static void processBookKeepingOp(ThreadContext context, Instr instr, Operation operation,
+                                             String name, IRubyObject[] args, IRubyObject self, Block block,
+                                             RubyModule implClass) {
+<span class="pc bpc" id="L328" title="2 of 8 branches missed.">        switch(operation) {</span>
+        case PUSH_FRAME:
+<span class="fc" id="L330">            context.preMethodFrameOnly(implClass, name, self, block);</span>
+            // Only the top-level script scope has PRIVATE visibility.
+            // This is already handled as part of Interpreter.execute above.
+            // Everything else is PUBLIC by default.
+<span class="fc" id="L334">            context.setCurrentVisibility(Visibility.PUBLIC);</span>
+<span class="fc" id="L335">            break;</span>
+        case POP_FRAME:
+<span class="fc" id="L337">            context.popFrame();</span>
+<span class="fc" id="L338">            break;</span>
+        case POP_BINDING:
+<span class="fc" id="L340">            context.popScope();</span>
+<span class="fc" id="L341">            break;</span>
+        case THREAD_POLL:
+<span class="pc bpc" id="L343" title="1 of 2 branches missed.">            if (IRRuntimeHelpers.inProfileMode()) Profiler.clockTick();</span>
+<span class="fc" id="L344">            context.callThreadPoll();</span>
+<span class="fc" id="L345">            break;</span>
+        case CHECK_ARITY:
+<span class="fc" id="L347">            ((CheckArityInstr)instr).checkArity(context, args);</span>
+<span class="fc" id="L348">            break;</span>
+        case LINE_NUM:
+<span class="fc" id="L350">            context.setLine(((LineNumberInstr)instr).lineNumber);</span>
+<span class="fc" id="L351">            break;</span>
+        case TRACE: {
+<span class="nc bnc" id="L353" title="All 2 branches missed.">            if (context.runtime.hasEventHooks()) {</span>
+<span class="nc" id="L354">                TraceInstr trace = (TraceInstr) instr;</span>
+                // FIXME: Try and statically generate END linenumber instead of hacking it.
+<span class="nc bnc" id="L356" title="All 2 branches missed.">                int linenumber = trace.getLinenumber() == -1 ? context.getLine()+1 : trace.getLinenumber();</span>
+
+<span class="nc" id="L358">                context.trace(trace.getEvent(), trace.getName(), context.getFrameKlazz(),</span>
+<span class="nc" id="L359">                        trace.getFilename(), linenumber);</span>
+            }
+            break;
+        }
+        }
+<span class="fc" id="L364">    }</span>
+
+    private static IRubyObject processReturnOp(ThreadContext context, Instr instr, Operation operation, DynamicScope currDynScope, Object[] temp, IRubyObject self, Block.Type blockType, StaticScope currScope)
+    {
+<span class="pc bpc" id="L368" title="1 of 4 branches missed.">        switch(operation) {</span>
+        // --------- Return flavored instructions --------
+        case RETURN: {
+<span class="fc" id="L371">            return (IRubyObject)retrieveOp(((ReturnBase)instr).getReturnValue(), context, self, currDynScope, currScope, temp);</span>
+        }
+        case BREAK: {
+<span class="fc" id="L374">            BreakInstr bi = (BreakInstr)instr;</span>
+<span class="fc" id="L375">            IRubyObject rv = (IRubyObject)bi.getReturnValue().retrieve(context, self, currScope, currDynScope, temp);</span>
+            // This also handles breaks in lambdas -- by converting them to a return
+            //
+            // This assumes that scopes with break instr. have a frame / dynamic scope
+            // pushed so that we can get to its static scope. For-loops now always have
+            // a dyn-scope pushed onto stack which makes this work in all scenarios.
+<span class="fc" id="L381">            return IRRuntimeHelpers.initiateBreak(context, currDynScope, rv, blockType);</span>
+        }
+        case NONLOCAL_RETURN: {
+<span class="fc" id="L384">            NonlocalReturnInstr ri = (NonlocalReturnInstr)instr;</span>
+<span class="fc" id="L385">            IRubyObject rv = (IRubyObject)retrieveOp(ri.getReturnValue(), context, self, currDynScope, currScope, temp);</span>
+<span class="fc" id="L386">            return IRRuntimeHelpers.initiateNonLocalReturn(context, currDynScope, blockType, rv);</span>
+        }
+        }
+<span class="nc" id="L389">        return null;</span>
+    }
+
+    private static void processOtherOp(ThreadContext context, Instr instr, Operation operation, DynamicScope currDynScope, StaticScope currScope, Object[] temp, IRubyObject self, Block.Type blockType, double[] floats, long[] fixnums, boolean[] booleans)
+    {
+        Object result;
+<span class="pc bpc" id="L395" title="5 of 10 branches missed.">        switch(operation) {</span>
+        case COPY: {
+<span class="fc" id="L397">            CopyInstr c = (CopyInstr)instr;</span>
+<span class="fc" id="L398">            Operand  src = c.getSource();</span>
+<span class="fc" id="L399">            Variable res = c.getResult();</span>
+<span class="pc bpc" id="L400" title="1 of 2 branches missed.">            if (res instanceof TemporaryFloatVariable) {</span>
+<span class="nc" id="L401">                setFloatVar(floats, (TemporaryFloatVariable)res, getFloatArg(floats, src));</span>
+<span class="pc bpc" id="L402" title="1 of 2 branches missed.">            } else if (res instanceof TemporaryFixnumVariable) {</span>
+<span class="nc" id="L403">                setFixnumVar(fixnums, (TemporaryFixnumVariable)res, getFixnumArg(fixnums, src));</span>
+            } else {
+<span class="fc" id="L405">                setResult(temp, currDynScope, res, retrieveOp(src, context, self, currDynScope, currScope, temp));</span>
+            }
+<span class="fc" id="L407">            break;</span>
+        }
+
+        case GET_FIELD: {
+<span class="fc" id="L411">            GetFieldInstr gfi = (GetFieldInstr)instr;</span>
+<span class="fc" id="L412">            IRubyObject object = (IRubyObject)gfi.getSource().retrieve(context, self, currScope, currDynScope, temp);</span>
+<span class="fc" id="L413">            VariableAccessor a = gfi.getAccessor(object);</span>
+<span class="pc bpc" id="L414" title="1 of 2 branches missed.">            result = a == null ? null : (IRubyObject)a.get(object);</span>
+<span class="fc bfc" id="L415" title="All 2 branches covered.">            if (result == null) {</span>
+<span class="pc bpc" id="L416" title="1 of 2 branches missed.">                if (context.runtime.isVerbose()) {</span>
+<span class="nc" id="L417">                    context.runtime.getWarnings().warning(ID.IVAR_NOT_INITIALIZED, &quot;instance variable &quot; + gfi.getRef() + &quot; not initialized&quot;);</span>
+                }
+<span class="fc" id="L419">                result = context.nil;</span>
+            }
+<span class="fc" id="L421">            setResult(temp, currDynScope, gfi.getResult(), result);</span>
+<span class="fc" id="L422">            break;</span>
+        }
+
+        case SEARCH_CONST: {
+<span class="fc" id="L426">            SearchConstInstr sci = (SearchConstInstr)instr;</span>
+<span class="fc" id="L427">            ConstantCache cache = sci.getConstantCache();</span>
+<span class="fc bfc" id="L428" title="All 2 branches covered.">            if (!ConstantCache.isCached(cache)) {</span>
+<span class="fc" id="L429">                result = sci.cache(context, currScope, currDynScope, self, temp);</span>
+            } else {
+<span class="fc" id="L431">                result = cache.value;</span>
+            }
+<span class="fc" id="L433">            setResult(temp, currDynScope, sci.getResult(), result);</span>
+<span class="fc" id="L434">            break;</span>
+        }
+
+        case RUNTIME_HELPER: {
+<span class="fc" id="L438">            RuntimeHelperCall rhc = (RuntimeHelperCall)instr;</span>
+<span class="fc" id="L439">            result = rhc.callHelper(context, currScope, currDynScope, self, temp, blockType);</span>
+<span class="fc bfc" id="L440" title="All 2 branches covered.">            if (rhc.getResult() != null) {</span>
+<span class="fc" id="L441">                setResult(temp, currDynScope, rhc.getResult(), result);</span>
+            }
+            break;
+        }
+
+        case BOX_FLOAT: {
+<span class="nc" id="L447">            RubyFloat f = context.runtime.newFloat(getFloatArg(floats, ((BoxFloatInstr)instr).getValue()));</span>
+<span class="nc" id="L448">            setResult(temp, currDynScope, ((BoxInstr)instr).getResult(), f);</span>
+<span class="nc" id="L449">            break;</span>
+        }
+
+        case BOX_FIXNUM: {
+<span class="nc" id="L453">            RubyFixnum f = context.runtime.newFixnum(getFixnumArg(fixnums, ((BoxFixnumInstr) instr).getValue()));</span>
+<span class="nc" id="L454">            setResult(temp, currDynScope, ((BoxInstr)instr).getResult(), f);</span>
+<span class="nc" id="L455">            break;</span>
+        }
+
+        case BOX_BOOLEAN: {
+<span class="nc" id="L459">            RubyBoolean f = context.runtime.newBoolean(getBooleanArg(booleans, ((BoxBooleanInstr) instr).getValue()));</span>
+<span class="nc" id="L460">            setResult(temp, currDynScope, ((BoxInstr)instr).getResult(), f);</span>
+<span class="nc" id="L461">            break;</span>
+        }
+
+        case UNBOX_FLOAT: {
+<span class="nc" id="L465">            UnboxInstr ui = (UnboxInstr)instr;</span>
+<span class="nc" id="L466">            Object val = retrieveOp(ui.getValue(), context, self, currDynScope, currScope, temp);</span>
+<span class="nc bnc" id="L467" title="All 2 branches missed.">            if (val instanceof RubyFloat) {</span>
+<span class="nc" id="L468">                floats[((TemporaryLocalVariable)ui.getResult()).offset] = ((RubyFloat)val).getValue();</span>
+            } else {
+<span class="nc" id="L470">                floats[((TemporaryLocalVariable)ui.getResult()).offset] = ((RubyFixnum)val).getDoubleValue();</span>
+            }
+<span class="nc" id="L472">            break;</span>
+        }
+
+        case UNBOX_FIXNUM: {
+<span class="nc" id="L476">            UnboxInstr ui = (UnboxInstr)instr;</span>
+<span class="nc" id="L477">            Object val = retrieveOp(ui.getValue(), context, self, currDynScope, currScope, temp);</span>
+<span class="nc bnc" id="L478" title="All 2 branches missed.">            if (val instanceof RubyFloat) {</span>
+<span class="nc" id="L479">                fixnums[((TemporaryLocalVariable)ui.getResult()).offset] = ((RubyFloat)val).getLongValue();</span>
+            } else {
+<span class="nc" id="L481">                fixnums[((TemporaryLocalVariable)ui.getResult()).offset] = ((RubyFixnum)val).getLongValue();</span>
+            }
+<span class="nc" id="L483">            break;</span>
+        }
+
+        // ---------- All the rest ---------
+        default:
+<span class="fc" id="L488">            result = instr.interpret(context, currScope, currDynScope, self, temp);</span>
+<span class="fc" id="L489">            setResult(temp, currDynScope, instr, result);</span>
+            break;
+        }
+<span class="fc" id="L492">    }</span>
+
+    private static IRubyObject interpret(ThreadContext context, IRubyObject self,
+            InterpreterContext interpreterContext, RubyModule implClass,
+            String name, IRubyObject[] args, Block block, Block.Type blockType) {
+<span class="fc" id="L497">        Instr[] instrs = interpreterContext.getInstructions();</span>
+<span class="fc" id="L498">        Object[] temp           = interpreterContext.allocateTemporaryVariables();</span>
+<span class="fc" id="L499">        double[] floats         = interpreterContext.allocateTemporaryFloatVariables();</span>
+<span class="fc" id="L500">        long[]   fixnums        = interpreterContext.allocateTemporaryFixnumVariables();</span>
+<span class="fc" id="L501">        boolean[]   booleans    = interpreterContext.allocateTemporaryBooleanVariables();</span>
+<span class="fc" id="L502">        int      n              = instrs.length;</span>
+<span class="fc" id="L503">        int      ipc            = 0;</span>
+<span class="fc" id="L504">        Object   exception      = null;</span>
+<span class="fc" id="L505">        DynamicScope currDynScope = context.getCurrentScope();</span>
+<span class="fc" id="L506">        StaticScope currScope = interpreterContext.getStaticScope();</span>
+<span class="fc" id="L507">        IRScope scope = currScope.getIRScope();</span>
+<span class="fc" id="L508">        boolean acceptsKeywordArgument = interpreterContext.receivesKeywordArguments();</span>
+
+        // Init profiling this scope
+<span class="fc" id="L511">        boolean debug   = IRRuntimeHelpers.isDebug();</span>
+<span class="fc" id="L512">        boolean profile = IRRuntimeHelpers.inProfileMode();</span>
+<span class="pc bpc" id="L513" title="1 of 2 branches missed.">        Integer scopeVersion = profile ? Profiler.initProfiling(scope) : 0;</span>
+
+        // Enter the looooop!
+<span class="pc bpc" id="L516" title="1 of 2 branches missed.">        while (ipc &lt; n) {</span>
+<span class="fc" id="L517">            Instr instr = instrs[ipc];</span>
+<span class="fc" id="L518">            ipc++;</span>
+<span class="fc" id="L519">            Operation operation = instr.getOperation();</span>
+<span class="pc bpc" id="L520" title="1 of 2 branches missed.">            if (debug) {</span>
+<span class="nc" id="L521">                LOG.info(&quot;I: {}&quot;, instr);</span>
+<span class="nc" id="L522">                interpInstrsCount++;</span>
+<span class="pc bpc" id="L523" title="1 of 2 branches missed.">            } else if (profile) {</span>
+<span class="nc" id="L524">                Profiler.instrTick(operation);</span>
+<span class="nc" id="L525">                interpInstrsCount++;</span>
+            }
+
+            try {
+<span class="pc bpc" id="L529" title="3 of 9 branches missed.">                switch (operation.opClass) {</span>
+                case INT_OP:
+<span class="nc" id="L531">                    interpretIntOp((AluInstr) instr, operation, fixnums, booleans);</span>
+<span class="nc" id="L532">                    break;</span>
+                case FLOAT_OP:
+<span class="nc" id="L534">                    interpretFloatOp((AluInstr) instr, operation, floats, booleans);</span>
+<span class="nc" id="L535">                    break;</span>
+                case ARG_OP:
+<span class="fc" id="L537">                    receiveArg(context, instr, operation, args, acceptsKeywordArgument, currDynScope, temp, exception, block);</span>
+<span class="fc" id="L538">                    break;</span>
+                case CALL_OP:
+<span class="pc bpc" id="L540" title="1 of 2 branches missed.">                    if (profile) Profiler.updateCallSite(instr, scope, scopeVersion);</span>
+<span class="fc" id="L541">                    processCall(context, instr, operation, currDynScope, currScope, temp, self);</span>
+<span class="fc" id="L542">                    break;</span>
+                case RET_OP:
+<span class="fc" id="L544">                    return processReturnOp(context, instr, operation, currDynScope, temp, self, blockType, currScope);</span>
+                case BRANCH_OP:
+<span class="fc bfc" id="L546" title="All 2 branches covered.">                    switch (operation) {</span>
+<span class="fc" id="L547">                    case JUMP: ipc = ((JumpInstr)instr).getJumpTarget().getTargetPC(); break;</span>
+<span class="fc" id="L548">                    default: ipc = instr.interpretAndGetNewIPC(context, currDynScope, currScope, self, temp, ipc); break;</span>
+                    }
+                    break;
+                case BOOK_KEEPING_OP:
+<span class="fc bfc" id="L552" title="All 2 branches covered.">                    if (operation == Operation.PUSH_BINDING) {</span>
+                        // IMPORTANT: Preserve this update of currDynScope.
+                        // This affects execution of all instructions in this scope
+                        // which will now use the updated value of currDynScope.
+<span class="fc" id="L556">                        currDynScope = interpreterContext.newDynamicScope(context);</span>
+<span class="fc" id="L557">                        context.pushScope(currDynScope);</span>
+                    } else {
+<span class="fc" id="L559">                        processBookKeepingOp(context, instr, operation, name, args, self, block, implClass);</span>
+                    }
+<span class="fc" id="L561">                    break;</span>
+                case OTHER_OP:
+<span class="fc" id="L563">                    processOtherOp(context, instr, operation, currDynScope, currScope, temp, self, blockType, floats, fixnums, booleans);</span>
+                    break;
+                }
+<span class="fc" id="L566">            } catch (Throwable t) {</span>
+<span class="fc" id="L567">                extractToMethodToAvoidC2Crash(context, instr, t);</span>
+
+<span class="pc bpc" id="L569" title="1 of 2 branches missed.">                if (debug) LOG.info(&quot;in : &quot; + interpreterContext.getStaticScope().getIRScope() + &quot;, caught Java throwable: &quot; + t + &quot;; excepting instr: &quot; + instr);</span>
+<span class="fc" id="L570">                ipc = instr.getRPC();</span>
+<span class="pc bpc" id="L571" title="1 of 2 branches missed.">                if (debug) LOG.info(&quot;ipc for rescuer: &quot; + ipc);</span>
+
+<span class="pc bpc" id="L573" title="1 of 2 branches missed.">                if (ipc == -1) {</span>
+<span class="nc" id="L574">                    Helpers.throwException(t);</span>
+                } else {
+<span class="fc" id="L576">                    exception = t;</span>
+                }
+<span class="fc" id="L578">            }</span>
+<span class="fc" id="L579">        }</span>
+
+        // Control should never get here!
+<span class="nc" id="L582">        throw context.runtime.newRuntimeError(&quot;BUG: interpreter fell through to end unexpectedly&quot;);</span>
+    }
+
+    /*
+     * If you put this code into the method above it will hard crash some production builds of C2 in Java 8. We aren't
+     * sure exactly which builds, but it seems to appear more often in Linux builds than Mac. - Chris Seaton
+     */
+
+    private static void extractToMethodToAvoidC2Crash(ThreadContext context, Instr instr, Throwable t) {
+<span class="fc bfc" id="L591" title="All 2 branches covered.">        if (!(t instanceof Unrescuable)) {</span>
+<span class="fc bfc" id="L592" title="All 2 branches covered.">            if (!instr.canRaiseException()) {</span>
+<span class="fc" id="L593">                System.err.println(&quot;BUG: Got exception &quot; + t + &quot; but instr &quot; + instr + &quot; is not supposed to be raising exceptions!&quot;);</span>
+            }
+<span class="pc bpc" id="L595" title="2 of 4 branches missed.">            if ((t instanceof RaiseException) &amp;&amp; context.runtime.getGlobalVariables().get(&quot;$!&quot;) != IRRuntimeHelpers.unwrapRubyException(t)) {</span>
+<span class="nc" id="L596">                System.err.println(&quot;BUG: $! and exception are not matching up.&quot;);</span>
+<span class="nc" id="L597">                System.err.println(&quot;$!: &quot; + context.runtime.getGlobalVariables().get(&quot;$!&quot;));</span>
+<span class="nc" id="L598">                System.err.println(&quot;t : &quot; + t);</span>
+            }
+        }
+<span class="fc" id="L601">    }</span>
+
+    public static IRubyObject INTERPRET_ROOT(ThreadContext context, IRubyObject self,
+           InterpreterContext ic, RubyModule clazz, String name) {
+        try {
+<span class="fc" id="L606">            ThreadContext.pushBacktrace(context, name, ic.getFileName(), context.getLine());</span>
+<span class="fc" id="L607">            return interpret(context, self, ic, clazz, name, IRubyObject.NULL_ARRAY, Block.NULL_BLOCK, null);</span>
+        } finally {
+<span class="fc" id="L609">            ThreadContext.popBacktrace(context);</span>
+        }
+    }
+
+    public static IRubyObject INTERPRET_EVAL(ThreadContext context, IRubyObject self,
+           InterpreterContext ic, RubyModule clazz, IRubyObject[] args, String name, Block block, Block.Type blockType) {
+        try {
+<span class="fc" id="L616">            ThreadContext.pushBacktrace(context, name, ic.getFileName(), context.getLine());</span>
+<span class="fc" id="L617">            return interpret(context, self, ic, clazz, name, args, block, blockType);</span>
+        } finally {
+<span class="fc" id="L619">            ThreadContext.popBacktrace(context);</span>
+        }
+    }
+
+    public static IRubyObject INTERPRET_BLOCK(ThreadContext context, IRubyObject self,
+            InterpreterContext ic, IRubyObject[] args, String name, Block block, Block.Type blockType) {
+        try {
+<span class="fc" id="L626">            ThreadContext.pushBacktrace(context, name, ic.getFileName(), context.getLine());</span>
+<span class="fc" id="L627">            return interpret(context, self, ic, null, name, args, block, blockType);</span>
+        } finally {
+<span class="fc" id="L629">            ThreadContext.popBacktrace(context);</span>
+        }
+    }
+
+    public static IRubyObject INTERPRET_METHOD(ThreadContext context, InterpretedIRMethod method,
+        IRubyObject self, String name, IRubyObject[] args, Block block) {
+<span class="fc" id="L635">        InterpreterContext ic = method.ensureInstrsReady();</span>
+        // FIXME: Consider synthetic methods/module/class bodies to use different method type to eliminate this check
+<span class="fc" id="L637">        boolean isSynthetic = method.isSynthetic();</span>
+
+        try {
+<span class="fc bfc" id="L640" title="All 2 branches covered.">            if (!isSynthetic) ThreadContext.pushBacktrace(context, name, ic.getFileName(), context.getLine());</span>
+
+<span class="fc" id="L642">            return interpret(context, self, ic, method.getImplementationClass().getMethodLocation(), name, args, block, null);</span>
+        } finally {
+<span class="fc bfc" id="L644" title="All 4 branches covered.">            if (!isSynthetic) ThreadContext.popBacktrace(context);</span>
+        }
+    }
+
+    /**
+     * Evaluate the given string.
+     * @param context the current thread's context
+     * @param self the self to evaluate under
+     * @param src The string containing the text to be evaluated
+     * @param file The filename to use when reporting errors during the evaluation
+     * @param lineNumber that the eval supposedly starts from
+     * @return An IRubyObject result from the evaluation
+     */
+    public static IRubyObject evalSimple(ThreadContext context, RubyModule under, IRubyObject self, RubyString src, String file, int lineNumber, EvalType evalType) {
+<span class="fc" id="L658">        Ruby runtime = context.runtime;</span>
+<span class="pc bpc" id="L659" title="1 of 2 branches missed.">        if (runtime.getInstanceConfig().getCompileMode() == RubyInstanceConfig.CompileMode.TRUFFLE) throw new UnsupportedOperationException();</span>
+
+        // no binding, just eval in &quot;current&quot; frame (caller's frame)
+<span class="fc" id="L662">        DynamicScope parentScope = context.getCurrentScope();</span>
+<span class="fc" id="L663">        DynamicScope evalScope = new ManyVarsDynamicScope(runtime.getStaticScopeFactory().newEvalScope(parentScope.getStaticScope()), parentScope);</span>
+
+<span class="fc" id="L665">        evalScope.getStaticScope().setModule(under);</span>
+<span class="fc" id="L666">        context.pushEvalSimpleFrame(self);</span>
+
+        try {
+<span class="fc" id="L669">            return evalCommon(context, evalScope, self, src, file, lineNumber, &quot;(eval)&quot;, Block.NULL_BLOCK, evalType);</span>
+        } finally {
+<span class="pc" id="L671">            context.popFrame();</span>
+        }
+    }
+
+    private static IRubyObject evalCommon(ThreadContext context, DynamicScope evalScope, IRubyObject self, IRubyObject src,
+                                          String file, int lineNumber, String name, Block block, EvalType evalType) {
+<span class="fc" id="L677">        StaticScope ss = evalScope.getStaticScope();</span>
+<span class="fc" id="L678">        BeginEndInterpreterContext ic = prepareIC(context, evalScope, src, file, lineNumber, evalType);</span>
+
+<span class="fc" id="L680">        evalScope.setEvalType(evalType);</span>
+<span class="fc" id="L681">        context.pushScope(evalScope);</span>
+        try {
+<span class="fc" id="L683">            evalScope.growIfNeeded();</span>
+
+<span class="fc" id="L685">            runBeginBlocks(ic.getBeginBlocks(), context, self, ss, null);</span>
+
+<span class="fc" id="L687">            return Interpreter.INTERPRET_EVAL(context, self, ic, ic.getStaticScope().getModule(), EMPTY_ARGS, name, block, null);</span>
+        } finally {
+<span class="fc" id="L689">            evalScope.clearEvalType();</span>
+<span class="fc" id="L690">            context.popScope();</span>
+        }
+    }
+
+    /**
+     * Evaluate the given string under the specified binding object. If the binding is not a Proc or Binding object
+     * (RubyProc or RubyBinding) throw an appropriate type error.
+     * @param context the thread context for the current thread
+     * @param self the self against which eval was called; used as self in the eval in 1.9 mode
+     * @param src The string containing the text to be evaluated
+     * @param binding The binding object under which to perform the evaluation
+     * @return An IRubyObject result from the evaluation
+     */
+    public static IRubyObject evalWithBinding(ThreadContext context, IRubyObject self, IRubyObject src, Binding binding) {
+<span class="fc" id="L704">        Ruby runtime = context.runtime;</span>
+<span class="pc bpc" id="L705" title="1 of 2 branches missed.">        if (runtime.getInstanceConfig().getCompileMode() == RubyInstanceConfig.CompileMode.TRUFFLE) throw new UnsupportedOperationException();</span>
+
+<span class="fc" id="L707">        DynamicScope evalScope = binding.getEvalScope(runtime);</span>
+<span class="fc" id="L708">        evalScope.getStaticScope().determineModule(); // FIXME: It would be nice to just set this or remove it from staticScope altogether</span>
+
+<span class="fc" id="L710">        Frame lastFrame = context.preEvalWithBinding(binding);</span>
+        try {
+<span class="fc" id="L712">            return evalCommon(context, evalScope, self, src, binding.getFile(),</span>
+<span class="fc" id="L713">                    binding.getLine(), binding.getMethod(), binding.getFrame().getBlock(), EvalType.BINDING_EVAL);</span>
+        } finally {
+<span class="fc" id="L715">            context.postEvalWithBinding(binding, lastFrame);</span>
+        }
+    }
+
+    private static BeginEndInterpreterContext prepareIC(ThreadContext context, DynamicScope evalScope, IRubyObject src,
+                                                        String file, int lineNumber, EvalType evalType) {
+<span class="fc" id="L721">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L722">        IRScope containingIRScope = evalScope.getStaticScope().getEnclosingScope().getIRScope();</span>
+<span class="fc" id="L723">        RootNode rootNode = (RootNode) runtime.parseEval(src.convertToString().getByteList(), file, evalScope, lineNumber);</span>
+<span class="fc" id="L724">        IREvalScript evalScript = IRBuilder.createIRBuilder(runtime, runtime.getIRManager()).buildEvalRoot(evalScope.getStaticScope(), containingIRScope, file, lineNumber, rootNode, evalType);</span>
+
+<span class="fc" id="L726">        BeginEndInterpreterContext ic = (BeginEndInterpreterContext) evalScript.prepareForInterpretation();</span>
+
+<span class="pc bpc" id="L728" title="1 of 2 branches missed.">        if (IRRuntimeHelpers.isDebug()) {</span>
+<span class="nc" id="L729">            LOG.info(&quot;Graph:\n&quot; + evalScript.cfg().toStringGraph());</span>
+<span class="nc" id="L730">            LOG.info(&quot;CFG:\n&quot; + evalScript.cfg().toStringInstrs());</span>
+        }
+
+<span class="fc" id="L733">        return ic;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

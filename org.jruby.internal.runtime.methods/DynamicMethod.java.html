@@ -1,0 +1,613 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>DynamicMethod.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.internal.runtime.methods</a> &gt; <span class="el_source">DynamicMethod.java</span></div><h1>DynamicMethod.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2005 Thomas E Enebo &lt;enebo@acm.org&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+
+package org.jruby.internal.runtime.methods;
+
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import org.jruby.MetaClass;
+import org.jruby.Ruby;
+import org.jruby.RubyLocalJumpError;
+import org.jruby.RubyModule;
+import org.jruby.exceptions.JumpException;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.CallType;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.Visibility;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.ivars.MethodData;
+import org.jruby.util.CodegenUtils;
+
+/**
+ * DynamicMethod represents a method handle in JRuby, to provide both entry
+ * points into AST and bytecode interpreters, but also to provide handles to
+ * JIT-compiled and hand-implemented Java methods. All methods invokable from
+ * Ruby code are referenced by method handles, either directly or through
+ * delegation or callback mechanisms.
+ */
+<span class="pc bpc" id="L57" title="1 of 2 branches missed.">public abstract class DynamicMethod {</span>
+    /** The Ruby module or class in which this method is immediately defined. */
+    protected RubyModule implementationClass;
+    /** The &quot;protected class&quot; used for calculating protected access. */
+    protected RubyModule protectedClass;
+    /** The visibility of this method. */
+    protected Visibility visibility;
+    /** The &quot;call configuration&quot; to use for pre/post call logic. */
+    protected CallConfiguration callConfig;
+    /** The serial number for this method object, to globally identify it */
+    protected long serialNumber;
+    /** Is this a builtin core method or not */
+<span class="fc" id="L69">    protected boolean builtin = false;</span>
+    /** Single-arity native call */
+    protected NativeCall nativeCall;
+    /** Alternate-arity NativeCalls */
+<span class="fc" id="L73">    protected NativeCall[] nativeCalls = new NativeCall[10];</span>
+    /** The simple, base name this method was defined under. May be null.*/
+    protected String name;
+    /** Whether this method is &quot;not implemented&quot;. */
+<span class="fc" id="L77">    protected boolean notImplemented = false;</span>
+    /** An arbitrarily-typed &quot;method handle&quot; for use by compilers and call sites */
+    protected Object handle;
+
+    /**
+     * Base constructor for dynamic method handles.
+     *
+     * @param implementationClass The class to which this method will be
+     * immediately bound
+     * @param visibility The visibility assigned to this method
+     * @param callConfig The CallConfiguration to use for this method's
+     * pre/post invocation logic.
+     */
+<span class="fc" id="L90">    protected DynamicMethod(RubyModule implementationClass, Visibility visibility, CallConfiguration callConfig) {</span>
+<span class="pc bpc" id="L91" title="3 of 4 branches missed.">        assert implementationClass != null;</span>
+<span class="fc" id="L92">        init(implementationClass, visibility, callConfig);</span>
+<span class="fc" id="L93">    }</span>
+
+    /**
+     * Base constructor for dynamic method handles with names.
+     *
+     * @param implementationClass The class to which this method will be
+     * immediately bound
+     * @param visibility The visibility assigned to this method
+     * @param callConfig The CallConfiguration to use for this method's
+     * pre/post invocation logic.
+     */
+    protected DynamicMethod(RubyModule implementationClass, Visibility visibility, CallConfiguration callConfig, String name) {
+<span class="fc" id="L105">        this(implementationClass, visibility, callConfig);</span>
+<span class="fc" id="L106">        this.name = name;</span>
+<span class="fc" id="L107">    }</span>
+
+    /**
+     * A no-arg constructor used only by the UndefinedMethod subclass and
+     * CompiledMethod handles. instanceof assertions make sure this is so.
+     */
+<span class="fc" id="L113">    protected DynamicMethod() {</span>
+//        assert (this instanceof UndefinedMethod ||
+//                this instanceof CompiledMethod ||
+//                this instanceof );
+<span class="fc" id="L117">    }</span>
+
+    protected void init(RubyModule implementationClass, Visibility visibility, CallConfiguration callConfig) {
+<span class="fc" id="L120">        this.visibility = visibility;</span>
+<span class="fc" id="L121">        this.implementationClass = implementationClass;</span>
+        // TODO: Determine whether we should perhaps store non-singleton class
+        // in the implementationClass
+<span class="fc" id="L124">        this.protectedClass = calculateProtectedClass(implementationClass);</span>
+<span class="fc" id="L125">        this.callConfig = callConfig;</span>
+<span class="fc" id="L126">        this.serialNumber = implementationClass.getRuntime().getNextDynamicMethodSerial();</span>
+<span class="fc" id="L127">    }</span>
+
+    /**
+     * Get the global serial number for this method object
+     *
+     * @return This method object's serial number
+     */
+    public long getSerialNumber() {
+<span class="fc" id="L135">        return serialNumber;</span>
+    }
+
+    public boolean isBuiltin() {
+<span class="fc" id="L139">        return builtin;</span>
+    }
+
+    public void setIsBuiltin(boolean isBuiltin) {
+<span class="fc" id="L143">        this.builtin = isBuiltin;</span>
+<span class="fc" id="L144">    }</span>
+
+    /**
+     * The minimum 'call' method required for a dynamic method handle.
+     * Subclasses must impleemnt this method, but may implement the other
+     * signatures to provide faster, non-boxing call paths. Typically
+     * subclasses will implement this method to check variable arity calls,
+     * then performing a specific-arity invocation to the appropriate method
+     * or performing variable-arity logic in-line.
+     *
+     * @param context The thread context for the currently executing thread
+     * @param self The 'self' or 'receiver' object to use for this call
+     * @param klazz The Ruby class against which this method is binding
+     * @param name The incoming name used to invoke this method
+     * @param args The argument list to this invocation
+     * @param block The block passed to this invocation
+     * @return The result of the call
+     */
+    public abstract IRubyObject call(ThreadContext context, IRubyObject self, RubyModule clazz,
+            String name, IRubyObject[] args, Block block);
+
+    /**
+     * A default implementation of n-arity, non-block 'call' method,
+     * which simply calls the n-arity, block-receiving version with
+     * the arg list and Block.NULL_BLOCK.
+     *
+     * @param context The thread context for the currently executing thread
+     * @param self The 'self' or 'receiver' object to use for this call
+     * @param klazz The Ruby class against which this method is binding
+     * @param name The incoming name used to invoke this method
+     * @param arg1 The first argument to this invocation
+     * @param arg2 The second argument to this invocation
+     * @return The result of the call
+     */
+    public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule clazz,
+            String name, IRubyObject[] args) {
+<span class="fc" id="L180">        return call(context, self, clazz, name, args, Block.NULL_BLOCK);</span>
+    }
+
+    ////////////////////////////////////////////////////////////////////////////
+    // Now we provide default impls of a number of signatures. For each arity,
+    // we first generate a non-block version of the method, which just adds
+    // NULL_BLOCK and re-calls, allowing e.g. compiled code, which always can
+    // potentially take a block, to only generate the block-receiving signature
+    // and still avoid arg boxing.
+    //
+    // We then provide default implementations of each block-accepting method
+    // that in turn call the IRubyObject[]+Block version of call. This then
+    // finally falls back on the minimum implementation requirement for
+    // dynamic method handles.
+    ////////////////////////////////////////////////////////////////////////////
+
+    /** Arity 0, no block */
+    public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule klazz, String name) {
+<span class="fc" id="L198">        return call(context, self, klazz, name, Block.NULL_BLOCK);</span>
+    }
+    /** Arity 0, with block; calls through IRubyObject[] path */
+    public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule klazz, String name, Block block) {
+<span class="fc" id="L202">        return call(context, self, klazz, name, IRubyObject.NULL_ARRAY, block);</span>
+    }
+    /** Arity 1, no block */
+    public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule klazz, String name, IRubyObject arg0) {
+<span class="fc" id="L206">        return call(context, self, klazz, name, arg0, Block.NULL_BLOCK);</span>
+    }
+    /** Arity 1, with block; calls through IRubyObject[] path */
+    public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule klazz, String name, IRubyObject arg0, Block block) {
+<span class="fc" id="L210">        return call(context, self, klazz, name, new IRubyObject[] {arg0}, block);</span>
+    }
+    /** Arity 2, no block */
+    public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule klazz, String name, IRubyObject arg0, IRubyObject arg1) {
+<span class="fc" id="L214">        return call(context, self, klazz, name, arg0, arg1, Block.NULL_BLOCK);</span>
+    }
+    /** Arity 2, with block; calls through IRubyObject[] path */
+    public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule klazz, String name, IRubyObject arg0, IRubyObject arg1, Block block) {
+<span class="fc" id="L218">        return call(context, self, klazz, name, new IRubyObject[] {arg0, arg1}, block);</span>
+    }
+    /** Arity 3, no block */
+    public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule klazz, String name, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2) {
+<span class="fc" id="L222">        return call(context, self, klazz, name, arg0, arg1, arg2, Block.NULL_BLOCK);</span>
+    }
+    /** Arity 3, with block; calls through IRubyObject[] path */
+    public IRubyObject call(ThreadContext context, IRubyObject self, RubyModule klazz, String name, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="fc" id="L226">        return call(context, self, klazz, name, new IRubyObject[] {arg0, arg1, arg2}, block);</span>
+    }
+
+
+
+    /**
+     * Duplicate this method, returning DynamicMethod referencing the same code
+     * and with the same attributes.
+     *
+     * It is not required that this method produce a new object if the
+     * semantics of the DynamicMethod subtype do not require such.
+     *
+     * @return An identical DynamicMethod object to the target.
+     */
+    public abstract DynamicMethod dup();
+
+    /**
+     * Determine whether this method is callable from the given object using
+     * the given call type.
+     *
+     * @param caller The calling object
+     * @param callType The type of call
+     * @return true if the call would not violate visibility; false otherwise
+     */
+    public boolean isCallableFrom(IRubyObject caller, CallType callType) {
+<span class="pc bpc" id="L251" title="1 of 4 branches missed.">        switch (visibility) {</span>
+        case PUBLIC:
+<span class="fc" id="L253">            return true;</span>
+        case PRIVATE:
+<span class="fc bfc" id="L255" title="All 2 branches covered.">            return callType != CallType.NORMAL;</span>
+        case PROTECTED:
+<span class="fc" id="L257">            return protectedAccessOk(caller);</span>
+        }
+
+<span class="nc" id="L260">        return true;</span>
+    }
+
+    /**
+     * Determine whether the given object can safely invoke protected methods on
+     * the class this method is bound to.
+     *
+     * @param caller The calling object
+     * @return true if the calling object can call protected methods; false
+     * otherwise
+     */
+    private boolean protectedAccessOk(IRubyObject caller) {
+<span class="fc" id="L272">        return getProtectedClass().isInstance(caller);</span>
+    }
+
+    /**
+     * Calculate, based on given RubyModule, which class in its hierarchy
+     * should be used to determine protected access.
+     *
+     * @param cls The class from which to calculate
+     * @return The class to be used for protected access checking.
+     */
+    protected static RubyModule calculateProtectedClass(RubyModule cls) {
+        // singleton classes don't get their own visibility domain
+<span class="fc bfc" id="L284" title="All 2 branches covered.">        if (cls.isSingleton()) cls = cls.getSuperClass();</span>
+
+<span class="fc bfc" id="L286" title="All 2 branches covered.">        while (cls.isIncluded()) cls = cls.getMetaClass();</span>
+
+        // For visibility we need real meta class and not anonymous one from class &lt;&lt; self
+<span class="fc bfc" id="L289" title="All 2 branches covered.">        if (cls instanceof MetaClass) cls = ((MetaClass) cls).getRealClass();</span>
+
+<span class="fc" id="L291">        return cls;</span>
+    }
+
+    /**
+     * Retrieve the pre-calculated &quot;protected class&quot; used for access checks.
+     *
+     * @return The &quot;protected class&quot; for access checks.
+     */
+    protected RubyModule getProtectedClass() {
+<span class="fc" id="L300">        return protectedClass;</span>
+    }
+
+    /**
+     * Retrieve the class or module on which this method is implemented, used
+     * for 'super' logic among others.
+     *
+     * @return The class on which this method is implemented
+     */
+    public RubyModule getImplementationClass() {
+<span class="fc" id="L310">        return implementationClass;</span>
+    }
+
+    public boolean isImplementedBy(RubyModule other) {
+<span class="fc bfc" id="L314" title="All 2 branches covered.">        return implementationClass == other;</span>
+    }
+
+    /**
+     * Set the class on which this method is implemented, used for 'super'
+     * logic, among others.
+     *
+     * @param implClass The class on which this method is implemented
+     */
+    public void setImplementationClass(RubyModule implClass) {
+<span class="fc" id="L324">        implementationClass = implClass;</span>
+<span class="fc" id="L325">        protectedClass = calculateProtectedClass(implClass);</span>
+<span class="fc" id="L326">    }</span>
+
+    /**
+     * Get the visibility of this method.
+     *
+     * @return The visibility of this method
+     */
+    public Visibility getVisibility() {
+<span class="fc" id="L334">        return visibility;</span>
+    }
+
+    /**
+     * Set the visibility of this method.
+     *
+     * @param visibility The visibility of this method
+     */
+    public void setVisibility(Visibility visibility) {
+<span class="fc" id="L343">        this.visibility = visibility;</span>
+<span class="fc" id="L344">    }</span>
+
+    /**
+     * Whether this method is the &quot;undefined&quot; method, used to represent a
+     * missing or undef'ed method. Only returns true for UndefinedMethod
+     * instances, of which there should be only one (a singleton).
+     *
+     * @return true if this method is the undefined method; false otherwise
+     */
+    public final boolean isUndefined() {
+<span class="fc bfc" id="L354" title="All 2 branches covered.">        return this == UndefinedMethod.INSTANCE;</span>
+    }
+
+    /**
+     * Whether this method is the &quot;null&quot; method, used to stop method
+     * name resolution loops. Only returns true for NullMethod instances,
+     * of which there should be only one (a singleton).
+     *
+     * @return true if this method is the undefined method; false otherwise
+     */
+    public final boolean isNull() {
+<span class="fc bfc" id="L365" title="All 2 branches covered.">        return this == NullMethod.INSTANCE;</span>
+    }
+
+    /**
+     * Retrieve the arity of this method, used for reporting arity to Ruby
+     * code. This arity may or may not reflect the actual specific or variable
+     * arities of the referenced method.
+     *
+     * @return The arity of the method, as reported to Ruby consumers.
+     */
+    public Arity getArity() {
+<span class="nc" id="L376">        return Arity.optional();</span>
+    }
+
+    /**
+     * Get the &quot;real&quot; method contained within this method. This simply returns
+     * self except in cases where a method is wrapped to give it a new
+     * name or new implementation class (AliasMethod, WrapperMethod, ...).
+     *
+     * @return The &quot;real&quot; method associated with this one
+     */
+    public DynamicMethod getRealMethod() {
+<span class="fc" id="L387">        return this;</span>
+    }
+
+    /**
+     * Get the CallConfiguration used for pre/post logic for this method handle.
+     *
+     * @return The CallConfiguration for this method handle
+     */
+    public CallConfiguration getCallConfig() {
+<span class="nc" id="L396">        return callConfig;</span>
+    }
+
+    /**
+     * Set the CallConfiguration used for pre/post logic for this method handle.
+     *
+     * @param callConfig The CallConfiguration for this method handle
+     */
+    public void setCallConfig(CallConfiguration callConfig) {
+<span class="fc" id="L405">        this.callConfig = callConfig;</span>
+<span class="fc" id="L406">    }</span>
+    
+    public static class NativeCall {
+        private final Class nativeTarget;
+        private final String nativeName;
+        private final Class nativeReturn;
+        private final Class[] nativeSignature;
+        private final boolean statik;
+        private final boolean java;
+
+        public NativeCall(Class nativeTarget, String nativeName, Class nativeReturn, Class[] nativeSignature, boolean statik) {
+<span class="nc" id="L417">            this(nativeTarget, nativeName, nativeReturn, nativeSignature, statik, false);</span>
+<span class="nc" id="L418">        }</span>
+
+<span class="fc" id="L420">        public NativeCall(Class nativeTarget, String nativeName, Class nativeReturn, Class[] nativeSignature, boolean statik, boolean java) {</span>
+<span class="fc" id="L421">            this.nativeTarget = nativeTarget;</span>
+<span class="fc" id="L422">            this.nativeName = nativeName;</span>
+<span class="fc" id="L423">            this.nativeReturn = nativeReturn;</span>
+<span class="fc" id="L424">            this.nativeSignature = nativeSignature;</span>
+<span class="fc" id="L425">            this.statik = statik;</span>
+<span class="fc" id="L426">            this.java = java;</span>
+<span class="fc" id="L427">        }</span>
+
+        public Class getNativeTarget() {
+<span class="nc" id="L430">            return nativeTarget;</span>
+        }
+
+        public String getNativeName() {
+<span class="nc" id="L434">            return nativeName;</span>
+        }
+
+        public Class getNativeReturn() {
+<span class="nc" id="L438">            return nativeReturn;</span>
+        }
+
+        public Class[] getNativeSignature() {
+<span class="nc" id="L442">            return nativeSignature;</span>
+        }
+
+        public boolean isStatic() {
+<span class="nc" id="L446">            return statik;</span>
+        }
+        
+        public boolean isJava() {
+<span class="nc" id="L450">            return java;</span>
+        }
+
+        public boolean hasContext() {
+<span class="nc bnc" id="L454" title="All 4 branches missed.">            return nativeSignature.length &gt; 0 &amp;&amp; nativeSignature[0] == ThreadContext.class;</span>
+        }
+
+        public boolean hasBlock() {
+<span class="nc bnc" id="L458" title="All 4 branches missed.">            return nativeSignature.length &gt; 0 &amp;&amp; nativeSignature[nativeSignature.length - 1] == Block.class;</span>
+        }
+        
+        /**
+         * Get the java.lang.reflect.Method for this NativeCall
+         * 
+         * @return the reflected method corresponding to this NativeCall
+         */
+        public Method getMethod() {
+            try {
+<span class="nc" id="L468">                return nativeTarget.getDeclaredMethod(nativeName, nativeSignature);</span>
+<span class="nc" id="L469">            } catch (Exception e) {</span>
+<span class="nc" id="L470">                throw new RuntimeException(e);</span>
+            }
+        }
+
+        @Override
+        public String toString() {
+<span class="nc bnc" id="L476" title="All 2 branches missed.">            return &quot;&quot; + (statik?&quot;static &quot;:&quot;&quot;) + nativeReturn.getSimpleName() + &quot; &quot; + nativeTarget.getSimpleName() + &quot;.&quot; + nativeName + CodegenUtils.prettyShortParams(nativeSignature);</span>
+        }
+    }
+
+    /**
+     * Set the single-arity NativeCall for this method. All signatures for the
+     * non-single-arity getNativeCall will also be set to this value.
+     * 
+     * @param nativeTarget native method target
+     * @param nativeName native method name
+     * @param nativeReturn native method return
+     * @param nativeSignature native method arguments
+     * @param statik static?
+     * @param java plain Java method?
+     */
+    public void setNativeCall(Class nativeTarget, String nativeName, Class nativeReturn, Class[] nativeSignature, boolean statik, boolean java) {
+<span class="fc" id="L492">        this.nativeCall = new NativeCall(nativeTarget, nativeName, nativeReturn, nativeSignature, statik, java);</span>
+<span class="fc" id="L493">        Arrays.fill(nativeCalls, nativeCall);</span>
+<span class="fc" id="L494">    }</span>
+
+
+    /**
+     * Set the single-arity NativeCall for this method. All signatures for the
+     * non-single-arity getNativeCall will also be set to this value.
+     * 
+     * @param nativeTarget native method target
+     * @param nativeName native method name
+     * @param nativeReturn native method return
+     * @param nativeSignature native method arguments
+     * @param statik static?
+     */
+    public void setNativeCall(Class nativeTarget, String nativeName, Class nativeReturn, Class[] nativeSignature, boolean statik) {
+<span class="nc" id="L508">        setNativeCall(nativeTarget, nativeName, nativeReturn, nativeSignature, statik, false);</span>
+<span class="nc" id="L509">    }</span>
+    
+    public NativeCall getNativeCall() {
+<span class="nc" id="L512">        return this.nativeCall;</span>
+    }
+    
+    public NativeCall getNativeCall(int args, boolean block) {
+<span class="nc bnc" id="L516" title="All 4 branches missed.">        if (args == -1 || args &gt; 3) args = 4;</span>
+<span class="nc bnc" id="L517" title="All 2 branches missed.">        if (block) args += 5;</span>
+<span class="nc" id="L518">        return this.nativeCalls[args];</span>
+    }
+    
+    public void setNativeCall(int args, boolean block, NativeCall nativeCall) {
+<span class="nc bnc" id="L522" title="All 4 branches missed.">        if (args == -1 || args &gt; 3) args = 4;</span>
+<span class="nc bnc" id="L523" title="All 2 branches missed.">        if (block) args += 5;</span>
+<span class="nc" id="L524">        this.nativeCalls[args] = nativeCall;</span>
+<span class="nc" id="L525">    }</span>
+
+    /**
+     * Returns true if this method is backed by native (i.e. Java) code.
+     *
+     * @return true If backed by Java code or JVM bytecode; false otherwise
+     */
+    public boolean isNative() {
+<span class="nc" id="L533">        return false;</span>
+    }
+
+    /**
+     * Get the base name this method was defined as.
+     *
+     * @return the base name for the method
+     */
+    public String getName() {
+<span class="nc" id="L542">        return name;</span>
+    }
+
+    /**
+     * Set the base name for this method.
+     *
+     * @param name the name to set
+     */
+    public void setName(String name) {
+<span class="fc" id="L551">        this.name = name;</span>
+<span class="fc" id="L552">    }</span>
+
+    /**
+     * Get the &quot;handle&quot; associated with this DynamicMethod.
+     * 
+     * @return the handle
+     */
+    public Object getHandle() {
+<span class="nc" id="L560">        return handle;</span>
+    }
+
+    /**
+     * Set the &quot;handle&quot; associated with this DynamicMethod.
+     * 
+     * @param handle the handle
+     */
+    public void setHandle(Object handle) {
+<span class="fc" id="L569">        this.handle = handle;</span>
+<span class="fc" id="L570">    }</span>
+    
+    /**
+     * Whether this method is &quot;not implemented&quot;. This is
+     * primarily to support Ruby 1.9's behavior of respond_to? yielding false if
+     * the feature in question is unsupported (but still having the method defined).
+     */
+    public boolean isNotImplemented() {
+<span class="fc" id="L578">        return notImplemented;</span>
+    }
+    
+    /**
+     * Additional metadata about this method.
+     */
+    public MethodData getMethodData() {
+<span class="nc" id="L585">        return MethodData.NULL;</span>
+    }
+    
+    /**
+     * Set whether this method is &quot;not implemented&quot;.
+     */
+    public void setNotImplemented(boolean setNotImplemented) {
+<span class="fc" id="L592">        this.notImplemented = setNotImplemented;</span>
+<span class="fc" id="L593">    }</span>
+
+    protected IRubyObject handleRedo(Ruby runtime) throws RaiseException {
+<span class="nc" id="L596">        throw runtime.newLocalJumpError(RubyLocalJumpError.Reason.REDO, runtime.getNil(), &quot;unexpected redo&quot;);</span>
+    }
+
+    protected IRubyObject handleReturn(ThreadContext context, JumpException.ReturnJump rj, int callNumber) {
+<span class="nc bnc" id="L600" title="All 2 branches missed.">        if (rj.getTarget() == callNumber) {</span>
+<span class="nc" id="L601">            return (IRubyObject) rj.getValue();</span>
+        }
+<span class="nc" id="L603">        throw rj;</span>
+    }
+
+    protected IRubyObject handleBreak(ThreadContext context, Ruby runtime, JumpException.BreakJump bj, int callNumber) {
+<span class="nc bnc" id="L607" title="All 2 branches missed.">        if (bj.getTarget() == callNumber) {</span>
+<span class="nc" id="L608">            throw runtime.newLocalJumpError(RubyLocalJumpError.Reason.BREAK, runtime.getNil(), &quot;unexpected break&quot;);</span>
+        }
+<span class="nc" id="L610">        throw bj;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

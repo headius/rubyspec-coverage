@@ -1,0 +1,359 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ThreadFiber.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.fiber</a> &gt; <span class="el_source">ThreadFiber.java</span></div><h1>ThreadFiber.java</h1><pre class="source lang-java linenums">package org.jruby.ext.fiber;
+
+import java.lang.ref.WeakReference;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+import org.jruby.Ruby;
+import org.jruby.RubyClass;
+import org.jruby.RubyObject;
+import org.jruby.RubyThread;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.exceptions.JumpException;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.ext.thread.SizedQueue;
+import org.jruby.javasupport.JavaUtil;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ExecutionContext;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.Visibility;
+import org.jruby.runtime.builtin.IRubyObject;
+
+import org.jruby.ir.runtime.IRBreakJump;
+import org.jruby.ir.runtime.IRReturnJump;
+import org.jruby.ir.operands.IRException;
+
+<span class="pc bpc" id="L25" title="1 of 2 branches missed.">public class ThreadFiber extends RubyObject implements ExecutionContext {</span>
+    public ThreadFiber(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L27">        super(runtime, klass);</span>
+<span class="fc" id="L28">    }</span>
+    
+    public static void initRootFiber(ThreadContext context) {
+<span class="fc" id="L31">        Ruby runtime = context.runtime;</span>
+        
+<span class="fc" id="L33">        ThreadFiber rootFiber = new ThreadFiber(runtime, runtime.getClass(&quot;Fiber&quot;)); // FIXME: getFiber()</span>
+        
+<span class="pc bpc" id="L35" title="3 of 4 branches missed.">        assert runtime.getClass(&quot;SizedQueue&quot;) != null : &quot;SizedQueue has not been loaded&quot;;</span>
+<span class="fc" id="L36">        rootFiber.data = new FiberData(new SizedQueue(runtime, runtime.getClass(&quot;SizedQueue&quot;), 1), null, rootFiber);</span>
+<span class="fc" id="L37">        rootFiber.thread = context.getThread();</span>
+<span class="fc" id="L38">        context.setRootFiber(rootFiber);</span>
+<span class="fc" id="L39">    }</span>
+    
+    @JRubyMethod(visibility = Visibility.PRIVATE)
+    public IRubyObject initialize(ThreadContext context, Block block) {
+<span class="fc" id="L43">        Ruby runtime = context.runtime;</span>
+        
+<span class="fc bfc" id="L45" title="All 2 branches covered.">        if (!block.isGiven()) throw runtime.newArgumentError(&quot;tried to create Proc object without block&quot;);</span>
+
+<span class="fc" id="L47">        data = new FiberData(new SizedQueue(runtime, runtime.getClass(&quot;SizedQueue&quot;), 1), context.getFiberCurrentThread(), this);</span>
+        
+<span class="fc" id="L49">        FiberData currentFiberData = context.getFiber().data;</span>
+        
+<span class="fc" id="L51">        thread = createThread(runtime, data, currentFiberData.queue, block);</span>
+        
+<span class="fc" id="L53">        return context.nil;</span>
+    }
+    
+    @JRubyMethod(rest = true)
+    public IRubyObject resume(ThreadContext context, IRubyObject[] values) {
+<span class="fc" id="L58">        Ruby runtime = context.runtime;</span>
+        
+<span class="pc bpc" id="L60" title="2 of 4 branches missed.">        if (data.prev != null || data.transferred) throw runtime.newFiberError(&quot;double resume&quot;);</span>
+        
+<span class="fc bfc" id="L62" title="All 2 branches covered.">        if (!alive()) throw runtime.newFiberError(&quot;dead fiber called&quot;);</span>
+        
+<span class="fc" id="L64">        FiberData currentFiberData = context.getFiber().data;</span>
+        
+<span class="pc bpc" id="L66" title="1 of 2 branches missed.">        if (this.data == currentFiberData) {</span>
+<span class="nc bnc" id="L67" title="All 3 branches missed.">            switch (values.length) {</span>
+<span class="nc" id="L68">                case 0: return context.nil;</span>
+<span class="nc" id="L69">                case 1: return values[0];</span>
+<span class="nc" id="L70">                default: return runtime.newArrayNoCopyLight(values);</span>
+            }
+        }
+        
+        IRubyObject val;
+<span class="fc bfc" id="L75" title="All 3 branches covered.">        switch (values.length) {</span>
+<span class="fc" id="L76">            case 0: val = NEVER; break;</span>
+<span class="fc" id="L77">            case 1: val = values[0]; break;</span>
+<span class="fc" id="L78">            default: val = runtime.newArrayNoCopyLight(values);</span>
+        }
+        
+<span class="pc bpc" id="L81" title="1 of 2 branches missed.">        if (data.parent != context.getFiberCurrentThread()) throw runtime.newFiberError(&quot;fiber called across threads&quot;);</span>
+        
+<span class="fc" id="L83">        data.prev = context.getFiber();</span>
+
+        try {
+<span class="fc" id="L86">            return exchangeWithFiber(context, currentFiberData, data, val);</span>
+        } finally {
+<span class="fc" id="L88">            data.prev = null;</span>
+        }
+    }
+
+    private static IRubyObject exchangeWithFiber(ThreadContext context, FiberData currentFiberData, FiberData targetFiberData, IRubyObject val) {
+        // At this point we consider ourselves &quot;in&quot; the resume, so we need to enforce exception-propagation
+        // rules for both the push (to wake up fiber) and pop (to wait for fiber). Failure to do this can
+        // cause interrupts destined for the fiber to be caught after the fiber is running but before the
+        // resuming thread has started waiting for it, leaving the fiber to run rather than receiving the
+        // interrupt, and the parent thread propagates the error.
+
+        // Note: these need to be separate try/catches because of the while loop.
+        try {
+<span class="fc" id="L101">            targetFiberData.queue.push(context, new IRubyObject[] {val});</span>
+<span class="nc" id="L102">        } catch (RaiseException re) {</span>
+<span class="nc" id="L103">            handleExceptionDuringExchange(context, currentFiberData, targetFiberData, re);</span>
+<span class="fc" id="L104">        }</span>
+
+        while (true) {
+            try {
+<span class="fc" id="L108">                IRubyObject result = currentFiberData.queue.pop(context);</span>
+<span class="fc bfc" id="L109" title="All 2 branches covered.">                if (result == NEVER) result = context.nil;</span>
+<span class="fc" id="L110">                return result;</span>
+<span class="nc" id="L111">            } catch (RaiseException re) {</span>
+<span class="nc" id="L112">                handleExceptionDuringExchange(context, currentFiberData, targetFiberData, re);</span>
+<span class="nc" id="L113">            }</span>
+        }
+    }
+
+    /**
+     * Handle exceptions raised while exchanging data with a fiber.
+     *
+     * The rules work like this:
+     *
+     * &lt;ul&gt;
+     *     &lt;li&gt;If the thread has called Fiber#resume on the fiber and an interrupt is sent to the thread,
+     *     forward it to the fiber&lt;/li&gt;
+     *     &lt;li&gt;If the fiber has called Fiber.yield and an interrupt is sent to the fiber (e.g. Timeout.timeout(x) { Fiber.yield })
+     *     forward it to the fiber's parent thread.&lt;/li&gt;
+     * &lt;/ul&gt;
+     *
+     * @param context
+     * @param currentFiberData
+     * @param targetFiberData
+     * @param re
+     */
+    private static void handleExceptionDuringExchange(ThreadContext context, FiberData currentFiberData, FiberData targetFiberData, RaiseException re) {
+        // If we received a LJC we need to bubble it out
+<span class="pc bpc" id="L136" title="1 of 2 branches missed.">        if (context.runtime.getLocalJumpError().isInstance(re.getException())) {</span>
+<span class="fc" id="L137">            throw re;</span>
+        }
+
+        // If we were trying to yield but our queue has been shut down,
+        // let the exception bubble out and (ideally) kill us.
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        if (currentFiberData.queue.isShutdown()) {</span>
+<span class="nc" id="L143">            throw re;</span>
+        }
+
+        // re-raise if the target fiber has been shut down
+<span class="nc bnc" id="L147" title="All 2 branches missed.">        if (targetFiberData.queue.isShutdown()) {</span>
+<span class="nc" id="L148">            throw re;</span>
+        }
+
+        // Otherwise, we want to forward the exception to the target fiber
+        // since it has the ball
+<span class="nc" id="L153">        targetFiberData.fiber.get().thread.raise(re.getException());</span>
+<span class="nc" id="L154">    }</span>
+
+    @JRubyMethod(rest = true)
+    public IRubyObject __transfer__(ThreadContext context, IRubyObject[] values) {
+<span class="nc" id="L158">        Ruby runtime = context.runtime;</span>
+        
+<span class="nc bnc" id="L160" title="All 2 branches missed.">        if (data.prev != null) throw runtime.newFiberError(&quot;double resume&quot;);</span>
+        
+<span class="nc bnc" id="L162" title="All 2 branches missed.">        if (!alive()) throw runtime.newFiberError(&quot;dead fiber called&quot;);</span>
+        
+<span class="nc" id="L164">        FiberData currentFiberData = context.getFiber().data;</span>
+        
+<span class="nc bnc" id="L166" title="All 2 branches missed.">        if (this.data == currentFiberData) {</span>
+<span class="nc bnc" id="L167" title="All 3 branches missed.">            switch (values.length) {</span>
+<span class="nc" id="L168">                case 0: return context.nil;</span>
+<span class="nc" id="L169">                case 1: return values[0];</span>
+<span class="nc" id="L170">                default: return runtime.newArrayNoCopyLight(values);</span>
+            }
+        }
+        
+        IRubyObject val;
+<span class="nc bnc" id="L175" title="All 3 branches missed.">        switch (values.length) {</span>
+<span class="nc" id="L176">            case 0: val = NEVER; break;</span>
+<span class="nc" id="L177">            case 1: val = values[0]; break;</span>
+<span class="nc" id="L178">            default: val = runtime.newArrayNoCopyLight(values);</span>
+        }
+        
+<span class="nc bnc" id="L181" title="All 2 branches missed.">        if (data.parent != context.getFiberCurrentThread()) throw runtime.newFiberError(&quot;fiber called across threads&quot;);</span>
+        
+<span class="nc bnc" id="L183" title="All 2 branches missed.">        if (currentFiberData.prev != null) {</span>
+            // new fiber should answer to current prev and this fiber is marked as transferred
+<span class="nc" id="L185">            data.prev = currentFiberData.prev;</span>
+<span class="nc" id="L186">            currentFiberData.prev = null;</span>
+<span class="nc" id="L187">            currentFiberData.transferred = true;</span>
+        } else {
+<span class="nc" id="L189">            data.prev = context.getFiber();</span>
+        }
+        
+        try {
+<span class="nc" id="L193">            return exchangeWithFiber(context, currentFiberData, data, val);</span>
+        } finally {
+<span class="nc" id="L195">            data.prev = null;</span>
+<span class="nc" id="L196">            currentFiberData.transferred = false;</span>
+        }
+    }
+    
+    @JRubyMethod(meta = true)
+    public static IRubyObject yield(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L202">        return yield(context, recv, context.nil);</span>
+    }
+    
+    @JRubyMethod(meta = true)
+    public static IRubyObject yield(ThreadContext context, IRubyObject recv, IRubyObject value) {
+<span class="fc" id="L207">        Ruby runtime = context.runtime;</span>
+        
+<span class="fc" id="L209">        FiberData currentFiberData = context.getFiber().data;</span>
+        
+<span class="fc bfc" id="L211" title="All 2 branches covered.">        if (currentFiberData.parent == null) throw runtime.newFiberError(&quot;can't yield from root fiber&quot;);</span>
+
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">        if (currentFiberData.prev == null) throw runtime.newFiberError(&quot;BUG: yield occured with null previous fiber. Report this at http://bugs.jruby.org&quot;);</span>
+
+<span class="pc bpc" id="L215" title="1 of 2 branches missed.">        if (currentFiberData.queue.isShutdown()) throw runtime.newFiberError(&quot;dead fiber yielded&quot;);</span>
+        
+<span class="fc" id="L217">        FiberData prevFiberData = currentFiberData.prev.data;</span>
+
+<span class="fc" id="L219">        return exchangeWithFiber(context, currentFiberData, prevFiberData, value);</span>
+    }
+    
+    @JRubyMethod
+    public IRubyObject __alive__(ThreadContext context) {
+<span class="nc" id="L224">        return context.runtime.newBoolean(alive());</span>
+    }
+    
+    @JRubyMethod(meta = true)
+    public static IRubyObject __current__(ThreadContext context, IRubyObject recv) {
+<span class="nc" id="L229">        return context.getFiber();</span>
+    }
+
+    @Override
+    public Map&lt;Object, IRubyObject&gt; getContextVariables() {
+<span class="nc" id="L234">        return thread.getContextVariables();</span>
+    }
+    
+    boolean alive() {
+<span class="pc bpc" id="L238" title="2 of 6 branches missed.">        return thread != null &amp;&amp; thread.isAlive() &amp;&amp; !data.queue.isShutdown();</span>
+    }
+    
+    static RubyThread createThread(final Ruby runtime, final FiberData data, final SizedQueue queue, final Block block) {
+<span class="fc" id="L242">        final AtomicReference&lt;RubyThread&gt; fiberThread = new AtomicReference();</span>
+<span class="fc" id="L243">        runtime.getFiberExecutor().execute(new Runnable() {</span>
+            public void run() {
+<span class="fc" id="L245">                ThreadContext context = runtime.getCurrentContext();</span>
+<span class="fc" id="L246">                context.setFiber(data.fiber.get());</span>
+<span class="fc" id="L247">                context.setRootThread(data.parent);</span>
+<span class="fc" id="L248">                fiberThread.set(context.getThread());</span>
+                
+<span class="fc" id="L250">                IRubyObject init = data.queue.pop(context);</span>
+
+                try {
+                    try {
+                        IRubyObject result;
+
+<span class="fc bfc" id="L256" title="All 2 branches covered.">                        if (init == NEVER) {</span>
+<span class="fc" id="L257">                            result = block.yieldSpecific(context);</span>
+                        } else {
+<span class="fc" id="L259">                            result = block.yieldArray(context, init, null);</span>
+                        }
+
+<span class="fc" id="L262">                        data.prev.data.queue.push(context, new IRubyObject[] { result });</span>
+                    } finally {
+<span class="fc" id="L264">                        data.queue.shutdown();</span>
+<span class="fc" id="L265">                        runtime.getThreadService().disposeCurrentThread();</span>
+<span class="fc" id="L266">                    }</span>
+<span class="nc" id="L267">                } catch (JumpException.FlowControlException fce) {</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">                    if (data.prev != null) {</span>
+<span class="nc" id="L269">                        data.prev.thread.raise(fce.buildException(runtime).getException());</span>
+                    }
+<span class="fc" id="L271">                } catch (IRBreakJump bj) {</span>
+                    // This is one of the rare cases where IR flow-control jumps
+                    // leaks into the runtime impl.
+<span class="pc bpc" id="L274" title="1 of 2 branches missed.">                    if (data.prev != null) {</span>
+<span class="fc" id="L275">                        data.prev.thread.raise(((RaiseException)IRException.BREAK_LocalJumpError.getException(runtime)).getException());</span>
+                    }
+<span class="nc" id="L277">                } catch (IRReturnJump rj) {</span>
+                    // This is one of the rare cases where IR flow-control jumps
+                    // leaks into the runtime impl.
+<span class="nc bnc" id="L280" title="All 2 branches missed.">                    if (data.prev != null) {</span>
+<span class="nc" id="L281">                        data.prev.thread.raise(((RaiseException)IRException.RETURN_LocalJumpError.getException(runtime)).getException());</span>
+                    }
+<span class="fc" id="L283">                } catch (RaiseException re) {</span>
+<span class="pc bpc" id="L284" title="1 of 2 branches missed.">                    if (data.prev != null) {</span>
+<span class="fc" id="L285">                        data.prev.thread.raise(re.getException());</span>
+                    }
+<span class="fc" id="L287">                } catch (Throwable t) {</span>
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">                    if (data.prev != null) {</span>
+<span class="nc" id="L289">                        data.prev.thread.raise(JavaUtil.convertJavaToUsableRubyObject(runtime, t));</span>
+                    }
+                } finally {
+                    // clear reference to the fiber's thread
+<span class="pc" id="L293">                    ThreadFiber tf = data.fiber.get();</span>
+<span class="pc bpc" id="L294" title="10 of 14 branches missed.">                    if (tf != null) tf.thread = null;</span>
+<span class="pc" id="L295">                }</span>
+<span class="fc" id="L296">            }</span>
+        });
+        
+<span class="fc bfc" id="L299" title="All 2 branches covered.">        while (fiberThread.get() == null) {Thread.yield();}</span>
+        
+<span class="fc" id="L301">        return fiberThread.get();</span>
+    }
+    
+    protected void finalize() throws Throwable {
+        try {
+<span class="fc" id="L306">            FiberData data = this.data;</span>
+<span class="fc bfc" id="L307" title="All 2 branches covered.">            if (data != null) {</span>
+                // we never interrupt or shutdown root fibers
+<span class="fc bfc" id="L309" title="All 2 branches covered.">                if (data.parent == null) return;</span>
+                
+<span class="fc" id="L311">                data.queue.shutdown();</span>
+            }
+
+<span class="fc" id="L314">            RubyThread thread = this.thread;</span>
+<span class="fc bfc" id="L315" title="All 2 branches covered.">            if (thread != null) {</span>
+<span class="fc" id="L316">                thread.dieFromFinalizer();</span>
+
+                // interrupt Ruby thread to break out of queue sleep, blocking IO
+<span class="fc" id="L319">                thread.interrupt();</span>
+
+                // null out references to aid GC
+<span class="fc" id="L322">                data = null;</span>
+<span class="fc" id="L323">                thread = null;</span>
+            }
+        } finally {
+<span class="pc" id="L326">            super.finalize();</span>
+<span class="fc" id="L327">        }</span>
+<span class="fc" id="L328">    }</span>
+
+    public FiberData getData() {
+<span class="fc" id="L331">        return data;</span>
+    }
+
+    public RubyThread getThread() {
+<span class="nc" id="L335">        return thread;</span>
+    }
+    
+    public static class FiberData {
+<span class="fc" id="L339">        FiberData(SizedQueue queue, RubyThread parent, ThreadFiber fiber) {</span>
+<span class="fc" id="L340">            this.queue = queue;</span>
+<span class="fc" id="L341">            this.parent = parent;</span>
+<span class="fc" id="L342">            this.fiber = new WeakReference&lt;ThreadFiber&gt;(fiber);</span>
+<span class="fc" id="L343">        }</span>
+
+        public ThreadFiber getPrev() {
+<span class="fc" id="L346">            return prev;</span>
+        }
+        
+        final SizedQueue queue;
+        volatile ThreadFiber prev;
+        final RubyThread parent;
+        final WeakReference&lt;ThreadFiber&gt; fiber;
+        volatile boolean transferred;
+    }
+    
+    volatile FiberData data;
+    volatile RubyThread thread;
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

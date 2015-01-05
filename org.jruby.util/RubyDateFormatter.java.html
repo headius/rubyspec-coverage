@@ -1,0 +1,648 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyDateFormatter.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util</a> &gt; <span class="el_source">RubyDateFormatter.java</span></div><h1>RubyDateFormatter.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002, 2009 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2004 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.util;
+
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.Reader;
+import java.text.DateFormat;
+import java.text.DateFormatSymbols;
+import java.text.ParsePosition;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Locale;
+
+import org.jcodings.Encoding;
+import org.jcodings.specific.ASCIIEncoding;
+import org.joda.time.Chronology;
+import org.joda.time.DateTime;
+import org.joda.time.chrono.GJChronology;
+import org.joda.time.chrono.JulianChronology;
+import org.jruby.RubyEncoding;
+import org.jruby.RubyString;
+import org.jruby.lexer.StrftimeLexer;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+
+import static org.jruby.util.RubyDateFormatter.FieldType.*;
+
+public class RubyDateFormatter {
+<span class="fc" id="L61">    private static final DateFormatSymbols FORMAT_SYMBOLS = new DateFormatSymbols(Locale.US);</span>
+<span class="fc" id="L62">    private static final Token[] CONVERSION2TOKEN = new Token[256];</span>
+
+    private ThreadContext context;
+    private StrftimeLexer lexer;
+
+<span class="pc" id="L67">    static enum Format {</span>
+        /** encoding to give to output */
+<span class="fc" id="L69">        FORMAT_ENCODING,</span>
+        /** raw string, no formatting */
+<span class="fc" id="L71">        FORMAT_STRING,</span>
+        /** formatter */
+<span class="fc" id="L73">        FORMAT_OUTPUT,</span>
+        /** composition of other formats, or depends on library */
+<span class="fc" id="L75">        FORMAT_SPECIAL,</span>
+
+        /** %A */
+<span class="fc" id="L78">        FORMAT_WEEK_LONG('A'),</span>
+        /** %a */
+<span class="fc" id="L80">        FORMAT_WEEK_SHORT('a'),</span>
+        /** %B */
+<span class="fc" id="L82">        FORMAT_MONTH_LONG('B'),</span>
+        /** %b, %h */
+<span class="fc" id="L84">        FORMAT_MONTH_SHORT('b', 'h'),</span>
+        /** %C */
+<span class="fc" id="L86">        FORMAT_CENTURY('C'),</span>
+        /** %d */
+<span class="fc" id="L88">        FORMAT_DAY('d'),</span>
+        /** %e */
+<span class="fc" id="L90">        FORMAT_DAY_S('e'),</span>
+        /** %G */
+<span class="fc" id="L92">        FORMAT_WEEKYEAR('G'),</span>
+        /** %g */
+<span class="fc" id="L94">        FORMAT_WEEKYEAR_SHORT('g'),</span>
+        /** %H */
+<span class="fc" id="L96">        FORMAT_HOUR('H'),</span>
+        /** %I */
+<span class="fc" id="L98">        FORMAT_HOUR_M('I'),</span>
+        /** %j */
+<span class="fc" id="L100">        FORMAT_DAY_YEAR('j'),</span>
+        /** %k */
+<span class="fc" id="L102">        FORMAT_HOUR_BLANK('k'),</span>
+        /** %L */
+<span class="fc" id="L104">        FORMAT_MILLISEC('L'),</span>
+        /** %l */
+<span class="fc" id="L106">        FORMAT_HOUR_S('l'),</span>
+        /** %M */
+<span class="fc" id="L108">        FORMAT_MINUTES('M'),</span>
+        /** %m */
+<span class="fc" id="L110">        FORMAT_MONTH('m'),</span>
+        /** %N */
+<span class="fc" id="L112">        FORMAT_NANOSEC('N'),</span>
+        /** %P */
+<span class="fc" id="L114">        FORMAT_MERIDIAN_LOWER_CASE('P'),</span>
+        /** %p */
+<span class="fc" id="L116">        FORMAT_MERIDIAN('p'),</span>
+        /** %S */
+<span class="fc" id="L118">        FORMAT_SECONDS('S'),</span>
+        /** %s */
+<span class="fc" id="L120">        FORMAT_EPOCH('s'),</span>
+        /** %U */
+<span class="fc" id="L122">        FORMAT_WEEK_YEAR_S('U'),</span>
+        /** %u */
+<span class="fc" id="L124">        FORMAT_DAY_WEEK2('u'),</span>
+        /** %V */
+<span class="fc" id="L126">        FORMAT_WEEK_WEEKYEAR('V'),</span>
+        /** %W */
+<span class="fc" id="L128">        FORMAT_WEEK_YEAR_M('W'),</span>
+        /** %w */
+<span class="fc" id="L130">        FORMAT_DAY_WEEK('w'),</span>
+        /** %Y */
+<span class="fc" id="L132">        FORMAT_YEAR_LONG('Y'),</span>
+        /** %y */
+<span class="fc" id="L134">        FORMAT_YEAR_SHORT('y'),</span>
+        /** %z, %:z, %::z, %:::z */
+<span class="fc" id="L136">        FORMAT_COLON_ZONE_OFF, // must be given number of colons as data</span>
+
+        /* Change between Time and Date */
+        /** %Z */
+<span class="fc" id="L140">        FORMAT_ZONE_ID,</span>
+
+        /* Only for Date/DateTime from here */
+        /** %Q */
+<span class="fc" id="L144">        FORMAT_MICROSEC_EPOCH;</span>
+
+<span class="fc" id="L146">        Format() {}</span>
+<span class="fc" id="L147">        Format(char conversion) {</span>
+<span class="fc" id="L148">            CONVERSION2TOKEN[conversion] = new Token(this);</span>
+<span class="fc" id="L149">        }</span>
+        Format(char conversion, char alias) {
+<span class="fc" id="L151">            this(conversion);</span>
+<span class="fc" id="L152">            CONVERSION2TOKEN[alias] = CONVERSION2TOKEN[conversion];</span>
+<span class="fc" id="L153">        }</span>
+    }
+<span class="fc" id="L155">    static final Format INSTANTIATE_ENUM = Format.FORMAT_WEEK_LONG;</span>
+
+    public static void main(String[] args) {
+        // composed + special, keys of the switch below
+<span class="nc" id="L159">        StringBuilder buf = new StringBuilder(&quot;cDxFnQRrTXtvZ+z&quot;);</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">        for (int i = 'A'; i &lt;= 'z'; i++) {</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">            if (CONVERSION2TOKEN[i] != null) {</span>
+<span class="nc" id="L162">                buf.append((char) i);</span>
+            }
+        }
+<span class="nc" id="L165">        System.out.println(buf.toString());</span>
+<span class="nc" id="L166">    }</span>
+
+    public static class Token {
+        private final Format format;
+        private final Object data;
+        
+        protected Token(Format format) {
+<span class="fc" id="L173">            this(format, null);</span>
+<span class="fc" id="L174">        }</span>
+
+<span class="fc" id="L176">        protected Token(Format formatString, Object data) {</span>
+<span class="fc" id="L177">            this.format = formatString;</span>
+<span class="fc" id="L178">            this.data = data;</span>
+<span class="fc" id="L179">        }</span>
+
+        public static Token str(String str) {
+<span class="fc" id="L182">            return new Token(Format.FORMAT_STRING, str);</span>
+        }
+
+        public static Token format(char c) {
+<span class="fc" id="L186">            return CONVERSION2TOKEN[c];</span>
+        }
+
+        public static Token zoneOffsetColons(int colons) {
+<span class="fc" id="L190">            return new Token(Format.FORMAT_COLON_ZONE_OFF, colons);</span>
+        }
+
+        public static Token special(char c) {
+<span class="fc" id="L194">            return new Token(Format.FORMAT_SPECIAL, c);</span>
+        }
+
+        public static Token formatter(RubyTimeOutputFormatter formatter) {
+<span class="fc" id="L198">            return new Token(Format.FORMAT_OUTPUT, formatter);</span>
+        }
+
+        /**
+         * Gets the data.
+         * @return Returns a Object
+         */
+        public Object getData() {
+<span class="fc" id="L206">            return data;</span>
+        }
+
+        /**
+         * Gets the format.
+         * @return Returns a int
+         */
+        public Format getFormat() {
+<span class="fc" id="L214">            return format;</span>
+        }
+
+        @Override
+        public String toString() {
+<span class="nc" id="L219">            return &quot;&lt;Token &quot;+format+ &quot; &quot;+data+&quot;&gt;&quot;;</span>
+        }
+    }
+
+    /**
+     * Constructor for RubyDateFormatter.
+     */
+    public RubyDateFormatter(ThreadContext context) {
+<span class="fc" id="L227">        super();</span>
+<span class="fc" id="L228">        this.context = context;</span>
+<span class="fc" id="L229">        lexer = new StrftimeLexer((Reader) null);</span>
+<span class="fc" id="L230">    }</span>
+
+    private void addToPattern(List&lt;Token&gt; compiledPattern, String str) {
+<span class="fc bfc" id="L233" title="All 2 branches covered.">        for (int i = 0; i &lt; str.length(); i++) {</span>
+<span class="fc" id="L234">            char c = str.charAt(i);</span>
+<span class="pc bpc" id="L235" title="1 of 8 branches missed.">            if (('A' &lt;= c &amp;&amp; c &lt;= 'Z') || ('a' &lt;= c &amp;&amp; c &lt;= 'z')) {</span>
+<span class="fc" id="L236">                compiledPattern.add(Token.format(c));</span>
+            } else {
+<span class="fc" id="L238">                compiledPattern.add(Token.str(Character.toString(c)));</span>
+            }
+        }
+<span class="fc" id="L241">    }</span>
+
+    public List&lt;Token&gt; compilePattern(RubyString format, boolean dateLibrary) {
+<span class="fc" id="L244">        return compilePattern(format.getByteList(), dateLibrary);</span>
+    }
+
+    public List&lt;Token&gt; compilePattern(ByteList pattern, boolean dateLibrary) {
+<span class="fc" id="L248">        List&lt;Token&gt; compiledPattern = new LinkedList&lt;Token&gt;();</span>
+
+<span class="fc" id="L250">        Encoding enc = pattern.getEncoding();</span>
+<span class="pc bpc" id="L251" title="1 of 2 branches missed.">        if (!enc.isAsciiCompatible()) {</span>
+<span class="nc" id="L252">            throw context.runtime.newArgumentError(&quot;format should have ASCII compatible encoding&quot;);</span>
+        }
+<span class="pc bpc" id="L254" title="1 of 2 branches missed.">        if (enc != ASCIIEncoding.INSTANCE) { // default for ByteList</span>
+<span class="fc" id="L255">            compiledPattern.add(new Token(Format.FORMAT_ENCODING, enc));</span>
+        }
+
+<span class="fc" id="L258">        ByteArrayInputStream in = new ByteArrayInputStream(pattern.getUnsafeBytes(), pattern.getBegin(), pattern.getRealSize());</span>
+<span class="fc" id="L259">        Reader reader = new InputStreamReader(in, context.runtime.getEncodingService().charsetForEncoding(pattern.getEncoding()));</span>
+<span class="fc" id="L260">        lexer.yyreset(reader);</span>
+
+        Token token;
+        try {
+<span class="fc bfc" id="L264" title="All 2 branches covered.">            while ((token = lexer.yylex()) != null) {</span>
+<span class="fc bfc" id="L265" title="All 2 branches covered.">                if (token.format != Format.FORMAT_SPECIAL) {</span>
+<span class="fc" id="L266">                    compiledPattern.add(token);</span>
+                } else {
+<span class="fc" id="L268">                    char c = (Character) token.data;</span>
+<span class="pc bpc" id="L269" title="10 of 13 branches missed.">                    switch (c) {</span>
+                    case 'c':
+<span class="nc" id="L271">                        addToPattern(compiledPattern, &quot;a b e H:M:S Y&quot;);</span>
+<span class="nc" id="L272">                        break;</span>
+                    case 'D':
+                    case 'x':
+<span class="fc" id="L275">                        addToPattern(compiledPattern, &quot;m/d/y&quot;);</span>
+<span class="fc" id="L276">                        break;</span>
+                    case 'F':
+<span class="nc" id="L278">                        addToPattern(compiledPattern, &quot;Y-m-d&quot;);</span>
+<span class="nc" id="L279">                        break;</span>
+                    case 'n':
+<span class="nc" id="L281">                        compiledPattern.add(Token.str(&quot;\n&quot;));</span>
+<span class="nc" id="L282">                        break;</span>
+                    case 'Q':
+<span class="nc bnc" id="L284" title="All 2 branches missed.">                        if (dateLibrary) {</span>
+<span class="nc" id="L285">                            compiledPattern.add(new Token(Format.FORMAT_MICROSEC_EPOCH));</span>
+                        } else {
+<span class="nc" id="L287">                            compiledPattern.add(Token.str(&quot;%Q&quot;));</span>
+                        }
+<span class="nc" id="L289">                        break;</span>
+                    case 'R':
+<span class="nc" id="L291">                        addToPattern(compiledPattern, &quot;H:M&quot;);</span>
+<span class="nc" id="L292">                        break;</span>
+                    case 'r':
+<span class="nc" id="L294">                        addToPattern(compiledPattern, &quot;I:M:S p&quot;);</span>
+<span class="nc" id="L295">                        break;</span>
+                    case 'T':
+                    case 'X':
+<span class="fc" id="L298">                        addToPattern(compiledPattern, &quot;H:M:S&quot;);</span>
+<span class="fc" id="L299">                        break;</span>
+                    case 't':
+<span class="nc" id="L301">                        compiledPattern.add(Token.str(&quot;\t&quot;));</span>
+<span class="nc" id="L302">                        break;</span>
+                    case 'v':
+<span class="nc" id="L304">                        addToPattern(compiledPattern, &quot;e-&quot;);</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">                        if (!dateLibrary)</span>
+<span class="nc" id="L306">                            compiledPattern.add(Token.formatter(new RubyTimeOutputFormatter(&quot;^&quot;, 0)));</span>
+<span class="nc" id="L307">                        addToPattern(compiledPattern, &quot;b-Y&quot;);</span>
+<span class="nc" id="L308">                        break;</span>
+                    case 'Z':
+<span class="pc bpc" id="L310" title="1 of 2 branches missed.">                        if (dateLibrary) {</span>
+                            // +HH:MM in 'date', never zone name
+<span class="nc" id="L312">                            compiledPattern.add(Token.zoneOffsetColons(1));</span>
+                        } else {
+<span class="fc" id="L314">                            compiledPattern.add(new Token(Format.FORMAT_ZONE_ID));</span>
+                        }
+<span class="fc" id="L316">                        break;</span>
+                    case '+':
+<span class="nc bnc" id="L318" title="All 2 branches missed.">                        if (!dateLibrary) {</span>
+<span class="nc" id="L319">                            compiledPattern.add(Token.str(&quot;%+&quot;));</span>
+<span class="nc" id="L320">                            break;</span>
+                        }
+<span class="nc" id="L322">                        addToPattern(compiledPattern, &quot;a b e H:M:S &quot;);</span>
+                        // %Z: +HH:MM in 'date', never zone name
+<span class="nc" id="L324">                        compiledPattern.add(Token.zoneOffsetColons(1));</span>
+<span class="nc" id="L325">                        addToPattern(compiledPattern, &quot; Y&quot;);</span>
+<span class="nc" id="L326">                        break;</span>
+                    default:
+<span class="nc" id="L328">                        throw new Error(&quot;Unknown special char: &quot;+c);</span>
+                    }
+<span class="fc" id="L330">                }</span>
+            }
+<span class="nc" id="L332">        } catch (IOException e) {</span>
+<span class="nc" id="L333">            e.printStackTrace();</span>
+<span class="fc" id="L334">        }</span>
+
+<span class="fc" id="L336">        return compiledPattern;</span>
+    }
+
+<span class="pc" id="L339">    static enum FieldType {</span>
+<span class="fc" id="L340">        NUMERIC('0', 0),</span>
+<span class="fc" id="L341">        NUMERIC2('0', 2),</span>
+<span class="fc" id="L342">        NUMERIC2BLANK(' ', 2),</span>
+<span class="fc" id="L343">        NUMERIC3('0', 3),</span>
+<span class="fc" id="L344">        NUMERIC4('0', 4),</span>
+<span class="fc" id="L345">        NUMERIC5('0', 5),</span>
+<span class="fc" id="L346">        TEXT(' ', 0);</span>
+
+        char defaultPadder;
+        int defaultWidth;
+<span class="fc" id="L350">        FieldType(char padder, int width) {</span>
+<span class="fc" id="L351">            defaultPadder = padder;</span>
+<span class="fc" id="L352">            defaultWidth = width;</span>
+<span class="fc" id="L353">        }</span>
+    }
+
+    /** Convenience method when using no pattern caching */
+    public RubyString compileAndFormat(RubyString pattern, boolean dateLibrary, DateTime dt, long nsec, IRubyObject sub_millis) {
+<span class="fc" id="L358">        RubyString out = format(compilePattern(pattern, dateLibrary), dt, nsec, sub_millis);</span>
+<span class="pc bpc" id="L359" title="1 of 2 branches missed.">        if (pattern.isTaint()) {</span>
+<span class="nc" id="L360">            out.taint(context);</span>
+        }
+<span class="fc" id="L362">        return out;</span>
+    }
+
+    public RubyString format(List&lt;Token&gt; compiledPattern, DateTime dt, long nsec, IRubyObject sub_millis) {
+<span class="fc" id="L366">        return context.runtime.newString(formatToByteList(compiledPattern, dt, nsec, sub_millis));</span>
+    }
+
+    public ByteList formatToByteList(List&lt;Token&gt; compiledPattern, DateTime dt, long nsec, IRubyObject sub_millis) {
+<span class="fc" id="L370">        RubyTimeOutputFormatter formatter = RubyTimeOutputFormatter.DEFAULT_FORMATTER;</span>
+<span class="fc" id="L371">        ByteList toAppendTo = new ByteList();</span>
+
+<span class="fc bfc" id="L373" title="All 2 branches covered.">        for (Token token: compiledPattern) {</span>
+<span class="fc" id="L374">            String output = null;</span>
+<span class="fc" id="L375">            long value = 0;</span>
+<span class="fc" id="L376">            FieldType type = TEXT;</span>
+<span class="fc" id="L377">            Format format = token.getFormat();</span>
+
+<span class="pc bpc" id="L379" title="9 of 35 branches missed.">            switch (format) {</span>
+                case FORMAT_ENCODING:
+<span class="fc" id="L381">                    toAppendTo.setEncoding((Encoding) token.getData());</span>
+<span class="fc" id="L382">                    continue; // go to next token</span>
+                case FORMAT_OUTPUT:
+<span class="fc" id="L384">                    formatter = (RubyTimeOutputFormatter) token.getData();</span>
+<span class="fc" id="L385">                    continue; // go to next token</span>
+                case FORMAT_STRING:
+<span class="fc" id="L387">                    output = token.getData().toString();</span>
+<span class="fc" id="L388">                    break;</span>
+                case FORMAT_WEEK_LONG:
+                    // This is GROSS, but Java API's aren't ISO 8601 compliant at all
+<span class="fc" id="L391">                    int v = (dt.getDayOfWeek()+1)%8;</span>
+<span class="pc bpc" id="L392" title="1 of 2 branches missed.">                    if(v == 0) {</span>
+<span class="nc" id="L393">                        v++;</span>
+                    }
+<span class="fc" id="L395">                    output = FORMAT_SYMBOLS.getWeekdays()[v];</span>
+<span class="fc" id="L396">                    break;</span>
+                case FORMAT_WEEK_SHORT:
+                    // This is GROSS, but Java API's aren't ISO 8601 compliant at all
+<span class="fc" id="L399">                    v = (dt.getDayOfWeek()+1)%8;</span>
+<span class="pc bpc" id="L400" title="1 of 2 branches missed.">                    if(v == 0) {</span>
+<span class="nc" id="L401">                        v++;</span>
+                    }
+<span class="fc" id="L403">                    output = FORMAT_SYMBOLS.getShortWeekdays()[v];</span>
+<span class="fc" id="L404">                    break;</span>
+                case FORMAT_MONTH_LONG:
+<span class="fc" id="L406">                    output = FORMAT_SYMBOLS.getMonths()[dt.getMonthOfYear()-1];</span>
+<span class="fc" id="L407">                    break;</span>
+                case FORMAT_MONTH_SHORT:
+<span class="fc" id="L409">                    output = FORMAT_SYMBOLS.getShortMonths()[dt.getMonthOfYear()-1];</span>
+<span class="fc" id="L410">                    break;</span>
+                case FORMAT_DAY:
+<span class="fc" id="L412">                    type = NUMERIC2;</span>
+<span class="fc" id="L413">                    value = dt.getDayOfMonth();</span>
+<span class="fc" id="L414">                    break;</span>
+                case FORMAT_DAY_S:
+<span class="fc" id="L416">                    type = NUMERIC2BLANK;</span>
+<span class="fc" id="L417">                    value = dt.getDayOfMonth();</span>
+<span class="fc" id="L418">                    break;</span>
+                case FORMAT_HOUR:
+<span class="fc" id="L420">                    type = NUMERIC2;</span>
+<span class="fc" id="L421">                    value = dt.getHourOfDay();</span>
+<span class="fc" id="L422">                    break;</span>
+                case FORMAT_HOUR_BLANK:
+<span class="fc" id="L424">                    type = NUMERIC2BLANK;</span>
+<span class="fc" id="L425">                    value = dt.getHourOfDay();</span>
+<span class="fc" id="L426">                    break;</span>
+                case FORMAT_HOUR_M:
+                case FORMAT_HOUR_S:
+<span class="fc" id="L429">                    value = dt.getHourOfDay();</span>
+<span class="pc bpc" id="L430" title="1 of 2 branches missed.">                    if (value == 0) {</span>
+<span class="nc" id="L431">                        value = 12;</span>
+<span class="fc bfc" id="L432" title="All 2 branches covered.">                    } else if (value &gt; 12) {</span>
+<span class="fc" id="L433">                        value -= 12;</span>
+                    }
+
+<span class="fc bfc" id="L436" title="All 2 branches covered.">                    type = (format == Format.FORMAT_HOUR_M) ? NUMERIC2 : NUMERIC2BLANK;</span>
+<span class="fc" id="L437">                    break;</span>
+                case FORMAT_DAY_YEAR:
+<span class="fc" id="L439">                    type = NUMERIC3;</span>
+<span class="fc" id="L440">                    value = dt.getDayOfYear();</span>
+<span class="fc" id="L441">                    break;</span>
+                case FORMAT_MINUTES:
+<span class="fc" id="L443">                    type = NUMERIC2;</span>
+<span class="fc" id="L444">                    value = dt.getMinuteOfHour();</span>
+<span class="fc" id="L445">                    break;</span>
+                case FORMAT_MONTH:
+<span class="fc" id="L447">                    type = NUMERIC2;</span>
+<span class="fc" id="L448">                    value = dt.getMonthOfYear();</span>
+<span class="fc" id="L449">                    break;</span>
+                case FORMAT_MERIDIAN:
+<span class="fc bfc" id="L451" title="All 2 branches covered.">                    output = dt.getHourOfDay() &lt; 12 ? &quot;AM&quot; : &quot;PM&quot;;</span>
+<span class="fc" id="L452">                    break;</span>
+                case FORMAT_MERIDIAN_LOWER_CASE:
+<span class="fc bfc" id="L454" title="All 2 branches covered.">                    output = dt.getHourOfDay() &lt; 12 ? &quot;am&quot; : &quot;pm&quot;;</span>
+<span class="fc" id="L455">                    break;</span>
+                case FORMAT_SECONDS:
+<span class="fc" id="L457">                    type = NUMERIC2;</span>
+<span class="fc" id="L458">                    value = dt.getSecondOfMinute();</span>
+<span class="fc" id="L459">                    break;</span>
+                case FORMAT_WEEK_YEAR_M:
+<span class="fc" id="L461">                    type = NUMERIC2;</span>
+<span class="fc" id="L462">                    value = formatWeekYear(dt, java.util.Calendar.MONDAY);</span>
+<span class="fc" id="L463">                    break;</span>
+                case FORMAT_WEEK_YEAR_S:
+<span class="fc" id="L465">                    type = NUMERIC2;</span>
+<span class="fc" id="L466">                    value = formatWeekYear(dt, java.util.Calendar.SUNDAY);</span>
+<span class="fc" id="L467">                    break;</span>
+                case FORMAT_DAY_WEEK:
+<span class="fc" id="L469">                    type = NUMERIC;</span>
+<span class="fc" id="L470">                    value = dt.getDayOfWeek() % 7;</span>
+<span class="fc" id="L471">                    break;</span>
+                case FORMAT_DAY_WEEK2:
+<span class="nc" id="L473">                    type = NUMERIC;</span>
+<span class="nc" id="L474">                    value = dt.getDayOfWeek();</span>
+<span class="nc" id="L475">                    break;</span>
+                case FORMAT_YEAR_LONG:
+<span class="fc" id="L477">                    value = year(dt, dt.getYear());</span>
+<span class="pc bpc" id="L478" title="1 of 2 branches missed.">                    type = (value &gt;= 0) ? NUMERIC4 : NUMERIC5;</span>
+<span class="fc" id="L479">                    break;</span>
+                case FORMAT_YEAR_SHORT:
+<span class="fc" id="L481">                    type = NUMERIC2;</span>
+<span class="fc" id="L482">                    value = year(dt, dt.getYear()) % 100;</span>
+<span class="fc" id="L483">                    break;</span>
+                case FORMAT_COLON_ZONE_OFF:
+                    // custom logic because this is so weird
+<span class="fc" id="L486">                    value = dt.getZone().getOffset(dt.getMillis()) / 1000;</span>
+<span class="fc" id="L487">                    int colons = (Integer) token.getData();</span>
+<span class="fc" id="L488">                    output = formatZone(colons, (int) value, formatter);</span>
+<span class="fc" id="L489">                    break;</span>
+                case FORMAT_ZONE_ID:
+<span class="fc" id="L491">                    output = dt.getZone().getShortName(dt.getMillis());</span>
+<span class="fc" id="L492">                    break;</span>
+                case FORMAT_CENTURY:
+<span class="nc" id="L494">                    type = NUMERIC;</span>
+<span class="nc" id="L495">                    value = year(dt, dt.getYear()) / 100;</span>
+<span class="nc" id="L496">                    break;</span>
+                case FORMAT_EPOCH:
+<span class="nc" id="L498">                    type = NUMERIC;</span>
+<span class="nc" id="L499">                    value = dt.getMillis() / 1000;</span>
+<span class="nc" id="L500">                    break;</span>
+                case FORMAT_WEEK_WEEKYEAR:
+<span class="nc" id="L502">                    type = NUMERIC2;</span>
+<span class="nc" id="L503">                    value = dt.getWeekOfWeekyear();</span>
+<span class="nc" id="L504">                    break;</span>
+                case FORMAT_MILLISEC:
+                case FORMAT_NANOSEC:
+<span class="fc bfc" id="L507" title="All 2 branches covered.">                    int defaultWidth = (format == Format.FORMAT_NANOSEC) ? 9 : 3;</span>
+<span class="fc" id="L508">                    int width = formatter.getWidth(defaultWidth);</span>
+
+<span class="fc" id="L510">                    output = RubyTimeOutputFormatter.formatNumber(dt.getMillisOfSecond(), 3, '0');</span>
+<span class="fc bfc" id="L511" title="All 2 branches covered.">                    if (width &gt; 3) {</span>
+<span class="pc bpc" id="L512" title="3 of 4 branches missed.">                        if (sub_millis == null || sub_millis.isNil()) { // Time</span>
+<span class="fc" id="L513">                            output += RubyTimeOutputFormatter.formatNumber(nsec, 6, '0');</span>
+                        } else { // Date, DateTime
+<span class="nc" id="L515">                            int prec = width - 3;</span>
+<span class="nc" id="L516">                            IRubyObject power = context.runtime.newFixnum(10).callMethod(&quot;**&quot;, context.runtime.newFixnum(prec));</span>
+<span class="nc" id="L517">                            IRubyObject truncated = sub_millis.callMethod(context, &quot;numerator&quot;).callMethod(context, &quot;*&quot;, power);</span>
+<span class="nc" id="L518">                            truncated = truncated.callMethod(context, &quot;/&quot;, sub_millis.callMethod(context, &quot;denominator&quot;));</span>
+<span class="nc" id="L519">                            long decimals = truncated.convertToInteger().getLongValue();</span>
+<span class="nc" id="L520">                            output += RubyTimeOutputFormatter.formatNumber(decimals, prec, '0');</span>
+                        }
+                    }
+
+<span class="fc bfc" id="L524" title="All 2 branches covered.">                    if (width &lt; output.length()) {</span>
+<span class="fc" id="L525">                        output = output.substring(0, width);</span>
+                    } else {
+                        // Not enough precision, fill with 0
+<span class="pc bpc" id="L528" title="1 of 2 branches missed.">                        while(output.length() &lt; width)</span>
+<span class="nc" id="L529">                            output += &quot;0&quot;;</span>
+                    }
+<span class="fc" id="L531">                    formatter = RubyTimeOutputFormatter.DEFAULT_FORMATTER; // no more formatting</span>
+<span class="fc" id="L532">                    break;</span>
+                case FORMAT_WEEKYEAR:
+<span class="nc" id="L534">                    value = year(dt, dt.getWeekyear());</span>
+<span class="nc bnc" id="L535" title="All 2 branches missed.">                    type = (value &gt;= 0) ? NUMERIC4 : NUMERIC5;</span>
+<span class="nc" id="L536">                    break;</span>
+                case FORMAT_WEEKYEAR_SHORT:
+<span class="nc" id="L538">                    type = NUMERIC2;</span>
+<span class="nc" id="L539">                    value = year(dt, dt.getWeekyear()) % 100;</span>
+<span class="nc" id="L540">                    break;</span>
+                case FORMAT_MICROSEC_EPOCH:
+                    // only available for Date
+<span class="nc" id="L543">                    type = NUMERIC;</span>
+<span class="nc" id="L544">                    value = dt.getMillis();</span>
+<span class="nc" id="L545">                    break;</span>
+                case FORMAT_SPECIAL:
+<span class="nc" id="L547">                    throw new Error(&quot;FORMAT_SPECIAL is a special token only for the lexer.&quot;);</span>
+            }
+
+<span class="fc" id="L550">            output = formatter.format(output, value, type);</span>
+            // reset formatter
+<span class="fc" id="L552">            formatter = RubyTimeOutputFormatter.DEFAULT_FORMATTER;</span>
+
+<span class="fc" id="L554">            toAppendTo.append(output.getBytes(context.runtime.getEncodingService().charsetForEncoding(toAppendTo.getEncoding())));</span>
+<span class="fc" id="L555">        }</span>
+
+<span class="fc" id="L557">        return toAppendTo;</span>
+    }
+
+    /**
+     * Ruby always follows Astronomical year numbering,
+     * that is BC x is -x+1 and there is a year 0 (BC 1)
+     * but Joda-time returns -x for year x BC in Julian chronology (no year 0) */
+    private int year(DateTime dt, int year) {
+        Chronology c;
+<span class="pc bpc" id="L566" title="1 of 2 branches missed.">        if (year &lt; 0 &amp;&amp; (</span>
+<span class="nc bnc" id="L567" title="All 4 branches missed.">                (c = dt.getChronology()) instanceof JulianChronology ||</span>
+<span class="nc bnc" id="L568" title="All 2 branches missed.">                (c instanceof GJChronology &amp;&amp; ((GJChronology) c).getGregorianCutover().isAfter(dt))))</span>
+<span class="nc" id="L569">            return year + 1;</span>
+<span class="fc" id="L570">        return year;</span>
+    }
+
+    private int formatWeekYear(DateTime dt, int firstDayOfWeek) {
+<span class="fc" id="L574">        java.util.Calendar dtCalendar = dt.toGregorianCalendar();</span>
+<span class="fc" id="L575">        dtCalendar.setFirstDayOfWeek(firstDayOfWeek);</span>
+<span class="fc" id="L576">        dtCalendar.setMinimalDaysInFirstWeek(7);</span>
+<span class="fc" id="L577">        int value = dtCalendar.get(java.util.Calendar.WEEK_OF_YEAR);</span>
+<span class="fc bfc" id="L578" title="All 4 branches covered.">        if ((value == 52 || value == 53) &amp;&amp;</span>
+<span class="fc bfc" id="L579" title="All 2 branches covered.">                (dtCalendar.get(Calendar.MONTH) == Calendar.JANUARY )) {</span>
+            // MRI behavior: Week values are monotonous.
+            // So, weeks that effectively belong to previous year,
+            // will get the value of 0, not 52 or 53, as in Java.
+<span class="fc" id="L583">            value = 0;</span>
+        }
+<span class="fc" id="L585">        return value;</span>
+    }
+
+    private String formatZone(int colons, int value, RubyTimeOutputFormatter formatter) {
+<span class="fc" id="L589">        int seconds = Math.abs(value);</span>
+<span class="fc" id="L590">        int hours = seconds / 3600;</span>
+<span class="fc" id="L591">        seconds %= 3600;</span>
+<span class="fc" id="L592">        int minutes = seconds / 60;</span>
+<span class="fc" id="L593">        seconds %= 60;</span>
+
+<span class="pc bpc" id="L595" title="1 of 4 branches missed.">        if (value &lt; 0 &amp;&amp; hours != 0) { // see below when hours == 0</span>
+<span class="fc" id="L596">            hours = -hours;</span>
+        }
+
+<span class="fc" id="L599">        String mm = RubyTimeOutputFormatter.formatNumber(minutes, 2, '0');</span>
+<span class="fc" id="L600">        String ss = RubyTimeOutputFormatter.formatNumber(seconds, 2, '0');</span>
+
+<span class="fc" id="L602">        char padder = formatter.getPadder('0');</span>
+<span class="fc" id="L603">        int defaultWidth = -1;</span>
+<span class="fc" id="L604">        String after = null;</span>
+
+<span class="pc bpc" id="L606" title="2 of 5 branches missed.">        switch (colons) {</span>
+            case 0: // %z -&gt; +hhmm
+<span class="fc" id="L608">                defaultWidth = 5;</span>
+<span class="fc" id="L609">                after = mm;</span>
+<span class="fc" id="L610">                break;</span>
+            case 1: // %:z -&gt; +hh:mm
+<span class="fc" id="L612">                defaultWidth = 6;</span>
+<span class="fc" id="L613">                after = &quot;:&quot; + mm;</span>
+<span class="fc" id="L614">                break;</span>
+            case 2: // %::z -&gt; +hh:mm:ss
+<span class="fc" id="L616">                defaultWidth = 9;</span>
+<span class="fc" id="L617">                after = &quot;:&quot; + mm + &quot;:&quot; + ss;</span>
+<span class="fc" id="L618">                break;</span>
+            case 3: // %:::z -&gt; +hh[:mm[:ss]]
+<span class="nc" id="L620">                StringBuilder sb = new StringBuilder();</span>
+<span class="nc bnc" id="L621" title="All 4 branches missed.">                if (minutes != 0 || seconds != 0) sb.append(&quot;:&quot;).append(mm);</span>
+<span class="nc bnc" id="L622" title="All 2 branches missed.">                if (seconds != 0) sb.append(&quot;:&quot;).append(ss);</span>
+<span class="nc" id="L623">                after = sb.toString();</span>
+<span class="nc" id="L624">                defaultWidth = after.length() + 3;</span>
+                break;
+        }
+
+<span class="fc" id="L628">        int minWidth = defaultWidth - 1;</span>
+<span class="fc" id="L629">        int width = formatter.getWidth(defaultWidth);</span>
+<span class="pc bpc" id="L630" title="1 of 2 branches missed.">        if (width &lt; minWidth) {</span>
+<span class="nc" id="L631">            width = minWidth;</span>
+        }
+<span class="fc" id="L633">        width -= after.length();</span>
+<span class="fc" id="L634">        String before = RubyTimeOutputFormatter.formatSignedNumber(hours, width, padder);</span>
+
+<span class="pc bpc" id="L636" title="1 of 4 branches missed.">        if (value &lt; 0 &amp;&amp; hours == 0) // the formatter could not handle this case</span>
+<span class="nc" id="L637">            before = before.replace('+', '-');</span>
+<span class="fc" id="L638">        return before + after;</span>
+    }
+
+    /**
+     * @see DateFormat#parse(String, ParsePosition)
+     */
+    public Date parse(String source, ParsePosition pos) {
+<span class="nc" id="L645">        throw new UnsupportedOperationException();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

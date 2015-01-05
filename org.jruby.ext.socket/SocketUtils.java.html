@@ -1,0 +1,583 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SocketUtils.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.socket</a> &gt; <span class="el_source">SocketUtils.java</span></div><h1>SocketUtils.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+
+package org.jruby.ext.socket;
+
+import jnr.constants.platform.AddressFamily;
+import jnr.constants.platform.ProtocolFamily;
+import jnr.constants.platform.Sock;
+import jnr.netdb.Service;
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyInteger;
+import org.jruby.RubyNumeric;
+import org.jruby.RubyString;
+import org.jruby.RubySymbol;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
+import org.jruby.util.io.Sockaddr;
+
+import java.net.Inet6Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.SocketException;
+import java.net.UnknownHostException;
+import java.util.ArrayList;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import static jnr.constants.platform.AddressFamily.AF_INET;
+import static jnr.constants.platform.IPProto.IPPROTO_TCP;
+import static jnr.constants.platform.IPProto.IPPROTO_UDP;
+import static jnr.constants.platform.NameInfo.NI_NUMERICHOST;
+import static jnr.constants.platform.NameInfo.NI_NUMERICSERV;
+import static jnr.constants.platform.ProtocolFamily.PF_INET;
+import static jnr.constants.platform.ProtocolFamily.PF_INET6;
+import static jnr.constants.platform.Sock.SOCK_DGRAM;
+import static jnr.constants.platform.Sock.SOCK_STREAM;
+import org.jruby.runtime.Helpers;
+
+/**
+ * Socket class methods for addresses, structures, and so on.
+ */
+<span class="nc" id="L72">public class SocketUtils {</span>
+    public static IRubyObject gethostname(ThreadContext context) {
+<span class="nc" id="L74">        Ruby runtime = context.runtime;</span>
+
+        try {
+<span class="nc" id="L77">            return runtime.newString(InetAddress.getLocalHost().getHostName());</span>
+
+<span class="nc" id="L79">        } catch(UnknownHostException e) {</span>
+
+            try {
+<span class="nc" id="L82">                return runtime.newString(InetAddress.getByAddress(new byte[]{0,0,0,0}).getHostName());</span>
+
+<span class="nc" id="L84">            } catch(UnknownHostException e2) {</span>
+<span class="nc" id="L85">                throw sockerr(runtime, &quot;gethostname: name or service not known&quot;);</span>
+
+            }
+        }
+    }
+
+    public static IRubyObject gethostbyaddr(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L92">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L93">        IRubyObject[] ret = new IRubyObject[4];</span>
+
+<span class="nc" id="L95">        ret[0] = runtime.newString(Sockaddr.addressFromString(runtime, args[0].convertToString().toString()).getCanonicalHostName());</span>
+<span class="nc" id="L96">        ret[1] = runtime.newArray();</span>
+<span class="nc" id="L97">        ret[2] = runtime.newFixnum(2); // AF_INET</span>
+<span class="nc" id="L98">        ret[3] = args[0];</span>
+
+<span class="nc" id="L100">        return runtime.newArrayNoCopy(ret);</span>
+    }
+
+    public static IRubyObject getservbyname(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L104">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L105">        String name = args[0].convertToString().toString();</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">        String proto = args.length ==  1 ? &quot;tcp&quot; : args[1].convertToString().toString();</span>
+<span class="nc" id="L107">        Service service = Service.getServiceByName(name, proto);</span>
+        int port;
+
+<span class="nc bnc" id="L110" title="All 2 branches missed.">        if (service != null) {</span>
+<span class="nc" id="L111">            port = service.getPort();</span>
+
+        } else {
+
+            // MRI behavior: try to convert the name string to port directly
+            try {
+<span class="nc" id="L117">                port = Integer.parseInt(name.trim());</span>
+
+<span class="nc" id="L119">            } catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L120">                throw sockerr(runtime, &quot;no such service &quot; + name + &quot;/&quot; + proto);</span>
+
+<span class="nc" id="L122">            }</span>
+
+        }
+
+<span class="nc" id="L126">        return runtime.newFixnum(port);</span>
+    }
+
+    public static IRubyObject pack_sockaddr_in(ThreadContext context, IRubyObject port, IRubyObject host) {
+<span class="nc bnc" id="L130" title="All 2 branches missed.">        int portNum = port instanceof RubyString ?</span>
+<span class="nc" id="L131">                Integer.parseInt(port.convertToString().toString()) :</span>
+<span class="nc" id="L132">                RubyNumeric.fix2int(port);</span>
+
+<span class="nc" id="L134">        return Sockaddr.pack_sockaddr_in(</span>
+                context,
+                portNum,
+<span class="nc bnc" id="L137" title="All 2 branches missed.">                host.isNil() ? null : host.convertToString().toString());</span>
+    }
+
+    public static IRubyObject unpack_sockaddr_in(ThreadContext context, IRubyObject addr) {
+<span class="nc" id="L141">        return Sockaddr.unpack_sockaddr_in(context, addr);</span>
+    }
+
+    public static IRubyObject pack_sockaddr_un(ThreadContext context, IRubyObject filename) {
+<span class="nc" id="L145">        ByteList str = filename.convertToString().getByteList();</span>
+
+<span class="nc" id="L147">        AddressFamily af = AddressFamily.AF_UNIX;</span>
+<span class="nc" id="L148">        int high = (af.intValue() &amp; 0xff00) &gt;&gt; 8;</span>
+<span class="nc" id="L149">        int low = af.intValue() &amp; 0xff;</span>
+
+<span class="nc" id="L151">        ByteList bl = new ByteList();</span>
+<span class="nc" id="L152">        bl.append((byte)high);</span>
+<span class="nc" id="L153">        bl.append((byte)low);</span>
+<span class="nc" id="L154">        bl.append(str);</span>
+
+<span class="nc bnc" id="L156" title="All 2 branches missed.">        for(int i=str.length();i&lt;104;i++) {</span>
+<span class="nc" id="L157">            bl.append((byte)0);</span>
+        }
+
+<span class="nc" id="L160">        return context.runtime.newString(bl);</span>
+    }
+
+    public static IRubyObject gethostbyname(ThreadContext context, IRubyObject hostname) {
+<span class="nc" id="L164">        Ruby runtime = context.runtime;</span>
+
+        try {
+<span class="nc" id="L167">            InetAddress addr = getRubyInetAddress(hostname.convertToString().getByteList());</span>
+<span class="nc" id="L168">            IRubyObject[] ret = new IRubyObject[4];</span>
+
+<span class="nc" id="L170">            ret[0] = runtime.newString(addr.getCanonicalHostName());</span>
+<span class="nc" id="L171">            ret[1] = runtime.newArray();</span>
+<span class="nc" id="L172">            ret[2] = runtime.newFixnum(2); // AF_INET</span>
+<span class="nc" id="L173">            ret[3] = runtime.newString(new ByteList(addr.getAddress()));</span>
+<span class="nc" id="L174">            return runtime.newArrayNoCopy(ret);</span>
+
+<span class="nc" id="L176">        } catch(UnknownHostException e) {</span>
+<span class="nc" id="L177">            throw sockerr(runtime, &quot;gethostbyname: name or service not known&quot;);</span>
+
+        }
+    }
+
+    /**
+     * Ruby definition would look like:
+     *
+     * def self.getaddrinfo(host, port, family = nil, socktype = nil, protocol = nil, flags = nil)
+     */
+    public static IRubyObject getaddrinfo(final ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L188">        final Ruby runtime = context.runtime;</span>
+<span class="nc" id="L189">        final List&lt;IRubyObject&gt; l = new ArrayList&lt;IRubyObject&gt;();</span>
+
+<span class="nc" id="L191">        buildAddrinfoList(context, args, new AddrinfoCallback() {</span>
+            @Override
+            public void addrinfo(InetAddress address, int port, Sock sock) {
+<span class="nc" id="L194">                boolean is_ipv6 = address instanceof Inet6Address;</span>
+<span class="nc" id="L195">                boolean sock_stream = true;</span>
+<span class="nc" id="L196">                boolean sock_dgram = true;</span>
+
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                if (sock != null) {</span>
+<span class="nc bnc" id="L199" title="All 2 branches missed.">                    if (sock == SOCK_STREAM) {</span>
+<span class="nc" id="L200">                        sock_dgram = false;</span>
+
+<span class="nc bnc" id="L202" title="All 2 branches missed.">                    } else if (sock == SOCK_DGRAM) {</span>
+<span class="nc" id="L203">                        sock_stream = false;</span>
+
+                    }
+                }
+
+                IRubyObject[] c;
+
+<span class="nc bnc" id="L210" title="All 2 branches missed.">                if (sock_dgram) {</span>
+<span class="nc" id="L211">                    c = new IRubyObject[7];</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">                    c[0] = runtime.newString(is_ipv6 ? &quot;AF_INET6&quot; : &quot;AF_INET&quot;);</span>
+<span class="nc" id="L213">                    c[1] = runtime.newFixnum(port);</span>
+<span class="nc" id="L214">                    c[2] = runtime.newString(getHostAddress(context, address));</span>
+<span class="nc" id="L215">                    c[3] = runtime.newString(address.getHostAddress());</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">                    c[4] = runtime.newFixnum(is_ipv6 ? PF_INET6 : PF_INET);</span>
+<span class="nc" id="L217">                    c[5] = runtime.newFixnum(SOCK_DGRAM);</span>
+<span class="nc" id="L218">                    c[6] = runtime.newFixnum(IPPROTO_UDP);</span>
+<span class="nc" id="L219">                    l.add(runtime.newArrayNoCopy(c));</span>
+                }
+
+<span class="nc bnc" id="L222" title="All 2 branches missed.">                if (sock_stream) {</span>
+<span class="nc" id="L223">                    c = new IRubyObject[7];</span>
+<span class="nc bnc" id="L224" title="All 2 branches missed.">                    c[0] = runtime.newString(is_ipv6 ? &quot;AF_INET6&quot; : &quot;AF_INET&quot;);</span>
+<span class="nc" id="L225">                    c[1] = runtime.newFixnum(port);</span>
+<span class="nc" id="L226">                    c[2] = runtime.newString(getHostAddress(context, address));</span>
+<span class="nc" id="L227">                    c[3] = runtime.newString(address.getHostAddress());</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">                    c[4] = runtime.newFixnum(is_ipv6 ? PF_INET6 : PF_INET);</span>
+<span class="nc" id="L229">                    c[5] = runtime.newFixnum(SOCK_STREAM);</span>
+<span class="nc" id="L230">                    c[6] = runtime.newFixnum(IPPROTO_TCP);</span>
+<span class="nc" id="L231">                    l.add(runtime.newArrayNoCopy(c));</span>
+                }
+<span class="nc" id="L233">            }</span>
+        });
+
+<span class="nc" id="L236">        return runtime.newArray(l);</span>
+    }
+
+    public static List&lt;Addrinfo&gt; getaddrinfoList(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L240">        final Ruby runtime = context.runtime;</span>
+<span class="nc" id="L241">        final List&lt;Addrinfo&gt; l = new ArrayList&lt;Addrinfo&gt;();</span>
+
+<span class="nc" id="L243">        buildAddrinfoList(context, args, new AddrinfoCallback() {</span>
+            @Override
+            public void addrinfo(InetAddress address, int port, Sock sock) {
+<span class="nc" id="L246">                boolean sock_stream = true;</span>
+<span class="nc" id="L247">                boolean sock_dgram = true;</span>
+
+<span class="nc bnc" id="L249" title="All 2 branches missed.">                if (sock != null) {</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">                    if (sock == SOCK_STREAM) {</span>
+<span class="nc" id="L251">                        sock_dgram = false;</span>
+
+<span class="nc bnc" id="L253" title="All 2 branches missed.">                    } else if (sock == SOCK_DGRAM) {</span>
+<span class="nc" id="L254">                        sock_stream = false;</span>
+
+                    }
+                }
+
+<span class="nc bnc" id="L259" title="All 2 branches missed.">                if (sock_dgram) {</span>
+<span class="nc" id="L260">                    l.add(new Addrinfo(runtime, runtime.getClass(&quot;Addrinfo&quot;),</span>
+                            address,
+                            port,
+                            SocketType.DATAGRAM));
+                }
+
+<span class="nc bnc" id="L266" title="All 2 branches missed.">                if (sock_stream) {</span>
+<span class="nc" id="L267">                    l.add(new Addrinfo(runtime, runtime.getClass(&quot;Addrinfo&quot;),</span>
+                            address,
+                            port,
+                            SocketType.SOCKET));
+                }
+<span class="nc" id="L272">            }</span>
+        });
+
+<span class="nc" id="L275">        return l;</span>
+    }
+
+<span class="nc" id="L278">    interface AddrinfoCallback {</span>
+        void addrinfo(
+                InetAddress address,
+                int port,
+                Sock sock);
+    }
+
+    public static void buildAddrinfoList(ThreadContext context, IRubyObject[] args, AddrinfoCallback callback) {
+<span class="nc" id="L286">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L287">        IRubyObject host = args[0];</span>
+<span class="nc" id="L288">        IRubyObject port = args[1];</span>
+<span class="nc bnc" id="L289" title="All 4 branches missed.">        boolean emptyHost = host.isNil() || host.convertToString().isEmpty();</span>
+
+        try {
+<span class="nc bnc" id="L292" title="All 2 branches missed.">            if(port instanceof RubyString) {</span>
+<span class="nc" id="L293">                port = getservbyname(context, new IRubyObject[]{port});</span>
+            }
+
+<span class="nc bnc" id="L296" title="All 2 branches missed.">            IRubyObject family = args.length &gt; 2 ? args[2] : context.nil;</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">            IRubyObject socktype = args.length &gt; 3 ? args[3] : context.nil;</span>
+            //IRubyObject protocol = args[4];
+<span class="nc bnc" id="L299" title="All 2 branches missed.">            IRubyObject flags = args.length &gt; 5 ? args[5] : context.nil;</span>
+
+<span class="nc" id="L301">            AddressFamily addressFamily = AF_INET;</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">            if (!family.isNil()) {</span>
+<span class="nc" id="L303">                addressFamily = addressFamilyFromArg(family);</span>
+            }
+<span class="nc bnc" id="L305" title="All 2 branches missed.">            boolean is_ipv6 = addressFamily == AddressFamily.AF_INET6;</span>
+<span class="nc" id="L306">            boolean sock_stream = true;</span>
+<span class="nc" id="L307">            boolean sock_dgram = true;</span>
+
+<span class="nc" id="L309">            Sock sock = SOCK_STREAM;</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">            if(!socktype.isNil()) {</span>
+<span class="nc" id="L311">                sockFromArg(socktype);</span>
+
+<span class="nc bnc" id="L313" title="All 2 branches missed.">                if(sock == SOCK_STREAM) {</span>
+<span class="nc" id="L314">                    sock_dgram = false;</span>
+
+<span class="nc bnc" id="L316" title="All 2 branches missed.">                } else if (sock == SOCK_DGRAM) {</span>
+<span class="nc" id="L317">                    sock_stream = false;</span>
+
+                }
+            }
+
+            // When Socket::AI_PASSIVE and host is nil, return 'any' address.
+<span class="nc" id="L323">            InetAddress[] addrs = null;</span>
+
+<span class="nc bnc" id="L325" title="All 4 branches missed.">            if(!flags.isNil() &amp;&amp; RubyFixnum.fix2int(flags) &gt; 0) {</span>
+                // The value of 1 is for Socket::AI_PASSIVE.
+<span class="nc" id="L327">                int flag = RubyNumeric.fix2int(flags);</span>
+
+<span class="nc bnc" id="L329" title="All 4 branches missed.">                if ((flag == 1) &amp;&amp; emptyHost ) {</span>
+                    // use RFC 2732 style string to ensure that we get Inet6Address
+<span class="nc bnc" id="L331" title="All 2 branches missed.">                    addrs = InetAddress.getAllByName(is_ipv6 ? &quot;[::]&quot; : &quot;0.0.0.0&quot;);</span>
+                }
+
+            }
+
+<span class="nc bnc" id="L336" title="All 2 branches missed.">            if (addrs == null) {</span>
+<span class="nc bnc" id="L337" title="All 4 branches missed.">                addrs = InetAddress.getAllByName(emptyHost ? (is_ipv6 ? &quot;[::1]&quot; : null) : host.convertToString().toString());</span>
+            }
+
+<span class="nc bnc" id="L340" title="All 2 branches missed.">            for(int i = 0; i &lt; addrs.length; i++) {</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">                int p = port.isNil() ? 0 : (int)port.convertToInteger().getLongValue();</span>
+<span class="nc" id="L342">                callback.addrinfo(addrs[i], p, sock);</span>
+            }
+
+<span class="nc" id="L345">        } catch(UnknownHostException e) {</span>
+<span class="nc" id="L346">            throw sockerr(runtime, &quot;getaddrinfo: name or service not known&quot;);</span>
+
+<span class="nc" id="L348">        }</span>
+<span class="nc" id="L349">    }</span>
+
+    public static IRubyObject getnameinfo(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L352">        Ruby runtime = context.runtime;</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">        int flags = args.length == 2 ? RubyNumeric.num2int(args[1]) : 0;</span>
+<span class="nc" id="L354">        IRubyObject arg0 = args[0];</span>
+        String host, port;
+
+<span class="nc bnc" id="L357" title="All 2 branches missed.">        if (arg0 instanceof RubyArray) {</span>
+<span class="nc" id="L358">            List list = ((RubyArray)arg0).getList();</span>
+<span class="nc" id="L359">            int len = list.size();</span>
+
+<span class="nc bnc" id="L361" title="All 4 branches missed.">            if (len &lt; 3 || len &gt; 4) {</span>
+<span class="nc" id="L362">                throw runtime.newArgumentError(&quot;array size should be 3 or 4, &quot;+len+&quot; given&quot;);</span>
+            }
+
+            // if array has 4 elements, third element is ignored
+<span class="nc bnc" id="L366" title="All 2 branches missed.">            host = list.size() == 3 ? list.get(2).toString() : list.get(3).toString();</span>
+<span class="nc" id="L367">            port = list.get(1).toString();</span>
+
+<span class="nc bnc" id="L369" title="All 2 branches missed.">        } else if (arg0 instanceof RubyString) {</span>
+<span class="nc" id="L370">            String arg = ((RubyString)arg0).toString();</span>
+<span class="nc" id="L371">            Matcher m = STRING_IPV4_ADDRESS_PATTERN.matcher(arg);</span>
+
+<span class="nc bnc" id="L373" title="All 2 branches missed.">            if (!m.matches()) {</span>
+<span class="nc" id="L374">                IRubyObject obj = unpack_sockaddr_in(context, arg0);</span>
+
+<span class="nc bnc" id="L376" title="All 2 branches missed.">                if (obj instanceof RubyArray) {</span>
+<span class="nc" id="L377">                    List list = ((RubyArray)obj).getList();</span>
+<span class="nc" id="L378">                    int len = list.size();</span>
+
+<span class="nc bnc" id="L380" title="All 2 branches missed.">                    if (len != 2) {</span>
+<span class="nc" id="L381">                        throw runtime.newArgumentError(&quot;invalid address representation&quot;);</span>
+                    }
+
+<span class="nc" id="L384">                    host = list.get(1).toString();</span>
+<span class="nc" id="L385">                    port = list.get(0).toString();</span>
+
+<span class="nc" id="L387">                } else {</span>
+<span class="nc" id="L388">                    throw runtime.newArgumentError(&quot;invalid address string&quot;);</span>
+
+                }
+
+<span class="nc bnc" id="L392" title="All 4 branches missed.">            } else if ((host = m.group(IPV4_HOST_GROUP)) == null || host.length() == 0 ||</span>
+<span class="nc bnc" id="L393" title="All 4 branches missed.">                    (port = m.group(IPV4_PORT_GROUP)) == null || port.length() == 0) {</span>
+
+<span class="nc" id="L395">                throw runtime.newArgumentError(&quot;invalid address string&quot;);</span>
+
+            } else {
+
+                // Try IPv6
+                try {
+<span class="nc" id="L401">                    InetAddress ipv6_addr = InetAddress.getByName(host);</span>
+
+<span class="nc bnc" id="L403" title="All 2 branches missed.">                    if (ipv6_addr instanceof Inet6Address) {</span>
+<span class="nc" id="L404">                        host = ipv6_addr.getHostAddress();</span>
+                    }
+
+<span class="nc" id="L407">                } catch (UnknownHostException uhe) {</span>
+<span class="nc" id="L408">                    throw runtime.newArgumentError(&quot;invalid address string&quot;);</span>
+
+<span class="nc" id="L410">                }</span>
+            }
+
+<span class="nc" id="L413">        } else {</span>
+<span class="nc" id="L414">            throw runtime.newArgumentError(&quot;invalid args&quot;);</span>
+
+        }
+
+        InetAddress addr;
+
+        try {
+<span class="nc" id="L421">            addr = InetAddress.getByName(host);</span>
+
+<span class="nc" id="L423">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L424">            throw sockerr(runtime, &quot;unknown host: &quot;+ host);</span>
+
+<span class="nc" id="L426">        }</span>
+
+<span class="nc bnc" id="L428" title="All 2 branches missed.">        if ((flags &amp; NI_NUMERICHOST.intValue()) == 0) {</span>
+<span class="nc" id="L429">            host = addr.getCanonicalHostName();</span>
+
+        } else {
+<span class="nc" id="L432">            host = addr.getHostAddress();</span>
+
+        }
+
+<span class="nc" id="L436">        jnr.netdb.Service serv = jnr.netdb.Service.getServiceByPort(Integer.parseInt(port), null);</span>
+
+<span class="nc bnc" id="L438" title="All 2 branches missed.">        if (serv != null) {</span>
+
+<span class="nc bnc" id="L440" title="All 2 branches missed.">            if ((flags &amp; NI_NUMERICSERV.intValue()) == 0) {</span>
+<span class="nc" id="L441">                port = serv.getName();</span>
+
+            } else {
+<span class="nc" id="L444">                port = Integer.toString(serv.getPort());</span>
+
+            }
+
+        }
+
+<span class="nc" id="L450">        return runtime.newArray(runtime.newString(host), runtime.newString(port));</span>
+
+    }
+
+    public static IRubyObject ip_address_list(ThreadContext context) {
+<span class="nc" id="L455">        Ruby runtime = context.runtime;</span>
+
+        try {
+<span class="nc" id="L458">            RubyArray list = RubyArray.newArray(runtime);</span>
+<span class="nc" id="L459">            RubyClass addrInfoCls = runtime.getClass(&quot;Addrinfo&quot;);</span>
+
+<span class="nc bnc" id="L461" title="All 2 branches missed.">            for (Enumeration&lt;NetworkInterface&gt; networkIfcs = NetworkInterface.getNetworkInterfaces() ; networkIfcs.hasMoreElements() ; ) {</span>
+<span class="nc bnc" id="L462" title="All 2 branches missed.">                for (Enumeration&lt;InetAddress&gt; addresses = networkIfcs.nextElement().getInetAddresses() ; addresses.hasMoreElements() ; ) {</span>
+<span class="nc" id="L463">                    list.append(new Addrinfo(runtime, addrInfoCls, addresses.nextElement()));</span>
+                }
+            }
+
+<span class="nc" id="L467">            return list;</span>
+<span class="nc" id="L468">        } catch (SocketException se) {</span>
+<span class="nc" id="L469">            throw sockerr(runtime, se.getLocalizedMessage());</span>
+        }
+    }
+
+    public static InetAddress getRubyInetAddress(ByteList address) throws UnknownHostException {
+        // switched to String because the ByteLists were not comparing properly in 1.9 mode (encoding?
+        // FIXME: Need to properly decode this string (see Helpers.decodeByteList)
+<span class="nc" id="L476">        String addressString = Helpers.byteListToString(address);</span>
+
+<span class="nc bnc" id="L478" title="All 2 branches missed.">        if (addressString.equals(BROADCAST)) {</span>
+<span class="nc" id="L479">            return InetAddress.getByAddress(INADDR_BROADCAST);</span>
+
+<span class="nc bnc" id="L481" title="All 2 branches missed.">        } else if (addressString.equals(ANY)) {</span>
+<span class="nc" id="L482">            return InetAddress.getByAddress(INADDR_ANY);</span>
+
+        } else {
+<span class="nc" id="L485">            return InetAddress.getByName(addressString);</span>
+
+        }
+    }
+
+    public static IRubyObject getaddress(ThreadContext context, IRubyObject hostname) {
+        try {
+<span class="nc" id="L492">            return context.runtime.newString(InetAddress.getByName(hostname.convertToString().toString()).getHostAddress());</span>
+<span class="nc" id="L493">        } catch(UnknownHostException e) {</span>
+<span class="nc" id="L494">            throw sockerr(context.runtime, &quot;getaddress: name or service not known&quot;);</span>
+        }
+    }
+
+    public static RuntimeException sockerr(Ruby runtime, String msg) {
+<span class="nc" id="L499">        return new RaiseException(runtime, runtime.getClass(&quot;SocketError&quot;), msg, true);</span>
+    }
+
+    public static int getPortFrom(ThreadContext context, IRubyObject _port) {
+        int port;
+<span class="nc bnc" id="L504" title="All 2 branches missed.">        if (_port instanceof RubyInteger) {</span>
+<span class="nc" id="L505">            port = RubyNumeric.fix2int(_port);</span>
+        } else {
+<span class="nc" id="L507">            IRubyObject portString = _port.convertToString();</span>
+<span class="nc" id="L508">            IRubyObject portInteger = portString.convertToInteger( &quot;to_i&quot;);</span>
+<span class="nc" id="L509">            port = RubyNumeric.fix2int(portInteger);</span>
+
+<span class="nc bnc" id="L511" title="All 2 branches missed.">            if (port &lt;= 0) {</span>
+<span class="nc" id="L512">                port = RubyNumeric.fix2int(RubySocket.getservbyname(</span>
+<span class="nc" id="L513">                        context, context.runtime.getObject(), new IRubyObject[]{portString}));</span>
+            }
+        }
+
+<span class="nc" id="L517">        return port;</span>
+    }
+
+    private static String getHostAddress(ThreadContext context, InetAddress addr) {
+<span class="nc bnc" id="L521" title="All 2 branches missed.">        return context.runtime.isDoNotReverseLookupEnabled() ? addr.getHostAddress() : addr.getCanonicalHostName();</span>
+    }
+
+<span class="nc" id="L524">    private static final Pattern STRING_IPV4_ADDRESS_PATTERN =</span>
+<span class="nc" id="L525">            Pattern.compile(&quot;((.*)\\/)?([\\.0-9]+)(:([0-9]+))?&quot;);</span>
+
+    private static final int IPV4_HOST_GROUP = 3;
+    private static final int IPV4_PORT_GROUP = 5;
+
+    private static final String BROADCAST = &quot;&lt;broadcast&gt;&quot;;
+<span class="nc" id="L531">    private static final byte[] INADDR_BROADCAST = new byte[] {-1,-1,-1,-1}; // 255.255.255.255</span>
+    private static final String ANY = &quot;&lt;any&gt;&quot;;
+<span class="nc" id="L533">    private static final byte[] INADDR_ANY = new byte[] {0,0,0,0}; // 0.0.0.0</span>
+
+    static AddressFamily addressFamilyFromArg(IRubyObject domain) {
+<span class="nc" id="L536">        AddressFamily addressFamily = null;</span>
+
+<span class="nc bnc" id="L538" title="All 4 branches missed.">        if(domain instanceof RubyString || domain instanceof RubySymbol) {</span>
+<span class="nc" id="L539">            String domainString = domain.toString();</span>
+<span class="nc bnc" id="L540" title="All 2 branches missed.">            if (!domainString.startsWith(&quot;AF_&quot;)) domainString = &quot;AF_&quot; + domainString;</span>
+<span class="nc" id="L541">            addressFamily = AddressFamily.valueOf(domainString);</span>
+<span class="nc" id="L542">        } else {</span>
+<span class="nc" id="L543">            int domainInt = RubyNumeric.fix2int(domain);</span>
+<span class="nc" id="L544">            addressFamily = AddressFamily.valueOf(domainInt);</span>
+        }
+
+<span class="nc" id="L547">        return addressFamily;</span>
+    }
+
+    static Sock sockFromArg(IRubyObject type) {
+<span class="nc" id="L551">        Sock sockType = null;</span>
+
+<span class="nc bnc" id="L553" title="All 4 branches missed.">        if(type instanceof RubyString || type instanceof RubySymbol) {</span>
+<span class="nc" id="L554">            String typeString = type.toString();</span>
+<span class="nc" id="L555">            sockType = Sock.valueOf(&quot;SOCK_&quot; + typeString);</span>
+<span class="nc" id="L556">        } else {</span>
+<span class="nc" id="L557">            int typeInt = RubyNumeric.fix2int(type);</span>
+<span class="nc" id="L558">            sockType = Sock.valueOf(typeInt);</span>
+        }
+
+<span class="nc" id="L561">        return sockType;</span>
+    }
+
+    static ProtocolFamily protocolFamilyFromArg(IRubyObject protocol) {
+<span class="nc" id="L565">        ProtocolFamily protocolFamily = null;</span>
+
+<span class="nc bnc" id="L567" title="All 4 branches missed.">        if(protocol instanceof RubyString || protocol instanceof RubySymbol) {</span>
+<span class="nc" id="L568">            String protocolString = protocol.toString();</span>
+<span class="nc" id="L569">            protocolFamily = ProtocolFamily.valueOf(&quot;PF_&quot; + protocolString);</span>
+<span class="nc" id="L570">        } else {</span>
+<span class="nc" id="L571">            int protocolInt = RubyNumeric.fix2int(protocol);</span>
+<span class="nc bnc" id="L572" title="All 2 branches missed.">            if (protocolInt == 0) return null;</span>
+<span class="nc" id="L573">            protocolFamily = ProtocolFamily.valueOf(protocolInt);</span>
+        }
+
+<span class="nc" id="L576">        return protocolFamily;</span>
+    }
+    
+    public static int portToInt(IRubyObject port) {
+<span class="nc bnc" id="L580" title="All 2 branches missed.">        return port.isNil() ? 0 : RubyNumeric.fix2int(port);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

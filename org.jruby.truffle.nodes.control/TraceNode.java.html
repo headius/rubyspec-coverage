@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>TraceNode.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.nodes.control</a> &gt; <span class="el_source">TraceNode.java</span></div><h1>TraceNode.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2013, 2015 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.nodes.control;
+
+import com.oracle.truffle.api.Assumption;
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.Truffle;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.instrument.KillException;
+import com.oracle.truffle.api.nodes.DirectCallNode;
+import com.oracle.truffle.api.nodes.InvalidAssumptionException;
+import com.oracle.truffle.api.nodes.UnexpectedResultException;
+import com.oracle.truffle.api.source.SourceSection;
+import org.jruby.truffle.nodes.RubyNode;
+import org.jruby.truffle.runtime.RubyArguments;
+import org.jruby.truffle.runtime.RubyContext;
+import org.jruby.truffle.runtime.UndefinedPlaceholder;
+import org.jruby.truffle.runtime.core.*;
+
+public class TraceNode extends RubyNode {
+
+    private final RubyContext context;
+    @Child protected RubyNode child;
+
+    @CompilerDirectives.CompilationFinal private Assumption traceAssumption;
+    @CompilerDirectives.CompilationFinal private RubyProc traceFunc;
+    @Child protected DirectCallNode callNode;
+
+    private final RubyString event;
+    private final RubyString file;
+    private final int line;
+
+    public TraceNode(RubyContext context, SourceSection sourceSection, RubyNode child) {
+<span class="nc" id="L41">        super(context, sourceSection);</span>
+<span class="nc" id="L42">        this.child = child;</span>
+<span class="nc" id="L43">        this.context = context;</span>
+<span class="nc" id="L44">        traceAssumption = context.getTraceManager().getTraceAssumption();</span>
+<span class="nc" id="L45">        traceFunc = null;</span>
+<span class="nc" id="L46">        callNode = null;</span>
+<span class="nc" id="L47">        event = context.makeString(&quot;line&quot;);</span>
+<span class="nc" id="L48">        file = context.makeString(sourceSection.getSource().getName());</span>
+<span class="nc" id="L49">        line = sourceSection.getStartLine();</span>
+<span class="nc" id="L50">    }</span>
+
+    @Override
+    public Object execute(VirtualFrame frame) {
+<span class="nc" id="L54">        trace(frame);</span>
+<span class="nc" id="L55">        return child.execute(frame);</span>
+    }
+
+
+    @Override
+    public void executeVoid(VirtualFrame frame) {
+<span class="nc" id="L61">        trace(frame);</span>
+<span class="nc" id="L62">        child.executeVoid(frame);</span>
+<span class="nc" id="L63">    }</span>
+
+    public void trace(VirtualFrame frame) {
+        try {
+<span class="nc" id="L67">            traceAssumption.check();</span>
+<span class="nc" id="L68">        } catch (InvalidAssumptionException e) {</span>
+<span class="nc" id="L69">            traceAssumption = context.getTraceManager().getTraceAssumption();</span>
+<span class="nc" id="L70">            traceFunc = context.getTraceManager().getTraceFunc();</span>
+
+<span class="nc bnc" id="L72" title="All 2 branches missed.">            if (traceFunc != null) {</span>
+<span class="nc" id="L73">                callNode = insert(Truffle.getRuntime().createDirectCallNode(traceFunc.getCallTarget()));</span>
+            } else {
+<span class="nc" id="L75">                callNode = null;</span>
+            }
+<span class="nc" id="L77">        }</span>
+
+<span class="nc bnc" id="L79" title="All 2 branches missed.">        if (traceFunc != null) {</span>
+<span class="nc bnc" id="L80" title="All 2 branches missed.">            if (!context.getTraceManager().isInTraceFunc()) {</span>
+<span class="nc" id="L81">                context.getTraceManager().setInTraceFunc(true);</span>
+
+<span class="nc" id="L83">                final Object[] args = new Object[]{</span>
+                        event,
+                        file,
+<span class="nc" id="L86">                        line,</span>
+<span class="nc" id="L87">                        context.getCoreLibrary().getNilObject(),</span>
+<span class="nc" id="L88">                        new RubyBinding(context.getCoreLibrary().getBindingClass(), RubyArguments.getSelf(frame.getArguments()), frame.materialize()),</span>
+<span class="nc" id="L89">                        context.getCoreLibrary().getNilObject()</span>
+                };
+
+                try {
+<span class="nc" id="L93">                    callNode.call(frame, RubyArguments.pack(traceFunc, traceFunc.getDeclarationFrame(), traceFunc.getSelfCapturedInScope(), traceFunc.getBlockCapturedInScope(), args));</span>
+                } finally {
+<span class="nc" id="L95">                    context.getTraceManager().setInTraceFunc(false);</span>
+<span class="nc" id="L96">                }</span>
+            }
+        }
+<span class="nc" id="L99">    }</span>
+
+    @Override
+    public Object isDefined(VirtualFrame frame) {
+<span class="nc" id="L103">        return child.isDefined(frame);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

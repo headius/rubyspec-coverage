@@ -1,0 +1,1324 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyProcess.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyProcess.java</span></div><h1>RubyProcess.java</h1><pre class="source lang-java linenums">/*
+ **** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import jnr.constants.platform.Signal;
+import jnr.constants.platform.Sysconf;
+import jnr.ffi.byref.IntByReference;
+import jnr.posix.Times;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.anno.JRubyModule;
+import jnr.posix.POSIX;
+import org.jruby.platform.Platform;
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.BlockCallback;
+import org.jruby.runtime.CallBlock;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import static org.jruby.runtime.Visibility.*;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.invokedynamic.MethodNames;
+import org.jruby.util.ShellLauncher;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.util.io.PopenExecutor;
+import org.jruby.util.io.PosixShim;
+
+import static org.jruby.runtime.Helpers.invokedynamic;
+import static org.jruby.runtime.invokedynamic.MethodNames.OP_EQUAL;
+import static org.jruby.util.WindowsFFI.kernel32;
+import static org.jruby.util.WindowsFFI.Kernel32.*;
+
+import java.lang.management.ThreadMXBean;
+import java.lang.management.ManagementFactory;
+
+/**
+ */
+
+@JRubyModule(name=&quot;Process&quot;)
+<span class="nc" id="L67">public class RubyProcess {</span>
+
+    public static RubyModule createProcessModule(Ruby runtime) {
+<span class="fc" id="L70">        RubyModule process = runtime.defineModule(&quot;Process&quot;);</span>
+<span class="fc" id="L71">        runtime.setProcess(process);</span>
+        
+        // TODO: NOT_ALLOCATABLE_ALLOCATOR is probably ok here. Confirm. JRUBY-415
+<span class="fc" id="L74">        RubyClass process_status = process.defineClassUnder(&quot;Status&quot;, runtime.getObject(), ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);</span>
+<span class="fc" id="L75">        runtime.setProcStatus(process_status);</span>
+        
+<span class="fc" id="L77">        RubyModule process_uid = process.defineModuleUnder(&quot;UID&quot;);</span>
+<span class="fc" id="L78">        runtime.setProcUID(process_uid);</span>
+        
+<span class="fc" id="L80">        RubyModule process_gid = process.defineModuleUnder(&quot;GID&quot;);</span>
+<span class="fc" id="L81">        runtime.setProcGID(process_gid);</span>
+        
+<span class="fc" id="L83">        RubyModule process_sys = process.defineModuleUnder(&quot;Sys&quot;);</span>
+<span class="fc" id="L84">        runtime.setProcSys(process_sys);</span>
+        
+<span class="fc" id="L86">        process.defineAnnotatedMethods(RubyProcess.class);</span>
+<span class="fc" id="L87">        process_status.defineAnnotatedMethods(RubyStatus.class);</span>
+<span class="fc" id="L88">        process_uid.defineAnnotatedMethods(UserID.class);</span>
+<span class="fc" id="L89">        process_gid.defineAnnotatedMethods(GroupID.class);</span>
+<span class="fc" id="L90">        process_sys.defineAnnotatedMethods(Sys.class);</span>
+
+<span class="fc" id="L92">        runtime.loadConstantSet(process, jnr.constants.platform.PRIO.class);</span>
+<span class="fc" id="L93">        runtime.loadConstantSet(process, jnr.constants.platform.RLIM.class);</span>
+<span class="fc" id="L94">        runtime.loadConstantSet(process, jnr.constants.platform.RLIMIT.class);</span>
+        
+<span class="fc" id="L96">        process.defineConstant(&quot;WNOHANG&quot;, runtime.newFixnum(1));</span>
+<span class="fc" id="L97">        process.defineConstant(&quot;WUNTRACED&quot;, runtime.newFixnum(2));</span>
+        
+        // FIXME: These should come out of jnr-constants
+        // TODO: other clock types
+<span class="fc" id="L101">        process.defineConstant(&quot;CLOCK_REALTIME&quot;, RubySymbol.newSymbol(runtime, CLOCK_REALTIME));</span>
+<span class="fc" id="L102">        process.defineConstant(&quot;CLOCK_MONOTONIC&quot;, RubySymbol.newSymbol(runtime, CLOCK_MONOTONIC));</span>
+        
+<span class="fc" id="L104">        return process;</span>
+    }
+    
+    public static final String CLOCK_MONOTONIC = &quot;CLOCK_MONOTONIC&quot;;
+    public static final String CLOCK_REALTIME = &quot;CLOCK_REALTIME&quot;;
+    public static final String CLOCK_UNIT_NANOSECOND = &quot;nanosecond&quot;;
+    public static final String CLOCK_UNIT_MICROSECOND = &quot;microsecond&quot;;
+    public static final String CLOCK_UNIT_MILLISECOND = &quot;millisecond&quot;;
+    public static final String CLOCK_UNIT_FLOAT_MICROSECOND = &quot;float_microsecond&quot;;
+    public static final String CLOCK_UNIT_FLOAT_MILLISECOND = &quot;float_millisecond&quot;;
+    public static final String CLOCK_UNIT_FLOAT_SECOND = &quot;float_second&quot;;
+    public static final String CLOCK_UNIT_HERTZ = &quot;hertz&quot;;
+
+    @JRubyClass(name=&quot;Process::Status&quot;)
+    public static class RubyStatus extends RubyObject {
+        private final long status;
+        private final long pid;
+        
+        private static final long EXIT_SUCCESS = 0L;
+        public RubyStatus(Ruby runtime, RubyClass metaClass, long status, long pid) {
+<span class="fc" id="L124">            super(runtime, metaClass);</span>
+<span class="fc" id="L125">            this.status = status;</span>
+<span class="fc" id="L126">            this.pid = pid;</span>
+<span class="fc" id="L127">        }</span>
+        
+        public static RubyStatus newProcessStatus(Ruby runtime, long status, long pid) {
+<span class="fc" id="L130">            return new RubyStatus(runtime, runtime.getProcStatus(), status, pid);</span>
+        }
+
+        @JRubyMethod(name = &quot;&amp;&quot;)
+        public IRubyObject op_and(IRubyObject arg) {
+<span class="nc" id="L135">            return getRuntime().newFixnum(status &amp; arg.convertToInteger().getLongValue());</span>
+        }
+
+        @JRubyMethod(name = &quot;stopped?&quot;)
+        public IRubyObject stopped_p() {
+<span class="nc" id="L140">            return RubyBoolean.newBoolean(getRuntime(), PosixShim.WAIT_MACROS.WIFSTOPPED(status));</span>
+        }
+
+        @JRubyMethod(name = {&quot;signaled?&quot;})
+        public IRubyObject signaled() {
+<span class="fc" id="L145">            return RubyBoolean.newBoolean(getRuntime(), PosixShim.WAIT_MACROS.WIFSIGNALED(status));</span>
+        }
+
+        @JRubyMethod(name = {&quot;exited?&quot;})
+        public IRubyObject exited() {
+<span class="fc" id="L150">            return RubyBoolean.newBoolean(getRuntime(), PosixShim.WAIT_MACROS.WIFEXITED(status));</span>
+        }
+
+        @JRubyMethod(name = {&quot;stopsig&quot;})
+        public IRubyObject stopsig() {
+<span class="nc bnc" id="L155" title="All 2 branches missed.">            if (PosixShim.WAIT_MACROS.WIFSTOPPED(status)) {</span>
+<span class="nc" id="L156">                return RubyFixnum.newFixnum(getRuntime(), PosixShim.WAIT_MACROS.WSTOPSIG(status));</span>
+            }
+<span class="nc" id="L158">            return getRuntime().getNil();</span>
+        }
+
+        @JRubyMethod(name = {&quot;termsig&quot;})
+        public IRubyObject termsig() {
+<span class="pc bpc" id="L163" title="1 of 2 branches missed.">            if (PosixShim.WAIT_MACROS.WIFSIGNALED(status)) {</span>
+<span class="fc" id="L164">                return RubyFixnum.newFixnum(getRuntime(), PosixShim.WAIT_MACROS.WTERMSIG(status));</span>
+            }
+<span class="nc" id="L166">            return getRuntime().getNil();</span>
+        }
+
+        @JRubyMethod
+        public IRubyObject exitstatus() {
+<span class="fc bfc" id="L171" title="All 2 branches covered.">            if (PosixShim.WAIT_MACROS.WIFEXITED(status)) {</span>
+<span class="fc" id="L172">                return getRuntime().newFixnum(PosixShim.WAIT_MACROS.WEXITSTATUS(status));</span>
+            }
+<span class="fc" id="L174">            return getRuntime().getNil();</span>
+        }
+
+        @JRubyMethod(name = &quot;&gt;&gt;&quot;)
+        public IRubyObject op_rshift(ThreadContext context, IRubyObject other) {
+<span class="nc" id="L179">            return op_rshift(context.runtime, other);</span>
+        }
+
+        @Override
+        @JRubyMethod(name = &quot;==&quot;)
+        public IRubyObject op_equal(ThreadContext context, IRubyObject other) {
+<span class="nc" id="L185">            Ruby runtime = context.runtime;</span>
+
+<span class="nc bnc" id="L187" title="All 2 branches missed.">            if (this == other) return runtime.getTrue();</span>
+<span class="nc" id="L188">            return invokedynamic(context, runtime.newFixnum(status), MethodNames.OP_EQUAL, other);</span>
+        }
+
+        @JRubyMethod(name = {&quot;to_i&quot;, &quot;to_int&quot;})
+        public IRubyObject to_i(ThreadContext context) {
+<span class="nc" id="L193">            return to_i(context.runtime);</span>
+        }
+
+        @JRubyMethod
+        public IRubyObject to_s(ThreadContext context) {
+<span class="nc" id="L198">            return to_s(context.runtime);</span>
+        }
+
+        @JRubyMethod
+        public IRubyObject inspect(ThreadContext context) {
+<span class="nc" id="L203">            return inspect(context.runtime);</span>
+        }
+        
+        @JRubyMethod(name = &quot;success?&quot;)
+        public IRubyObject success_p(ThreadContext context) {
+<span class="pc bpc" id="L208" title="1 of 2 branches missed.">            if (!PosixShim.WAIT_MACROS.WIFEXITED(status)) {</span>
+<span class="nc" id="L209">                return context.nil;</span>
+            }
+<span class="fc bfc" id="L211" title="All 2 branches covered.">            return context.runtime.newBoolean(PosixShim.WAIT_MACROS.WEXITSTATUS(status) == EXIT_SUCCESS);</span>
+        }
+
+        @JRubyMethod(name = {&quot;coredump?&quot;})
+        public IRubyObject coredump_p() {
+<span class="nc" id="L216">            return RubyBoolean.newBoolean(getRuntime(), PosixShim.WAIT_MACROS.WCOREDUMP(status));</span>
+        }
+        
+        @JRubyMethod
+        public IRubyObject pid(ThreadContext context) {
+<span class="fc" id="L221">            return context.runtime.newFixnum(pid);</span>
+        }
+
+        public long getStatus() {
+<span class="fc" id="L225">            return status;</span>
+        }
+
+        public IRubyObject op_rshift(Ruby runtime, IRubyObject other) {
+<span class="nc" id="L229">            long shiftValue = other.convertToInteger().getLongValue();</span>
+<span class="nc" id="L230">            return runtime.newFixnum(status &gt;&gt; shiftValue);</span>
+        }
+
+        public IRubyObject to_i(Ruby runtime) {
+<span class="nc" id="L234">            return runtime.newFixnum(status);</span>
+        }
+
+        public IRubyObject to_s(Ruby runtime) {
+<span class="nc" id="L238">            return runtime.newString(pst_message(&quot;&quot;, pid, status));</span>
+        }
+
+        @Override
+        public IRubyObject to_s() {
+<span class="nc" id="L243">            return to_s(getRuntime());</span>
+        }
+
+        public IRubyObject inspect(Ruby runtime) {
+<span class="nc" id="L247">            return runtime.newString(pst_message(&quot;#&lt;&quot; + getMetaClass().getName() + &quot;: &quot;, pid, status) + &quot;&gt;&quot;);</span>
+        }
+
+        // MRI: pst_message
+        private static String pst_message(String prefix, long pid, long status) {
+<span class="nc" id="L252">            StringBuilder sb = new StringBuilder(prefix);</span>
+<span class="nc" id="L253">            sb</span>
+<span class="nc" id="L254">                    .append(&quot;pid &quot;)</span>
+<span class="nc" id="L255">                    .append(pid);</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">            if (PosixShim.WAIT_MACROS.WIFSTOPPED(status)) {</span>
+<span class="nc" id="L257">                long stopsig = PosixShim.WAIT_MACROS.WSTOPSIG(status);</span>
+<span class="nc" id="L258">                String signame = RubySignal.signo2signm(stopsig);</span>
+<span class="nc bnc" id="L259" title="All 2 branches missed.">                if (signame != null) {</span>
+<span class="nc" id="L260">                    sb</span>
+<span class="nc" id="L261">                            .append(&quot; stopped &quot;)</span>
+<span class="nc" id="L262">                            .append(signame)</span>
+<span class="nc" id="L263">                            .append(&quot; (signal &quot;)</span>
+<span class="nc" id="L264">                            .append(stopsig)</span>
+<span class="nc" id="L265">                            .append(&quot;)&quot;);</span>
+                } else {
+<span class="nc" id="L267">                    sb</span>
+<span class="nc" id="L268">                            .append(&quot; stopped signal &quot;)</span>
+<span class="nc" id="L269">                            .append(stopsig);</span>
+                }
+            }
+<span class="nc bnc" id="L272" title="All 2 branches missed.">            if (PosixShim.WAIT_MACROS.WIFSIGNALED(status)) {</span>
+<span class="nc" id="L273">                long termsig = PosixShim.WAIT_MACROS.WTERMSIG(status);</span>
+<span class="nc" id="L274">                String signame = RubySignal.signo2signm(termsig);</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">                if (signame != null) {</span>
+<span class="nc" id="L276">                    sb</span>
+<span class="nc" id="L277">                            .append(&quot; &quot;)</span>
+<span class="nc" id="L278">                            .append(signame)</span>
+<span class="nc" id="L279">                            .append(&quot; (signal &quot;)</span>
+<span class="nc" id="L280">                            .append(termsig)</span>
+<span class="nc" id="L281">                            .append(&quot;)&quot;);</span>
+                } else {
+<span class="nc" id="L283">                    sb</span>
+<span class="nc" id="L284">                            .append(&quot; signal &quot;)</span>
+<span class="nc" id="L285">                            .append(termsig);</span>
+                }
+            }
+<span class="nc bnc" id="L288" title="All 2 branches missed.">            if (PosixShim.WAIT_MACROS.WIFEXITED(status)) {</span>
+<span class="nc" id="L289">                sb</span>
+<span class="nc" id="L290">                        .append(&quot; exit &quot;)</span>
+<span class="nc" id="L291">                        .append(PosixShim.WAIT_MACROS.WEXITSTATUS(status));</span>
+            }
+<span class="nc bnc" id="L293" title="All 2 branches missed.">            if (PosixShim.WAIT_MACROS.WCOREDUMP(status)) {</span>
+<span class="nc" id="L294">                sb</span>
+<span class="nc" id="L295">                        .append(&quot; (core dumped)&quot;);</span>
+            }
+<span class="nc" id="L297">            return sb.toString();</span>
+        }
+
+        @Override
+        public IRubyObject inspect() {
+<span class="nc" id="L302">            return inspect(getRuntime());</span>
+        }
+
+        @Deprecated
+        public IRubyObject op_rshift(IRubyObject other) {
+<span class="nc" id="L307">            return op_rshift(getRuntime(), other);</span>
+        }
+
+        @Deprecated
+        public IRubyObject to_i() {
+<span class="nc" id="L312">            return to_i(getRuntime());</span>
+        }
+    }
+
+    @JRubyModule(name=&quot;Process::UID&quot;)
+<span class="nc" id="L317">    public static class UserID {</span>
+        @JRubyMethod(name = &quot;change_privilege&quot;, module = true)
+        public static IRubyObject change_privilege(IRubyObject self, IRubyObject arg) {
+<span class="nc" id="L320">            throw self.getRuntime().newNotImplementedError(&quot;Process::UID::change_privilege not implemented yet&quot;);</span>
+        }
+        
+        @Deprecated
+        public static IRubyObject eid(IRubyObject self) {
+<span class="nc" id="L325">            return euid(self.getRuntime());</span>
+        }
+        @JRubyMethod(name = &quot;eid&quot;, module = true)
+        public static IRubyObject eid(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L329">            return euid(context.runtime);</span>
+        }
+
+        @Deprecated
+        public static IRubyObject eid(IRubyObject self, IRubyObject arg) {
+<span class="nc" id="L334">            return eid(self.getRuntime(), arg);</span>
+        }
+        @JRubyMethod(name = &quot;eid=&quot;, module = true)
+        public static IRubyObject eid(ThreadContext context, IRubyObject self, IRubyObject arg) {
+<span class="nc" id="L338">            return eid(context.runtime, arg);</span>
+        }
+        public static IRubyObject eid(Ruby runtime, IRubyObject arg) {
+<span class="nc" id="L341">            return euid_set(runtime, arg);</span>
+        }
+        
+        @JRubyMethod(name = &quot;grant_privilege&quot;, module = true)
+        public static IRubyObject grant_privilege(IRubyObject self, IRubyObject arg) {
+<span class="nc" id="L346">            throw self.getRuntime().newNotImplementedError(&quot;Process::UID::grant_privilege not implemented yet&quot;);</span>
+        }
+        
+        @JRubyMethod(name = &quot;re_exchange&quot;, module = true)
+        public static IRubyObject re_exchange(ThreadContext context, IRubyObject self) {
+<span class="nc" id="L351">            return switch_rb(context, self, Block.NULL_BLOCK);</span>
+        }
+        
+        @JRubyMethod(name = &quot;re_exchangeable?&quot;, module = true)
+        public static IRubyObject re_exchangeable_p(IRubyObject self) {
+<span class="nc" id="L356">            throw self.getRuntime().newNotImplementedError(&quot;Process::UID::re_exchangeable? not implemented yet&quot;);</span>
+        }
+
+        @Deprecated
+        public static IRubyObject rid(IRubyObject self) {
+<span class="nc" id="L361">            return rid(self.getRuntime());</span>
+        }
+        @JRubyMethod(name = &quot;rid&quot;, module = true)
+        public static IRubyObject rid(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L365">            return rid(context.runtime);</span>
+        }
+        public static IRubyObject rid(Ruby runtime) {
+<span class="fc" id="L368">            return uid(runtime);</span>
+        }
+        
+        @JRubyMethod(name = &quot;sid_available?&quot;, module = true)
+        public static IRubyObject sid_available_p(IRubyObject self) {
+<span class="nc" id="L373">            throw self.getRuntime().newNotImplementedError(&quot;Process::UID::sid_available not implemented yet&quot;);</span>
+        }
+        
+        @JRubyMethod(name = &quot;switch&quot;, module = true, visibility = PRIVATE)
+        public static IRubyObject switch_rb(ThreadContext context, IRubyObject self, Block block) {
+<span class="nc" id="L378">            Ruby runtime = context.runtime;</span>
+<span class="nc" id="L379">            int uid = checkErrno(runtime, runtime.getPosix().getuid());</span>
+<span class="nc" id="L380">            int euid = checkErrno(runtime, runtime.getPosix().geteuid());</span>
+            
+<span class="nc bnc" id="L382" title="All 2 branches missed.">            if (block.isGiven()) {</span>
+                try {
+<span class="nc" id="L384">                    checkErrno(runtime, runtime.getPosix().seteuid(uid));</span>
+<span class="nc" id="L385">                    checkErrno(runtime, runtime.getPosix().setuid(euid));</span>
+                    
+<span class="nc" id="L387">                    return block.yield(context, runtime.getNil());</span>
+                } finally {
+<span class="nc" id="L389">                    checkErrno(runtime, runtime.getPosix().seteuid(euid));</span>
+<span class="nc" id="L390">                    checkErrno(runtime, runtime.getPosix().setuid(uid));</span>
+                }
+            } else {
+<span class="nc" id="L393">                checkErrno(runtime, runtime.getPosix().seteuid(uid));</span>
+<span class="nc" id="L394">                checkErrno(runtime, runtime.getPosix().setuid(euid));</span>
+                
+<span class="nc" id="L396">                return RubyFixnum.zero(runtime);</span>
+            }
+        }
+    }
+    
+    @JRubyModule(name=&quot;Process::GID&quot;)
+<span class="nc" id="L402">    public static class GroupID {</span>
+        @JRubyMethod(name = &quot;change_privilege&quot;, module = true)
+        public static IRubyObject change_privilege(IRubyObject self, IRubyObject arg) {
+<span class="nc" id="L405">            throw self.getRuntime().newNotImplementedError(&quot;Process::GID::change_privilege not implemented yet&quot;);</span>
+        }
+
+        @Deprecated
+        public static IRubyObject eid(IRubyObject self) {
+<span class="nc" id="L410">            return eid(self.getRuntime());</span>
+        }
+        @JRubyMethod(name = &quot;eid&quot;, module = true)
+        public static IRubyObject eid(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L414">            return eid(context.runtime);</span>
+        }
+        public static IRubyObject eid(Ruby runtime) {
+<span class="fc" id="L417">            return egid(runtime);</span>
+        }
+
+        @Deprecated
+        public static IRubyObject eid(IRubyObject self, IRubyObject arg) {
+<span class="nc" id="L422">            return eid(self.getRuntime(), arg);</span>
+        }
+        @JRubyMethod(name = &quot;eid=&quot;, module = true)
+        public static IRubyObject eid(ThreadContext context, IRubyObject self, IRubyObject arg) {
+<span class="nc" id="L426">            return eid(context.runtime, arg);</span>
+        }
+        public static IRubyObject eid(Ruby runtime, IRubyObject arg) {
+<span class="nc" id="L429">            return RubyProcess.egid_set(runtime, arg);</span>
+        }
+        
+        @JRubyMethod(name = &quot;grant_privilege&quot;, module = true)
+        public static IRubyObject grant_privilege(IRubyObject self, IRubyObject arg) {
+<span class="nc" id="L434">            throw self.getRuntime().newNotImplementedError(&quot;Process::GID::grant_privilege not implemented yet&quot;);</span>
+        }
+        
+        @JRubyMethod(name = &quot;re_exchange&quot;, module = true)
+        public static IRubyObject re_exchange(ThreadContext context, IRubyObject self) {
+<span class="nc" id="L439">            return switch_rb(context, self, Block.NULL_BLOCK);</span>
+        }
+        
+        @JRubyMethod(name = &quot;re_exchangeable?&quot;, module = true)
+        public static IRubyObject re_exchangeable_p(IRubyObject self) {
+<span class="nc" id="L444">            throw self.getRuntime().newNotImplementedError(&quot;Process::GID::re_exchangeable? not implemented yet&quot;);</span>
+        }
+
+        @Deprecated
+        public static IRubyObject rid(IRubyObject self) {
+<span class="nc" id="L449">            return rid(self.getRuntime());</span>
+        }
+        @JRubyMethod(name = &quot;rid&quot;, module = true)
+        public static IRubyObject rid(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L453">            return rid(context.runtime);</span>
+        }
+        public static IRubyObject rid(Ruby runtime) {
+<span class="fc" id="L456">            return gid(runtime);</span>
+        }
+        
+        @JRubyMethod(name = &quot;sid_available?&quot;, module = true)
+        public static IRubyObject sid_available_p(IRubyObject self) {
+<span class="nc" id="L461">            throw self.getRuntime().newNotImplementedError(&quot;Process::GID::sid_available not implemented yet&quot;);</span>
+        }
+        
+        @JRubyMethod(name = &quot;switch&quot;, module = true, visibility = PRIVATE)
+        public static IRubyObject switch_rb(ThreadContext context, IRubyObject self, Block block) {
+<span class="nc" id="L466">            Ruby runtime = context.runtime;</span>
+<span class="nc" id="L467">            int gid = checkErrno(runtime, runtime.getPosix().getgid());</span>
+<span class="nc" id="L468">            int egid = checkErrno(runtime, runtime.getPosix().getegid());</span>
+            
+<span class="nc bnc" id="L470" title="All 2 branches missed.">            if (block.isGiven()) {</span>
+                try {
+<span class="nc" id="L472">                    checkErrno(runtime, runtime.getPosix().setegid(gid));</span>
+<span class="nc" id="L473">                    checkErrno(runtime, runtime.getPosix().setgid(egid));</span>
+                    
+<span class="nc" id="L475">                    return block.yield(context, runtime.getNil());</span>
+                } finally {
+<span class="nc" id="L477">                    checkErrno(runtime, runtime.getPosix().setegid(egid));</span>
+<span class="nc" id="L478">                    checkErrno(runtime, runtime.getPosix().setgid(gid));</span>
+                }
+            } else {
+<span class="nc" id="L481">                checkErrno(runtime, runtime.getPosix().setegid(gid));</span>
+<span class="nc" id="L482">                checkErrno(runtime, runtime.getPosix().setgid(egid));</span>
+                
+<span class="nc" id="L484">                return RubyFixnum.zero(runtime);</span>
+            }
+        }
+    }
+    
+    @JRubyModule(name=&quot;Process::Sys&quot;)
+<span class="nc" id="L490">    public static class Sys {</span>
+        @Deprecated
+        public static IRubyObject getegid(IRubyObject self) {
+<span class="nc" id="L493">            return egid(self.getRuntime());</span>
+        }
+        @JRubyMethod(name = &quot;getegid&quot;, module = true, visibility = PRIVATE)
+        public static IRubyObject getegid(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L497">            return egid(context.runtime);</span>
+        }
+        
+        @Deprecated
+        public static IRubyObject geteuid(IRubyObject self) {
+<span class="nc" id="L502">            return euid(self.getRuntime());</span>
+        }
+        @JRubyMethod(name = &quot;geteuid&quot;, module = true, visibility = PRIVATE)
+        public static IRubyObject geteuid(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L506">            return euid(context.runtime);</span>
+        }
+
+        @Deprecated
+        public static IRubyObject getgid(IRubyObject self) {
+<span class="nc" id="L511">            return gid(self.getRuntime());</span>
+        }
+        @JRubyMethod(name = &quot;getgid&quot;, module = true, visibility = PRIVATE)
+        public static IRubyObject getgid(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L515">            return gid(context.runtime);</span>
+        }
+
+        @Deprecated
+        public static IRubyObject getuid(IRubyObject self) {
+<span class="nc" id="L520">            return uid(self.getRuntime());</span>
+        }
+        @JRubyMethod(name = &quot;getuid&quot;, module = true, visibility = PRIVATE)
+        public static IRubyObject getuid(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L524">            return uid(context.runtime);</span>
+        }
+
+        @Deprecated
+        public static IRubyObject setegid(IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L529">            return egid_set(recv.getRuntime(), arg);</span>
+        }
+        @JRubyMethod(name = &quot;setegid&quot;, module = true, visibility = PRIVATE)
+        public static IRubyObject setegid(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L533">            return egid_set(context.runtime, arg);</span>
+        }
+
+        @Deprecated
+        public static IRubyObject seteuid(IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L538">            return euid_set(recv.getRuntime(), arg);</span>
+        }
+        @JRubyMethod(name = &quot;seteuid&quot;, module = true, visibility = PRIVATE)
+        public static IRubyObject seteuid(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L542">            return euid_set(context.runtime, arg);</span>
+        }
+
+        @Deprecated
+        public static IRubyObject setgid(IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L547">            return gid_set(recv.getRuntime(), arg);</span>
+        }
+        @JRubyMethod(name = &quot;setgid&quot;, module = true, visibility = PRIVATE)
+        public static IRubyObject setgid(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L551">            return gid_set(context.runtime, arg);</span>
+        }
+
+        @Deprecated
+        public static IRubyObject setuid(IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L556">            return uid_set(recv.getRuntime(), arg);</span>
+        }
+        @JRubyMethod(name = &quot;setuid&quot;, module = true, visibility = PRIVATE)
+        public static IRubyObject setuid(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L560">            return uid_set(context.runtime, arg);</span>
+        }
+    }
+
+    @JRubyMethod(name = &quot;abort&quot;, optional = 1, module = true, visibility = PRIVATE)
+    public static IRubyObject abort(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L566">        return RubyKernel.abort(context, recv, args);</span>
+    }
+
+    @JRubyMethod(name = &quot;exit!&quot;, optional = 1, module = true, visibility = PRIVATE)
+    public static IRubyObject exit_bang(IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L571">        return RubyKernel.exit_bang(recv, args);</span>
+    }
+
+    @JRubyMethod(name = &quot;groups&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject groups(IRubyObject recv) {
+<span class="nc" id="L576">        long[] groups = Platform.getPlatform().getGroups(recv);</span>
+<span class="nc" id="L577">        RubyArray ary = RubyArray.newArray(recv.getRuntime(), groups.length);</span>
+<span class="nc bnc" id="L578" title="All 2 branches missed.">        for(int i = 0; i &lt; groups.length; i++) {</span>
+<span class="nc" id="L579">            ary.push(RubyFixnum.newFixnum(recv.getRuntime(), groups[i]));</span>
+        }
+<span class="nc" id="L581">        return ary;</span>
+    }
+
+    @JRubyMethod(name = &quot;setrlimit&quot;, rest = true, module = true, visibility = PRIVATE)
+    public static IRubyObject setrlimit(IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L586">        throw recv.getRuntime().newNotImplementedError(&quot;Process#setrlimit not yet implemented&quot;);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject getpgrp(IRubyObject recv) {
+<span class="nc" id="L591">        return getpgrp(recv.getRuntime());</span>
+    }
+    @JRubyMethod(name = &quot;getpgrp&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject getpgrp(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L595">        return getpgrp(context.runtime);</span>
+    }
+    public static IRubyObject getpgrp(Ruby runtime) {
+<span class="fc" id="L598">        return runtime.newFixnum(runtime.getPosix().getpgrp());</span>
+    }
+
+    @JRubyMethod(name = &quot;groups=&quot;, required = 1, module = true, visibility = PRIVATE)
+    public static IRubyObject groups_set(IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L603">        throw recv.getRuntime().newNotImplementedError(&quot;Process#groups not yet implemented&quot;);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject waitpid(IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L608">        return waitpid(recv.getRuntime(), args);</span>
+    }
+    @JRubyMethod(name = &quot;waitpid&quot;, rest = true, module = true, visibility = PRIVATE)
+    public static IRubyObject waitpid(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L612">        return waitpid(context.runtime, args);</span>
+    }
+
+    public static IRubyObject waitpid(Ruby runtime, IRubyObject[] args) {
+<span class="nc" id="L616">        int pid = -1;</span>
+<span class="nc" id="L617">        int flags = 0;</span>
+<span class="nc bnc" id="L618" title="All 2 branches missed.">        if (args.length &gt; 0) {</span>
+<span class="nc" id="L619">            pid = (int)args[0].convertToInteger().getLongValue();</span>
+        }
+<span class="nc bnc" id="L621" title="All 2 branches missed.">        if (args.length &gt; 1) {</span>
+<span class="nc" id="L622">            flags = (int)args[1].convertToInteger().getLongValue();</span>
+        }
+
+<span class="nc" id="L625">        return runtime.newFixnum(waitpid(runtime, pid, flags));</span>
+    }
+
+    public static long waitpid(Ruby runtime, long pid, int flags) {
+<span class="fc" id="L629">        int[] status = new int[1];</span>
+<span class="fc" id="L630">        runtime.getPosix().errno(0);</span>
+<span class="fc" id="L631">        pid = runtime.getPosix().waitpid(pid, status, flags);</span>
+<span class="fc" id="L632">        raiseErrnoIfSet(runtime, ECHILD);</span>
+
+<span class="fc" id="L634">        runtime.getCurrentContext().setLastExitStatus(RubyProcess.RubyStatus.newProcessStatus(runtime, status[0], pid));</span>
+<span class="fc" id="L635">        return pid;</span>
+    }
+
+<span class="nc" id="L638">    private interface NonNativeErrno {</span>
+        public int handle(Ruby runtime, int result);
+    }
+
+<span class="fc" id="L642">    private static final NonNativeErrno ECHILD = new NonNativeErrno() {</span>
+        @Override
+        public int handle(Ruby runtime, int result) {
+<span class="nc" id="L645">            throw runtime.newErrnoECHILDError();</span>
+        }
+    };
+
+    @Deprecated
+    public static IRubyObject wait(IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L651">        return wait(recv.getRuntime(), args);</span>
+    }
+    @JRubyMethod(name = &quot;wait&quot;, rest = true, module = true, visibility = PRIVATE)
+    public static IRubyObject wait(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L655">        return wait(context.runtime, args);</span>
+    }
+
+    public static IRubyObject wait(Ruby runtime, IRubyObject[] args) {
+        
+<span class="nc bnc" id="L660" title="All 2 branches missed.">        if (args.length &gt; 0) {</span>
+<span class="nc" id="L661">            return waitpid(runtime, args);</span>
+        }
+        
+<span class="nc" id="L664">        int[] status = new int[1];</span>
+<span class="nc" id="L665">        runtime.getPosix().errno(0);</span>
+<span class="nc" id="L666">        int pid = runtime.getPosix().wait(status);</span>
+<span class="nc" id="L667">        raiseErrnoIfSet(runtime, ECHILD);</span>
+        
+<span class="nc" id="L669">        runtime.getCurrentContext().setLastExitStatus(RubyProcess.RubyStatus.newProcessStatus(runtime, status[0], pid));</span>
+<span class="nc" id="L670">        return runtime.newFixnum(pid);</span>
+    }
+
+
+    @Deprecated
+    public static IRubyObject waitall(IRubyObject recv) {
+<span class="nc" id="L676">        return waitall(recv.getRuntime());</span>
+    }
+    @JRubyMethod(name = &quot;waitall&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject waitall(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L680">        return waitall(context.runtime);</span>
+    }
+    public static IRubyObject waitall(Ruby runtime) {
+<span class="fc" id="L683">        POSIX posix = runtime.getPosix();</span>
+<span class="fc" id="L684">        RubyArray results = runtime.newArray();</span>
+        
+<span class="fc" id="L686">        int[] status = new int[1];</span>
+<span class="fc" id="L687">        int result = posix.wait(status);</span>
+<span class="fc bfc" id="L688" title="All 2 branches covered.">        while (result != -1) {</span>
+<span class="fc" id="L689">            results.append(runtime.newArray(runtime.newFixnum(result), RubyProcess.RubyStatus.newProcessStatus(runtime, status[0], result)));</span>
+<span class="fc" id="L690">            result = posix.wait(status);</span>
+        }
+        
+<span class="fc" id="L693">        return results;</span>
+    }
+
+    @Deprecated
+    public static IRubyObject setsid(IRubyObject recv) {
+<span class="nc" id="L698">        return setsid(recv.getRuntime());</span>
+    }
+    @JRubyMethod(name = &quot;setsid&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject setsid(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L702">        return setsid(context.runtime);</span>
+    }
+    public static IRubyObject setsid(Ruby runtime) {
+<span class="fc" id="L705">        return runtime.newFixnum(checkErrno(runtime, runtime.getPosix().setsid()));</span>
+    }
+
+    @Deprecated
+    public static IRubyObject setpgrp(IRubyObject recv) {
+<span class="nc" id="L710">        return setpgrp(recv.getRuntime());</span>
+    }
+    @JRubyMethod(name = &quot;setpgrp&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject setpgrp(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L714">        return setpgrp(context.runtime);</span>
+    }
+    public static IRubyObject setpgrp(Ruby runtime) {
+<span class="fc" id="L717">        return runtime.newFixnum(checkErrno(runtime, runtime.getPosix().setpgid(0, 0)));</span>
+    }
+
+    @Deprecated
+    public static IRubyObject egid_set(IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L722">        return egid_set(recv.getRuntime(), arg);</span>
+    }
+    @JRubyMethod(name = &quot;egid=&quot;, required = 1, module = true, visibility = PRIVATE)
+    public static IRubyObject egid_set(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L726">        return egid_set(context.runtime, arg);</span>
+    }
+    public static IRubyObject egid_set(Ruby runtime, IRubyObject arg) {
+<span class="nc" id="L729">        checkErrno(runtime, runtime.getPosix().setegid((int)arg.convertToInteger().getLongValue()));</span>
+<span class="nc" id="L730">        return RubyFixnum.zero(runtime);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject euid(IRubyObject recv) {
+<span class="nc" id="L735">        return euid(recv.getRuntime());</span>
+    }
+    @JRubyMethod(name = &quot;euid&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject euid(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L739">        return euid(context.runtime);</span>
+    }
+    public static IRubyObject euid(Ruby runtime) {
+<span class="fc" id="L742">        return runtime.newFixnum(checkErrno(runtime, runtime.getPosix().geteuid()));</span>
+    }
+
+    @Deprecated
+    public static IRubyObject uid_set(IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L747">        return uid_set(recv.getRuntime(), arg);</span>
+    }
+    @JRubyMethod(name = &quot;uid=&quot;, required = 1, module = true, visibility = PRIVATE)
+    public static IRubyObject uid_set(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L751">        return uid_set(context.runtime, arg);</span>
+    }
+    public static IRubyObject uid_set(Ruby runtime, IRubyObject arg) {
+<span class="nc" id="L754">        checkErrno(runtime, runtime.getPosix().setuid((int)arg.convertToInteger().getLongValue()));</span>
+<span class="nc" id="L755">        return RubyFixnum.zero(runtime);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject gid(IRubyObject recv) {
+<span class="nc" id="L760">        return gid(recv.getRuntime());</span>
+    }
+    @JRubyMethod(name = &quot;gid&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject gid(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L764">        return gid(context.runtime);</span>
+    }
+    public static IRubyObject gid(Ruby runtime) {
+<span class="pc bpc" id="L767" title="1 of 2 branches missed.">        if (Platform.IS_WINDOWS) {</span>
+            // MRI behavior on Windows
+<span class="nc" id="L769">            return RubyFixnum.zero(runtime);</span>
+        }
+<span class="fc" id="L771">        return runtime.newFixnum(checkErrno(runtime, runtime.getPosix().getgid()));</span>
+    }
+
+    @JRubyMethod(name = &quot;maxgroups&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject maxgroups(IRubyObject recv) {
+<span class="nc" id="L776">        throw recv.getRuntime().newNotImplementedError(&quot;Process#maxgroups not yet implemented&quot;);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject getpriority(IRubyObject recv, IRubyObject arg1, IRubyObject arg2) {
+<span class="nc" id="L781">        return getpriority(recv.getRuntime(), arg1, arg2);</span>
+    }
+    @JRubyMethod(name = &quot;getpriority&quot;, required = 2, module = true, visibility = PRIVATE)
+    public static IRubyObject getpriority(ThreadContext context, IRubyObject recv, IRubyObject arg1, IRubyObject arg2) {
+<span class="fc" id="L785">        return getpriority(context.runtime, arg1, arg2);</span>
+    }
+    public static IRubyObject getpriority(Ruby runtime, IRubyObject arg1, IRubyObject arg2) {
+<span class="fc" id="L788">        int which = (int)arg1.convertToInteger().getLongValue();</span>
+<span class="fc" id="L789">        int who = (int)arg2.convertToInteger().getLongValue();</span>
+<span class="fc" id="L790">        int result = checkErrno(runtime, runtime.getPosix().getpriority(which, who));</span>
+        
+<span class="fc" id="L792">        return runtime.newFixnum(result);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject uid(IRubyObject recv) {
+<span class="nc" id="L797">        return uid(recv.getRuntime());</span>
+    }
+    @JRubyMethod(name = &quot;uid&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject uid(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L801">        return uid(context.runtime);</span>
+    }
+    public static IRubyObject uid(Ruby runtime) {
+<span class="fc" id="L804">        return runtime.newFixnum(checkErrno(runtime, runtime.getPosix().getuid()));</span>
+    }
+
+    @Deprecated
+    public static IRubyObject waitpid2(IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L809">        return waitpid2(recv.getRuntime(), args);</span>
+    }
+    @JRubyMethod(name = &quot;waitpid2&quot;, rest = true, module = true, visibility = PRIVATE)
+    public static IRubyObject waitpid2(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L813">        return waitpid2(context.runtime, args);</span>
+    }
+    public static IRubyObject waitpid2(Ruby runtime, IRubyObject[] args) {
+<span class="fc" id="L816">        int pid = -1;</span>
+<span class="fc" id="L817">        int flags = 0;</span>
+<span class="pc bpc" id="L818" title="1 of 2 branches missed.">        if (args.length &gt; 0) {</span>
+<span class="nc" id="L819">            pid = (int)args[0].convertToInteger().getLongValue();</span>
+        }
+<span class="pc bpc" id="L821" title="1 of 2 branches missed.">        if (args.length &gt; 1) {</span>
+<span class="nc" id="L822">            flags = (int)args[1].convertToInteger().getLongValue();</span>
+        }
+        
+<span class="nc" id="L825">        int[] status = new int[1];</span>
+<span class="nc" id="L826">        pid = checkErrno(runtime, runtime.getPosix().waitpid(pid, status, flags), ECHILD);</span>
+        
+<span class="nc" id="L828">        return runtime.newArray(runtime.newFixnum(pid), RubyProcess.RubyStatus.newProcessStatus(runtime, status[0], pid));</span>
+    }
+
+    @JRubyMethod(name = &quot;initgroups&quot;, required = 2, module = true, visibility = PRIVATE)
+    public static IRubyObject initgroups(IRubyObject recv, IRubyObject arg1, IRubyObject arg2) {
+<span class="nc" id="L833">        throw recv.getRuntime().newNotImplementedError(&quot;Process#initgroups not yet implemented&quot;);</span>
+    }
+
+    @JRubyMethod(name = &quot;maxgroups=&quot;, required = 1, module = true, visibility = PRIVATE)
+    public static IRubyObject maxgroups_set(IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L838">        throw recv.getRuntime().newNotImplementedError(&quot;Process#maxgroups_set not yet implemented&quot;);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject ppid(IRubyObject recv) {
+<span class="nc" id="L843">        return ppid(recv.getRuntime());</span>
+    }
+    @JRubyMethod(name = &quot;ppid&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject ppid(ThreadContext context, IRubyObject recv) {
+<span class="nc" id="L847">        return ppid(context.runtime);</span>
+    }
+    public static IRubyObject ppid(Ruby runtime) {
+<span class="nc" id="L850">        int result = checkErrno(runtime, runtime.getPosix().getppid());</span>
+
+<span class="nc" id="L852">        return runtime.newFixnum(result);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject gid_set(IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L857">        return gid_set(recv.getRuntime(), arg);</span>
+    }
+    @JRubyMethod(name = &quot;gid=&quot;, required = 1, module = true, visibility = PRIVATE)
+    public static IRubyObject gid_set(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L861">        return gid_set(context.runtime, arg);</span>
+    }
+    public static IRubyObject gid_set(Ruby runtime, IRubyObject arg) {
+<span class="nc" id="L864">        int result = checkErrno(runtime, runtime.getPosix().setgid((int)arg.convertToInteger().getLongValue()));</span>
+
+<span class="nc" id="L866">        return runtime.newFixnum(result);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject wait2(IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L871">        return waitpid2(recv.getRuntime(), args);</span>
+    }
+    @JRubyMethod(name = &quot;wait2&quot;, rest = true, module = true, visibility = PRIVATE)
+    public static IRubyObject wait2(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L875">        return waitpid2(context.runtime, args);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject euid_set(IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L880">        return euid_set(recv.getRuntime(), arg);</span>
+    }
+    @JRubyMethod(name = &quot;euid=&quot;, required = 1, module = true, visibility = PRIVATE)
+    public static IRubyObject euid_set(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L884">        return euid_set(context.runtime, arg);</span>
+    }
+    public static IRubyObject euid_set(Ruby runtime, IRubyObject arg) {
+<span class="nc" id="L887">        checkErrno(runtime, runtime.getPosix().seteuid((int)arg.convertToInteger().getLongValue()));</span>
+<span class="nc" id="L888">        return RubyFixnum.zero(runtime);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject setpriority(IRubyObject recv, IRubyObject arg1, IRubyObject arg2, IRubyObject arg3) {
+<span class="nc" id="L893">        return setpriority(recv.getRuntime(), arg1, arg2, arg3);</span>
+    }
+    @JRubyMethod(name = &quot;setpriority&quot;, required = 3, module = true, visibility = PRIVATE)
+    public static IRubyObject setpriority(ThreadContext context, IRubyObject recv, IRubyObject arg1, IRubyObject arg2, IRubyObject arg3) {
+<span class="fc" id="L897">        return setpriority(context.runtime, arg1, arg2, arg3);</span>
+    }
+    public static IRubyObject setpriority(Ruby runtime, IRubyObject arg1, IRubyObject arg2, IRubyObject arg3) {
+<span class="fc" id="L900">        int which = (int)arg1.convertToInteger().getLongValue();</span>
+<span class="fc" id="L901">        int who = (int)arg2.convertToInteger().getLongValue();</span>
+<span class="fc" id="L902">        int prio = (int)arg3.convertToInteger().getLongValue();</span>
+<span class="fc" id="L903">        runtime.getPosix().errno(0);</span>
+<span class="fc" id="L904">        int result = checkErrno(runtime, runtime.getPosix().setpriority(which, who, prio));</span>
+        
+<span class="fc" id="L906">        return runtime.newFixnum(result);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject setpgid(IRubyObject recv, IRubyObject arg1, IRubyObject arg2) {
+<span class="nc" id="L911">        return setpgid(recv.getRuntime(), arg1, arg2);</span>
+    }
+    @JRubyMethod(name = &quot;setpgid&quot;, required = 2, module = true, visibility = PRIVATE)
+    public static IRubyObject setpgid(ThreadContext context, IRubyObject recv, IRubyObject arg1, IRubyObject arg2) {
+<span class="nc" id="L915">        return setpgid(context.runtime, arg1, arg2);</span>
+    }
+    public static IRubyObject setpgid(Ruby runtime, IRubyObject arg1, IRubyObject arg2) {
+<span class="nc" id="L918">        int pid = (int)arg1.convertToInteger().getLongValue();</span>
+<span class="nc" id="L919">        int gid = (int)arg2.convertToInteger().getLongValue();</span>
+<span class="nc" id="L920">        return runtime.newFixnum(checkErrno(runtime, runtime.getPosix().setpgid(pid, gid)));</span>
+    }
+
+    @Deprecated
+    public static IRubyObject getpgid(IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L925">        return getpgid(recv.getRuntime(), arg);</span>
+    }
+    @JRubyMethod(name = &quot;getpgid&quot;, required = 1, module = true, visibility = PRIVATE)
+    public static IRubyObject getpgid(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="fc" id="L929">        return getpgid(context.runtime, arg);</span>
+    }
+    public static IRubyObject getpgid(Ruby runtime, IRubyObject arg) {
+<span class="fc" id="L932">        return runtime.newFixnum(checkErrno(runtime, runtime.getPosix().getpgid((int)arg.convertToInteger().getLongValue())));</span>
+    }
+
+    @Deprecated
+    public static IRubyObject getrlimit(IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L937">        return getrlimit(recv.getRuntime(), arg);</span>
+    }
+    @JRubyMethod(name = &quot;getrlimit&quot;, required = 1, module = true, visibility = PRIVATE)
+    public static IRubyObject getrlimit(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L941">        return getrlimit(context.runtime, arg);</span>
+    }
+    public static IRubyObject getrlimit(Ruby runtime, IRubyObject arg) {
+<span class="nc" id="L944">        throw runtime.newNotImplementedError(&quot;Process#getrlimit not yet implemented&quot;);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject egid(IRubyObject recv) {
+<span class="nc" id="L949">        return egid(recv.getRuntime());</span>
+    }
+    @JRubyMethod(name = &quot;egid&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject egid(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L953">        return egid(context.runtime);</span>
+    }
+    public static IRubyObject egid(Ruby runtime) {
+<span class="pc bpc" id="L956" title="1 of 2 branches missed.">        if (Platform.IS_WINDOWS) {</span>
+            // MRI behavior on Windows
+<span class="nc" id="L958">            return RubyFixnum.zero(runtime);</span>
+        }
+<span class="fc" id="L960">        return runtime.newFixnum(checkErrno(runtime, runtime.getPosix().getegid()));</span>
+    }
+    
+    private static int parseSignalString(Ruby runtime, String value) {
+<span class="fc" id="L964">        boolean negative = value.startsWith(&quot;-&quot;);</span>
+
+        // Gets rid of the - if there is one present.
+<span class="pc bpc" id="L967" title="1 of 2 branches missed.">        if (negative) value = value.substring(1);</span>
+
+        // We need the SIG for sure.
+<span class="fc bfc" id="L970" title="All 2 branches covered.">        String signalName = value.startsWith(&quot;SIG&quot;) ? value : &quot;SIG&quot; + value;</span>
+
+        try {
+<span class="fc" id="L973">            int signalValue = Signal.valueOf(signalName).intValue();</span>
+<span class="pc bpc" id="L974" title="1 of 2 branches missed.">            return negative ? -signalValue : signalValue;</span>
+
+<span class="fc" id="L976">        } catch (IllegalArgumentException ex) {</span>
+<span class="fc" id="L977">            throw runtime.newArgumentError(&quot;unsupported name `&quot; + signalName + &quot;'&quot;);</span>
+        }
+    }
+
+    @Deprecated
+    public static IRubyObject kill(IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L983">        return kill(recv.getRuntime(), args);</span>
+    }
+    @JRubyMethod(name = &quot;kill&quot;, rest = true, module = true, visibility = PRIVATE)
+    public static IRubyObject kill(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="fc" id="L987">        return kill(context.runtime, args);</span>
+    }
+    public static IRubyObject kill(Ruby runtime, IRubyObject[] args) {
+<span class="pc bpc" id="L990" title="1 of 2 branches missed.">        if (args.length &lt; 2) {</span>
+<span class="nc" id="L991">            throw runtime.newArgumentError(&quot;wrong number of arguments -- kill(sig, pid...)&quot;);</span>
+        }
+
+        int signal;
+<span class="fc bfc" id="L995" title="All 2 branches covered.">        if (args[0] instanceof RubyFixnum) {</span>
+<span class="fc" id="L996">            signal = (int) ((RubyFixnum) args[0]).getLongValue();</span>
+<span class="fc bfc" id="L997" title="All 2 branches covered.">        } else if (args[0] instanceof RubySymbol) {</span>
+<span class="fc" id="L998">            signal = parseSignalString(runtime, args[0].toString());</span>
+<span class="pc bpc" id="L999" title="1 of 2 branches missed.">        } else if (args[0] instanceof RubyString) {</span>
+<span class="fc" id="L1000">            signal = parseSignalString(runtime, args[0].toString());</span>
+        } else {
+<span class="nc" id="L1002">            signal = parseSignalString(runtime, args[0].checkStringType().toString());</span>
+        }
+
+<span class="pc bpc" id="L1005" title="1 of 2 branches missed.">        boolean processGroupKill = signal &lt; 0;</span>
+        
+<span class="pc bpc" id="L1007" title="1 of 2 branches missed.">        if (processGroupKill) {</span>
+<span class="nc bnc" id="L1008" title="All 2 branches missed.">		    if (Platform.IS_WINDOWS) {</span>
+<span class="nc" id="L1009">                throw  runtime.newErrnoEINVALError(&quot;group signals not implemented in windows&quot;);</span>
+            }
+<span class="nc" id="L1011">		    signal = -signal;</span>
+        }
+        
+<span class="pc bpc" id="L1014" title="1 of 2 branches missed.">		if (Platform.IS_WINDOWS) {</span>
+<span class="nc bnc" id="L1015" title="All 2 branches missed.">		    for (int i = 1; i &lt; args.length; i++) {</span>
+<span class="nc" id="L1016">				int pid = RubyNumeric.num2int(args[i]);</span>
+<span class="nc bnc" id="L1017" title="All 2 branches missed.">				if (signal == 0) {</span>
+<span class="nc" id="L1018">					jnr.ffi.Pointer ptr = kernel32().OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid);</span>
+<span class="nc bnc" id="L1019" title="All 4 branches missed.">					if(ptr != null &amp;&amp; ptr.address() != -1) {</span>
+					   try {
+<span class="nc" id="L1021">                           IntByReference status = new IntByReference(0);</span>
+<span class="nc bnc" id="L1022" title="All 2 branches missed.">					       if(kernel32().GetExitCodeProcess(ptr, status) == 0) {</span>
+<span class="nc" id="L1023">					          throw runtime.newErrnoEPERMError(&quot;unable to call GetExitCodeProcess &quot; + pid);</span>
+					       } else {
+<span class="nc bnc" id="L1025" title="All 2 branches missed.">					           if(status.intValue() != STILL_ACTIVE) {</span>
+<span class="nc" id="L1026">							       throw runtime.newErrnoEPERMError(&quot;Process exists but is not alive anymore &quot; + pid);</span>
+                               }
+					       }
+					   } finally {
+<span class="nc" id="L1030">					     kernel32().CloseHandle(ptr);</span>
+<span class="nc" id="L1031">					   }</span>
+					   
+					} else {
+<span class="nc bnc" id="L1034" title="All 2 branches missed.">					    if (kernel32().GetLastError() == ERROR_INVALID_PARAMETER) {</span>
+<span class="nc" id="L1035">					        throw runtime.newErrnoESRCHError();</span>
+					    } else {
+<span class="nc" id="L1037">					        throw runtime.newErrnoEPERMError(&quot;Process does not exist &quot; + pid);</span>
+					    }
+					}
+<span class="nc bnc" id="L1040" title="All 2 branches missed.">			    } else if (signal == 9) { //SIGKILL</span>
+<span class="nc" id="L1041">				    jnr.ffi.Pointer ptr = kernel32().OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION, 0, pid);</span>
+<span class="nc bnc" id="L1042" title="All 4 branches missed.">                    if(ptr != null &amp;&amp; ptr.address() != -1) {</span>
+					    try {
+<span class="nc" id="L1044">                            IntByReference status = new IntByReference(0);</span>
+<span class="nc bnc" id="L1045" title="All 2 branches missed.">					        if(kernel32().GetExitCodeProcess(ptr, status) == 0) {</span>
+<span class="nc" id="L1046">					            throw runtime.newErrnoEPERMError(&quot;unable to call GetExitCodeProcess &quot; + pid); // todo better error messages</span>
+					        } else {
+<span class="nc bnc" id="L1048" title="All 2 branches missed.">					            if (status.intValue() == STILL_ACTIVE) {</span>
+<span class="nc bnc" id="L1049" title="All 2 branches missed.">						            if (kernel32().TerminateProcess(ptr, 0) == 0) {</span>
+<span class="nc" id="L1050">						               throw runtime.newErrnoEPERMError(&quot;unable to call TerminateProcess &quot; + pid);</span>
+						             }
+                                     // success									 
+						        }
+					        }
+						} finally {						   
+<span class="nc" id="L1056">					       kernel32().CloseHandle(ptr);</span>
+<span class="nc" id="L1057">					    }</span>
+					} else {
+<span class="nc bnc" id="L1059" title="All 2 branches missed.">					    if (kernel32().GetLastError() == ERROR_INVALID_PARAMETER) {</span>
+<span class="nc" id="L1060">					        throw runtime.newErrnoESRCHError();</span>
+					    } else {
+<span class="nc" id="L1062">					        throw runtime.newErrnoEPERMError(&quot;Process does not exist &quot; + pid);</span>
+					    }
+					}					
+<span class="nc" id="L1065">				} else {</span>
+<span class="nc" id="L1066">		            throw runtime.newNotImplementedError(&quot;this signal not yet implemented in windows&quot;);</span>
+		        }
+            }			
+		} else {		
+<span class="fc" id="L1070">			POSIX posix = runtime.getPosix();</span>
+<span class="fc bfc" id="L1071" title="All 2 branches covered.">			for (int i = 1; i &lt; args.length; i++) {</span>
+<span class="fc" id="L1072">				int pid = RubyNumeric.num2int(args[i]);</span>
+
+				// FIXME: It may be possible to killpg on systems which support it.  POSIX library
+				// needs to tell whether a particular method works or not
+<span class="pc bpc" id="L1076" title="1 of 2 branches missed.">				if (pid == 0) pid = runtime.getPosix().getpid();</span>
+<span class="pc bpc" id="L1077" title="1 of 2 branches missed.">				checkErrno(runtime, posix.kill(processGroupKill ? -pid : pid, signal));</span>
+			}
+		}
+        
+<span class="fc" id="L1081">        return runtime.newFixnum(args.length - 1);</span>
+
+    }
+
+    @JRubyMethod(name = &quot;detach&quot;, required = 1, module = true, visibility = PRIVATE)
+    public static IRubyObject detach(ThreadContext context, IRubyObject recv, IRubyObject arg) {
+<span class="nc" id="L1087">        final int pid = (int)arg.convertToInteger().getLongValue();</span>
+<span class="nc" id="L1088">        Ruby runtime = context.runtime;</span>
+        
+<span class="nc" id="L1090">        BlockCallback callback = new BlockCallback() {</span>
+            @Override
+            public IRubyObject call(ThreadContext context, IRubyObject[] args, Block block) {
+<span class="nc" id="L1093">                int[] status = new int[1];</span>
+<span class="nc" id="L1094">                Ruby runtime = context.runtime;</span>
+<span class="nc" id="L1095">                int result = checkErrno(runtime, runtime.getPosix().waitpid(pid, status, 0));</span>
+                
+<span class="nc" id="L1097">                return RubyStatus.newProcessStatus(runtime, result, pid);</span>
+            }
+        };
+        
+<span class="nc" id="L1101">        return RubyThread.newInstance(</span>
+<span class="nc" id="L1102">                runtime.getThread(),</span>
+                IRubyObject.NULL_ARRAY,
+<span class="nc" id="L1104">                CallBlock.newCallClosure(recv, (RubyModule)recv, Arity.NO_ARGUMENTS, callback, context));</span>
+    }
+
+    @Deprecated
+    public static IRubyObject times(IRubyObject recv, Block unusedBlock) {
+<span class="nc" id="L1109">        return times(recv.getRuntime());</span>
+    }
+    @JRubyMethod(module = true, visibility = PRIVATE)
+    public static IRubyObject times(ThreadContext context, IRubyObject recv, Block unusedBlock) {
+<span class="fc" id="L1113">        return times(context.runtime);</span>
+    }
+
+    public static IRubyObject times(Ruby runtime) {
+<span class="fc" id="L1117">        Times tms = runtime.getPosix().times();</span>
+<span class="fc" id="L1118">        double utime = 0.0d, stime = 0.0d, cutime = 0.0d, cstime = 0.0d;</span>
+<span class="pc bpc" id="L1119" title="1 of 2 branches missed.">        if (tms == null) {</span>
+<span class="nc" id="L1120">            ThreadMXBean bean = ManagementFactory.getThreadMXBean();</span>
+<span class="nc bnc" id="L1121" title="All 2 branches missed.">            if(bean.isCurrentThreadCpuTimeSupported()) {</span>
+<span class="nc" id="L1122">                cutime = utime = bean.getCurrentThreadUserTime();</span>
+<span class="nc" id="L1123">                cstime = stime = bean.getCurrentThreadCpuTime() - bean.getCurrentThreadUserTime();</span>
+            }
+<span class="nc" id="L1125">        } else {</span>
+<span class="fc" id="L1126">            utime = (double)tms.utime();</span>
+<span class="fc" id="L1127">            stime = (double)tms.stime();</span>
+<span class="fc" id="L1128">            cutime = (double)tms.cutime();</span>
+<span class="fc" id="L1129">            cstime = (double)tms.cstime();</span>
+        }
+
+<span class="fc" id="L1132">        long hz = runtime.getPosix().sysconf(Sysconf._SC_CLK_TCK);</span>
+<span class="pc bpc" id="L1133" title="1 of 2 branches missed.">        if (hz == -1) {</span>
+<span class="nc" id="L1134">            hz = 60; //https://github.com/ruby/ruby/blob/trunk/process.c#L6616</span>
+        }
+
+<span class="fc" id="L1137">        return RubyStruct.newStruct(runtime.getTmsStruct(),</span>
+                new IRubyObject[] {
+<span class="fc" id="L1139">                        runtime.newFloat(utime / (double) hz),</span>
+<span class="fc" id="L1140">                        runtime.newFloat(stime / (double) hz),</span>
+<span class="fc" id="L1141">                        runtime.newFloat(cutime / (double) hz),</span>
+<span class="fc" id="L1142">                        runtime.newFloat(cstime / (double) hz)</span>
+                },
+                Block.NULL_BLOCK);
+    }
+    
+    // this is only in 2.1. See https://bugs.ruby-lang.org/issues/8658
+    @JRubyMethod(module = true, visibility = PRIVATE)
+    public static IRubyObject clock_gettime(ThreadContext context, IRubyObject self, IRubyObject _clock_id) {
+<span class="nc" id="L1150">        Ruby runtime = context.runtime;</span>
+        
+<span class="nc" id="L1152">        return makeClockResult(runtime, getTimeForClock(_clock_id, runtime), CLOCK_UNIT_FLOAT_SECOND);</span>
+    }
+    
+    // this is only in 2.1. See https://bugs.ruby-lang.org/issues/8658
+    @JRubyMethod(module = true, visibility = PRIVATE)
+    public static IRubyObject clock_gettime(ThreadContext context, IRubyObject self, IRubyObject _clock_id, IRubyObject _unit) {
+<span class="nc" id="L1158">        Ruby runtime = context.runtime;</span>
+        
+<span class="nc bnc" id="L1160" title="All 2 branches missed.">        if (!(_unit instanceof RubySymbol)) {</span>
+<span class="nc" id="L1161">            throw runtime.newArgumentError(&quot;unexpected unit: &quot; + _unit);</span>
+        }
+        
+<span class="nc" id="L1164">        return makeClockResult(runtime, getTimeForClock(_clock_id, runtime), _unit.toString());</span>
+    }
+
+    /**
+     * Get the time in nanoseconds corresponding to the requested clock.
+     */
+    private static long getTimeForClock(IRubyObject _clock_id, Ruby runtime) throws RaiseException {
+        long nanos;
+        
+<span class="nc bnc" id="L1173" title="All 2 branches missed.">        if (_clock_id instanceof RubySymbol) {</span>
+<span class="nc bnc" id="L1174" title="All 2 branches missed.">            if (_clock_id.toString().equals(CLOCK_MONOTONIC)) {</span>
+<span class="nc" id="L1175">                nanos = System.nanoTime();</span>
+<span class="nc bnc" id="L1176" title="All 2 branches missed.">            } else if (_clock_id.toString().equals(CLOCK_REALTIME)) {</span>
+<span class="nc" id="L1177">                nanos = System.currentTimeMillis() * 1000000;</span>
+            } else {
+<span class="nc" id="L1179">                throw runtime.newErrnoEINVALError(&quot;clock_gettime&quot;);</span>
+            }
+        } else {
+            // TODO: probably need real clock_id values to do this right.
+<span class="nc" id="L1183">            throw runtime.newErrnoEINVALError(&quot;clock_gettime&quot;);</span>
+        }
+<span class="nc" id="L1185">        return nanos;</span>
+    }
+
+    /**
+     * Get the time resolution in nanoseconds corresponding to the requested clock.
+     */
+    private static long getResolutionForClock(IRubyObject _clock_id, Ruby runtime) throws RaiseException {
+        long nanos;
+        
+<span class="nc bnc" id="L1194" title="All 2 branches missed.">        if (_clock_id instanceof RubySymbol) {</span>
+<span class="nc bnc" id="L1195" title="All 2 branches missed.">            if (_clock_id.toString().equals(CLOCK_MONOTONIC)) {</span>
+<span class="nc" id="L1196">                nanos = 1;</span>
+<span class="nc bnc" id="L1197" title="All 2 branches missed.">            } else if (_clock_id.toString().equals(CLOCK_REALTIME)) {</span>
+<span class="nc" id="L1198">                nanos = 1000000;</span>
+            } else {
+<span class="nc" id="L1200">                throw runtime.newErrnoEINVALError(&quot;clock_gettime&quot;);</span>
+            }
+        } else {
+            // TODO: probably need real clock_id values to do this right.
+<span class="nc" id="L1204">            throw runtime.newErrnoEINVALError(&quot;clock_gettime&quot;);</span>
+        }
+<span class="nc" id="L1206">        return nanos;</span>
+    }
+    
+    private static IRubyObject makeClockResult(Ruby runtime, long nanos, String unit) {
+<span class="nc bnc" id="L1210" title="All 2 branches missed.">        if (unit.equals(CLOCK_UNIT_NANOSECOND)) {</span>
+<span class="nc" id="L1211">            return runtime.newFixnum(nanos);</span>
+<span class="nc bnc" id="L1212" title="All 2 branches missed.">        } else if (unit.equals(CLOCK_UNIT_MICROSECOND)) {</span>
+<span class="nc" id="L1213">            return runtime.newFixnum(nanos / 1000);</span>
+<span class="nc bnc" id="L1214" title="All 2 branches missed.">        } else if (unit.equals(CLOCK_UNIT_MILLISECOND)) {</span>
+<span class="nc" id="L1215">            return runtime.newFixnum(nanos / 1000000);</span>
+<span class="nc bnc" id="L1216" title="All 2 branches missed.">        } else if (unit.equals(CLOCK_UNIT_FLOAT_MICROSECOND)) {</span>
+<span class="nc" id="L1217">            return runtime.newFloat(nanos / 1000.0);</span>
+<span class="nc bnc" id="L1218" title="All 2 branches missed.">        } else if (unit.equals(CLOCK_UNIT_FLOAT_MILLISECOND)) {</span>
+<span class="nc" id="L1219">            return runtime.newFloat(nanos / 1000000.0);</span>
+<span class="nc bnc" id="L1220" title="All 2 branches missed.">        } else if (unit.equals(CLOCK_UNIT_FLOAT_SECOND)) {</span>
+<span class="nc" id="L1221">            return runtime.newFloat(nanos / 1000000000.0);</span>
+        } else {
+<span class="nc" id="L1223">            throw runtime.newArgumentError(&quot;unexpected unit: &quot; + unit);</span>
+        }
+    }
+    
+    // this is only in 2.1. See https://bugs.ruby-lang.org/issues/8658
+    @JRubyMethod(module = true, visibility = PRIVATE)
+    public static IRubyObject clock_getres(ThreadContext context, IRubyObject self, IRubyObject _clock_id) {
+<span class="nc" id="L1230">        Ruby runtime = context.runtime;</span>
+        
+<span class="nc" id="L1232">        return makeClockResolutionResult(runtime, getResolutionForClock(_clock_id, runtime), CLOCK_UNIT_FLOAT_SECOND);</span>
+    }
+    
+    // this is only in 2.1. See https://bugs.ruby-lang.org/issues/8658
+    @JRubyMethod(module = true, visibility = PRIVATE)
+    public static IRubyObject clock_getres(ThreadContext context, IRubyObject self, IRubyObject _clock_id, IRubyObject _unit) {
+<span class="nc" id="L1238">        Ruby runtime = context.runtime;</span>
+        
+<span class="nc bnc" id="L1240" title="All 2 branches missed.">        if (!(_unit instanceof RubySymbol)) {</span>
+<span class="nc" id="L1241">            throw runtime.newArgumentError(&quot;unexpected unit: &quot; + _unit);</span>
+        }
+        
+<span class="nc" id="L1244">        return makeClockResolutionResult(runtime, getResolutionForClock(_clock_id, runtime), _unit.toString());</span>
+    }
+    
+    private static IRubyObject makeClockResolutionResult(Ruby runtime, long nanos, String unit) {
+<span class="nc bnc" id="L1248" title="All 2 branches missed.">        if (unit.equals(CLOCK_UNIT_HERTZ)) {</span>
+<span class="nc" id="L1249">            return runtime.newFloat(1000000000.0 / nanos);</span>
+        } else {
+<span class="nc" id="L1251">            return makeClockResult(runtime, nanos, unit);</span>
+        }
+    }
+
+    @Deprecated
+    public static IRubyObject pid(IRubyObject recv) {
+<span class="nc" id="L1257">        return pid(recv.getRuntime());</span>
+    }
+    @JRubyMethod(name = &quot;pid&quot;, module = true, visibility = PRIVATE)
+    public static IRubyObject pid(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L1261">        return pid(context.runtime);</span>
+    }
+    public static IRubyObject pid(Ruby runtime) {
+<span class="fc" id="L1264">        return runtime.newFixnum(runtime.getPosix().getpid());</span>
+    }
+    
+    public static IRubyObject fork(ThreadContext context, IRubyObject recv, Block block) {
+<span class="nc" id="L1268">        return RubyKernel.fork(context, recv, block);</span>
+    }
+    
+    @JRubyMethod(name = &quot;fork&quot;, module = true, visibility = PRIVATE, notImplemented = true)
+    public static IRubyObject fork19(ThreadContext context, IRubyObject recv, Block block) {
+<span class="nc" id="L1273">        return RubyKernel.fork(context, recv, block);</span>
+    }
+
+    @JRubyMethod(rest = true, module = true, visibility = PRIVATE)
+    public static RubyFixnum spawn(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L1278">        Ruby runtime = context.runtime;</span>
+
+<span class="nc bnc" id="L1280" title="All 4 branches missed.">        if (runtime.getPosix().isNative() &amp;&amp; !Platform.IS_WINDOWS) {</span>
+<span class="nc" id="L1281">            return PopenExecutor.spawn(context, args);</span>
+        }
+
+<span class="nc" id="L1284">        return RubyFixnum.newFixnum(runtime, ShellLauncher.runExternalWithoutWait(runtime, args));</span>
+    }
+    
+    @JRubyMethod(name = &quot;exit&quot;, optional = 1, module = true, visibility = PRIVATE)
+    public static IRubyObject exit(IRubyObject recv, IRubyObject[] args) {
+<span class="nc" id="L1289">        return RubyKernel.exit(recv, args);</span>
+    }
+
+    // This isn't quite right, and should probably work with a new Process + pid aggregate object
+    public static void syswait(Ruby runtime, int pid) {
+<span class="nc" id="L1294">        int[] status = {0};</span>
+<span class="nc" id="L1295">        runtime.getPosix().waitpid(pid, status, 0);</span>
+<span class="nc" id="L1296">    }</span>
+    
+<span class="fc" id="L1298">    private static final NonNativeErrno IGNORE = new NonNativeErrno() {</span>
+        @Override
+<span class="nc" id="L1300">        public int handle(Ruby runtime, int result) {return result;}</span>
+    };
+
+    private static int checkErrno(Ruby runtime, int result) {
+<span class="fc" id="L1304">        return checkErrno(runtime, result, IGNORE);</span>
+    }
+
+    private static int checkErrno(Ruby runtime, int result, NonNativeErrno nonNative) {
+<span class="pc bpc" id="L1308" title="1 of 2 branches missed.">        if (result == -1) {</span>
+<span class="nc bnc" id="L1309" title="All 2 branches missed.">            if (runtime.getPosix().isNative()) {</span>
+<span class="nc" id="L1310">                raiseErrnoIfSet(runtime, nonNative);</span>
+            } else {
+<span class="nc" id="L1312">                nonNative.handle(runtime, result);</span>
+            }
+        }
+<span class="fc" id="L1315">        return result;</span>
+    }
+
+    private static void raiseErrnoIfSet(Ruby runtime, NonNativeErrno nonNative) {
+<span class="fc bfc" id="L1319" title="All 2 branches covered.">        if (runtime.getPosix().errno() != 0) {</span>
+<span class="fc" id="L1320">            throw runtime.newErrnoFromInt(runtime.getPosix().errno());</span>
+        }
+<span class="fc" id="L1322">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

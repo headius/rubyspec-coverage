@@ -1,0 +1,327 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ObjectSpace.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime</a> &gt; <span class="el_source">ObjectSpace.java</span></div><h1>ObjectSpace.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2004-2006 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.runtime;
+
+import java.lang.ref.Reference;
+import java.lang.ref.ReferenceQueue;
+import java.lang.ref.SoftReference;
+import java.lang.ref.WeakReference;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReferenceArray;
+
+import org.jruby.RubyModule;
+import org.jruby.java.proxies.JavaProxy;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.WeakIdentityHashMap;
+
+/**
+ * FIXME: This version is faster than the previous, but both suffer from a
+ * crucial flaw: It is impossible to create an ObjectSpace with an iterator
+ * that doesn't either: a. hold on to objects that might otherwise be collected
+ * or b. have no way to guarantee that a call to hasNext() will be correct or
+ * that a subsequent call to next() will produce an object. For our purposes,
+ * for now, this may be acceptable.
+ */
+<span class="fc" id="L54">public class ObjectSpace {</span>
+<span class="fc" id="L55">    private final ReferenceQueue&lt;Object&gt; deadReferences = new ReferenceQueue&lt;Object&gt;();</span>
+<span class="fc" id="L56">    private final ReferenceQueue&lt;ObjectGroup&gt; objectGroupReferenceQueue = new ReferenceQueue&lt;ObjectGroup&gt;();</span>
+    private WeakReferenceListNode top;
+
+<span class="fc" id="L59">    private ReferenceQueue deadIdentityReferences = new ReferenceQueue();</span>
+<span class="fc" id="L60">    private final Map identities = new HashMap();</span>
+<span class="fc" id="L61">    private final Map identitiesByObject = new WeakIdentityHashMap();</span>
+<span class="fc" id="L62">    private static final AtomicLong maxId = new AtomicLong(1000);</span>
+<span class="fc" id="L63">    private final ThreadLocal&lt;Reference&lt;ObjectGroup&gt;&gt; currentObjectGroup = new ThreadLocal&lt;Reference&lt;ObjectGroup&gt;&gt;();</span>
+    private Reference&lt;GroupSweeper&gt; groupSweeperReference;
+
+    public void registerObjectId(long id, IRubyObject object) {
+<span class="fc" id="L67">        synchronized (identities) {</span>
+<span class="fc" id="L68">            cleanIdentities();</span>
+<span class="fc" id="L69">            identities.put(id, new IdReference(object, id, deadIdentityReferences));</span>
+<span class="fc" id="L70">            identitiesByObject.put(object, id);</span>
+<span class="pc" id="L71">        }</span>
+<span class="fc" id="L72">    }</span>
+
+    public static long calculateObjectId(Object object) {
+        // Fixnums get all the odd IDs, so we use identityHashCode * 2
+<span class="fc" id="L76">        return maxId.getAndIncrement() * 2;</span>
+    }
+    
+    public long createAndRegisterObjectId(IRubyObject rubyObject) {
+<span class="nc" id="L80">        synchronized (identities) {</span>
+<span class="nc" id="L81">            Long longId = (Long) identitiesByObject.get(rubyObject);</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">            if (longId == null) {</span>
+<span class="nc" id="L83">                longId = createId(rubyObject);</span>
+            }
+<span class="nc" id="L85">            return longId.longValue();</span>
+<span class="nc" id="L86">        }</span>
+    }
+
+    private long createId(IRubyObject object) {
+<span class="nc" id="L90">        long id = calculateObjectId(object);</span>
+<span class="nc" id="L91">        registerObjectId(id, object);</span>
+<span class="nc" id="L92">        return id;</span>
+    }
+
+    public IRubyObject id2ref(long id) {
+<span class="nc" id="L96">        synchronized (identities) {</span>
+<span class="nc" id="L97">            cleanIdentities();</span>
+<span class="nc" id="L98">            IdReference reference = (IdReference) identities.get(Long.valueOf(id));</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">            if (reference == null) {</span>
+<span class="nc" id="L100">                return null;</span>
+            }
+<span class="nc" id="L102">            return (IRubyObject) reference.get();</span>
+<span class="nc" id="L103">        }</span>
+    }
+
+    private void cleanIdentities() {
+        IdReference ref;
+<span class="pc bpc" id="L108" title="1 of 2 branches missed.">        while ((ref = (IdReference) deadIdentityReferences.poll()) != null)</span>
+<span class="nc" id="L109">            identities.remove(Long.valueOf(ref.id()));</span>
+<span class="fc" id="L110">    }</span>
+
+    @Deprecated
+    public long idOf(IRubyObject rubyObject) {
+<span class="nc" id="L114">        return createAndRegisterObjectId(rubyObject);</span>
+    }
+    
+    public void addFinalizer(IRubyObject object, IRubyObject proc) {
+<span class="fc" id="L118">        object.addFinalizer(proc);</span>
+<span class="fc" id="L119">    }</span>
+    
+    public void removeFinalizers(long id) {
+<span class="nc" id="L122">        IRubyObject object = id2ref(id);</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">        if (object != null) {</span>
+<span class="nc" id="L124">            object.removeFinalizers();</span>
+        }
+<span class="nc" id="L126">    }</span>
+    
+    public void add(IRubyObject object) {
+<span class="nc bnc" id="L129" title="All 4 branches missed.">        if (true &amp;&amp; object.getMetaClass() != null &amp;&amp; !(object instanceof JavaProxy)) {</span>
+            // If the object is already frozen when we encounter it, it's pre-frozen.
+            // Since this only (currently) applies to objects created outside the
+            // normal routes of construction, we don't show it in ObjectSpace.
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            if (object.isFrozen()) return;</span>
+
+<span class="nc" id="L135">            getObjectGroup().add(object);</span>
+        } else {
+<span class="nc" id="L137">            addIndividualWeakReference(object);</span>
+        }
+<span class="nc" id="L139">    }</span>
+
+    private synchronized void addIndividualWeakReference(IRubyObject object) {
+<span class="nc" id="L142">        cleanup(deadReferences);</span>
+<span class="nc" id="L143">        top = new WeakReferenceListNode&lt;Object&gt;(object, deadReferences, top);</span>
+<span class="nc" id="L144">    }</span>
+
+    private synchronized void registerGroupSweeper() {
+<span class="nc bnc" id="L147" title="All 4 branches missed.">        if (groupSweeperReference == null || groupSweeperReference.get() == null) {</span>
+<span class="nc" id="L148">            groupSweeperReference = new WeakReference&lt;GroupSweeper&gt;(new GroupSweeper());</span>
+        }
+<span class="nc" id="L150">    }</span>
+
+    private synchronized void splitObjectGroups() {
+<span class="nc" id="L153">        cleanup(objectGroupReferenceQueue);</span>
+
+        // Split apart each group into individual weak references
+<span class="nc" id="L156">        WeakReferenceListNode node = top;</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        while (node != null) {</span>
+<span class="nc" id="L158">            Object obj = node.get();</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">            if (obj instanceof ObjectGroup) {</span>
+<span class="nc" id="L160">                ObjectGroup objectGroup = (ObjectGroup) obj;</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                for (int i = 0; i &lt; objectGroup.size(); i++) {</span>
+<span class="nc" id="L162">                    IRubyObject rubyObject = objectGroup.set(i, null);</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">                    if (rubyObject != null) {</span>
+<span class="nc" id="L164">                        top = new WeakReferenceListNode&lt;Object&gt;(rubyObject, deadReferences, top);</span>
+                    }
+                }
+            }
+<span class="nc" id="L168">            node = node.nextNode;</span>
+<span class="nc" id="L169">        }</span>
+<span class="nc" id="L170">    }</span>
+
+    public synchronized Iterator iterator(RubyModule rubyClass) {
+<span class="nc" id="L173">        final List&lt;Reference&lt;Object&gt;&gt; objList = new ArrayList&lt;Reference&lt;Object&gt;&gt;();</span>
+<span class="nc" id="L174">        WeakReferenceListNode current = top;</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">        while (current != null) {</span>
+<span class="nc" id="L176">            Object obj = current.get();</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">            if (obj instanceof IRubyObject) {</span>
+<span class="nc" id="L178">                IRubyObject rubyObject = (IRubyObject)obj;</span>
+<span class="nc bnc" id="L179" title="All 4 branches missed.">                if (rubyObject != null &amp;&amp; rubyClass.isInstance(rubyObject)) {</span>
+<span class="nc" id="L180">                    objList.add(current);</span>
+                }
+
+<span class="nc bnc" id="L183" title="All 2 branches missed.">            } else if (obj instanceof ObjectGroup) {</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">                for (IRubyObject rubyObject : (ObjectGroup) obj) {</span>
+<span class="nc bnc" id="L185" title="All 4 branches missed.">                    if (rubyObject != null &amp;&amp; rubyClass.isInstance(rubyObject)) {</span>
+<span class="nc" id="L186">                        objList.add(new WeakReference&lt;Object&gt;(rubyObject));</span>
+                    }
+<span class="nc" id="L188">                }</span>
+            }
+
+<span class="nc" id="L191">            current = current.nextNode;</span>
+<span class="nc" id="L192">        }</span>
+
+<span class="nc" id="L194">        return new Iterator() {</span>
+<span class="nc" id="L195">            private Iterator&lt;Reference&lt;Object&gt;&gt; iter = objList.iterator();</span>
+
+            public boolean hasNext() {
+<span class="nc" id="L198">                throw new UnsupportedOperationException();</span>
+            }
+
+            public Object next() {
+<span class="nc" id="L202">                Object obj = null;</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">                while (iter.hasNext()) {</span>
+<span class="nc" id="L204">                    obj = iter.next().get();</span>
+
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                    if (obj != null) break;</span>
+                }
+<span class="nc" id="L208">                return obj;</span>
+            }
+
+            public void remove() {
+<span class="nc" id="L212">                throw new UnsupportedOperationException();</span>
+            }
+        };
+    }
+
+    private void cleanup(ReferenceQueue&lt;?&gt; referenceQueue) {
+        WeakReferenceListNode reference;
+<span class="nc bnc" id="L219" title="All 2 branches missed.">        while ((reference = (WeakReferenceListNode)referenceQueue.poll()) != null) {</span>
+<span class="nc" id="L220">            reference.remove();</span>
+        }
+<span class="nc" id="L222">    }</span>
+
+    private class WeakReferenceListNode&lt;T&gt; extends WeakReference&lt;T&gt; {
+        private WeakReferenceListNode prevNode;
+        private WeakReferenceListNode nextNode;
+
+<span class="nc" id="L228">        public WeakReferenceListNode(T referent, ReferenceQueue&lt;T&gt; queue, WeakReferenceListNode&lt;?&gt; next) {</span>
+<span class="nc" id="L229">            super(referent, queue);</span>
+
+<span class="nc" id="L231">            this.nextNode = next;</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">            if (next != null) {</span>
+<span class="nc" id="L233">                next.prevNode = this;</span>
+            }
+<span class="nc" id="L235">        }</span>
+
+        private void remove() {
+<span class="nc bnc" id="L238" title="All 2 branches missed.">            if (prevNode != null) {</span>
+<span class="nc" id="L239">                prevNode.nextNode = nextNode;</span>
+            } else {
+<span class="nc" id="L241">                top = nextNode;</span>
+            }
+<span class="nc bnc" id="L243" title="All 2 branches missed.">            if (nextNode != null) {</span>
+<span class="nc" id="L244">                nextNode.prevNode = prevNode;</span>
+            }
+<span class="nc" id="L246">        }</span>
+    }
+
+    private static class IdReference extends WeakReference {
+        private final long id;
+
+        public IdReference(IRubyObject object, long id, ReferenceQueue queue) {
+<span class="fc" id="L253">            super(object, queue);</span>
+<span class="fc" id="L254">            this.id = id;</span>
+<span class="fc" id="L255">        }</span>
+
+        public long id() {
+<span class="nc" id="L258">            return id;</span>
+        }
+    }
+
+    private ObjectGroup getObjectGroup() {
+<span class="nc" id="L263">        Reference&lt;ObjectGroup&gt; ref = currentObjectGroup.get();</span>
+<span class="nc bnc" id="L264" title="All 2 branches missed.">        ObjectGroup objectGroup = ref != null ? ref.get() : null;</span>
+<span class="nc bnc" id="L265" title="All 4 branches missed.">        return objectGroup != null &amp;&amp; !objectGroup.isFull() ? objectGroup : addObjectGroup();</span>
+    }
+
+
+    private synchronized ObjectGroup addObjectGroup() {
+<span class="nc" id="L270">        cleanup(objectGroupReferenceQueue);</span>
+        ObjectGroup objectGroup;
+<span class="nc" id="L272">        WeakReferenceListNode&lt;ObjectGroup&gt; ref = new WeakReferenceListNode&lt;ObjectGroup&gt;(objectGroup = new ObjectGroup(),</span>
+                objectGroupReferenceQueue, top);
+<span class="nc" id="L274">        currentObjectGroup.set(ref);</span>
+<span class="nc" id="L275">        top = ref;</span>
+<span class="nc bnc" id="L276" title="All 2 branches missed.">        if (groupSweeperReference == null) registerGroupSweeper();</span>
+
+<span class="nc" id="L278">        return objectGroup;</span>
+    }
+
+<span class="nc" id="L281">    private static final class ObjectGroup extends AbstractList&lt;IRubyObject&gt; {</span>
+        private static final int MAX_OBJECTS_PER_GROUP = 64;
+<span class="nc" id="L283">        private final AtomicReferenceArray&lt;IRubyObject&gt; objects = new AtomicReferenceArray&lt;IRubyObject&gt;(MAX_OBJECTS_PER_GROUP);</span>
+<span class="nc" id="L284">        private int nextIndex = 0;</span>
+
+        public boolean add(IRubyObject obj) {
+<span class="nc" id="L287">            obj.getMetaClass().getObjectGroupAccessorForWrite().set(obj, this);</span>
+<span class="nc" id="L288">            objects.set(nextIndex, obj);</span>
+<span class="nc" id="L289">            ++nextIndex;</span>
+<span class="nc" id="L290">            return true;</span>
+        }
+
+        @Override
+        public IRubyObject get(int index) {
+<span class="nc" id="L295">            return objects.get(index);</span>
+        }
+
+        @Override
+        public IRubyObject set(int index, IRubyObject element) {
+<span class="nc" id="L300">            return objects.getAndSet(index, element);</span>
+        }
+
+        private boolean isFull() {
+<span class="nc bnc" id="L304" title="All 2 branches missed.">            return nextIndex &gt;= objects.length();</span>
+        }
+
+        public int size() {
+<span class="nc" id="L308">            return objects.length();</span>
+        }
+    }
+
+    // This class is used as a low-memory cleaner.  When it is finalized, it will cause all groups to be split into
+    // individual weak refs, so each object can be collected.
+<span class="pc" id="L314">    private final class GroupSweeper {</span>
+
+        @Override
+        protected void finalize() throws Throwable {
+            try {
+<span class="nc" id="L319">                splitObjectGroups();</span>
+            } finally {
+<span class="nc" id="L321">                registerGroupSweeper();</span>
+<span class="nc" id="L322">                super.finalize();</span>
+<span class="nc" id="L323">            }</span>
+<span class="nc" id="L324">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

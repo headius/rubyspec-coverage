@@ -1,0 +1,2634 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>OpenFile.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util.io</a> &gt; <span class="el_source">OpenFile.java</span></div><h1>OpenFile.java</h1><pre class="source lang-java linenums">package org.jruby.util.io;
+
+import jnr.constants.platform.Errno;
+import jnr.constants.platform.OpenFlags;
+import jnr.posix.FileStat;
+import org.jcodings.Encoding;
+import org.jcodings.Ptr;
+import org.jcodings.transcode.EConv;
+import org.jcodings.transcode.EConvFlags;
+import org.jcodings.transcode.EConvResult;
+import org.jruby.Finalizable;
+import org.jruby.Ruby;
+import org.jruby.RubyArgsFile;
+import org.jruby.RubyBasicObject;
+import org.jruby.RubyBignum;
+import org.jruby.RubyException;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyIO;
+import org.jruby.RubyNumeric;
+import org.jruby.RubyString;
+import org.jruby.RubyThread;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.platform.Platform;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
+import org.jruby.util.ShellLauncher;
+import org.jruby.util.StringSupport;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.nio.channels.Channel;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.ReadableByteChannel;
+import java.nio.channels.SelectableChannel;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.SocketChannel;
+import java.nio.channels.WritableByteChannel;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+<span class="pc bpc" id="L47" title="1 of 2 branches missed.">public class OpenFile implements Finalizable {</span>
+
+    // RB_IO_FPTR_NEW, minus fields that Java already initializes the same way
+<span class="fc" id="L50">    public OpenFile(IRubyObject nil) {</span>
+<span class="fc" id="L51">        runtime = nil.getRuntime();</span>
+<span class="fc" id="L52">        writeconvAsciicompat = nil;</span>
+<span class="fc" id="L53">        writeconvPreEcopts = nil;</span>
+<span class="fc" id="L54">        encs.ecopts = nil;</span>
+<span class="fc" id="L55">        posix = new PosixShim(runtime.getPosix());</span>
+<span class="fc" id="L56">    }</span>
+
+    // IO Mode flags
+    public static final int READABLE           = 0x00000001;
+    public static final int WRITABLE           = 0x00000002;
+    public static final int READWRITE          = READABLE | WRITABLE;
+    public static final int BINMODE            = 0x00000004;
+    public static final int SYNC               = 0x00000008;
+    public static final int TTY                = 0x00000010;
+    public static final int DUPLEX             = 0x00000020;
+    public static final int APPEND             = 0x00000040;
+    public static final int CREATE             = 0x00000080;
+    public static final int WSPLIT             = 0x00000200;
+    public static final int WSPLIT_INITIALIZED = 0x00000400;
+    public static final int TRUNC              = 0x00000800;
+    public static final int TEXTMODE           = 0x00001000;
+    public static final int SETENC_BY_BOM      = 0x00100000;
+    public static final int PREP         = (1&lt;&lt;16);
+    
+    public static final int SYNCWRITE = SYNC | WRITABLE;
+
+    public static final int PIPE_BUF = 512; // value of _POSIX_PIPE_BUF from Mac OS X 10.9
+    public static final int BUFSIZ = 1024; // value of BUFSIZ from Mac OS X 10.9 stdio.h
+
+    public void ascii8bitBinmode(Ruby runtime) {
+<span class="fc" id="L81">        Encoding ascii8bit = runtime.getEncodingService().getAscii8bitEncoding();</span>
+
+<span class="pc bpc" id="L83" title="1 of 2 branches missed.">        if (readconv != null) {</span>
+<span class="nc" id="L84">            readconv.close();</span>
+<span class="nc" id="L85">            readconv = null;</span>
+        }
+<span class="pc bpc" id="L87" title="1 of 2 branches missed.">        if (writeconv != null) {</span>
+<span class="nc" id="L88">            writeconv.close();</span>
+<span class="nc" id="L89">            writeconv = null;</span>
+        }
+<span class="fc" id="L91">        setBinmode();</span>
+<span class="fc" id="L92">        clearTextMode();</span>
+        // TODO: Windows
+        //SET_BINARY_MODE_WITH_SEEK_CUR()
+<span class="fc" id="L95">        encs.enc = EncodingUtils.ascii8bitEncoding(runtime);</span>
+<span class="fc" id="L96">        encs.enc2 = null;</span>
+<span class="fc" id="L97">        encs.ecflags = 0;</span>
+<span class="fc" id="L98">        encs.ecopts = runtime.getNil();</span>
+<span class="fc" id="L99">        clearCodeConversion();</span>
+<span class="fc" id="L100">    }</span>
+
+    public void checkReopenSeek(ThreadContext context, Ruby runtime, long pos) {
+<span class="pc bpc" id="L103" title="3 of 4 branches missed.">        if (seek(context, pos, PosixShim.SEEK_SET) &lt; 0 &amp;&amp; errno() != null) {</span>
+<span class="nc" id="L104">            throw runtime.newErrnoFromErrno(errno(), getPath());</span>
+        }
+<span class="fc" id="L106">    }</span>
+
+    public static interface Finalizer {
+        public void finalize(Ruby runtime, OpenFile fptr, boolean noraise);
+    }
+
+<span class="fc" id="L112">    private ChannelFD fd = null;</span>
+    private int mode;
+<span class="fc" id="L114">    private long pid = -1;</span>
+    private Process process;
+    private int lineno;
+    private String pathv;
+    private Finalizer finalizer;
+    public Closeable stdio_file;
+    public volatile FileLock currentLock;
+
+<span class="fc" id="L122">    public static class Buffer {</span>
+        public byte[] ptr;
+        public int start;
+        public int off;
+        public int len;
+        public int capa;
+    }
+
+<span class="fc" id="L130">    public IOEncodable.ConvConfig encs = new IOEncodable.ConvConfig();</span>
+
+    public EConv readconv;
+    public EConv writeconv;
+    public IRubyObject writeconvAsciicompat;
+    public int writeconvPreEcflags;
+    public IRubyObject writeconvPreEcopts;
+    public boolean writeconvInitialized;
+
+    public volatile ReentrantReadWriteLock write_lock;
+<span class="fc" id="L140">    private final ReentrantLock lock = new ReentrantLock();</span>
+
+<span class="fc" id="L142">    public final Buffer wbuf = new Buffer(), rbuf = new Buffer(), cbuf = new Buffer();</span>
+
+    public RubyIO tiedIOForWriting;
+
+<span class="fc" id="L146">    private boolean nonblock = false;</span>
+
+    public final PosixShim posix;
+
+    private final Ruby runtime;
+
+    protected List&lt;RubyThread&gt; blockingThreads;
+
+    public void clearStdio() {
+<span class="fc" id="L155">        stdio_file = null;</span>
+<span class="fc" id="L156">    }</span>
+
+    public String PREP_STDIO_NAME() {
+<span class="nc" id="L159">        return pathv;</span>
+    }
+
+<span class="fc bfc" id="L162" title="All 2 branches covered.">    public boolean READ_DATA_PENDING() {return rbuf.len != 0;}</span>
+<span class="fc" id="L163">    public int READ_DATA_PENDING_COUNT() {return rbuf.len;}</span>
+    // goes with READ_DATA_PENDING_OFF
+<span class="fc" id="L165">    public byte[] READ_DATA_PENDING_PTR() {return rbuf.ptr;}</span>
+<span class="fc" id="L166">    public int READ_DATA_PENDING_OFF() {return rbuf.off;}</span>
+<span class="nc" id="L167">    public int READ_DATA_PENDING_START() {return rbuf.start;}</span>
+<span class="fc" id="L168">    public boolean READ_DATA_BUFFERED() {return READ_DATA_PENDING();}</span>
+
+<span class="pc bpc" id="L170" title="1 of 2 branches missed.">    public boolean READ_CHAR_PENDING() {return cbuf.len != 0;}</span>
+<span class="fc" id="L171">    public int READ_CHAR_PENDING_COUNT() {return cbuf.len;}</span>
+    // goes with READ_CHAR_PENDING_OFF
+<span class="fc" id="L173">    public byte[] READ_CHAR_PENDING_PTR() {return cbuf.ptr;}</span>
+<span class="fc" id="L174">    public int READ_CHAR_PENDING_OFF() {return cbuf.off;}</span>
+<span class="nc" id="L175">    public int READ_CHAR_PENDING_START() {return cbuf.start;}</span>
+
+    public void READ_CHECK(ThreadContext context) {
+<span class="fc bfc" id="L178" title="All 2 branches covered.">        if (!READ_DATA_PENDING()) {</span>
+<span class="fc" id="L179">            checkClosed();</span>
+        }
+<span class="fc" id="L181">    }</span>
+
+    public boolean IS_PREP_STDIO() {
+<span class="fc bfc" id="L184" title="All 2 branches covered.">        return (mode &amp; PREP) == PREP;</span>
+    }
+
+    public void setFD(ChannelFD fd) {
+<span class="fc" id="L188">        this.fd = fd;</span>
+<span class="fc" id="L189">    }</span>
+
+    public void setChannel(Channel fd) {
+<span class="fc" id="L192">        this.fd = new ChannelFD(fd, runtime.getPosix(), runtime.getFilenoUtil());</span>
+<span class="fc" id="L193">    }</span>
+
+    public int getMode() {
+<span class="fc" id="L196">        return mode;</span>
+    }
+    
+    public String getModeAsString(Ruby runtime) {
+<span class="nc" id="L200">        String modeString = getStringFromMode(mode);</span>
+
+<span class="nc bnc" id="L202" title="All 2 branches missed.">        if (modeString == null) {</span>
+<span class="nc" id="L203">            throw runtime.newArgumentError(&quot;Illegal access modenum &quot; + Integer.toOctalString(mode));</span>
+        }
+
+<span class="nc" id="L206">        return modeString;</span>
+    }
+    
+    public static int getModeFlagsAsIntFrom(int fmode) {
+<span class="fc" id="L210">        int oflags = 0;</span>
+        
+<span class="fc bfc" id="L212" title="All 2 branches covered.">        if ((fmode &amp; READABLE) != 0) {</span>
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">            if ((fmode &amp; WRITABLE) != 0) {</span>
+<span class="nc" id="L214">                oflags |= ModeFlags.RDWR;</span>
+            } else {
+<span class="fc" id="L216">                oflags |= ModeFlags.RDONLY;</span>
+            }
+<span class="pc bpc" id="L218" title="1 of 2 branches missed.">        } else if ((fmode &amp; WRITABLE) != 0) {</span>
+<span class="fc" id="L219">            oflags |= ModeFlags.WRONLY;</span>
+        }
+        
+<span class="fc bfc" id="L222" title="All 2 branches covered.">        if ((fmode &amp; APPEND) != 0) oflags |= ModeFlags.APPEND;</span>
+<span class="fc bfc" id="L223" title="All 2 branches covered.">        if ((fmode &amp; CREATE) != 0) oflags |= ModeFlags.CREAT;</span>
+<span class="pc bpc" id="L224" title="1 of 2 branches missed.">        if ((fmode &amp; BINMODE) != 0) oflags |= ModeFlags.BINARY;</span>
+<span class="pc bpc" id="L225" title="1 of 2 branches missed.">        if ((fmode &amp; TEXTMODE) != 0) oflags |= ModeFlags.TEXT;</span>
+<span class="fc bfc" id="L226" title="All 2 branches covered.">        if ((fmode &amp; TRUNC) != 0) oflags |= ModeFlags.TRUNC;</span>
+        
+<span class="fc" id="L228">        return oflags;</span>
+    }
+
+    // MRI: rb_io_oflags_modestr
+    public static String ioOflagsModestr(Ruby runtime, int oflags) {
+<span class="fc" id="L233">        int accmode = oflags &amp; (OpenFlags.O_RDONLY.intValue()|OpenFlags.O_WRONLY.intValue()|OpenFlags.O_RDWR.intValue());</span>
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">        if ((oflags &amp; OpenFlags.O_APPEND.intValue()) != 0) {</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">            if (accmode == OpenFlags.O_WRONLY.intValue()) {</span>
+<span class="nc" id="L236">                return MODE_BINARY(oflags, &quot;a&quot;, &quot;ab&quot;);</span>
+            }
+<span class="nc bnc" id="L238" title="All 2 branches missed.">            if (accmode == OpenFlags.O_RDWR.intValue()) {</span>
+<span class="nc" id="L239">                return MODE_BINARY(oflags, &quot;a+&quot;, &quot;ab+&quot;);</span>
+            }
+        }
+<span class="pc bpc" id="L242" title="1 of 4 branches missed.">        switch (OpenFlags.valueOf(oflags &amp; (OpenFlags.O_RDONLY.intValue()|OpenFlags.O_WRONLY.intValue()|OpenFlags.O_RDWR.intValue()))) {</span>
+            default:
+<span class="nc" id="L244">                throw runtime.newArgumentError(&quot;invalid access oflags 0x&quot; + Integer.toHexString(oflags));</span>
+            case O_RDONLY:
+<span class="fc" id="L246">                return MODE_BINARY(oflags, &quot;r&quot;, &quot;rb&quot;);</span>
+            case O_WRONLY:
+<span class="fc" id="L248">                return MODE_BINARY(oflags, &quot;w&quot;, &quot;wb&quot;);</span>
+            case O_RDWR:
+<span class="fc" id="L250">                return MODE_BINARY(oflags, &quot;r+&quot;, &quot;rb+&quot;);</span>
+        }
+    }
+
+    // MRI: rb_io_modestr_oflags
+    public static int ioModestrOflags(Ruby runtime, String modestr) {
+<span class="fc" id="L256">        return ioFmodeOflags(ioModestrFmode(runtime, modestr));</span>
+    }
+
+    // MRI: rb_io_fmode_oflags
+    public static int ioFmodeOflags(int fmode) {
+<span class="fc" id="L261">        int oflags = 0;</span>
+
+<span class="pc bpc" id="L263" title="1 of 4 branches missed.">        switch (fmode &amp; OpenFile.READWRITE) {</span>
+            case OpenFile.READABLE:
+<span class="fc" id="L265">                oflags |= OpenFlags.O_RDONLY.intValue();</span>
+<span class="fc" id="L266">                break;</span>
+            case OpenFile.WRITABLE:
+<span class="fc" id="L268">                oflags |= OpenFlags.O_WRONLY.intValue();</span>
+<span class="fc" id="L269">                break;</span>
+            case OpenFile.READWRITE:
+<span class="fc" id="L271">                oflags |= OpenFlags.O_RDWR.intValue();</span>
+                break;
+        }
+
+<span class="fc bfc" id="L275" title="All 2 branches covered.">        if ((fmode &amp; OpenFile.APPEND) != 0) {</span>
+<span class="fc" id="L276">            oflags |= OpenFlags.O_APPEND.intValue();</span>
+        }
+<span class="fc bfc" id="L278" title="All 2 branches covered.">        if ((fmode &amp; OpenFile.TRUNC) != 0) {</span>
+<span class="fc" id="L279">            oflags |= OpenFlags.O_TRUNC.intValue();</span>
+        }
+<span class="fc bfc" id="L281" title="All 2 branches covered.">        if ((fmode &amp; OpenFile.CREATE) != 0) {</span>
+<span class="fc" id="L282">            oflags |= OpenFlags.O_CREAT.intValue();</span>
+        }
+<span class="pc bpc" id="L284" title="1 of 2 branches missed.">        if (OpenFlags.O_BINARY.defined()) {</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">            if ((fmode &amp; OpenFile.BINMODE) != 0) {</span>
+<span class="nc" id="L286">                oflags |= OpenFlags.O_BINARY.intValue();</span>
+            }
+        }
+
+<span class="fc" id="L290">        return oflags;</span>
+    }
+
+    public static int ioModestrFmode(Ruby runtime, String modestr) {
+<span class="fc" id="L294">        int fmode = 0;</span>
+<span class="fc" id="L295">        char[] mChars = modestr.toCharArray(), pChars = null;</span>
+<span class="fc" id="L296">        int m = 0, p = 0;</span>
+
+<span class="fc bfc" id="L298" title="All 2 branches covered.">        if (mChars.length == 0) throw runtime.newArgumentError(&quot;invalid access mode &quot; + modestr);</span>
+
+<span class="fc bfc" id="L300" title="All 4 branches covered.">        switch (mChars[m++]) {</span>
+            case 'r':
+<span class="fc" id="L302">                fmode |= OpenFile.READABLE;</span>
+<span class="fc" id="L303">                break;</span>
+            case 'w':
+<span class="fc" id="L305">                fmode |= OpenFile.WRITABLE | OpenFile.TRUNC | OpenFile.CREATE;</span>
+<span class="fc" id="L306">                break;</span>
+            case 'a':
+<span class="fc" id="L308">                fmode |= OpenFile.WRITABLE | OpenFile.APPEND | OpenFile.CREATE;</span>
+<span class="fc" id="L309">                break;</span>
+            default:
+<span class="fc" id="L311">                throw runtime.newArgumentError(&quot;invalid access mode &quot; + modestr);</span>
+        }
+
+<span class="fc bfc" id="L314" title="All 2 branches covered.">        loop: while (m &lt; mChars.length) {</span>
+<span class="pc bpc" id="L315" title="1 of 5 branches missed.">            switch (mChars[m++]) {</span>
+                case 'b':
+<span class="fc" id="L317">                    fmode |= OpenFile.BINMODE;</span>
+<span class="fc" id="L318">                    break;</span>
+                case 't':
+<span class="fc" id="L320">                    fmode |= OpenFile.TEXTMODE;</span>
+<span class="fc" id="L321">                    break;</span>
+                case '+':
+<span class="fc" id="L323">                    fmode |= OpenFile.READWRITE;</span>
+<span class="fc" id="L324">                    break;</span>
+                default:
+<span class="nc" id="L326">                    throw runtime.newArgumentError(&quot;invalid access mode &quot; + modestr);</span>
+                case ':':
+<span class="fc" id="L328">                    pChars = mChars;</span>
+<span class="fc" id="L329">                    p = m;</span>
+<span class="pc bpc" id="L330" title="1 of 4 branches missed.">                    if ((fmode &amp; OpenFile.BINMODE) != 0 &amp;&amp; (fmode &amp; OpenFile.TEXTMODE) != 0)</span>
+<span class="nc" id="L331">                        throw runtime.newArgumentError(&quot;invalid access mode &quot; + modestr);</span>
+                    break loop;
+            }
+        }
+
+<span class="pc bpc" id="L336" title="1 of 4 branches missed.">        if ((fmode &amp; OpenFile.BINMODE) != 0 &amp;&amp; (fmode &amp; OpenFile.TEXTMODE) != 0)</span>
+<span class="nc" id="L337">            throw runtime.newArgumentError(&quot;invalid access mode &quot; + modestr);</span>
+<span class="pc bpc" id="L338" title="1 of 4 branches missed.">        if (p != 0 &amp;&amp; ioEncnameBomP(new String(pChars, p, pChars.length - p), 0))</span>
+<span class="nc" id="L339">            fmode |= OpenFile.SETENC_BY_BOM;</span>
+
+<span class="fc" id="L341">        return fmode;</span>
+    }
+
+    static boolean ioEncnameBomP(String name, long len) {
+<span class="fc" id="L345">        String bom_prefix = &quot;bom|utf-&quot;;</span>
+<span class="fc" id="L346">        int bom_prefix_len = bom_prefix.length();</span>
+<span class="pc bpc" id="L347" title="1 of 2 branches missed.">        if (len == 0) {</span>
+<span class="fc" id="L348">            int p = name.indexOf(':');</span>
+<span class="fc bfc" id="L349" title="All 2 branches covered.">            len = p != -1 ? p : name.length();</span>
+        }
+<span class="pc bpc" id="L351" title="1 of 4 branches missed.">        return len &gt; bom_prefix_len &amp;&amp; name.compareToIgnoreCase(bom_prefix) == 0;</span>
+    }
+
+    private static String MODE_BINARY(int oflags, String a, String b) {
+<span class="pc bpc" id="L355" title="3 of 4 branches missed.">        if (OpenFlags.O_BINARY.defined() &amp;&amp; (oflags &amp; OpenFlags.O_BINARY.intValue()) != 0) {</span>
+<span class="nc" id="L356">            return b;</span>
+        }
+<span class="fc" id="L358">        return a;</span>
+    }
+
+    public static String getStringFromMode(int mode) {
+<span class="nc bnc" id="L362" title="All 2 branches missed.">        if ((mode &amp; APPEND) != 0) {</span>
+<span class="nc bnc" id="L363" title="All 2 branches missed.">            if ((mode &amp; READWRITE) != 0) {</span>
+<span class="nc" id="L364">                return &quot;ab+&quot;;</span>
+            }
+<span class="nc" id="L366">            return &quot;ab&quot;;</span>
+        }
+<span class="nc bnc" id="L368" title="All 4 branches missed.">        switch (mode &amp; READWRITE) {</span>
+        case READABLE:
+<span class="nc" id="L370">            return &quot;rb&quot;;</span>
+        case WRITABLE:
+<span class="nc" id="L372">            return &quot;wb&quot;;</span>
+        case READWRITE:
+<span class="nc bnc" id="L374" title="All 2 branches missed.">            if ((mode &amp; CREATE) != 0) {</span>
+<span class="nc" id="L375">                return &quot;wb+&quot;;</span>
+            }
+<span class="nc" id="L377">            return &quot;rb+&quot;;</span>
+        }
+<span class="nc" id="L379">        return null;</span>
+    }
+
+    // rb_io_check_char_readable
+    public void checkCharReadable(ThreadContext context) {
+<span class="fc" id="L384">        checkClosed();</span>
+
+<span class="fc bfc" id="L386" title="All 2 branches covered.">        if ((mode &amp; READABLE) == 0) {</span>
+<span class="fc" id="L387">            throw runtime.newIOError(&quot;not opened for reading&quot;);</span>
+        }
+
+<span class="fc bfc" id="L390" title="All 2 branches covered.">        if (wbuf.len != 0) {</span>
+<span class="pc bpc" id="L391" title="1 of 2 branches missed.">            if (io_fflush(context) &lt; 0) {</span>
+<span class="nc" id="L392">                throw runtime.newErrnoFromErrno(posix.errno, &quot;error flushing&quot;);</span>
+            }
+        }
+<span class="fc bfc" id="L395" title="All 2 branches covered.">        if (tiedIOForWriting != null) {</span>
+            OpenFile wfptr;
+<span class="fc" id="L397">            wfptr = tiedIOForWriting.getOpenFileChecked();</span>
+<span class="pc bpc" id="L398" title="1 of 2 branches missed.">            if (wfptr.io_fflush(context) &lt; 0)</span>
+<span class="nc" id="L399">                throw runtime.newErrnoFromErrno(wfptr.posix.errno, wfptr.getPath());</span>
+        }
+<span class="fc" id="L401">    }</span>
+
+    // rb_io_check_byte_readable
+    public void checkByteReadable(ThreadContext context) {
+<span class="fc" id="L405">        checkCharReadable(context);</span>
+<span class="pc bpc" id="L406" title="1 of 2 branches missed.">        if (READ_CHAR_PENDING()) {</span>
+<span class="nc" id="L407">            throw runtime.newIOError(&quot;byte oriented read for character buffered IO&quot;);</span>
+        }
+<span class="fc" id="L409">    }</span>
+
+    // rb_io_check_readable
+    public void checkReadable(ThreadContext context) {
+<span class="nc" id="L413">        checkByteReadable(context);</span>
+<span class="nc" id="L414">    }</span>
+
+    // io_fflush
+    public int io_fflush(ThreadContext context) {
+<span class="fc" id="L418">        boolean locked = lock();</span>
+        try {
+<span class="fc" id="L420">            checkClosed();</span>
+
+<span class="fc bfc" id="L422" title="All 2 branches covered.">            if (wbuf.len == 0) return 0;</span>
+
+<span class="fc" id="L424">            checkClosed();</span>
+
+<span class="pc bpc" id="L426" title="2 of 4 branches missed.">            while (wbuf.len &gt; 0 &amp;&amp; flushBuffer() != 0) {</span>
+<span class="nc bnc" id="L427" title="All 2 branches missed.">                if (!waitWritable(context)) {</span>
+<span class="nc" id="L428">                    return -1;</span>
+                }
+<span class="nc" id="L430">                checkClosed();</span>
+            }
+        } finally {
+<span class="pc bpc" id="L433" title="4 of 8 branches missed.">            if (locked) unlock();</span>
+        }
+
+<span class="fc" id="L436">        return 0;</span>
+    }
+
+    // rb_io_wait_writable
+    public boolean waitWritable(ThreadContext context, long timeout) {
+<span class="nc" id="L441">        boolean locked = lock();</span>
+        try {
+<span class="nc bnc" id="L443" title="All 2 branches missed.">            if (posix.errno == null) return false;</span>
+
+<span class="nc bnc" id="L445" title="All 2 branches missed.">            if (fd == null) throw runtime.newIOError(RubyIO.CLOSED_STREAM_MSG);</span>
+
+<span class="pc bnc" id="L447" title="All 3 branches missed.">            switch (posix.errno) {</span>
+                case EINTR:
+                    //            case ERESTART: // not defined in jnr-constants
+<span class="nc" id="L450">                    runtime.getCurrentContext().pollThreadEvents();</span>
+<span class="nc" id="L451">                    return true;</span>
+                case EAGAIN:
+                case EWOULDBLOCK:
+<span class="nc" id="L454">                    ready(runtime, context.getThread(), SelectExecutor.WRITE_CONNECT_OPS, timeout);</span>
+<span class="nc" id="L455">                    return true;</span>
+                default:
+<span class="nc" id="L457">                    return false;</span>
+            }
+        } finally {
+<span class="nc bnc" id="L460" title="All 10 branches missed.">            if (locked) unlock();</span>
+        }
+    }
+
+    // rb_io_wait_writable
+    public boolean waitWritable(ThreadContext context) {
+<span class="nc" id="L466">        return waitWritable(context, 0);</span>
+    }
+
+    // rb_io_wait_readable
+    public boolean waitReadable(ThreadContext context, long timeout) {
+<span class="nc" id="L471">        boolean locked = lock();</span>
+        try {
+<span class="nc bnc" id="L473" title="All 2 branches missed.">            if (posix.errno == null) return false;</span>
+
+<span class="nc bnc" id="L475" title="All 2 branches missed.">            if (fd == null) throw runtime.newIOError(RubyIO.CLOSED_STREAM_MSG);</span>
+
+<span class="nc bnc" id="L477" title="All 3 branches missed.">            switch (posix.errno) {</span>
+                case EINTR:
+                    //            case ERESTART: // not defined in jnr-constants
+<span class="nc" id="L480">                    runtime.getCurrentContext().pollThreadEvents();</span>
+<span class="nc" id="L481">                    return true;</span>
+                case EAGAIN:
+                case EWOULDBLOCK:
+<span class="nc" id="L484">                    ready(runtime, context.getThread(), SelectionKey.OP_READ, timeout);</span>
+<span class="nc" id="L485">                    return true;</span>
+                default:
+<span class="nc" id="L487">                    return false;</span>
+            }
+        } finally {
+<span class="nc bnc" id="L490" title="All 10 branches missed.">            if (locked) unlock();</span>
+        }
+    }
+
+    // rb_io_wait_readable
+    public boolean waitReadable(ThreadContext context) {
+<span class="nc" id="L496">        return waitReadable(context, 0);</span>
+    }
+
+    /**
+     * Wait until the primary
+     *
+     * @param runtime
+     * @param ops
+     * @param timeout
+     * @return
+     */
+    public boolean ready(Ruby runtime, RubyThread thread, int ops, long timeout) {
+<span class="nc" id="L508">        boolean locked = lock();</span>
+        try {
+<span class="nc bnc" id="L510" title="All 2 branches missed.">            if (fd.chSelect != null) {</span>
+<span class="nc" id="L511">                return thread.select(fd.chSelect, this, ops, timeout);</span>
+            } else {
+<span class="nc bnc" id="L513" title="All 2 branches missed.">                if (fd.chSeek != null) {</span>
+<span class="nc bnc" id="L514" title="All 2 branches missed.">                    return fd.chSeek.position() != -1</span>
+<span class="nc bnc" id="L515" title="All 2 branches missed.">                            &amp;&amp; fd.chSeek.size() != -1</span>
+<span class="nc bnc" id="L516" title="All 2 branches missed.">                            &amp;&amp; fd.chSeek.position() &lt; fd.chSeek.size();</span>
+                }
+<span class="nc" id="L518">                return false;</span>
+            }
+<span class="nc" id="L520">        } catch (IOException ioe) {</span>
+<span class="nc" id="L521">            throw runtime.newIOErrorFromException(ioe);</span>
+        } finally {
+<span class="nc bnc" id="L523" title="All 8 branches missed.">            if (locked) unlock();</span>
+        }
+
+    }
+
+    // io_flush_buffer
+    public int flushBuffer() {
+<span class="pc bpc" id="L530" title="1 of 2 branches missed.">        if (write_lock != null) {</span>
+<span class="nc" id="L531">            write_lock.writeLock().lock();</span>
+            try {
+<span class="nc" id="L533">                return flushBufferAsync2();</span>
+            } finally {
+<span class="nc" id="L535">                write_lock.writeLock().unlock();</span>
+            }
+        }
+<span class="fc" id="L538">        return flushBufferAsync2();</span>
+    }
+
+    // io_flush_buffer_async2
+    public int flushBufferAsync2() {
+        // GVL-free call to io_flush_buffer_sync2 here in MRI
+
+<span class="fc" id="L545">        return flushBufferSync2();</span>
+
+        // logic after here was to interpret the retval of rb_thread_call_without_gvl2
+    }
+
+    // io_flush_buffer_sync2
+    private int flushBufferSync2() {
+<span class="fc" id="L552">        int result = flushBufferSync();</span>
+
+<span class="fc" id="L554">        return result;</span>
+//        return result == 0 ? 1 : result;
+    }
+
+    // io_flush_buffer_sync
+    private int flushBufferSync() {
+<span class="fc" id="L560">        int l = writableLength(wbuf.len);</span>
+<span class="fc" id="L561">        int r = posix.write(fd, wbuf.ptr, wbuf.off, l, nonblock);</span>
+
+<span class="pc bpc" id="L563" title="1 of 2 branches missed.">        if (wbuf.len &lt;= r) {</span>
+<span class="fc" id="L564">            wbuf.off = 0;</span>
+<span class="fc" id="L565">            wbuf.len = 0;</span>
+<span class="fc" id="L566">            return 0;</span>
+        }
+<span class="nc bnc" id="L568" title="All 2 branches missed.">        if (0 &lt;= r) {</span>
+<span class="nc" id="L569">            wbuf.off += (int)r;</span>
+<span class="nc" id="L570">            wbuf.len -= (int)r;</span>
+<span class="nc" id="L571">            posix.errno = Errno.EAGAIN;</span>
+        }
+<span class="nc" id="L573">        return -1;</span>
+    }
+
+    // io_writable_length
+    private int writableLength(int l) {
+        // We don't use wsplit mode, so we just pass length back directly.
+//        if (PIPE_BUF &lt; l &amp;&amp;
+//                // we should always assume other threads, so we don't use rb_thread_alone
+////                !rb_thread_alone() &amp;&amp;
+//                wsplit()) {
+//            l = PIPE_BUF;
+//        }
+<span class="fc" id="L585">        return l;</span>
+    }
+
+    /**
+     * wsplit mode selects a smaller write size based on the internal buffer of
+     * things like pipes, in order to help guarantee it will not block when
+     * emptying our write buffer. This must be guaranteed to allow MRI to re-try
+     * flushing the rest of the buffer with the GVL released, which happens when
+     * flushBufferSync above produces EAGAIN.
+     *
+     * In JRuby, where we don't have to release a lock, we skip this logic and
+     * always just let writes do what writes do.
+     *
+     * MRI: wsplit_p
+     * @return
+     */
+    // wsplit_p
+    private boolean wsplit()
+    {
+        int r;
+
+//        if ((mode &amp; WSPLIT_INITIALIZED) == 0) {
+////            struct stat buf;
+//            if (fd.chFile == null
+////            if (fstat(fptr-&gt;fd, &amp;buf) == 0 &amp;&amp;
+////                    !S_ISREG(buf.st_mode)
+////                    &amp;&amp; (r = fcntl(fptr-&gt;fd, F_GETFL)) != -1 &amp;&amp;
+////                    !(r &amp; O_NONBLOCK)
+//            ) {
+//                mode |= WSPLIT;
+//            }
+//            mode |= WSPLIT_INITIALIZED;
+//        }
+<span class="nc bnc" id="L618" title="All 2 branches missed.">        return (mode &amp; WSPLIT) != 0;</span>
+    }
+
+    // io_seek
+    public long seek(ThreadContext context, long offset, int whence) {
+<span class="fc" id="L623">        boolean locked = lock();</span>
+        try {
+<span class="fc" id="L625">            flushBeforeSeek(context);</span>
+<span class="fc" id="L626">            return posix.lseek(fd, offset, whence);</span>
+        } finally {
+<span class="pc bpc" id="L628" title="3 of 4 branches missed.">            if (locked) unlock();</span>
+        }
+    }
+
+    // flush_before_seek
+    private void flushBeforeSeek(ThreadContext context) {
+<span class="fc" id="L634">        boolean locked = lock();</span>
+        try {
+<span class="pc bpc" id="L636" title="1 of 2 branches missed.">            if (io_fflush(context) &lt; 0)</span>
+<span class="nc" id="L637">                throw context.runtime.newErrnoFromErrno(posix.errno, &quot;&quot;);</span>
+<span class="fc" id="L638">            unread(context);</span>
+<span class="fc" id="L639">            posix.errno = null;</span>
+        } finally {
+<span class="pc bpc" id="L641" title="3 of 4 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L643">    }</span>
+
+    public void checkWritable(ThreadContext context) {
+<span class="fc" id="L646">        boolean locked = lock();</span>
+        try {
+<span class="fc" id="L648">            checkClosed();</span>
+<span class="fc bfc" id="L649" title="All 2 branches covered.">            if ((mode &amp; WRITABLE) == 0) {</span>
+<span class="fc" id="L650">                throw context.runtime.newIOError(&quot;not opened for writing&quot;);</span>
+            }
+<span class="pc bpc" id="L652" title="1 of 2 branches missed.">            if (rbuf.len != 0) {</span>
+<span class="nc" id="L653">                unread(context);</span>
+            }
+        } finally {
+<span class="pc bpc" id="L656" title="2 of 4 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L658">    }</span>
+
+    public void checkClosed() {
+<span class="fc bfc" id="L661" title="All 2 branches covered.">        if (fd == null) {</span>
+<span class="fc" id="L662">            throw runtime.newIOError(RubyIO.CLOSED_STREAM_MSG);</span>
+        }
+<span class="fc" id="L664">    }</span>
+
+    public boolean isBinmode() {
+<span class="fc bfc" id="L667" title="All 2 branches covered.">        return (mode &amp; BINMODE) != 0;</span>
+    }
+
+    public boolean isTextMode() {
+<span class="fc bfc" id="L671" title="All 2 branches covered.">        return (mode &amp; TEXTMODE) != 0;</span>
+    }
+
+    public void setTextMode() {
+<span class="nc" id="L675">        mode |= TEXTMODE;</span>
+<span class="nc" id="L676">    }</span>
+
+    public void clearTextMode() {
+<span class="fc" id="L679">        mode &amp;= ~TEXTMODE;</span>
+<span class="fc" id="L680">    }</span>
+
+    public void setBinmode() {
+<span class="fc" id="L683">        mode |= BINMODE;</span>
+<span class="fc" id="L684">    }</span>
+
+    public boolean isOpen() {
+<span class="pc bpc" id="L687" title="1 of 2 branches missed.">        return fd != null;</span>
+    }
+
+    public boolean isReadable() {
+<span class="fc bfc" id="L691" title="All 2 branches covered.">        return (mode &amp; READABLE) != 0;</span>
+    }
+
+    public boolean isWritable() {
+<span class="fc bfc" id="L695" title="All 2 branches covered.">        return (mode &amp; WRITABLE) != 0;</span>
+    }
+
+    public boolean isReadBuffered() {
+<span class="nc" id="L699">        return READ_DATA_BUFFERED();</span>
+    }
+
+    public boolean isWriteBuffered() {
+<span class="nc" id="L703">        return false;</span>
+    }
+
+    public void setSync(boolean sync) {
+<span class="fc" id="L707">        boolean locked = lock();</span>
+        try {
+<span class="fc bfc" id="L709" title="All 2 branches covered.">            if (sync) {</span>
+<span class="fc" id="L710">                mode = mode | SYNC;</span>
+            } else {
+<span class="fc" id="L712">                mode = mode &amp; ~SYNC;</span>
+            }
+        } finally {
+<span class="pc bpc" id="L715" title="3 of 4 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L717">    }</span>
+
+    public boolean isSync() {
+<span class="nc bnc" id="L720" title="All 2 branches missed.">        return (mode &amp; (SYNC | TTY)) != 0;</span>
+    }
+
+    public void setMode(int modes) {
+<span class="fc" id="L724">        this.mode = modes;</span>
+<span class="fc" id="L725">    }</span>
+
+    public Process getProcess() {
+<span class="fc" id="L728">        return process;</span>
+    }
+
+    public void setProcess(Process process) {
+<span class="fc" id="L732">        this.process = process;</span>
+<span class="fc" id="L733">    }</span>
+
+    public long getPid() {
+<span class="pc bpc" id="L736" title="1 of 2 branches missed.">        if (pid != -1) return pid;</span>
+
+<span class="nc" id="L738">        return ShellLauncher.getPidFromProcess(process);</span>
+    }
+
+    public void setPid(long pid) {
+<span class="fc" id="L742">        this.pid = pid;</span>
+<span class="fc" id="L743">    }</span>
+
+    public int getLineNumber() {
+<span class="fc" id="L746">        return lineno;</span>
+    }
+
+    public void setLineNumber(int lineNumber) {
+<span class="fc" id="L750">        this.lineno = lineNumber;</span>
+<span class="fc" id="L751">    }</span>
+
+    public String getPath() {
+<span class="fc" id="L754">        return pathv;</span>
+    }
+
+    public void setPath(String path) {
+<span class="fc" id="L758">        this.pathv = path;</span>
+<span class="fc" id="L759">    }</span>
+
+    public boolean isAutoclose() {
+<span class="fc bfc" id="L762" title="All 2 branches covered.">        return (mode &amp; PREP) == 0;</span>
+    }
+
+    public void setAutoclose(boolean autoclose) {
+<span class="fc" id="L766">        boolean locked = lock();</span>
+        try {
+<span class="pc bpc" id="L768" title="1 of 2 branches missed.">            if (!autoclose)</span>
+<span class="nc" id="L769">                mode |= PREP;</span>
+            else
+<span class="fc" id="L771">                mode &amp;= ~PREP;</span>
+        } finally {
+<span class="pc bpc" id="L773" title="3 of 4 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L775">    }</span>
+
+    public Finalizer getFinalizer() {
+<span class="fc" id="L778">        return finalizer;</span>
+    }
+
+    public void setFinalizer(Finalizer finalizer) {
+<span class="fc" id="L782">        this.finalizer = finalizer;</span>
+<span class="fc" id="L783">    }</span>
+
+    public void cleanup(Ruby runtime, boolean noraise) {
+<span class="fc" id="L786">        boolean locked = lock();</span>
+        try {
+<span class="pc bpc" id="L788" title="1 of 2 branches missed.">            if (finalizer != null) {</span>
+<span class="nc" id="L789">                finalizer.finalize(runtime, this, noraise);</span>
+            } else {
+<span class="fc" id="L791">                finalize(runtime.getCurrentContext(), noraise);</span>
+            }
+        } finally {
+<span class="pc bpc" id="L794" title="2 of 4 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L796">    }</span>
+
+<span class="fc" id="L798">    public static final Finalizer PIPE_FINALIZE = new Finalizer() {</span>
+        @Override
+        public void finalize(Ruby runtime, OpenFile fptr, boolean noraise) {
+<span class="nc bnc" id="L801" title="All 2 branches missed.">            if (!Platform.IS_WINDOWS) { // #if !defined(HAVE_FORK) &amp;&amp; !defined(_WIN32)</span>
+<span class="nc" id="L802">                int status = 0;</span>
+<span class="nc bnc" id="L803" title="All 2 branches missed.">                if (fptr.stdio_file != null) {</span>
+                    // unsure how to do this
+//                    status = pclose(fptr-&gt;stdio_file);
+<span class="nc" id="L806">                    fptr.posix.close(fptr.stdio_file);</span>
+                }
+<span class="nc" id="L808">                fptr.setFD(null);</span>
+<span class="nc" id="L809">                fptr.stdio_file = null;</span>
+                // no status from above, so can't really do this
+//                runtime.getCurrentContext().setLastExitStatus();
+<span class="nc" id="L812">            } else {</span>
+<span class="nc" id="L813">                fptr.finalize(runtime.getCurrentContext(), noraise);</span>
+            }
+//            pipe_del_fptr(fptr);
+<span class="nc" id="L816">        }</span>
+    };
+
+    public void finalize() {
+<span class="fc bfc" id="L820" title="All 2 branches covered.">        if (fd != null) finalize(runtime.getCurrentContext(), true);</span>
+<span class="fc" id="L821">    }</span>
+
+    public void finalize(ThreadContext context, boolean noraise) {
+<span class="fc" id="L824">        IRubyObject err = runtime.getNil();</span>
+<span class="fc" id="L825">        ChannelFD fd = this.fd();</span>
+<span class="fc" id="L826">        Closeable stdio_file = this.stdio_file;</span>
+
+<span class="fc bfc" id="L828" title="All 2 branches covered.">        if (writeconv != null) {</span>
+<span class="pc bpc" id="L829" title="3 of 4 branches missed.">            if (write_lock != null &amp;&amp; !noraise) {</span>
+                // TODO: interruptible version
+<span class="nc" id="L831">                write_lock.writeLock().lock();</span>
+                try {
+<span class="nc" id="L833">                    finishWriteconv(context, noraise);</span>
+                } finally {
+<span class="nc" id="L835">                    write_lock.writeLock().unlock();</span>
+<span class="nc" id="L836">                }</span>
+            }
+            else {
+<span class="fc" id="L839">                err = finishWriteconv(context, noraise);</span>
+            }
+        }
+<span class="fc bfc" id="L842" title="All 2 branches covered.">        if (wbuf.len != 0) {</span>
+<span class="fc bfc" id="L843" title="All 2 branches covered.">            if (noraise) {</span>
+<span class="pc bpc" id="L844" title="3 of 4 branches missed.">                if (flushBufferSync() &lt; 0 &amp;&amp; err.isNil())</span>
+<span class="nc" id="L845">                    err = runtime.getTrue();</span>
+            }
+            else {
+<span class="pc bpc" id="L848" title="3 of 4 branches missed.">                if (io_fflush(runtime.getCurrentContext()) &lt; 0 &amp;&amp; err.isNil()) {</span>
+<span class="nc bnc" id="L849" title="All 2 branches missed.">                    err = RubyFixnum.newFixnum(runtime, posix.errno == null ? 0 :posix.errno.longValue());</span>
+                }
+            }
+        }
+
+<span class="fc" id="L854">        this.fd = null;</span>
+<span class="fc" id="L855">        this.clearStdio();</span>
+<span class="fc" id="L856">        mode &amp;= ~(READABLE|WRITABLE);</span>
+
+<span class="pc bpc" id="L858" title="1 of 4 branches missed.">        if (IS_PREP_STDIO() || isStdio()) {</span>
+	        /* need to keep FILE objects of stdin, stdout and stderr */
+<span class="pc bpc" id="L860" title="1 of 2 branches missed.">        } else if (stdio_file != null) {</span>
+	        /* stdio_file is deallocated anyway
+             * even if fclose failed.  */
+<span class="nc bnc" id="L863" title="All 4 branches missed.">            if (posix.close(stdio_file) &lt; 0 &amp;&amp; err.isNil())</span>
+<span class="nc bnc" id="L864" title="All 2 branches missed.">                err = noraise ? runtime.getTrue() : RubyNumeric.int2fix(runtime, posix.errno.intValue());</span>
+<span class="pc bpc" id="L865" title="1 of 2 branches missed.">        } else if (fd != null) {</span>
+            /* fptr-&gt;fd may be closed even if close fails.
+             * POSIX doesn't specify it.
+             * We assumes it is closed.  */
+<span class="pc bpc" id="L869" title="1 of 4 branches missed.">            if ((posix.close(fd) &lt; 0) &amp;&amp; err.isNil())</span>
+<span class="pc bpc" id="L870" title="1 of 2 branches missed.">                err = noraise ? runtime.getTrue() : runtime.newFixnum(posix.errno.intValue());</span>
+        }
+
+<span class="pc bpc" id="L873" title="1 of 4 branches missed.">        if (!err.isNil() &amp;&amp; !noraise) {</span>
+<span class="pc bpc" id="L874" title="3 of 4 branches missed.">            if (err instanceof RubyFixnum || err instanceof RubyBignum) {</span>
+<span class="fc" id="L875">                posix.errno = Errno.valueOf(RubyNumeric.num2int(err));</span>
+<span class="fc" id="L876">                throw runtime.newErrnoFromErrno(posix.errno, pathv);</span>
+            } else {
+<span class="nc" id="L878">                throw new RaiseException((RubyException)err);</span>
+            }
+        }
+<span class="fc" id="L881">    }</span>
+
+    // MRI: NEED_READCONV
+    public boolean needsReadConversion() {
+<span class="pc bpc" id="L885" title="5 of 8 branches missed.">        return Platform.IS_WINDOWS ?</span>
+                (encs.enc2 != null || (encs.ecflags &amp; ~EConvFlags.CRLF_NEWLINE_DECORATOR) != 0)
+                :
+<span class="fc bfc" id="L888" title="All 2 branches covered.">                (encs.enc2 != null || NEED_NEWLINE_DECORATOR_ON_READ());</span>
+    }
+
+    // MRI: NEED_WRITECONV
+    public boolean needsWriteConversion(ThreadContext context) {
+<span class="fc" id="L893">        Encoding ascii8bit = context.runtime.getEncodingService().getAscii8bitEncoding();</span>
+
+<span class="pc bpc" id="L895" title="7 of 12 branches missed.">        return Platform.IS_WINDOWS ?</span>
+                ((encs.enc != null &amp;&amp; encs.enc != ascii8bit) || (encs.ecflags &amp; ((EConvFlags.DECORATOR_MASK &amp; ~EConvFlags.CRLF_NEWLINE_DECORATOR)|EConvFlags.STATEFUL_DECORATOR_MASK)) != 0)
+                :
+<span class="pc bpc" id="L898" title="2 of 4 branches missed.">                ((encs.enc != null &amp;&amp; encs.enc != ascii8bit) || NEED_NEWLINE_DECORATOR_ON_WRITE() || (encs.ecflags &amp; (EConvFlags.DECORATOR_MASK|EConvFlags.STATEFUL_DECORATOR_MASK)) != 0);</span>
+    }
+
+    // MRI: make_readconv
+    public void makeReadConversion(ThreadContext context, int size) {
+<span class="fc bfc" id="L903" title="All 2 branches covered.">        if (readconv == null) {</span>
+            int ecflags;
+            IRubyObject ecopts;
+            byte[] sname, dname;
+<span class="fc" id="L907">            ecflags = encs.ecflags &amp; ~EConvFlags.NEWLINE_DECORATOR_WRITE_MASK;</span>
+<span class="fc" id="L908">            ecopts = encs.ecopts;</span>
+<span class="fc bfc" id="L909" title="All 2 branches covered.">            if (encs.enc2 != null) {</span>
+<span class="fc" id="L910">                sname = encs.enc2.getName();</span>
+<span class="fc" id="L911">                dname = encs.enc.getName();</span>
+            }
+            else {
+<span class="fc" id="L914">                sname = dname = new byte[0];</span>
+            }
+<span class="fc" id="L916">            readconv = EncodingUtils.econvOpenOpts(context, sname, dname, ecflags, ecopts);</span>
+<span class="pc bpc" id="L917" title="1 of 2 branches missed.">            if (readconv == null)</span>
+<span class="nc" id="L918">                throw EncodingUtils.econvOpenExc(context, sname, dname, ecflags);</span>
+<span class="fc" id="L919">            cbuf.off = 0;</span>
+<span class="fc" id="L920">            cbuf.len = 0;</span>
+<span class="pc bpc" id="L921" title="1 of 2 branches missed.">            if (size &lt; IO_CBUF_CAPA_MIN) size = IO_CBUF_CAPA_MIN;</span>
+<span class="fc" id="L922">            cbuf.capa = size;</span>
+<span class="fc" id="L923">            cbuf.ptr = new byte[cbuf.capa];</span>
+        }
+<span class="fc" id="L925">    }</span>
+
+    public void makeReadConversion(ThreadContext context) {
+<span class="fc" id="L928">        makeReadConversion(context, IO_CBUF_CAPA_MIN);</span>
+<span class="fc" id="L929">    }</span>
+
+    // MRI: make_writeconv
+    public void makeWriteConversion(ThreadContext context) {
+<span class="fc bfc" id="L933" title="All 2 branches covered.">        if (writeconvInitialized) return;</span>
+
+        byte[] senc;
+        byte[] denc;
+        Encoding enc;
+        int ecflags;
+        IRubyObject ecopts;
+
+<span class="fc" id="L941">        writeconvInitialized = true;</span>
+
+<span class="fc" id="L943">        ecflags = encs.ecflags &amp; ~EConvFlags.NEWLINE_DECORATOR_READ_MASK;</span>
+<span class="fc" id="L944">        ecopts = encs.ecopts;</span>
+
+<span class="fc" id="L946">        Encoding ascii8bit = context.runtime.getEncodingService().getAscii8bitEncoding();</span>
+<span class="pc bpc" id="L947" title="4 of 6 branches missed.">        if (encs.enc == null || (encs.enc == ascii8bit &amp;&amp; encs.enc2 == null)) {</span>
+            /* no encoding conversion */
+<span class="nc" id="L949">            writeconvPreEcflags = 0;</span>
+<span class="nc" id="L950">            writeconvPreEcopts = context.nil;</span>
+<span class="nc" id="L951">            writeconv = EncodingUtils.econvOpenOpts(context, EMPTY_BYTE_ARRAY, EMPTY_BYTE_ARRAY, ecflags, ecopts);</span>
+<span class="nc bnc" id="L952" title="All 2 branches missed.">            if (writeconv == null) {</span>
+<span class="nc" id="L953">                throw EncodingUtils.econvOpenExc(context, EMPTY_BYTE_ARRAY, EMPTY_BYTE_ARRAY, ecflags);</span>
+            }
+<span class="nc" id="L955">            writeconvAsciicompat = context.nil;</span>
+        }
+        else {
+<span class="fc bfc" id="L958" title="All 2 branches covered.">            enc = encs.enc2 != null ? encs.enc2 : encs.enc;</span>
+<span class="fc" id="L959">            Encoding tmpEnc = EncodingUtils.econvAsciicompatEncoding(enc);</span>
+<span class="fc bfc" id="L960" title="All 2 branches covered.">            senc = tmpEnc == null ? null : tmpEnc.getName();</span>
+<span class="pc bpc" id="L961" title="1 of 4 branches missed.">            if (senc == null &amp;&amp; (encs.ecflags &amp; EConvFlags.STATEFUL_DECORATOR_MASK) == 0) {</span>
+                /* single conversion */
+<span class="fc" id="L963">                writeconvPreEcflags = ecflags;</span>
+<span class="fc" id="L964">                writeconvPreEcopts = ecopts;</span>
+<span class="fc" id="L965">                writeconv = null;</span>
+<span class="fc" id="L966">                writeconvAsciicompat = context.nil;</span>
+            }
+            else {
+                /* double conversion */
+<span class="fc" id="L970">                writeconvPreEcflags = ecflags &amp; ~EConvFlags.STATEFUL_DECORATOR_MASK;</span>
+<span class="fc" id="L971">                writeconvPreEcopts = ecopts;</span>
+<span class="pc bpc" id="L972" title="1 of 2 branches missed.">                if (senc != null) {</span>
+<span class="fc" id="L973">                    denc = enc.getName();</span>
+<span class="fc" id="L974">                    writeconvAsciicompat = RubyString.newString(context.runtime, senc);</span>
+                }
+                else {
+<span class="nc" id="L977">                    senc = denc = EMPTY_BYTE_ARRAY;</span>
+<span class="nc" id="L978">                    writeconvAsciicompat = RubyString.newString(context.runtime, enc.getName());</span>
+                }
+<span class="fc" id="L980">                ecflags = encs.ecflags &amp; (EConvFlags.ERROR_HANDLER_MASK | EConvFlags.STATEFUL_DECORATOR_MASK);</span>
+<span class="fc" id="L981">                ecopts = encs.ecopts;</span>
+<span class="fc" id="L982">                writeconv = EncodingUtils.econvOpenOpts(context, senc, denc, ecflags, ecopts);</span>
+<span class="pc bpc" id="L983" title="1 of 2 branches missed.">                if (writeconv == null) {</span>
+<span class="nc" id="L984">                    throw EncodingUtils.econvOpenExc(context, senc, denc, ecflags);</span>
+                }
+            }
+        }
+<span class="fc" id="L988">    }</span>
+
+    public void clearReadConversion() {
+<span class="fc" id="L991">        readconv = null;</span>
+<span class="fc" id="L992">    }</span>
+
+    public void clearCodeConversion() {
+<span class="fc" id="L995">        readconv = null;</span>
+<span class="fc" id="L996">        writeconv = null;</span>
+<span class="fc" id="L997">    }</span>
+
+    public static final int MORE_CHAR_SUSPENDED = 0;
+    public static final int MORE_CHAR_FINISHED = 1;
+    public static final int EOF = -1;
+
+    public static final int IO_RBUF_CAPA_MIN = 8192;
+    public static final int IO_CBUF_CAPA_MIN = (128*1024);
+    public int IO_RBUF_CAPA_FOR() {
+<span class="fc bfc" id="L1006" title="All 2 branches covered.">        return needsReadConversion() ? IO_CBUF_CAPA_MIN : IO_RBUF_CAPA_MIN;</span>
+    }
+    public static final int IO_WBUF_CAPA_MIN = 8192;
+
+<span class="fc" id="L1010">    private static final byte[] EMPTY_BYTE_ARRAY = new byte[0];</span>
+
+    // MRI: appendline
+    public int appendline(ThreadContext context, int delim, ByteList[] strp, int[] lp) {
+<span class="fc" id="L1014">        ByteList str = strp[0];</span>
+<span class="fc" id="L1015">        int limit = lp[0];</span>
+
+<span class="fc bfc" id="L1017" title="All 2 branches covered.">        if (needsReadConversion()) {</span>
+<span class="fc" id="L1018">            SET_BINARY_MODE();</span>
+<span class="fc" id="L1019">            makeReadConversion(context);</span>
+            do {
+                int p, e;
+<span class="fc" id="L1022">                int searchlen = READ_CHAR_PENDING_COUNT();</span>
+<span class="fc bfc" id="L1023" title="All 2 branches covered.">                if (searchlen &gt; 0) {</span>
+<span class="fc" id="L1024">                    byte[] pBytes = READ_CHAR_PENDING_PTR();</span>
+<span class="fc" id="L1025">                    p = READ_CHAR_PENDING_OFF();</span>
+<span class="pc bpc" id="L1026" title="3 of 4 branches missed.">                    if (0 &lt; limit &amp;&amp; limit &lt; searchlen)</span>
+<span class="nc" id="L1027">                        searchlen = limit;</span>
+<span class="fc" id="L1028">                    e = memchr(pBytes, p, delim, searchlen);</span>
+<span class="fc bfc" id="L1029" title="All 2 branches covered.">                    if (e != -1) {</span>
+<span class="fc" id="L1030">                        int len = (int)(e-p+1);</span>
+<span class="pc bpc" id="L1031" title="1 of 2 branches missed.">                        if (str == null) {</span>
+<span class="nc" id="L1032">                            strp[0] = str = new ByteList(pBytes, p, len);</span>
+                        } else {
+<span class="fc" id="L1034">                            str.append(pBytes, p, len);</span>
+                        }
+<span class="fc" id="L1036">                        cbuf.off += len;</span>
+<span class="fc" id="L1037">                        cbuf.len -= len;</span>
+<span class="fc" id="L1038">                        limit -= len;</span>
+<span class="fc" id="L1039">                        lp[0] = limit;</span>
+<span class="fc" id="L1040">                        return delim;</span>
+                    }
+
+<span class="fc bfc" id="L1043" title="All 2 branches covered.">                    if (str == null) {</span>
+<span class="fc" id="L1044">                        strp[0] = str = new ByteList(pBytes, p, searchlen);</span>
+                    } else {
+<span class="fc" id="L1046">                        EncodingUtils.rbStrBufCat(context.runtime, str, pBytes, p, searchlen);</span>
+                    }
+<span class="fc" id="L1048">                    cbuf.off += searchlen;</span>
+<span class="fc" id="L1049">                    cbuf.len -= searchlen;</span>
+<span class="fc" id="L1050">                    limit -= searchlen;</span>
+
+<span class="pc bpc" id="L1052" title="1 of 2 branches missed.">                    if (limit == 0) {</span>
+<span class="nc" id="L1053">                        lp[0] = limit;</span>
+<span class="nc" id="L1054">                        return str.get(str.getRealSize() - 1) &amp; 0xFF;</span>
+                    }
+                }
+<span class="fc bfc" id="L1057" title="All 2 branches covered.">            } while (moreChar(context) != MORE_CHAR_FINISHED);</span>
+<span class="fc" id="L1058">            clearReadConversion();</span>
+<span class="fc" id="L1059">            lp[0] = limit;</span>
+<span class="fc" id="L1060">            return EOF;</span>
+        }
+
+<span class="fc" id="L1063">        NEED_NEWLINE_DECORATOR_ON_READ_CHECK();</span>
+        do {
+<span class="fc" id="L1065">            int pending = READ_DATA_PENDING_COUNT();</span>
+<span class="fc bfc" id="L1066" title="All 2 branches covered.">            if (pending &gt; 0) {</span>
+<span class="fc" id="L1067">                byte[] pBytes = READ_DATA_PENDING_PTR();</span>
+<span class="fc" id="L1068">                int p = READ_DATA_PENDING_OFF();</span>
+<span class="fc" id="L1069">                int e = -1;</span>
+                int last;
+
+<span class="fc bfc" id="L1072" title="All 4 branches covered.">                if (limit &gt; 0 &amp;&amp; pending &gt; limit) pending = limit;</span>
+<span class="fc" id="L1073">                e = memchr(pBytes, p, delim, pending);</span>
+<span class="fc bfc" id="L1074" title="All 2 branches covered.">                if (e != -1) pending = e - p + 1;</span>
+<span class="fc bfc" id="L1075" title="All 2 branches covered.">                if (str != null) {</span>
+<span class="fc" id="L1076">                    last = str.getRealSize();</span>
+<span class="fc" id="L1077">                    str.length(last + pending);</span>
+                }
+                else {
+<span class="fc" id="L1080">                    last = 0;</span>
+<span class="fc" id="L1081">                    strp[0] = str = new ByteList(pending);</span>
+<span class="fc" id="L1082">                    str.setRealSize(pending);</span>
+                }
+<span class="fc" id="L1084">                readBufferedData(str.getUnsafeBytes(), str.getBegin() + last, pending); /* must not fail */</span>
+<span class="fc" id="L1085">                limit -= pending;</span>
+<span class="fc" id="L1086">                lp[0] = limit;</span>
+<span class="fc bfc" id="L1087" title="All 2 branches covered.">                if (e != -1) return delim;</span>
+<span class="fc bfc" id="L1088" title="All 2 branches covered.">                if (limit == 0) {</span>
+<span class="fc" id="L1089">                    return str.get(str.getRealSize() - 1) &amp; 0xFF;</span>
+                }
+            }
+<span class="fc" id="L1092">            READ_CHECK(context);</span>
+<span class="fc bfc" id="L1093" title="All 2 branches covered.">        } while (fillbuf(context) &gt;= 0);</span>
+<span class="fc" id="L1094">        lp[0] = limit;</span>
+<span class="fc" id="L1095">        return EOF;</span>
+    }
+
+    private int memchr(byte[] pBytes, int p, int delim, int length) {
+<span class="fc bfc" id="L1099" title="All 2 branches covered.">        for (int i = p; i &lt; p + length; i++) {</span>
+<span class="fc bfc" id="L1100" title="All 2 branches covered.">            if ((pBytes[i] &amp; 0xFF) == delim) {</span>
+<span class="fc" id="L1101">                return i;</span>
+            }
+        }
+<span class="fc" id="L1104">        return -1;</span>
+    }
+
+    public void NEED_NEWLINE_DECORATOR_ON_READ_CHECK() {
+<span class="pc bpc" id="L1108" title="1 of 2 branches missed.">        if (NEED_NEWLINE_DECORATOR_ON_READ()) {</span>
+<span class="nc bnc" id="L1109" title="All 4 branches missed.">            if (isReadable() &amp;&amp;</span>
+                    (encs.ecflags &amp; EConvFlags.NEWLINE_DECORATOR_MASK) == 0) {
+<span class="nc" id="L1111">                SET_BINARY_MODE();</span>
+            } else {
+<span class="nc" id="L1113">                SET_TEXT_MODE();</span>
+            }
+        }
+<span class="fc" id="L1116">    }</span>
+
+    public boolean NEED_NEWLINE_DECORATOR_ON_READ() {
+<span class="fc" id="L1119">        return isTextMode();</span>
+    }
+
+    public boolean NEED_NEWLINE_DECORATOR_ON_WRITE() {
+<span class="fc" id="L1123">        return isTextMode();</span>
+    }
+
+    public int moreChar(ThreadContext context) {
+        Object v;
+<span class="fc" id="L1128">        v = fillCbuf(context, EConvFlags.AFTER_OUTPUT);</span>
+<span class="pc bpc" id="L1129" title="1 of 2 branches missed.">        if (!(v instanceof Integer) ||</span>
+<span class="pc bpc" id="L1130" title="1 of 4 branches missed.">                ((Integer)v != MORE_CHAR_SUSPENDED &amp;&amp; (Integer)v != MORE_CHAR_FINISHED))</span>
+<span class="nc" id="L1131">            throw (RaiseException)v;</span>
+<span class="fc" id="L1132">        return (Integer)v;</span>
+    }
+
+    private Object fillCbuf(ThreadContext context, int ec_flags) {
+        int ss, se;
+        int ds, de;
+        EConvResult res;
+        int putbackable;
+        int cbuf_len0;
+        RaiseException exc;
+
+<span class="fc" id="L1143">        ec_flags |= EConvFlags.PARTIAL_INPUT;</span>
+
+<span class="fc" id="L1145">        boolean locked = lock();</span>
+        try {
+<span class="pc bpc" id="L1147" title="1 of 2 branches missed.">            if (cbuf.len == cbuf.capa)</span>
+<span class="nc" id="L1148">                return MORE_CHAR_SUSPENDED; /* cbuf full */</span>
+<span class="pc bpc" id="L1149" title="1 of 2 branches missed.">            if (cbuf.len == 0)</span>
+<span class="fc" id="L1150">                cbuf.off = 0;</span>
+<span class="nc bnc" id="L1151" title="All 2 branches missed.">            else if (cbuf.off + cbuf.len == cbuf.capa) {</span>
+<span class="nc" id="L1152">                System.arraycopy(cbuf.ptr, cbuf.off, cbuf.ptr, 0, cbuf.len);</span>
+<span class="nc" id="L1153">                cbuf.off = 0;</span>
+            }
+
+<span class="fc" id="L1156">            cbuf_len0 = cbuf.len;</span>
+
+<span class="fc" id="L1158">            Ptr spPtr = new Ptr();</span>
+<span class="fc" id="L1159">            Ptr dpPtr = new Ptr();</span>
+
+            while (true) {
+<span class="fc" id="L1162">                ss = spPtr.p = rbuf.off;</span>
+<span class="fc" id="L1163">                se = spPtr.p + rbuf.len;</span>
+<span class="fc" id="L1164">                ds = dpPtr.p = cbuf.off + cbuf.len;</span>
+<span class="fc" id="L1165">                de = cbuf.capa;</span>
+<span class="fc" id="L1166">                res = readconv.convert(rbuf.ptr, spPtr, se, cbuf.ptr, dpPtr, de, ec_flags);</span>
+<span class="fc" id="L1167">                rbuf.off += (int) (spPtr.p - ss);</span>
+<span class="fc" id="L1168">                rbuf.len -= (int) (spPtr.p - ss);</span>
+<span class="fc" id="L1169">                cbuf.len += (int) (dpPtr.p - ds);</span>
+
+<span class="fc" id="L1171">                putbackable = readconv.putbackable();</span>
+<span class="pc bpc" id="L1172" title="1 of 2 branches missed.">                if (putbackable != 0) {</span>
+<span class="nc" id="L1173">                    readconv.putback(rbuf.ptr, rbuf.off - putbackable, putbackable);</span>
+<span class="nc" id="L1174">                    rbuf.off -= putbackable;</span>
+<span class="nc" id="L1175">                    rbuf.len += putbackable;</span>
+                }
+
+<span class="fc" id="L1178">                exc = EncodingUtils.makeEconvException(context.runtime, readconv);</span>
+<span class="pc bpc" id="L1179" title="1 of 2 branches missed.">                if (exc != null)</span>
+<span class="nc" id="L1180">                    return exc;</span>
+
+<span class="fc bfc" id="L1182" title="All 2 branches covered.">                if (cbuf_len0 != cbuf.len)</span>
+<span class="fc" id="L1183">                    return MORE_CHAR_SUSPENDED;</span>
+
+<span class="pc bpc" id="L1185" title="1 of 2 branches missed.">                if (res == EConvResult.Finished) {</span>
+<span class="nc" id="L1186">                    return MORE_CHAR_FINISHED;</span>
+                }
+
+<span class="pc bpc" id="L1189" title="1 of 2 branches missed.">                if (res == EConvResult.SourceBufferEmpty) {</span>
+<span class="pc bpc" id="L1190" title="1 of 2 branches missed.">                    if (rbuf.len == 0) {</span>
+<span class="fc" id="L1191">                        READ_CHECK(context);</span>
+<span class="fc bfc" id="L1192" title="All 2 branches covered.">                        if (fillbuf(context) == -1) {</span>
+<span class="pc bpc" id="L1193" title="1 of 2 branches missed.">                            if (readconv == null) {</span>
+<span class="nc" id="L1194">                                return MORE_CHAR_FINISHED;</span>
+                            }
+<span class="fc" id="L1196">                            ds = dpPtr.p = cbuf.off + cbuf.len;</span>
+<span class="fc" id="L1197">                            de = cbuf.capa;</span>
+<span class="fc" id="L1198">                            res = readconv.convert(null, null, 0, cbuf.ptr, dpPtr, de, 0);</span>
+<span class="fc" id="L1199">                            cbuf.len += (int) (dpPtr.p - ds);</span>
+<span class="fc" id="L1200">                            EncodingUtils.econvCheckError(context, readconv);</span>
+<span class="fc" id="L1201">                            break;</span>
+                        }
+                    }
+                }
+            }
+<span class="pc bpc" id="L1206" title="1 of 2 branches missed.">            if (cbuf_len0 != cbuf.len)</span>
+<span class="nc" id="L1207">                return MORE_CHAR_SUSPENDED;</span>
+        } finally {
+<span class="pc bpc" id="L1209" title="14 of 16 branches missed.">            if (locked) unlock();</span>
+        }
+
+<span class="fc" id="L1212">        return MORE_CHAR_FINISHED;</span>
+    }
+
+    // read_buffered_data
+    public int readBufferedData(byte[] ptrBytes, int ptr, int len) {
+<span class="fc" id="L1217">        boolean locked = lock();</span>
+        try {
+<span class="fc" id="L1219">            int n = rbuf.len;</span>
+
+<span class="fc bfc" id="L1221" title="All 2 branches covered.">            if (n &lt;= 0) return n;</span>
+<span class="fc bfc" id="L1222" title="All 2 branches covered.">            if (n &gt; len) n = len;</span>
+<span class="fc" id="L1223">            System.arraycopy(rbuf.ptr, rbuf.start + rbuf.off, ptrBytes, ptr, n);</span>
+<span class="fc" id="L1224">            rbuf.off += n;</span>
+<span class="fc" id="L1225">            rbuf.len -= n;</span>
+<span class="fc" id="L1226">            return n;</span>
+        } finally {
+<span class="pc bpc" id="L1228" title="4 of 6 branches missed.">            if (locked) unlock();</span>
+        }
+    }
+
+    // io_fillbuf
+    public int fillbuf(ThreadContext context) {
+        int r;
+
+<span class="fc" id="L1236">        boolean locked = lock();</span>
+        try {
+<span class="fc bfc" id="L1238" title="All 2 branches covered.">            if (rbuf.ptr == null) {</span>
+<span class="fc" id="L1239">                rbuf.off = 0;</span>
+<span class="fc" id="L1240">                rbuf.len = 0;</span>
+<span class="fc" id="L1241">                rbuf.capa = IO_RBUF_CAPA_FOR();</span>
+<span class="fc" id="L1242">                rbuf.ptr = new byte[rbuf.capa];</span>
+<span class="pc bpc" id="L1243" title="1 of 2 branches missed.">                if (Platform.IS_WINDOWS) {</span>
+<span class="nc" id="L1244">                    rbuf.capa--;</span>
+                }
+            }
+<span class="fc bfc" id="L1247" title="All 2 branches covered.">            if (rbuf.len == 0) {</span>
+                retry:
+                while (true) {
+<span class="fc" id="L1250">                    r = readInternal(context, this, fd, rbuf.ptr, 0, rbuf.capa);</span>
+
+<span class="pc bpc" id="L1252" title="1 of 2 branches missed.">                    if (r &lt; 0) {</span>
+<span class="nc bnc" id="L1253" title="All 2 branches missed.">                        if (waitReadable(context, fd)) {</span>
+<span class="nc" id="L1254">                            continue retry;</span>
+                        }
+<span class="nc bnc" id="L1256" title="All 2 branches missed.">                        throw context.runtime.newErrnoFromErrno(posix.errno, &quot;channel: &quot; + fd + (pathv != null ? &quot; &quot; + pathv : &quot;&quot;));</span>
+                    }
+                    break;
+                }
+<span class="fc" id="L1260">                rbuf.off = 0;</span>
+<span class="fc" id="L1261">                rbuf.len = (int) r; /* r should be &lt;= rbuf_capa */</span>
+<span class="fc bfc" id="L1262" title="All 2 branches covered.">                if (r == 0)</span>
+<span class="fc" id="L1263">                    return -1; /* EOF */</span>
+            }
+        } finally {
+<span class="pc bpc" id="L1266" title="4 of 6 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L1268">        return 0;</span>
+    }
+
+    public static class InternalReadStruct {
+<span class="fc" id="L1272">        InternalReadStruct(OpenFile fptr, ChannelFD fd, byte[] bufBytes, int buf, int count) {</span>
+<span class="fc" id="L1273">            this.fptr = fptr;</span>
+<span class="fc" id="L1274">            this.fd = fd;</span>
+<span class="fc" id="L1275">            this.bufBytes = bufBytes;</span>
+<span class="fc" id="L1276">            this.buf = buf;</span>
+<span class="fc" id="L1277">            this.capa = count;</span>
+<span class="fc" id="L1278">        }</span>
+
+        public OpenFile fptr;
+        public ChannelFD fd;
+        public byte[] bufBytes;
+        public int buf;
+        public int capa;
+        public Selector selector;
+    }
+
+<span class="pc bpc" id="L1288" title="1 of 2 branches missed.">    final static RubyThread.Task&lt;InternalReadStruct, Integer&gt; readTask = new RubyThread.Task&lt;InternalReadStruct, Integer&gt;() {</span>
+        @Override
+        public Integer run(ThreadContext context, InternalReadStruct iis) throws InterruptedException {
+<span class="fc" id="L1291">            ChannelFD fd = iis.fd;</span>
+<span class="fc" id="L1292">            OpenFile fptr = iis.fptr;</span>
+
+<span class="pc bpc" id="L1294" title="3 of 4 branches missed.">            assert fptr.lockedByMe();</span>
+
+<span class="fc" id="L1296">            fptr.unlock();</span>
+            try {
+<span class="fc" id="L1298">                return fptr.posix.read(fd, iis.bufBytes, iis.buf, iis.capa, fptr.nonblock);</span>
+            } finally {
+<span class="pc" id="L1300">                fptr.lock();</span>
+            }
+        }
+
+        @Override
+        public void wakeup(RubyThread thread, InternalReadStruct data) {
+<span class="nc" id="L1306">            thread.getNativeThread().interrupt();</span>
+<span class="nc" id="L1307">        }</span>
+    };
+
+<span class="pc bpc" id="L1310" title="1 of 2 branches missed.">    final static RubyThread.Task&lt;InternalWriteStruct, Integer&gt; writeTask = new RubyThread.Task&lt;InternalWriteStruct, Integer&gt;() {</span>
+        @Override
+        public Integer run(ThreadContext context, InternalWriteStruct iis) throws InterruptedException {
+<span class="fc" id="L1313">            OpenFile fptr = iis.fptr;</span>
+
+<span class="pc bpc" id="L1315" title="3 of 4 branches missed.">            assert fptr.lockedByMe();</span>
+
+<span class="fc" id="L1317">            fptr.unlock();</span>
+            try {
+<span class="fc" id="L1319">                return iis.fptr.posix.write(iis.fd, iis.bufBytes, iis.buf, iis.capa, iis.fptr.nonblock);</span>
+            } finally {
+<span class="pc" id="L1321">                fptr.lock();</span>
+            }
+        }
+
+        @Override
+        public void wakeup(RubyThread thread, InternalWriteStruct data) {
+            // FIXME: NO! This will kill many native channels. Must be nonblocking to interrupt.
+<span class="nc" id="L1328">            thread.getNativeThread().interrupt();</span>
+<span class="nc" id="L1329">        }</span>
+    };
+
+    // rb_read_internal
+    public static int readInternal(ThreadContext context, OpenFile fptr, ChannelFD fd, byte[] bufBytes, int buf, int count) {
+<span class="fc" id="L1334">        InternalReadStruct iis = new InternalReadStruct(fptr, fd, bufBytes, buf, count);</span>
+
+        // if we can do selection and this is not a non-blocking call, do selection
+<span class="fc" id="L1337">        fptr.unlock();</span>
+        try {
+<span class="fc bfc" id="L1339" title="All 4 branches covered.">            if (fd.chSelect != null &amp;&amp; !iis.fptr.nonblock) {</span>
+<span class="fc" id="L1340">                context.getThread().select(fd.chSelect, fptr, SelectionKey.OP_READ);</span>
+            }
+        } finally {
+<span class="pc" id="L1343">            fptr.lock();</span>
+<span class="fc" id="L1344">        }</span>
+
+        try {
+<span class="fc" id="L1347">            return context.getThread().executeTask(context, iis, readTask);</span>
+<span class="nc" id="L1348">        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L1349">            throw context.runtime.newConcurrencyError(&quot;IO operation interrupted&quot;);</span>
+        }
+    }
+
+    /**
+     * Logic to match (as well as possible) rb_io_wait_readable from MRI. We do not
+     * have the luxury of treating all file descriptors the same, so there's a bit
+     * of special-casing here when the channel is not selectable.
+     *
+     * Note also the EBADF on closed channels; I believe this is what *would*
+     * happen in MRI if we always called the selection logic and were given a
+     * closed channel.
+     *
+     * MRI: rb_io_wait_readable
+     */
+    boolean waitReadable(ThreadContext context, ChannelFD fd) {
+<span class="nc bnc" id="L1365" title="All 2 branches missed.">        if (fd == null) {</span>
+<span class="nc" id="L1366">            throw context.runtime.newIOError(RubyIO.CLOSED_STREAM_MSG);</span>
+        }
+
+<span class="nc" id="L1369">        boolean locked = lock();</span>
+        try {
+<span class="nc bnc" id="L1371" title="All 2 branches missed.">            if (!fd.ch.isOpen()) {</span>
+<span class="nc" id="L1372">                posix.errno = Errno.EBADF;</span>
+<span class="nc" id="L1373">                return false;</span>
+            }
+
+<span class="nc bnc" id="L1376" title="All 2 branches missed.">            if (fd.chSelect != null) {</span>
+<span class="nc" id="L1377">                unlock();</span>
+                try {
+<span class="nc" id="L1379">                    return context.getThread().select(fd.chSelect, this, SelectionKey.OP_READ);</span>
+                } finally {
+<span class="nc" id="L1381">                    lock();</span>
+                }
+            }
+
+            // kinda-hacky way to see if there's more data to read from a seekable channel
+<span class="nc bnc" id="L1386" title="All 2 branches missed.">            if (fd.chSeek != null) {</span>
+<span class="nc" id="L1387">                FileChannel fdSeek = fd.chSeek;</span>
+                try {
+                    // not a real file, can't get size...we'll have to just read and block
+<span class="nc bnc" id="L1390" title="All 2 branches missed.">                    if (fdSeek.size() &lt; 0) return true;</span>
+
+                    // if current position is less than file size, read should not block
+<span class="nc bnc" id="L1393" title="All 2 branches missed.">                    return fdSeek.position() &lt; fdSeek.size();</span>
+<span class="nc" id="L1394">                } catch (IOException ioe) {</span>
+<span class="nc" id="L1395">                    throw context.runtime.newIOErrorFromException(ioe);</span>
+                }
+            }
+        } finally {
+<span class="nc bnc" id="L1399" title="All 12 branches missed.">            if (locked) unlock();</span>
+        }
+
+        // we can't determine if it is readable
+<span class="nc" id="L1403">        return false;</span>
+
+        /*
+        switch (errno) {
+            case EINTR:
+                #if defined(ERESTART)
+            case ERESTART:
+                #endif
+                rb_thread_check_ints();
+                return TRUE;
+
+            case EAGAIN:
+                #if defined(EWOULDBLOCK) &amp;&amp; EWOULDBLOCK != EAGAIN
+            case EWOULDBLOCK:
+                #endif
+                rb_thread_wait_fd(f);
+                return TRUE;
+
+            default:
+                return FALSE;
+        }*/
+    }
+
+    // io_read_encoding
+    public Encoding readEncoding(Ruby runtime) {
+<span class="fc bfc" id="L1428" title="All 2 branches covered.">        return encs.enc != null ? encs.enc : EncodingUtils.defaultExternalEncoding(runtime);</span>
+    }
+
+    // io_input_encoding
+    public Encoding inputEncoding(Ruby runtime) {
+<span class="pc bpc" id="L1433" title="1 of 2 branches missed.">        return encs.enc2 != null ? encs.enc2 : readEncoding(runtime);</span>
+    }
+
+    // swallow
+    public boolean swallow(ThreadContext context, int term) {
+<span class="fc" id="L1438">        Ruby runtime = context.runtime;</span>
+
+<span class="fc" id="L1440">        boolean locked = lock();</span>
+        try {
+<span class="pc bpc" id="L1442" title="1 of 2 branches missed.">            if (needsReadConversion()) {</span>
+<span class="nc" id="L1443">                Encoding enc = readEncoding(runtime);</span>
+<span class="nc bnc" id="L1444" title="All 2 branches missed.">                boolean needconv = enc.minLength() != 1;</span>
+<span class="nc" id="L1445">                SET_BINARY_MODE();</span>
+<span class="nc" id="L1446">                makeReadConversion(context);</span>
+                do {
+                    int cnt;
+<span class="nc" id="L1449">                    int[] i = {0};</span>
+<span class="nc bnc" id="L1450" title="All 2 branches missed.">                    while ((cnt = READ_CHAR_PENDING_COUNT()) &gt; 0) {</span>
+<span class="nc" id="L1451">                        byte[] pBytes = READ_CHAR_PENDING_PTR();</span>
+<span class="nc" id="L1452">                        int p = READ_CHAR_PENDING_OFF();</span>
+<span class="nc" id="L1453">                        i[0] = 0;</span>
+<span class="nc bnc" id="L1454" title="All 2 branches missed.">                        if (!needconv) {</span>
+<span class="nc bnc" id="L1455" title="All 2 branches missed.">                            if (pBytes[p] != term) return true;</span>
+<span class="nc" id="L1456">                            i[0] = (int) cnt;</span>
+<span class="nc bnc" id="L1457" title="All 4 branches missed.">                            while ((--i[0] != 0) &amp;&amp; pBytes[++p] == term) ;</span>
+                        } else {
+<span class="nc" id="L1459">                            int e = p + cnt;</span>
+<span class="nc bnc" id="L1460" title="All 2 branches missed.">                            if (EncodingUtils.encAscget(pBytes, p, e, i, enc) != term) return true;</span>
+<span class="nc bnc" id="L1461" title="All 4 branches missed.">                            while ((p += i[0]) &lt; e &amp;&amp; EncodingUtils.encAscget(pBytes, p, e, i, enc) == term) ;</span>
+<span class="nc" id="L1462">                            i[0] = (int) (e - p);</span>
+                        }
+<span class="nc" id="L1464">                        shiftCbuf(context, (int) cnt - i[0], null);</span>
+<span class="nc" id="L1465">                    }</span>
+<span class="nc bnc" id="L1466" title="All 2 branches missed.">                } while (moreChar(context) != MORE_CHAR_FINISHED);</span>
+<span class="nc" id="L1467">                return false;</span>
+            }
+
+<span class="fc" id="L1470">            NEED_NEWLINE_DECORATOR_ON_READ_CHECK();</span>
+            do {
+                int cnt;
+<span class="fc bfc" id="L1473" title="All 2 branches covered.">                while ((cnt = READ_DATA_PENDING_COUNT()) &gt; 0) {</span>
+<span class="fc" id="L1474">                    byte[] buf = new byte[1024];</span>
+<span class="fc" id="L1475">                    byte[] pBytes = READ_DATA_PENDING_PTR();</span>
+<span class="fc" id="L1476">                    int p = READ_DATA_PENDING_OFF();</span>
+                    int i;
+<span class="pc bpc" id="L1478" title="1 of 2 branches missed.">                    if (cnt &gt; buf.length) cnt = buf.length;</span>
+<span class="fc bfc" id="L1479" title="All 2 branches covered.">                    if ((pBytes[p] &amp; 0xFF) != term) return true;</span>
+<span class="fc" id="L1480">                    i = (int) cnt;</span>
+<span class="pc bpc" id="L1481" title="1 of 4 branches missed.">                    while (--i != 0 &amp;&amp; (pBytes[++p] &amp; 0xFF) == term) ;</span>
+<span class="pc bpc" id="L1482" title="1 of 2 branches missed.">                    if (readBufferedData(buf, 0, cnt - i) == 0) /* must not fail */</span>
+<span class="nc" id="L1483">                        throw context.runtime.newRuntimeError(&quot;failure copying buffered IO bytes&quot;);</span>
+<span class="fc" id="L1484">                }</span>
+<span class="fc" id="L1485">                READ_CHECK(context);</span>
+<span class="fc bfc" id="L1486" title="All 2 branches covered.">            } while (fillbuf(context) == 0);</span>
+        } finally {
+<span class="pc bpc" id="L1488" title="10 of 12 branches missed.">            if (locked) unlock();</span>
+        }
+
+<span class="fc" id="L1491">        return false;</span>
+    }
+
+    // io_shift_cbuf
+    public IRubyObject shiftCbuf(ThreadContext context, int len, IRubyObject strp) {
+<span class="fc" id="L1496">        boolean locked = lock();</span>
+        try {
+<span class="fc" id="L1498">            IRubyObject str = null;</span>
+<span class="pc bpc" id="L1499" title="1 of 2 branches missed.">            if (strp != null) {</span>
+<span class="fc" id="L1500">                str = strp;</span>
+<span class="pc bpc" id="L1501" title="1 of 2 branches missed.">                if (str.isNil()) {</span>
+<span class="nc" id="L1502">                    strp = str = RubyString.newString(context.runtime, cbuf.ptr, cbuf.off, len);</span>
+                } else {
+<span class="fc" id="L1504">                    ((RubyString) str).cat(cbuf.ptr, cbuf.off, len);</span>
+                }
+<span class="fc" id="L1506">                str.setTaint(true);</span>
+<span class="fc" id="L1507">                EncodingUtils.encAssociateIndex(str, encs.enc);</span>
+            }
+<span class="fc" id="L1509">            cbuf.off += len;</span>
+<span class="fc" id="L1510">            cbuf.len -= len;</span>
+            /* xxx: set coderange */
+<span class="pc bpc" id="L1512" title="1 of 2 branches missed.">            if (cbuf.len == 0)</span>
+<span class="fc" id="L1513">                cbuf.off = 0;</span>
+<span class="nc bnc" id="L1514" title="All 2 branches missed.">            else if (cbuf.capa / 2 &lt; cbuf.off) {</span>
+<span class="nc" id="L1515">                System.arraycopy(cbuf.ptr, cbuf.off, cbuf.ptr, 0, cbuf.len);</span>
+<span class="nc" id="L1516">                cbuf.off = 0;</span>
+            }
+<span class="fc" id="L1518">            return str;</span>
+        } finally {
+<span class="pc bpc" id="L1520" title="3 of 4 branches missed.">            if (locked) unlock();</span>
+        }
+    }
+
+    // rb_io_getline_fast
+    public IRubyObject getlineFast(ThreadContext context, Encoding enc, RubyIO io) {
+<span class="fc" id="L1526">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L1527">        IRubyObject str = null;</span>
+        ByteList strByteList;
+<span class="fc" id="L1529">        int len = 0;</span>
+<span class="fc" id="L1530">        int pos = 0;</span>
+<span class="fc" id="L1531">        int cr = 0;</span>
+
+<span class="fc" id="L1533">        boolean locked = lock();</span>
+        try {
+            do {
+<span class="fc" id="L1536">                int pending = READ_DATA_PENDING_COUNT();</span>
+
+<span class="fc bfc" id="L1538" title="All 2 branches covered.">                if (pending &gt; 0) {</span>
+<span class="fc" id="L1539">                    byte[] pBytes = READ_DATA_PENDING_PTR();</span>
+<span class="fc" id="L1540">                    int p = READ_DATA_PENDING_OFF();</span>
+                    int e;
+
+<span class="fc" id="L1543">                    e = memchr(pBytes, p, '\n', pending);</span>
+<span class="fc bfc" id="L1544" title="All 2 branches covered.">                    if (e != -1) {</span>
+<span class="fc" id="L1545">                        pending = (int) (e - p + 1);</span>
+                    }
+<span class="fc bfc" id="L1547" title="All 2 branches covered.">                    if (str == null) {</span>
+<span class="fc" id="L1548">                        str = RubyString.newString(runtime, pBytes, p, pending);</span>
+<span class="fc" id="L1549">                        strByteList = ((RubyString) str).getByteList();</span>
+<span class="fc" id="L1550">                        rbuf.off += pending;</span>
+<span class="fc" id="L1551">                        rbuf.len -= pending;</span>
+                    } else {
+<span class="fc" id="L1553">                        ((RubyString) str).resize(len + pending);</span>
+<span class="fc" id="L1554">                        strByteList = ((RubyString) str).getByteList();</span>
+<span class="fc" id="L1555">                        readBufferedData(strByteList.unsafeBytes(), strByteList.begin() + len, pending);</span>
+                    }
+<span class="fc" id="L1557">                    len += pending;</span>
+<span class="pc bpc" id="L1558" title="1 of 2 branches missed.">                    if (cr != StringSupport.CR_BROKEN)</span>
+<span class="fc" id="L1559">                        pos += StringSupport.codeRangeScanRestartable(enc, strByteList.unsafeBytes(), strByteList.begin() + pos, strByteList.begin() + len, cr);</span>
+<span class="fc bfc" id="L1560" title="All 2 branches covered.">                    if (e != -1) break;</span>
+                }
+<span class="fc" id="L1562">                READ_CHECK(context);</span>
+<span class="fc bfc" id="L1563" title="All 2 branches covered.">            } while (fillbuf(context) &gt;= 0);</span>
+<span class="fc bfc" id="L1564" title="All 2 branches covered.">            if (str == null) return context.nil;</span>
+<span class="fc" id="L1565">            str = EncodingUtils.ioEncStr(runtime, str, this);</span>
+<span class="fc" id="L1566">            ((RubyString) str).setCodeRange(cr);</span>
+<span class="fc" id="L1567">            incrementLineno(runtime);</span>
+        } finally {
+<span class="pc bpc" id="L1569" title="4 of 6 branches missed.">            if (locked) unlock();</span>
+        }
+
+<span class="fc" id="L1572">        return str;</span>
+    }
+
+    public void incrementLineno(Ruby runtime) {
+<span class="fc" id="L1576">        boolean locked = lock();</span>
+        try {
+<span class="fc" id="L1578">            lineno++;</span>
+<span class="fc" id="L1579">            runtime.setCurrentLine(lineno);</span>
+<span class="fc" id="L1580">            RubyArgsFile.setCurrentLineNumber(runtime.getArgsFile(), lineno);</span>
+        } finally {
+<span class="pc bpc" id="L1582" title="3 of 4 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L1584">    }</span>
+
+    // read_all, 2014-5-13
+    public IRubyObject readAll(ThreadContext context, int siz, IRubyObject str) {
+<span class="fc" id="L1588">        Ruby runtime = context.runtime;</span>
+        int bytes;
+        int n;
+        int pos;
+        Encoding enc;
+        int cr;
+
+<span class="fc" id="L1595">        boolean locked = lock();</span>
+        try {
+<span class="fc bfc" id="L1597" title="All 2 branches covered.">            if (needsReadConversion()) {</span>
+<span class="fc" id="L1598">                SET_BINARY_MODE();</span>
+<span class="fc" id="L1599">                str = EncodingUtils.setStrBuf(runtime, str, 0);</span>
+<span class="fc" id="L1600">                makeReadConversion(context);</span>
+                while (true) {
+                    Object v;
+<span class="fc bfc" id="L1603" title="All 2 branches covered.">                    if (cbuf.len != 0) {</span>
+<span class="fc" id="L1604">                        str = shiftCbuf(context, cbuf.len, str);</span>
+                    }
+<span class="fc" id="L1606">                    v = fillCbuf(context, 0);</span>
+<span class="pc bpc" id="L1607" title="1 of 4 branches missed.">                    if (!v.equals(MORE_CHAR_SUSPENDED) &amp;&amp; !v.equals(MORE_CHAR_FINISHED)) {</span>
+<span class="nc bnc" id="L1608" title="All 2 branches missed.">                        if (cbuf.len != 0) {</span>
+<span class="nc" id="L1609">                            str = shiftCbuf(context, cbuf.len, str);</span>
+                        }
+<span class="nc" id="L1611">                        throw (RaiseException) v;</span>
+                    }
+<span class="fc bfc" id="L1613" title="All 2 branches covered.">                    if (v.equals(MORE_CHAR_FINISHED)) {</span>
+<span class="fc" id="L1614">                        clearReadConversion();</span>
+<span class="fc" id="L1615">                        return EncodingUtils.ioEncStr(runtime, str, this);</span>
+                    }
+<span class="fc" id="L1617">                }</span>
+            }
+
+<span class="fc" id="L1620">            NEED_NEWLINE_DECORATOR_ON_READ_CHECK();</span>
+<span class="fc" id="L1621">            bytes = 0;</span>
+<span class="fc" id="L1622">            pos = 0;</span>
+
+<span class="fc" id="L1624">            enc = readEncoding(runtime);</span>
+<span class="fc" id="L1625">            cr = 0;</span>
+
+<span class="pc bpc" id="L1627" title="1 of 2 branches missed.">            if (siz == 0) siz = BUFSIZ;</span>
+<span class="fc" id="L1628">            str = EncodingUtils.setStrBuf(runtime, str, siz);</span>
+            for (; ; ) {
+<span class="fc" id="L1630">                READ_CHECK(context);</span>
+<span class="fc" id="L1631">                n = fread(context, str, bytes, siz - bytes);</span>
+<span class="pc bpc" id="L1632" title="1 of 4 branches missed.">                if (n == 0 &amp;&amp; bytes == 0) {</span>
+<span class="fc" id="L1633">                    ((RubyString) str).resize(0);</span>
+<span class="fc" id="L1634">                    break;</span>
+                }
+<span class="fc" id="L1636">                bytes += n;</span>
+<span class="fc" id="L1637">                ByteList strByteList = ((RubyString) str).getByteList();</span>
+<span class="fc" id="L1638">                strByteList.setRealSize(bytes);</span>
+<span class="pc bpc" id="L1639" title="1 of 2 branches missed.">                if (cr != StringSupport.CR_BROKEN)</span>
+<span class="fc" id="L1640">                    pos += StringSupport.codeRangeScanRestartable(enc, strByteList.unsafeBytes(), strByteList.begin() + pos, strByteList.begin() + bytes, cr);</span>
+<span class="fc bfc" id="L1641" title="All 2 branches covered.">                if (bytes &lt; siz) break;</span>
+<span class="fc" id="L1642">                siz += BUFSIZ;</span>
+<span class="fc" id="L1643">                ((RubyString) str).modify(BUFSIZ);</span>
+<span class="fc" id="L1644">            }</span>
+<span class="fc" id="L1645">            str = EncodingUtils.ioEncStr(runtime, str, this);</span>
+        } finally {
+<span class="pc bpc" id="L1647" title="3 of 6 branches missed.">            if (locked) unlock();</span>
+        }
+
+<span class="fc" id="L1650">        ((RubyString)str).setCodeRange(cr);</span>
+
+<span class="fc" id="L1652">        return str;</span>
+    }
+
+    // io_bufread
+    private int ioBufread(ThreadContext context, byte[] ptrBytes, int ptr, int len) {
+<span class="fc" id="L1657">        int offset = 0;</span>
+<span class="fc" id="L1658">        int n = len;</span>
+        int c;
+
+<span class="fc" id="L1661">        boolean locked = lock();</span>
+        try {
+<span class="fc bfc" id="L1663" title="All 2 branches covered.">            if (!READ_DATA_PENDING()) {</span>
+                outer:
+<span class="pc bpc" id="L1665" title="1 of 2 branches missed.">                while (n &gt; 0) {</span>
+                    again:
+                    while (true) {
+<span class="fc" id="L1668">                        c = readInternal(context, this, fd, ptrBytes, ptr + offset, n);</span>
+<span class="fc bfc" id="L1669" title="All 2 branches covered.">                        if (c == 0) break outer;</span>
+<span class="pc bpc" id="L1670" title="1 of 2 branches missed.">                        if (c &lt; 0) {</span>
+<span class="nc bnc" id="L1671" title="All 2 branches missed.">                            if (waitReadable(context, fd))</span>
+<span class="nc" id="L1672">                                continue again;</span>
+<span class="nc" id="L1673">                            return -1;</span>
+                        }
+                        break;
+                    }
+<span class="fc" id="L1677">                    offset += c;</span>
+<span class="fc bfc" id="L1678" title="All 2 branches covered.">                    if ((n -= c) &lt;= 0) break outer;</span>
+                }
+<span class="fc" id="L1680">                return len - n;</span>
+            }
+
+<span class="pc bpc" id="L1683" title="1 of 2 branches missed.">            while (n &gt; 0) {</span>
+<span class="fc" id="L1684">                c = readBufferedData(ptrBytes, ptr + offset, n);</span>
+<span class="pc bpc" id="L1685" title="1 of 2 branches missed.">                if (c &gt; 0) {</span>
+<span class="fc" id="L1686">                    offset += c;</span>
+<span class="fc bfc" id="L1687" title="All 2 branches covered.">                    if ((n -= c) &lt;= 0) break;</span>
+                }
+<span class="fc" id="L1689">                checkClosed();</span>
+<span class="pc bpc" id="L1690" title="1 of 2 branches missed.">                if (fillbuf(context) &lt; 0) {</span>
+<span class="fc" id="L1691">                    break;</span>
+                }
+            }
+        } finally {
+<span class="pc bpc" id="L1695" title="6 of 8 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L1697">        return len - n;</span>
+    }
+
+<span class="fc" id="L1700">    private static class BufreadArg {</span>
+        byte[] strPtrBytes;
+        int strPtr;
+        int len;
+        OpenFile fptr;
+    };
+
+    static IRubyObject bufreadCall(ThreadContext context, BufreadArg p) {
+<span class="fc" id="L1708">        p.len = p.fptr.ioBufread(context, p.strPtrBytes, p.strPtr, p.len);</span>
+<span class="fc" id="L1709">        return RubyBasicObject.UNDEF;</span>
+    }
+
+    // io_fread
+    public int fread(ThreadContext context, IRubyObject str, int offset, int size) {
+        int len;
+<span class="fc" id="L1715">        BufreadArg arg = new BufreadArg();</span>
+
+<span class="fc" id="L1717">        str = EncodingUtils.setStrBuf(context.runtime, str, offset + size);</span>
+<span class="fc" id="L1718">        ByteList strByteList = ((RubyString)str).getByteList();</span>
+<span class="fc" id="L1719">        arg.strPtrBytes = strByteList.unsafeBytes();</span>
+<span class="fc" id="L1720">        arg.strPtr = strByteList.begin() + offset;</span>
+<span class="fc" id="L1721">        arg.len = size;</span>
+<span class="fc" id="L1722">        arg.fptr = this;</span>
+        // we don't support string locking
+//        rb_str_locktmp_ensure(str, bufread_call, (VALUE)&amp;arg);
+<span class="fc" id="L1725">        bufreadCall(context, arg);</span>
+<span class="fc" id="L1726">        len = arg.len;</span>
+        // should be errno
+<span class="pc bpc" id="L1728" title="1 of 2 branches missed.">        if (len &lt; 0) throw context.runtime.newErrnoFromErrno(posix.errno, pathv);</span>
+<span class="fc" id="L1729">        return len;</span>
+    }
+
+    public void ungetbyte(ThreadContext context, IRubyObject str) {
+<span class="fc" id="L1733">        int len = ((RubyString)str).size();</span>
+
+<span class="fc" id="L1735">        boolean locked = lock();</span>
+        try {
+<span class="fc bfc" id="L1737" title="All 2 branches covered.">            if (rbuf.ptr == null) {</span>
+<span class="fc" id="L1738">                int min_capa = IO_RBUF_CAPA_FOR();</span>
+<span class="fc" id="L1739">                rbuf.off = 0;</span>
+<span class="fc" id="L1740">                rbuf.len = 0;</span>
+                //            #if SIZEOF_LONG &gt; SIZEOF_INT
+                //            if (len &gt; INT_MAX)
+                //                rb_raise(rb_eIOError, &quot;ungetbyte failed&quot;);
+                //            #endif
+<span class="pc bpc" id="L1745" title="1 of 2 branches missed.">                if (len &gt; min_capa)</span>
+<span class="nc" id="L1746">                    rbuf.capa = (int) len;</span>
+                else
+<span class="fc" id="L1748">                    rbuf.capa = min_capa;</span>
+<span class="fc" id="L1749">                rbuf.ptr = new byte[rbuf.capa];</span>
+            }
+<span class="pc bpc" id="L1751" title="1 of 2 branches missed.">            if (rbuf.capa &lt; len + rbuf.len) {</span>
+<span class="nc" id="L1752">                throw context.runtime.newIOError(&quot;ungetbyte failed&quot;);</span>
+            }
+<span class="fc bfc" id="L1754" title="All 2 branches covered.">            if (rbuf.off &lt; len) {</span>
+<span class="fc" id="L1755">                System.arraycopy(rbuf.ptr, rbuf.off, rbuf.ptr, rbuf.capa - rbuf.len, rbuf.len);</span>
+<span class="fc" id="L1756">                rbuf.off = rbuf.capa - rbuf.len;</span>
+            }
+<span class="fc" id="L1758">            rbuf.off -= (int) len;</span>
+<span class="fc" id="L1759">            rbuf.len += (int) len;</span>
+<span class="fc" id="L1760">            ByteList strByteList = ((RubyString) str).getByteList();</span>
+<span class="fc" id="L1761">            System.arraycopy(strByteList.unsafeBytes(), strByteList.begin(), rbuf.ptr, rbuf.off, len);</span>
+        } finally {
+<span class="pc bpc" id="L1763" title="3 of 4 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L1765">    }</span>
+
+    // io_getc
+    public IRubyObject getc(ThreadContext context, Encoding enc) {
+<span class="fc" id="L1769">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L1770">        int r, n, cr = 0;</span>
+        IRubyObject str;
+
+<span class="fc" id="L1773">        boolean locked = lock();</span>
+        try {
+<span class="pc bpc" id="L1775" title="1 of 2 branches missed.">            if (needsReadConversion()) {</span>
+<span class="nc" id="L1776">                str = context.nil;</span>
+<span class="nc" id="L1777">                Encoding read_enc = readEncoding(runtime);</span>
+
+<span class="nc" id="L1779">                SET_BINARY_MODE();</span>
+<span class="nc" id="L1780">                makeReadConversion(context, 0);</span>
+
+                while (true) {
+<span class="nc bnc" id="L1783" title="All 2 branches missed.">                    if (cbuf.len != 0) {</span>
+<span class="nc" id="L1784">                        r = StringSupport.preciseLength(read_enc, cbuf.ptr, cbuf.off, cbuf.off + cbuf.len);</span>
+<span class="nc bnc" id="L1785" title="All 2 branches missed.">                        if (!StringSupport.MBCLEN_NEEDMORE_P(r))</span>
+<span class="nc" id="L1786">                            break;</span>
+<span class="nc bnc" id="L1787" title="All 2 branches missed.">                        if (cbuf.len == cbuf.capa) {</span>
+<span class="nc" id="L1788">                            throw runtime.newIOError(&quot;too long character&quot;);</span>
+                        }
+                    }
+
+<span class="nc bnc" id="L1792" title="All 2 branches missed.">                    if (moreChar(context) == MORE_CHAR_FINISHED) {</span>
+<span class="nc bnc" id="L1793" title="All 2 branches missed.">                        if (cbuf.len == 0) {</span>
+<span class="nc" id="L1794">                            clearReadConversion();</span>
+<span class="nc" id="L1795">                            return context.nil;</span>
+                        }
+                        /* return an unit of an incomplete character just before EOF */
+<span class="nc" id="L1798">                        str = RubyString.newString(runtime, cbuf.ptr, cbuf.off, 1, read_enc);</span>
+<span class="nc" id="L1799">                        cbuf.off += 1;</span>
+<span class="nc" id="L1800">                        cbuf.len -= 1;</span>
+<span class="nc bnc" id="L1801" title="All 2 branches missed.">                        if (cbuf.len == 0) clearReadConversion();</span>
+<span class="nc" id="L1802">                        ((RubyString) str).setCodeRange(StringSupport.CR_BROKEN);</span>
+<span class="nc" id="L1803">                        return str;</span>
+                    }
+                }
+<span class="nc bnc" id="L1806" title="All 2 branches missed.">                if (StringSupport.MBCLEN_INVALID_P(r)) {</span>
+<span class="nc" id="L1807">                    r = read_enc.length(cbuf.ptr, cbuf.off, cbuf.off + cbuf.len);</span>
+<span class="nc" id="L1808">                    str = shiftCbuf(context, r, str);</span>
+<span class="nc" id="L1809">                    cr = StringSupport.CR_BROKEN;</span>
+                } else {
+<span class="nc" id="L1811">                    str = shiftCbuf(context, StringSupport.MBCLEN_CHARFOUND_LEN(r), str);</span>
+<span class="nc" id="L1812">                    cr = StringSupport.CR_VALID;</span>
+<span class="nc bnc" id="L1813" title="All 4 branches missed.">                    if (StringSupport.MBCLEN_CHARFOUND_LEN(r) == 1 &amp;&amp; read_enc.isAsciiCompatible() &amp;&amp;</span>
+<span class="nc bnc" id="L1814" title="All 2 branches missed.">                            Encoding.isAscii(((RubyString) str).getByteList().get(0))) {</span>
+<span class="nc" id="L1815">                        cr = StringSupport.CR_7BIT;</span>
+                    }
+                }
+<span class="nc" id="L1818">                str = EncodingUtils.ioEncStr(runtime, str, this);</span>
+
+<span class="nc" id="L1820">                ((RubyString)str).setCodeRange(cr);</span>
+
+<span class="nc" id="L1822">                return str;</span>
+            }
+
+<span class="fc" id="L1825">            NEED_NEWLINE_DECORATOR_ON_READ_CHECK();</span>
+<span class="fc bfc" id="L1826" title="All 2 branches covered.">            if (fillbuf(context) &lt; 0) {</span>
+<span class="fc" id="L1827">                return context.nil;</span>
+            }
+<span class="pc bpc" id="L1829" title="1 of 4 branches missed.">            if (enc.isAsciiCompatible() &amp;&amp; Encoding.isAscii(rbuf.ptr[rbuf.off])) {</span>
+<span class="fc" id="L1830">                str = RubyString.newString(runtime, rbuf.ptr, rbuf.off, 1);</span>
+<span class="fc" id="L1831">                rbuf.off += 1;</span>
+<span class="fc" id="L1832">                rbuf.len -= 1;</span>
+<span class="fc" id="L1833">                cr = StringSupport.CR_7BIT;</span>
+            }
+            else {
+<span class="fc" id="L1836">                r = StringSupport.preciseLength(enc, rbuf.ptr, rbuf.off, rbuf.off + rbuf.len);</span>
+<span class="pc bpc" id="L1837" title="1 of 2 branches missed.">                if (StringSupport.MBCLEN_CHARFOUND_P(r) &amp;&amp;</span>
+<span class="pc bpc" id="L1838" title="1 of 2 branches missed.">                        (n = StringSupport.MBCLEN_CHARFOUND_LEN(r)) &lt;= rbuf.len) {</span>
+<span class="fc" id="L1839">                    str = RubyString.newString(runtime, rbuf.ptr, rbuf.off, n);</span>
+<span class="fc" id="L1840">                    rbuf.off += n;</span>
+<span class="fc" id="L1841">                    rbuf.len -= n;</span>
+<span class="fc" id="L1842">                    cr = StringSupport.CR_VALID;</span>
+                }
+<span class="nc bnc" id="L1844" title="All 2 branches missed.">                else if (StringSupport.MBCLEN_NEEDMORE_P(r)) {</span>
+<span class="nc" id="L1845">                    str = RubyString.newString(runtime, rbuf.ptr, rbuf.off, rbuf.len);</span>
+<span class="nc" id="L1846">                    rbuf.len = 0;</span>
+                    getc_needmore: while (true) {
+<span class="nc bnc" id="L1848" title="All 2 branches missed.">                        if (fillbuf(context) != -1) {</span>
+<span class="nc" id="L1849">                            ((RubyString)str).cat(rbuf.ptr[rbuf.off]);</span>
+<span class="nc" id="L1850">                            rbuf.off++;</span>
+<span class="nc" id="L1851">                            rbuf.len--;</span>
+<span class="nc" id="L1852">                            ByteList strByteList = ((RubyString)str).getByteList();</span>
+<span class="nc" id="L1853">                            r = StringSupport.preciseLength(enc, strByteList.unsafeBytes(), strByteList.getBegin(), strByteList.getBegin() + strByteList.length());</span>
+<span class="nc bnc" id="L1854" title="All 2 branches missed.">                            if (StringSupport.MBCLEN_NEEDMORE_P(r)) {</span>
+<span class="nc" id="L1855">                                continue getc_needmore;</span>
+                            }
+<span class="nc bnc" id="L1857" title="All 2 branches missed.">                            else if (StringSupport.MBCLEN_CHARFOUND_P(r)) {</span>
+<span class="nc" id="L1858">                                cr = StringSupport.CR_VALID;</span>
+                            }
+<span class="nc" id="L1860">                        }</span>
+                        break;
+                    }
+                }
+                else {
+<span class="nc" id="L1865">                    str = RubyString.newString(runtime, rbuf.ptr, rbuf.off, 1);</span>
+<span class="nc" id="L1866">                    rbuf.off++;</span>
+<span class="nc" id="L1867">                    rbuf.len--;</span>
+                }
+            }
+<span class="pc bpc" id="L1870" title="1 of 2 branches missed.">            if (cr == 0) cr = StringSupport.CR_BROKEN;</span>
+<span class="fc" id="L1871">            str = EncodingUtils.ioEncStr(runtime, str, this);</span>
+        } finally {
+<span class="pc bpc" id="L1873" title="10 of 12 branches missed.">            if (locked) unlock();</span>
+        }
+
+<span class="fc" id="L1876">        ((RubyString)str).setCodeRange(cr);</span>
+
+<span class="fc" id="L1878">        return str;</span>
+    }
+
+    // io_tell
+    public synchronized long tell(ThreadContext context) {
+<span class="fc" id="L1883">        flushBeforeSeek(context);</span>
+<span class="fc" id="L1884">        return posix.lseek(fd, 0, PosixShim.SEEK_CUR);</span>
+    }
+
+    public synchronized void unread(ThreadContext context) {
+<span class="pc bpc" id="L1888" title="1 of 2 branches missed.">        if (Platform.IS_WINDOWS) {</span>
+<span class="nc" id="L1889">            unreadWindows(context);</span>
+        } else {
+<span class="fc" id="L1891">            unreadUnix(context);</span>
+        }
+<span class="fc" id="L1893">    }</span>
+
+    // io_unread, UNIX version
+    private synchronized void unreadUnix(ThreadContext context) {
+        long r;
+<span class="fc" id="L1898">        boolean locked = lock();</span>
+        try {
+<span class="fc" id="L1900">            checkClosed();</span>
+<span class="pc bpc" id="L1901" title="1 of 4 branches missed.">            if (rbuf.len == 0 || (mode &amp; DUPLEX) != 0)</span>
+<span class="fc" id="L1902">                return;</span>
+            /* xxx: target position may be negative if buffer is filled by ungetc */
+<span class="fc" id="L1904">            posix.errno = null;</span>
+<span class="fc" id="L1905">            r = posix.lseek(fd, -rbuf.len, PosixShim.SEEK_CUR);</span>
+<span class="pc bpc" id="L1906" title="3 of 4 branches missed.">            if (r &lt; 0 &amp;&amp; posix.errno != null) {</span>
+<span class="nc bnc" id="L1907" title="All 2 branches missed.">                if (posix.errno == Errno.ESPIPE)</span>
+<span class="nc" id="L1908">                    mode |= DUPLEX;</span>
+<span class="nc" id="L1909">                return;</span>
+            }
+<span class="fc" id="L1911">            rbuf.off = 0;</span>
+<span class="fc" id="L1912">            rbuf.len = 0;</span>
+        } finally {
+<span class="pc bpc" id="L1914" title="6 of 8 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L1916">        return;</span>
+    }
+
+    // io_unread, Windows version
+    private void unreadWindows(ThreadContext context) {
+<span class="nc" id="L1921">        Ruby runtime = context.runtime;</span>
+        long r, pos;
+        int read_size;
+        long i;
+<span class="nc" id="L1925">        int newlines = 0;</span>
+        long extra_max;
+        byte[] pBytes;
+        int p;
+        byte[] bufBytes;
+<span class="nc" id="L1930">        int buf = 0;</span>
+
+<span class="nc" id="L1932">        boolean locked = lock();</span>
+        try {
+<span class="nc" id="L1934">            checkClosed();</span>
+<span class="nc bnc" id="L1935" title="All 4 branches missed.">            if (rbuf.len == 0 || (mode &amp; DUPLEX) != 0) {</span>
+<span class="nc" id="L1936">                return;</span>
+            }
+
+            // TODO...
+            //        if (!rb_w32_fd_is_text(fptr-&gt;fd)) {
+            //            r = lseek(fptr-&gt;fd, -fptr-&gt;rbuf.len, SEEK_CUR);
+            //            if (r &lt; 0 &amp;&amp; errno) {
+            //                if (errno == ESPIPE)
+            //                    fptr-&gt;mode |= FMODE_DUPLEX;
+            //                return;
+            //            }
+            //
+            //            fptr-&gt;rbuf.off = 0;
+            //            fptr-&gt;rbuf.len = 0;
+            //            return;
+            //        }
+
+<span class="nc" id="L1953">            pos = posix.lseek(fd, 0, PosixShim.SEEK_CUR);</span>
+<span class="nc bnc" id="L1954" title="All 4 branches missed.">            if (pos &lt; 0 &amp;&amp; posix.errno != null) {</span>
+<span class="nc bnc" id="L1955" title="All 2 branches missed.">                if (posix.errno == Errno.ESPIPE)</span>
+<span class="nc" id="L1956">                    mode |= DUPLEX;</span>
+<span class="nc" id="L1957">                return;</span>
+            }
+
+            /* add extra offset for removed '\r' in rbuf */
+<span class="nc" id="L1961">            extra_max = (long) (pos - rbuf.len);</span>
+<span class="nc" id="L1962">            pBytes = rbuf.ptr;</span>
+<span class="nc" id="L1963">            p = rbuf.off;</span>
+
+            /* if the end of rbuf is '\r', rbuf doesn't have '\r' within rbuf.len */
+<span class="nc bnc" id="L1966" title="All 2 branches missed.">            if (rbuf.ptr[rbuf.capa - 1] == '\r') {</span>
+<span class="nc" id="L1967">                newlines++;</span>
+            }
+
+<span class="nc bnc" id="L1970" title="All 2 branches missed.">            for (i = 0; i &lt; rbuf.len; i++) {</span>
+<span class="nc bnc" id="L1971" title="All 2 branches missed.">                if (pBytes[p] == '\n') newlines++;</span>
+<span class="nc bnc" id="L1972" title="All 2 branches missed.">                if (extra_max == newlines) break;</span>
+<span class="nc" id="L1973">                p++;</span>
+            }
+
+<span class="nc" id="L1976">            bufBytes = new byte[rbuf.len + newlines];</span>
+<span class="nc bnc" id="L1977" title="All 2 branches missed.">            while (newlines &gt;= 0) {</span>
+<span class="nc" id="L1978">                r = posix.lseek(fd, pos - rbuf.len - newlines, PosixShim.SEEK_SET);</span>
+<span class="nc bnc" id="L1979" title="All 2 branches missed.">                if (newlines == 0) break;</span>
+<span class="nc bnc" id="L1980" title="All 2 branches missed.">                if (r &lt; 0) {</span>
+<span class="nc" id="L1981">                    newlines--;</span>
+<span class="nc" id="L1982">                    continue;</span>
+                }
+<span class="nc" id="L1984">                read_size = readInternal(context, this, fd, bufBytes, buf, rbuf.len + newlines);</span>
+<span class="nc bnc" id="L1985" title="All 2 branches missed.">                if (read_size &lt; 0) {</span>
+<span class="nc" id="L1986">                    throw runtime.newErrnoFromErrno(posix.errno, pathv);</span>
+                }
+<span class="nc bnc" id="L1988" title="All 2 branches missed.">                if (read_size == rbuf.len) {</span>
+<span class="nc" id="L1989">                    posix.lseek(fd, r, PosixShim.SEEK_SET);</span>
+<span class="nc" id="L1990">                    break;</span>
+                } else {
+<span class="nc" id="L1992">                    newlines--;</span>
+                }
+            }
+<span class="nc" id="L1995">            rbuf.off = 0;</span>
+<span class="nc" id="L1996">            rbuf.len = 0;</span>
+        } finally {
+<span class="nc bnc" id="L1998" title="All 8 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="nc" id="L2000">        return;</span>
+    }
+
+    // io_fwrite
+    public long fwrite(ThreadContext context, IRubyObject str, boolean nosync) {
+        // TODO: Windows
+//        #ifdef _WIN32
+//        if (fptr-&gt;mode &amp; FMODE_TTY) {
+//            long len = rb_w32_write_console(str, fptr-&gt;fd);
+//            if (len &gt; 0) return len;
+//        }
+//        #endif
+<span class="fc" id="L2012">        str = doWriteconv(context, str);</span>
+<span class="fc" id="L2013">        ByteList strByteList = ((RubyString)str).getByteList();</span>
+<span class="fc" id="L2014">        return binwrite(context, str, strByteList.unsafeBytes(), strByteList.begin(), strByteList.length(), nosync);</span>
+    }
+
+    // do_writeconv
+    public IRubyObject doWriteconv(ThreadContext context, IRubyObject str)
+    {
+<span class="fc" id="L2020">        boolean locked = lock();</span>
+        try {
+<span class="fc bfc" id="L2022" title="All 2 branches covered.">            if (needsWriteConversion(context)) {</span>
+<span class="fc" id="L2023">                IRubyObject common_encoding = context.nil;</span>
+<span class="fc" id="L2024">                SET_BINARY_MODE();</span>
+
+<span class="fc" id="L2026">                makeWriteConversion(context);</span>
+
+<span class="fc bfc" id="L2028" title="All 2 branches covered.">                if (writeconv != null) {</span>
+<span class="fc" id="L2029">                    int fmode = mode;</span>
+<span class="pc bpc" id="L2030" title="1 of 2 branches missed.">                    if (!writeconvAsciicompat.isNil())</span>
+<span class="fc" id="L2031">                        common_encoding = writeconvAsciicompat;</span>
+<span class="nc bnc" id="L2032" title="All 4 branches missed.">                    else if (EncodingUtils.MODE_BTMODE(fmode, EncodingUtils.DEFAULT_TEXTMODE, 0, 1) != 0 &amp;&amp; !((RubyString) str).getEncoding().isAsciiCompatible()) {</span>
+<span class="nc" id="L2033">                        throw context.runtime.newArgumentError(&quot;ASCII incompatible string written for text mode IO without encoding conversion: %s&quot; + ((RubyString) str).getEncoding().toString());</span>
+                    }
+<span class="fc" id="L2035">                } else {</span>
+<span class="fc bfc" id="L2036" title="All 2 branches covered.">                    if (encs.enc2 != null)</span>
+<span class="fc" id="L2037">                        common_encoding = context.runtime.getEncodingService().convertEncodingToRubyEncoding(encs.enc2);</span>
+<span class="pc bpc" id="L2038" title="1 of 2 branches missed.">                    else if (encs.enc != EncodingUtils.ascii8bitEncoding(context.runtime))</span>
+<span class="fc" id="L2039">                        common_encoding = context.runtime.getEncodingService().convertEncodingToRubyEncoding(encs.enc);</span>
+                }
+
+<span class="pc bpc" id="L2042" title="1 of 2 branches missed.">                if (!common_encoding.isNil()) {</span>
+<span class="fc" id="L2043">                    str = EncodingUtils.rbStrEncode(context, str, common_encoding, writeconvPreEcflags, writeconvPreEcopts);</span>
+                }
+
+<span class="fc bfc" id="L2046" title="All 2 branches covered.">                if (writeconv != null) {</span>
+<span class="fc" id="L2047">                    ((RubyString) str).setValue(</span>
+<span class="fc" id="L2048">                            EncodingUtils.econvStrConvert(context, writeconv, ((RubyString) str).getByteList(), EConvFlags.PARTIAL_INPUT));</span>
+                }
+            }
+            //        #if defined(RUBY_TEST_CRLF_ENVIRONMENT) || defined(_WIN32)
+            //        #define fmode (fptr-&gt;mode)
+            //        else if (MODE_BTMODE(DEFAULT_TEXTMODE,0,1)) {
+            //        if ((fptr-&gt;mode &amp; FMODE_READABLE) &amp;&amp;
+            //                !(fptr-&gt;encs.ecflags &amp; ECONV_NEWLINE_DECORATOR_MASK)) {
+            //            setmode(fptr-&gt;fd, O_BINARY);
+            //        }
+            //        else {
+            //            setmode(fptr-&gt;fd, O_TEXT);
+            //        }
+            //        if (!rb_enc_asciicompat(rb_enc_get(str))) {
+            //            rb_raise(rb_eArgError, &quot;ASCII incompatible string written for text mode IO without encoding conversion: %s&quot;,
+            //                    rb_enc_name(rb_enc_get(str)));
+            //        }
+            //    }
+            //        #undef fmode
+            //        #endif
+        } finally {
+<span class="pc bpc" id="L2069" title="2 of 4 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L2071">        return str;</span>
+    }
+
+<span class="fc" id="L2074">    private static class BinwriteArg {</span>
+        OpenFile fptr;
+        IRubyObject str;
+        byte[] ptrBytes;
+        int ptr;
+        int length;
+    }
+
+    // io_binwrite
+    public long binwrite(ThreadContext context, IRubyObject str, byte[] ptrBytes, int ptr, int len, boolean nosync) {
+<span class="fc" id="L2084">        int n, r, offset = 0;</span>
+
+        /* don't write anything if current thread has a pending interrupt. */
+<span class="fc" id="L2087">        context.pollThreadEvents();</span>
+
+<span class="fc" id="L2089">        boolean locked = lock();</span>
+        try {
+<span class="pc bpc" id="L2091" title="1 of 2 branches missed.">            if ((n = len) &lt;= 0) return n;</span>
+<span class="fc bfc" id="L2092" title="All 6 branches covered.">            if (wbuf.ptr == null &amp;&amp; !(!nosync &amp;&amp; (mode &amp; SYNC) != 0)) {</span>
+<span class="fc" id="L2093">                wbuf.off = 0;</span>
+<span class="fc" id="L2094">                wbuf.len = 0;</span>
+<span class="fc" id="L2095">                wbuf.capa = IO_WBUF_CAPA_MIN;</span>
+<span class="fc" id="L2096">                wbuf.ptr = new byte[wbuf.capa];</span>
+                //            write_lock = new ReentrantReadWriteLock();
+                // ???
+                //            rb_mutex_allow_trap(fptr-&gt;write_lock, 1);
+            }
+
+            // Translation: If we are not nosync (if we can do sync write) and sync or tty mode are set, OR
+            //              if the write buffer does not have enough capacity to store all incoming data...unbuffered write
+<span class="pc bpc" id="L2104" title="1 of 8 branches missed.">            if ((!nosync &amp;&amp; (mode &amp; (SYNC | TTY)) != 0) ||</span>
+                    (wbuf.ptr != null &amp;&amp; wbuf.capa &lt;= wbuf.len + len)) {
+<span class="fc" id="L2106">                BinwriteArg arg = new BinwriteArg();</span>
+
+<span class="pc bpc" id="L2108" title="3 of 4 branches missed.">                if (wbuf.len != 0 &amp;&amp; wbuf.len + len &lt;= wbuf.capa) {</span>
+<span class="nc bnc" id="L2109" title="All 2 branches missed.">                    if (wbuf.capa &lt; wbuf.off + wbuf.len + len) {</span>
+<span class="nc" id="L2110">                        System.arraycopy(wbuf.ptr, wbuf.off, wbuf.ptr, 0, wbuf.len);</span>
+<span class="nc" id="L2111">                        wbuf.off = 0;</span>
+                    }
+<span class="nc" id="L2113">                    System.arraycopy(ptrBytes, ptr + offset, wbuf.ptr, wbuf.off + wbuf.len, len);</span>
+<span class="nc" id="L2114">                    wbuf.len += (int) len;</span>
+<span class="nc" id="L2115">                    n = 0;</span>
+                }
+<span class="pc bpc" id="L2117" title="1 of 2 branches missed.">                if (io_fflush(context) &lt; 0)</span>
+<span class="nc" id="L2118">                    return -1L;</span>
+<span class="pc bpc" id="L2119" title="1 of 2 branches missed.">                if (n == 0)</span>
+<span class="nc" id="L2120">                    return len;</span>
+
+<span class="fc" id="L2122">                checkClosed();</span>
+<span class="fc" id="L2123">                arg.fptr = this;</span>
+<span class="fc" id="L2124">                arg.str = str;</span>
+                retry:
+                while (true) {
+<span class="fc" id="L2127">                    arg.ptrBytes = ptrBytes;</span>
+<span class="fc" id="L2128">                    arg.ptr = ptr + offset;</span>
+<span class="fc" id="L2129">                    arg.length = n;</span>
+<span class="pc bpc" id="L2130" title="1 of 2 branches missed.">                    if (write_lock != null) {</span>
+                        // FIXME: not interruptible by Ruby
+                        //                r = rb_mutex_synchronize(fptr-&gt;write_lock, io_binwrite_string, (VALUE)&amp;arg);
+<span class="nc" id="L2133">                        write_lock.writeLock().lock();</span>
+                        try {
+<span class="nc" id="L2135">                            r = binwriteString(context, arg);</span>
+                        } finally {
+<span class="nc" id="L2137">                            write_lock.writeLock().unlock();</span>
+<span class="nc" id="L2138">                        }</span>
+                    } else {
+<span class="fc" id="L2140">                        int l = writableLength(n);</span>
+<span class="fc" id="L2141">                        r = writeInternal(context, this, fd, ptrBytes, ptr + offset, l);</span>
+                    }
+                    /* xxx: other threads may modify given string. */
+<span class="pc bpc" id="L2144" title="1 of 2 branches missed.">                    if (r == n) return len;</span>
+<span class="nc bnc" id="L2145" title="All 2 branches missed.">                    if (0 &lt;= r) {</span>
+<span class="nc" id="L2146">                        offset += r;</span>
+<span class="nc" id="L2147">                        n -= r;</span>
+<span class="nc" id="L2148">                        posix.errno = Errno.EAGAIN;</span>
+                    }
+<span class="nc bnc" id="L2150" title="All 2 branches missed.">                    if (waitWritable(context)) {</span>
+<span class="nc" id="L2151">                        checkClosed();</span>
+<span class="nc bnc" id="L2152" title="All 2 branches missed.">                        if (offset &lt; len)</span>
+<span class="nc" id="L2153">                            continue retry;</span>
+                    }
+<span class="nc" id="L2155">                    return -1L;</span>
+                }
+            }
+
+<span class="pc bpc" id="L2159" title="1 of 2 branches missed.">            if (wbuf.off != 0) {</span>
+<span class="nc bnc" id="L2160" title="All 2 branches missed.">                if (wbuf.len != 0)</span>
+<span class="nc" id="L2161">                    System.arraycopy(wbuf.ptr, wbuf.off, wbuf.ptr, 0, wbuf.len);</span>
+<span class="nc" id="L2162">                wbuf.off = 0;</span>
+            }
+<span class="fc" id="L2164">            System.arraycopy(ptrBytes, ptr + offset, wbuf.ptr, wbuf.off + wbuf.len, len);</span>
+<span class="fc" id="L2165">            wbuf.len += (int) len;</span>
+        } finally {
+<span class="pc bpc" id="L2167" title="12 of 14 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L2169">        return len;</span>
+    }
+
+    // io_binwrite_string
+    static int binwriteString(ThreadContext context, BinwriteArg arg) {
+<span class="nc" id="L2174">        BinwriteArg p = arg;</span>
+<span class="nc" id="L2175">        int l = p.fptr.writableLength(p.length);</span>
+<span class="nc" id="L2176">        return p.fptr.writeInternal2(p.fptr.fd, p.ptrBytes, p.ptr, l);</span>
+    }
+
+    public static class InternalWriteStruct {
+<span class="fc" id="L2180">        InternalWriteStruct(OpenFile fptr, ChannelFD fd, byte[] bufBytes, int buf, int count) {</span>
+<span class="fc" id="L2181">            this.fptr = fptr;</span>
+<span class="fc" id="L2182">            this.fd = fd;</span>
+<span class="fc" id="L2183">            this.bufBytes = bufBytes;</span>
+<span class="fc" id="L2184">            this.buf = buf;</span>
+<span class="fc" id="L2185">            this.capa = count;</span>
+<span class="fc" id="L2186">        }</span>
+
+        public final OpenFile fptr;
+        public final ChannelFD fd;
+        public final byte[] bufBytes;
+        public final int buf;
+        public int capa;
+    }
+
+    // rb_write_internal
+    public static int writeInternal(ThreadContext context, OpenFile fptr, ChannelFD fd, byte[] bufBytes, int buf, int count) {
+<span class="fc" id="L2197">        InternalWriteStruct iis = new InternalWriteStruct(fptr, fd, bufBytes, buf, count);</span>
+
+        try {
+<span class="fc" id="L2200">            return context.getThread().executeTask(context, iis, writeTask);</span>
+<span class="nc" id="L2201">        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L2202">            throw context.runtime.newConcurrencyError(&quot;IO operation interrupted&quot;);</span>
+        }
+    }
+
+    // rb_write_internal2 (no GVL version...we just don't use executeTask as above.
+    int writeInternal2(ChannelFD fd, byte[] bufBytes, int buf, int count) {
+<span class="nc" id="L2208">        return posix.write(fd, bufBytes, buf, count, nonblock);</span>
+    }
+
+    public ChannelFD fd() {
+<span class="fc" id="L2212">        return fd;</span>
+    }
+
+    public Channel channel() {
+<span class="fc" id="L2216">        return fd.ch;</span>
+    }
+
+    public ReadableByteChannel readChannel() {
+<span class="fc" id="L2220">        return fd.chRead;</span>
+    }
+
+    public WritableByteChannel writeChannel() {
+<span class="fc" id="L2224">        return fd.chWrite;</span>
+    }
+
+    public FileChannel seekChannel() {
+<span class="nc" id="L2228">        return fd.chSeek;</span>
+    }
+
+    public SelectableChannel selectChannel() {
+<span class="nc" id="L2232">        return fd.chSelect;</span>
+    }
+
+    public FileChannel fileChannel() {
+<span class="fc" id="L2236">        return fd.chFile;</span>
+    }
+
+    public SocketChannel socketChannel() {
+<span class="fc" id="L2240">        return fd.chSock;</span>
+    }
+
+    IRubyObject finishWriteconv(ThreadContext context, boolean noalloc) {
+        byte[] dsBytes;
+        int ds, de;
+<span class="fc" id="L2246">        Ptr dpPtr = new Ptr();</span>
+        EConvResult res;
+
+<span class="fc" id="L2249">        boolean locked = lock();</span>
+        try {
+<span class="pc bpc" id="L2251" title="1 of 2 branches missed.">            if (wbuf.ptr == null) {</span>
+<span class="nc" id="L2252">                byte[] buf = new byte[1024];</span>
+                long r;
+
+<span class="nc" id="L2255">                res = EConvResult.DestinationBufferFull;</span>
+<span class="nc bnc" id="L2256" title="All 2 branches missed.">                while (res == EConvResult.DestinationBufferFull) {</span>
+<span class="nc" id="L2257">                    dsBytes = buf;</span>
+<span class="nc" id="L2258">                    ds = dpPtr.p = 0;</span>
+<span class="nc" id="L2259">                    de = buf.length;</span>
+<span class="nc" id="L2260">                    dpPtr.p = 0;</span>
+<span class="nc" id="L2261">                    res = writeconv.convert(null, null, 0, dsBytes, dpPtr, de, 0);</span>
+                    outer:
+<span class="nc bnc" id="L2263" title="All 2 branches missed.">                    while ((dpPtr.p - ds) != 0) {</span>
+                        retry:
+                        while (true) {
+<span class="nc bnc" id="L2266" title="All 4 branches missed.">                            if (write_lock != null &amp;&amp; write_lock.isWriteLockedByCurrentThread())</span>
+<span class="nc" id="L2267">                                r = writeInternal2(fd, dsBytes, ds, dpPtr.p - ds);</span>
+                            else
+<span class="nc" id="L2269">                                r = writeInternal(runtime.getCurrentContext(), this, fd, dsBytes, ds, dpPtr.p - ds);</span>
+<span class="nc bnc" id="L2270" title="All 2 branches missed.">                            if (r == dpPtr.p - ds)</span>
+<span class="nc" id="L2271">                                break outer;</span>
+<span class="nc bnc" id="L2272" title="All 2 branches missed.">                            if (0 &lt;= r) {</span>
+<span class="nc" id="L2273">                                ds += r;</span>
+                            }
+<span class="nc bnc" id="L2275" title="All 2 branches missed.">                            if (waitWritable(context)) {</span>
+<span class="nc bnc" id="L2276" title="All 2 branches missed.">                                if (fd == null)</span>
+<span class="nc bnc" id="L2277" title="All 2 branches missed.">                                    return noalloc ? runtime.getTrue() : runtime.newIOError(RubyIO.CLOSED_STREAM_MSG).getException();</span>
+                                continue retry;
+                            }
+                            break retry;
+                        }
+<span class="nc bnc" id="L2282" title="All 4 branches missed.">                        return noalloc ? runtime.getTrue() : RubyFixnum.newFixnum(runtime, (posix.errno == null) ? 0 : posix.errno.longValue());</span>
+                    }
+<span class="nc bnc" id="L2284" title="All 6 branches missed.">                    if (res == EConvResult.InvalidByteSequence ||</span>
+                            res == EConvResult.IncompleteInput ||
+                            res == EConvResult.UndefinedConversion) {
+<span class="nc bnc" id="L2287" title="All 2 branches missed.">                        return noalloc ? runtime.getTrue() : EncodingUtils.makeEconvException(runtime, writeconv).getException();</span>
+                    }
+                }
+
+<span class="nc" id="L2291">                return runtime.getNil();</span>
+            }
+
+<span class="fc" id="L2294">            res = EConvResult.DestinationBufferFull;</span>
+<span class="fc bfc" id="L2295" title="All 2 branches covered.">            while (res == EConvResult.DestinationBufferFull) {</span>
+<span class="pc bpc" id="L2296" title="1 of 2 branches missed.">                if (wbuf.len == wbuf.capa) {</span>
+<span class="nc bnc" id="L2297" title="All 2 branches missed.">                    if (io_fflush(context) &lt; 0)</span>
+<span class="nc bnc" id="L2298" title="All 4 branches missed.">                        return noalloc ? runtime.getTrue() : runtime.newFixnum(posix.errno == null ? 0 : posix.errno.longValue());</span>
+                }
+
+<span class="fc" id="L2301">                dsBytes = wbuf.ptr;</span>
+<span class="fc" id="L2302">                ds = dpPtr.p = wbuf.off + wbuf.len;</span>
+<span class="fc" id="L2303">                de = wbuf.capa;</span>
+<span class="fc" id="L2304">                res = writeconv.convert(null, null, 0, dsBytes, dpPtr, de, 0);</span>
+<span class="fc" id="L2305">                wbuf.len += (int) (dpPtr.p - ds);</span>
+<span class="pc bpc" id="L2306" title="3 of 6 branches missed.">                if (res == EConvResult.InvalidByteSequence ||</span>
+                        res == EConvResult.IncompleteInput ||
+                        res == EConvResult.UndefinedConversion) {
+<span class="nc bnc" id="L2309" title="All 2 branches missed.">                    return noalloc ? runtime.getTrue() : EncodingUtils.makeEconvException(runtime, writeconv).getException();</span>
+                }
+            }
+        } finally {
+<span class="pc bpc" id="L2313" title="15 of 16 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L2315">        return runtime.getNil();</span>
+    }
+
+    // rb_io_set_nonblock
+    public void setNonblock(Ruby runtime) {
+<span class="fc" id="L2320">        setBlocking(runtime, false);</span>
+<span class="fc" id="L2321">    }</span>
+
+    public void setBlock(Ruby runtime) {
+<span class="fc" id="L2324">        setBlocking(runtime, true);</span>
+<span class="fc" id="L2325">    }</span>
+
+    public void setBlocking(Ruby runtime, boolean blocking) {
+<span class="fc" id="L2328">        boolean locked = lock();</span>
+        try {
+            // Not all NIO channels are non-blocking, so we need to maintain this flag
+            // and make those channels act like non-blocking
+<span class="fc bfc" id="L2332" title="All 2 branches covered.">            nonblock = !blocking;</span>
+
+<span class="fc" id="L2334">            ChannelFD fd = this.fd;</span>
+
+<span class="fc" id="L2336">            checkClosed();</span>
+
+<span class="fc bfc" id="L2338" title="All 2 branches covered.">            if (fd.chSelect != null) {</span>
+                try {
+<span class="fc" id="L2340">                    fd.chSelect.configureBlocking(blocking);</span>
+<span class="fc" id="L2341">                    return;</span>
+<span class="nc" id="L2342">                } catch (IOException ioe) {</span>
+<span class="nc" id="L2343">                    throw runtime.newIOErrorFromException(ioe);</span>
+                }
+            }
+        } finally {
+<span class="pc bpc" id="L2347" title="4 of 6 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L2349">    }</span>
+
+    public boolean isBlocking() {
+<span class="nc bnc" id="L2352" title="All 2 branches missed.">        return !nonblock;</span>
+    }
+
+    // MRI: check_tty
+    public void checkTTY() {
+        // TODO: native descriptors? Is this only used for stdio?
+<span class="fc bfc" id="L2358" title="All 2 branches covered.">        if (stdio_file != null) {</span>
+<span class="fc" id="L2359">            boolean locked = lock();</span>
+            try {
+<span class="fc" id="L2361">                mode |= TTY | DUPLEX;</span>
+            } finally {
+<span class="pc bpc" id="L2363" title="3 of 4 branches missed.">                if (locked) unlock();</span>
+            }
+        }
+<span class="fc" id="L2366">    }</span>
+
+    public boolean isBOM() {
+<span class="pc bpc" id="L2369" title="1 of 2 branches missed.">        return (mode &amp; SETENC_BY_BOM) != 0;</span>
+    }
+
+    public void setBOM(boolean bom) {
+<span class="nc" id="L2373">        boolean locked = lock();</span>
+        try {
+<span class="nc bnc" id="L2375" title="All 2 branches missed.">            if (bom) {</span>
+<span class="nc" id="L2376">                mode |= SETENC_BY_BOM;</span>
+            } else {
+<span class="nc" id="L2378">                mode &amp;= ~SETENC_BY_BOM;</span>
+            }
+        } finally {
+<span class="nc bnc" id="L2381" title="All 4 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="nc" id="L2383">    }</span>
+
+    public boolean isStdio() {
+<span class="fc bfc" id="L2386" title="All 2 branches covered.">        return stdio_file != null;</span>
+    }
+
+    public int readPending() {
+<span class="nc" id="L2390">        lock();</span>
+        try {
+<span class="nc bnc" id="L2392" title="All 2 branches missed.">            if (READ_CHAR_PENDING()) return 1;</span>
+<span class="nc" id="L2393">            return READ_DATA_PENDING_COUNT();</span>
+        } finally {
+<span class="nc" id="L2395">            unlock();</span>
+        }
+    }
+
+    @Deprecated
+    public static int getFModeFromString(String modesString) throws InvalidValueException {
+<span class="nc" id="L2401">        int fmode = 0;</span>
+<span class="nc" id="L2402">        int length = modesString.length();</span>
+
+<span class="nc bnc" id="L2404" title="All 2 branches missed.">        if (length == 0) {</span>
+<span class="nc" id="L2405">            throw new InvalidValueException();</span>
+        }
+
+<span class="nc bnc" id="L2408" title="All 4 branches missed.">        switch (modesString.charAt(0)) {</span>
+            case 'r' :
+<span class="nc" id="L2410">                fmode |= READABLE;</span>
+<span class="nc" id="L2411">                break;</span>
+            case 'w' :
+<span class="nc" id="L2413">                fmode |= WRITABLE | TRUNC | CREATE;</span>
+<span class="nc" id="L2414">                break;</span>
+            case 'a' :
+<span class="nc" id="L2416">                fmode |= WRITABLE | APPEND | CREATE;</span>
+<span class="nc" id="L2417">                break;</span>
+            default :
+<span class="nc" id="L2419">                throw new InvalidValueException();</span>
+        }
+
+<span class="nc bnc" id="L2422" title="All 2 branches missed.">        ModifierLoop: for (int n = 1; n &lt; length; n++) {</span>
+<span class="nc bnc" id="L2423" title="All 5 branches missed.">            switch (modesString.charAt(n)) {</span>
+                case 'b':
+<span class="nc" id="L2425">                    fmode |= BINMODE;</span>
+<span class="nc" id="L2426">                    break;</span>
+                case 't' :
+<span class="nc" id="L2428">                    fmode |= TEXTMODE;</span>
+<span class="nc" id="L2429">                    break;</span>
+                case '+':
+<span class="nc" id="L2431">                    fmode |= READWRITE;</span>
+<span class="nc" id="L2432">                    break;</span>
+                case ':':
+<span class="nc" id="L2434">                    break ModifierLoop;</span>
+                default:
+<span class="nc" id="L2436">                    throw new InvalidValueException();</span>
+            }
+        }
+
+<span class="nc" id="L2440">        return fmode;</span>
+    }
+
+    public int getFileno() {
+<span class="fc" id="L2444">        int fileno = fd.realFileno;</span>
+<span class="pc bpc" id="L2445" title="1 of 2 branches missed.">        if (fileno != -1) return fileno;</span>
+<span class="nc" id="L2446">        return fd.fakeFileno;</span>
+    }
+
+    // rb_thread_flock
+    public int threadFlock(ThreadContext context, final int lockMode) {
+//        #ifdef __CYGWIN__
+//        int old_errno = errno;
+//        #endif
+<span class="fc" id="L2454">        int ret = 0;</span>
+        try {
+<span class="fc" id="L2456">            ret = context.getThread().executeTask(context, this, new RubyThread.Task&lt;OpenFile, Integer&gt;() {</span>
+                @Override
+                public Integer run(ThreadContext context, OpenFile openFile) throws InterruptedException {
+<span class="fc" id="L2459">                    return posix.flock(fd, lockMode);</span>
+                }
+
+                @Override
+                public void wakeup(RubyThread thread, OpenFile openFile) {
+                    // unlikely to help a native downcall, but we'll try it
+<span class="nc" id="L2465">                    thread.getNativeThread().interrupt();</span>
+<span class="nc" id="L2466">                }</span>
+            });
+<span class="nc" id="L2468">        } catch (InterruptedException ie) {</span>
+            // ignore?
+<span class="fc" id="L2470">        }</span>
+
+//        #ifdef __CYGWIN__
+//        if (GetLastError() == ERROR_NOT_LOCKED) {
+//            ret = 0;
+//            errno = old_errno;
+//        }
+//        #endif
+<span class="fc" id="L2478">        return ret;</span>
+    }
+
+    public Errno errno() {
+<span class="fc" id="L2482">        return posix.errno;</span>
+    }
+
+    public void errno(Errno newErrno) {
+<span class="fc" id="L2486">        posix.errno = newErrno;</span>
+<span class="fc" id="L2487">    }</span>
+
+    public static int cloexecDup2(PosixShim posix, ChannelFD oldfd, ChannelFD newfd) {
+        int ret;
+        /* When oldfd == newfd, dup2 succeeds but dup3 fails with EINVAL.
+         * rb_cloexec_dup2 succeeds as dup2.  */
+<span class="pc bpc" id="L2493" title="1 of 2 branches missed.">        if (oldfd == newfd) {</span>
+<span class="nc" id="L2494">            ret = 0;</span>
+        }
+        else {
+//            #if defined(HAVE_DUP3) &amp;&amp; defined(O_CLOEXEC)
+//            static int try_dup3 = 1;
+//            if (2 &lt; newfd &amp;&amp; try_dup3) {
+//                ret = dup3(oldfd, newfd, O_CLOEXEC);
+//                if (ret != -1)
+//                    return ret;
+//            /* dup3 is available since Linux 2.6.27, glibc 2.9. */
+//                if (errno == ENOSYS) {
+//                    try_dup3 = 0;
+//                    ret = dup2(oldfd, newfd);
+//                }
+//            }
+//            else {
+//                ret = dup2(oldfd, newfd);
+//            }
+//            #else
+<span class="fc" id="L2513">            ret = posix.dup2(oldfd, newfd);</span>
+//            #endif
+<span class="pc bpc" id="L2515" title="1 of 2 branches missed.">            if (ret == -1) return -1;</span>
+        }
+        // TODO?
+//        rb_maygvl_fd_fix_cloexec(ret);
+<span class="fc" id="L2519">        return ret;</span>
+    }
+
+    /**
+     * Add a thread to the list of blocking threads for this IO.
+     *
+     * @param thread A thread blocking on this IO
+     */
+    public void addBlockingThread(RubyThread thread) {
+<span class="fc" id="L2528">        boolean locked = lock();</span>
+        try {
+<span class="fc bfc" id="L2530" title="All 2 branches covered.">            if (blockingThreads == null) {</span>
+<span class="fc" id="L2531">                blockingThreads = new ArrayList&lt;RubyThread&gt;(1);</span>
+            }
+<span class="fc" id="L2533">            blockingThreads.add(thread);</span>
+        } finally {
+<span class="pc bpc" id="L2535" title="2 of 4 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L2537">    }</span>
+
+    /**
+     * Remove a thread from the list of blocking threads for this IO.
+     *
+     * @param thread A thread blocking on this IO
+     */
+    public synchronized void removeBlockingThread(RubyThread thread) {
+<span class="fc" id="L2545">        boolean locked = lock();</span>
+        try {
+<span class="pc bpc" id="L2547" title="1 of 2 branches missed.">            if (blockingThreads == null) {</span>
+<span class="nc" id="L2548">                return;</span>
+            }
+<span class="fc bfc" id="L2550" title="All 2 branches covered.">            for (int i = 0; i &lt; blockingThreads.size(); i++) {</span>
+<span class="pc bpc" id="L2551" title="1 of 2 branches missed.">                if (blockingThreads.get(i) == thread) {</span>
+                    // not using remove(Object) here to avoid the equals() call
+<span class="fc" id="L2553">                    blockingThreads.remove(i);</span>
+                }
+            }
+        } finally {
+<span class="pc bpc" id="L2557" title="4 of 6 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L2559">    }</span>
+
+    /**
+     * Fire an IOError in all threads blocking on this IO object
+     */
+    public void interruptBlockingThreads() {
+<span class="fc" id="L2565">        boolean locked = lock();</span>
+        try {
+<span class="fc bfc" id="L2567" title="All 2 branches covered.">            if (blockingThreads == null) {</span>
+<span class="fc" id="L2568">                return;</span>
+            }
+<span class="pc bpc" id="L2570" title="1 of 2 branches missed.">            for (int i = 0; i &lt; blockingThreads.size(); i++) {</span>
+<span class="nc" id="L2571">                RubyThread thread = blockingThreads.get(i);</span>
+
+                // raise will also wake the thread from selection
+<span class="nc" id="L2574">                thread.raise(new IRubyObject[]{runtime.newIOError(&quot;stream closed&quot;).getException()}, Block.NULL_BLOCK);</span>
+            }
+        } finally {
+<span class="pc bpc" id="L2577" title="4 of 6 branches missed.">            if (locked) unlock();</span>
+        }
+<span class="fc" id="L2579">    }</span>
+
+    public void SET_BINARY_MODE() {
+        // FIXME: this only does something if we have O_BINARY at open(2) level
+<span class="fc" id="L2583">    }</span>
+
+    private void SET_TEXT_MODE() {
+        // FIXME: this only does something if we have O_TEXT at open(2) level
+<span class="nc" id="L2587">    }</span>
+
+    public int remainSize() {
+        FileStat st;
+<span class="fc" id="L2591">        int siz = READ_DATA_PENDING_COUNT();</span>
+        long pos;
+
+        // MRI does all this presumably to read more of the file right away, but
+        // I believe the logic that uses this is ok with just pending read plus buf size.
+
+//        if (fstat(fptr -&gt; fd, &amp; st)==0 &amp;&amp; S_ISREG(st.st_mode))
+//        {
+//            if (io_fflush(fptr) &lt; 0)
+//                rb_sys_fail(0);
+//            pos = lseek(fptr -&gt; fd, 0, SEEK_CUR);
+//            if (st.st_size &gt;= pos &amp;&amp; pos &gt;= 0) {
+//                siz += st.st_size - pos;
+//                if (siz &gt; LONG_MAX) {
+//                    rb_raise(rb_eIOError, &quot;file too big for single read&quot;);
+//                }
+//            }
+//        }
+//        else {
+<span class="fc" id="L2610">            siz += BUFSIZ;</span>
+//        }
+<span class="fc" id="L2612">        return siz;</span>
+    }
+
+    public boolean lock() {
+<span class="fc bfc" id="L2616" title="All 2 branches covered.">        if (lock.isHeldByCurrentThread()) {</span>
+<span class="fc" id="L2617">            return false;</span>
+        } else {
+<span class="fc" id="L2619">            lock.lock();</span>
+<span class="fc" id="L2620">            return true;</span>
+        }
+    }
+
+    public void unlock() {
+<span class="pc bpc" id="L2625" title="3 of 4 branches missed.">        assert lock.isHeldByCurrentThread();</span>
+
+<span class="fc" id="L2627">        lock.unlock();</span>
+<span class="fc" id="L2628">    }</span>
+
+    public boolean lockedByMe() {
+<span class="nc" id="L2631">        return lock.isHeldByCurrentThread();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

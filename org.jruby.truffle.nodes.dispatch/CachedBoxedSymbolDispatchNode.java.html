@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>CachedBoxedSymbolDispatchNode.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.nodes.dispatch</a> &gt; <span class="el_source">CachedBoxedSymbolDispatchNode.java</span></div><h1>CachedBoxedSymbolDispatchNode.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2014 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.nodes.dispatch;
+
+import com.oracle.truffle.api.Assumption;
+import com.oracle.truffle.api.CompilerAsserts;
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.Truffle;
+import com.oracle.truffle.api.dsl.Fallback;
+import com.oracle.truffle.api.dsl.Specialization;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.nodes.DirectCallNode;
+import com.oracle.truffle.api.nodes.IndirectCallNode;
+import com.oracle.truffle.api.nodes.InvalidAssumptionException;
+import org.jruby.truffle.runtime.LexicalScope;
+import org.jruby.truffle.runtime.RubyArguments;
+import org.jruby.truffle.runtime.RubyContext;
+import org.jruby.truffle.runtime.core.RubyProc;
+import org.jruby.truffle.runtime.core.RubySymbol;
+import org.jruby.truffle.runtime.methods.RubyMethod;
+
+public abstract class CachedBoxedSymbolDispatchNode extends CachedDispatchNode {
+
+    private final Assumption unmodifiedAssumption;
+
+    private final Object value;
+
+    private final RubyMethod method;
+    @Child protected DirectCallNode callNode;
+    @Child protected IndirectCallNode indirectCallNode;
+
+    public CachedBoxedSymbolDispatchNode(RubyContext context, Object cachedName, DispatchNode next, Object value, RubyMethod method,
+                                         boolean indirect) {
+<span class="nc" id="L41">        super(context, cachedName, next, indirect);</span>
+<span class="nc" id="L42">        unmodifiedAssumption = context.getCoreLibrary().getSymbolClass().getUnmodifiedAssumption();</span>
+<span class="nc" id="L43">        this.value = value;</span>
+<span class="nc" id="L44">        this.method = method;</span>
+
+<span class="nc bnc" id="L46" title="All 2 branches missed.">        if (method != null) {</span>
+<span class="nc bnc" id="L47" title="All 2 branches missed.">            if (indirect) {</span>
+<span class="nc" id="L48">                indirectCallNode = Truffle.getRuntime().createIndirectCallNode();</span>
+            } else {
+<span class="nc" id="L50">                callNode = Truffle.getRuntime().createDirectCallNode(method.getCallTarget());</span>
+
+<span class="nc bnc" id="L52" title="All 4 branches missed.">                if (callNode.isCallTargetCloningAllowed() &amp;&amp; method.getSharedMethodInfo().shouldAlwaysSplit()) {</span>
+<span class="nc" id="L53">                    insert(callNode);</span>
+<span class="nc" id="L54">                    callNode.cloneCallTarget();</span>
+                }
+            }
+        }
+<span class="nc" id="L58">    }</span>
+
+    public CachedBoxedSymbolDispatchNode(CachedBoxedSymbolDispatchNode prev) {
+<span class="nc" id="L61">        super(prev);</span>
+<span class="nc" id="L62">        unmodifiedAssumption = prev.unmodifiedAssumption;</span>
+<span class="nc" id="L63">        value = prev.value;</span>
+<span class="nc" id="L64">        method = prev.method;</span>
+<span class="nc" id="L65">        callNode = prev.callNode;</span>
+<span class="nc" id="L66">        indirectCallNode = prev.indirectCallNode;</span>
+<span class="nc" id="L67">    }</span>
+
+    @Specialization(guards = &quot;guardName&quot;)
+    public Object dispatch(
+            VirtualFrame frame,
+            LexicalScope lexicalScope,
+            RubySymbol receiverObject,
+            Object methodName,
+            Object blockObject,
+            Object argumentsObjects,
+            Dispatch.DispatchAction dispatchAction) {
+<span class="nc" id="L78">        CompilerAsserts.compilationConstant(dispatchAction);</span>
+
+        // Check the class has not been modified
+
+        try {
+<span class="nc" id="L83">            unmodifiedAssumption.check();</span>
+<span class="nc" id="L84">        } catch (InvalidAssumptionException e) {</span>
+<span class="nc" id="L85">            return resetAndDispatch(</span>
+                    frame,
+                    lexicalScope,
+                    receiverObject,
+                    methodName,
+<span class="nc" id="L90">                    CompilerDirectives.unsafeCast(blockObject, RubyProc.class, true, false),</span>
+                    argumentsObjects,
+                    dispatchAction,
+                    &quot;class modified&quot;);
+<span class="nc" id="L94">        }</span>
+
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        if (dispatchAction == Dispatch.DispatchAction.CALL_METHOD) {</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">            if (isIndirect()) {</span>
+<span class="nc" id="L98">                return indirectCallNode.call(</span>
+                        frame,
+<span class="nc" id="L100">                        method.getCallTarget(),</span>
+<span class="nc" id="L101">                        RubyArguments.pack(</span>
+                                method,
+<span class="nc" id="L103">                                method.getDeclarationFrame(),</span>
+                                receiverObject,
+<span class="nc" id="L105">                                CompilerDirectives.unsafeCast(blockObject, RubyProc.class, true, false),</span>
+<span class="nc" id="L106">                                CompilerDirectives.unsafeCast(argumentsObjects, Object[].class, true)));</span>
+            } else {
+<span class="nc" id="L108">                return callNode.call(</span>
+                        frame,
+<span class="nc" id="L110">                        RubyArguments.pack(</span>
+                                method,
+<span class="nc" id="L112">                                method.getDeclarationFrame(),</span>
+                                receiverObject,
+<span class="nc" id="L114">                                CompilerDirectives.unsafeCast(blockObject, RubyProc.class, true, false),</span>
+<span class="nc" id="L115">                                CompilerDirectives.unsafeCast(argumentsObjects, Object[].class, true)));</span>
+            }
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        } else if (dispatchAction == Dispatch.DispatchAction.RESPOND_TO_METHOD) {</span>
+<span class="nc" id="L118">            return true;</span>
+<span class="nc bnc" id="L119" title="All 2 branches missed.">        } else if (dispatchAction == Dispatch.DispatchAction.READ_CONSTANT) {</span>
+<span class="nc" id="L120">            return value;</span>
+        } else {
+<span class="nc" id="L122">            throw new UnsupportedOperationException();</span>
+        }
+    }
+
+    @Fallback
+    public Object dispatch(
+            VirtualFrame frame,
+            LexicalScope lexicalScope,
+            Object receiverObject,
+            Object methodName,
+            Object blockObject,
+            Object argumentsObjects,
+            Dispatch.DispatchAction dispatchAction) {
+<span class="nc" id="L135">        return next.executeDispatch(</span>
+                frame,
+                lexicalScope,
+                receiverObject,
+                methodName,
+<span class="nc" id="L140">                CompilerDirectives.unsafeCast(blockObject, RubyProc.class, true, false),</span>
+                argumentsObjects,
+                dispatchAction);
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

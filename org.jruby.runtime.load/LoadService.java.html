@@ -1,0 +1,1645 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LoadService.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime.load</a> &gt; <span class="el_source">LoadService.java</span></div><h1>LoadService.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002-2011 JRuby Community
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2002-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004-2005 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2006 Ola Bini &lt;ola@ologix.com&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.runtime.load;
+
+import org.jruby.util.collections.StringArraySet;
+import java.io.File;
+import java.io.FileDescriptor;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.net.MalformedURLException;
+import java.net.URISyntaxException;
+import java.net.URI;
+import java.net.URL;
+import java.security.AccessControlException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.jar.JarFile;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.zip.ZipException;
+
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyFile;
+import org.jruby.RubyHash;
+import org.jruby.RubyInstanceConfig;
+import org.jruby.RubyString;
+import org.jruby.ast.executable.Script;
+import org.jruby.exceptions.MainExitException;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.ext.rbconfig.RbConfigLibrary;
+import org.jruby.platform.Platform;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.JRubyFile;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+
+import static org.jruby.runtime.Helpers.arrayOf;
+import static org.jruby.util.URLUtil.getPath;
+import org.jruby.util.cli.Options;
+
+/**
+ * &lt;h2&gt;How require works in JRuby&lt;/h2&gt;
+ *
+ * When requiring a name from Ruby, JRuby will first remove any file
+ * extension it knows about, thereby making it possible to use this string
+ * to see if JRuby has already loaded the name in question. If a .rb
+ * extension is specified, JRuby will only try those extensions when
+ * searching. If a .so, .o, .dll, or .jar extension is specified, JRuby will
+ * only try .so or .jar when searching. Otherwise, JRuby goes through the
+ * known suffixes (.rb, .rb.ast.ser, .so, and .jar) and tries to find a
+ * library with this name. The process for finding a library follows this
+ * order for all searchable extensions:
+ *
+ * &lt;ol&gt;
+ * &lt;li&gt;First, check if the name starts with 'jar:', then the path points to
+ * a jar-file resource which is returned.&lt;/li&gt;
+ * &lt;li&gt;Second, try searching for the file in the current dir&lt;/li&gt;
+ * &lt;li&gt;Then JRuby looks through the load path trying these variants:
+ *   &lt;ol&gt;
+ *     &lt;li&gt;See if the current load path entry starts with 'jar:', if so
+ *     check if this jar-file contains the name&lt;/li&gt;
+ *     &lt;li&gt;Otherwise JRuby tries to construct a path by combining the entry
+ *     and the current working directy, and then see if a file with the
+ *     correct name can be reached from this point.&lt;/li&gt;
+ *   &lt;/ol&gt;
+ * &lt;/li&gt;
+ * &lt;li&gt;If all these fail, try to load the name as a resource from
+ * classloader resources, using the bare name as well as the load path
+ * entries&lt;/li&gt;
+ * &lt;li&gt;When we get to this state, the normal JRuby loading has failed. At
+ * this stage JRuby tries to load Java native extensions, by following this
+ * process:
+ *   &lt;ol&gt;
+ *     &lt;li&gt;First it checks that we haven't already found a library. If we
+ *     found a library of type JarredScript, the method continues.&lt;/li&gt;
+ *
+ *     &lt;li&gt;The first step is translating the name given into a valid Java
+ *     Extension class name. First it splits the string into each path
+ *     segment, and then makes all but the last downcased. After this it
+ *     takes the last entry, removes all underscores and capitalizes each
+ *     part separated by underscores. It then joins everything together and
+ *     tacks on a 'Service' at the end. Lastly, it removes all leading dots,
+ *     to make it a valid Java FWCN.&lt;/li&gt;
+ *
+ *     &lt;li&gt;If the previous library was of type JarredScript, we try to add
+ *     the jar-file to the classpath&lt;/li&gt;
+ *
+ *     &lt;li&gt;Now JRuby tries to instantiate the class with the name
+ *     constructed. If this works, we return a ClassExtensionLibrary.
+ *     Otherwise, the old library is put back in place, if there was one.
+ *   &lt;/ol&gt;
+ * &lt;/li&gt;
+ * &lt;li&gt;When all separate methods have been tried and there was no result, a
+ * LoadError will be raised.&lt;/li&gt;
+ * &lt;li&gt;Otherwise, the name will be added to the loaded features, and the
+ * library loaded&lt;/li&gt;
+ * &lt;/ol&gt;
+ *
+ * @author jpetersen
+ */
+public class LoadService {
+<span class="fc" id="L140">    private static final Logger LOG = LoggerFactory.getLogger(&quot;LoadService&quot;);</span>
+
+    private final LoadTimer loadTimer;
+<span class="fc" id="L143">    private boolean canGetAbsolutePath = true;</span>
+
+<span class="pc" id="L145">    public enum SuffixType {</span>
+<span class="fc" id="L146">        Source, Extension, Both, Neither;</span>
+
+<span class="fc" id="L148">        private static final String[] emptySuffixes = { &quot;&quot; };</span>
+        // NOTE: always search .rb first for speed
+<span class="fc" id="L150">        public static final String[] sourceSuffixes =</span>
+<span class="pc bpc" id="L151" title="1 of 2 branches missed.">                Options.AOT_LOADCLASSES.load() ? arrayOf(&quot;.rb&quot;, &quot;.class&quot;) : arrayOf(&quot;.rb&quot;);</span>
+<span class="fc" id="L152">        public static final String[] extensionSuffixes = arrayOf(&quot;.jar&quot;);</span>
+        private static final String[] allSuffixes;
+
+        static {
+<span class="fc" id="L156">            allSuffixes = new String[sourceSuffixes.length + extensionSuffixes.length];</span>
+<span class="fc" id="L157">            System.arraycopy(sourceSuffixes, 0, allSuffixes, 0, sourceSuffixes.length);</span>
+<span class="fc" id="L158">            System.arraycopy(extensionSuffixes, 0, allSuffixes, sourceSuffixes.length, extensionSuffixes.length);</span>
+<span class="fc" id="L159">        }</span>
+
+        public String[] getSuffixes() {
+<span class="pc bpc" id="L162" title="1 of 5 branches missed.">            switch (this) {</span>
+            case Source:
+<span class="fc" id="L164">                return sourceSuffixes;</span>
+            case Extension:
+<span class="fc" id="L166">                return extensionSuffixes;</span>
+            case Both:
+<span class="fc" id="L168">                return allSuffixes;</span>
+            case Neither:
+<span class="fc" id="L170">                return emptySuffixes;</span>
+            }
+<span class="nc" id="L172">            throw new RuntimeException(&quot;Unknown SuffixType: &quot; + this);</span>
+        }
+    }
+<span class="fc" id="L175">    protected static final Pattern sourcePattern = Pattern.compile(&quot;\\.(?:rb)$&quot;);</span>
+<span class="fc" id="L176">    protected static final Pattern extensionPattern = Pattern.compile(&quot;\\.(?:so|o|dll|bundle|jar)$&quot;);</span>
+
+    protected RubyArray loadPath;
+    protected StringArraySet loadedFeatures;
+    protected RubyArray loadedFeaturesDup;
+<span class="fc" id="L181">    private final Map&lt;String, String&gt; loadedFeaturesIndex = new ConcurrentHashMap&lt;String, String&gt;();</span>
+<span class="fc" id="L182">    protected final Map&lt;String, Library&gt; builtinLibraries = new HashMap&lt;String, Library&gt;();</span>
+
+<span class="fc" id="L184">    protected final Map&lt;String, JarFile&gt; jarFiles = new HashMap&lt;String, JarFile&gt;();</span>
+
+    protected final Ruby runtime;
+    protected final LibrarySearcher librarySearcher;
+
+<span class="fc" id="L189">    public LoadService(Ruby runtime) {</span>
+<span class="fc" id="L190">        this.runtime = runtime;</span>
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">        if (RubyInstanceConfig.DEBUG_LOAD_TIMINGS) {</span>
+<span class="nc" id="L192">            loadTimer = new TracingLoadTimer();</span>
+        } else {
+<span class="fc" id="L194">            loadTimer = new LoadTimer();</span>
+        }
+
+<span class="fc" id="L197">        this.librarySearcher = new LibrarySearcher(this);</span>
+<span class="fc" id="L198">    }</span>
+
+    /**
+     * Called to initialize the load path with a set of optional prepended
+     * directories and then the standard set of dirs.
+     *
+     * This should only be called once, at load time, since it wipes out loaded
+     * features.
+     *
+     * @param prependDirectories
+     */
+    public void init(List prependDirectories) {
+<span class="fc" id="L210">        loadPath = RubyArray.newArray(runtime);</span>
+
+<span class="fc" id="L212">        String jrubyHome = runtime.getJRubyHome();</span>
+<span class="fc" id="L213">        loadedFeatures = new StringArraySet(runtime);</span>
+
+        // add all startup load paths to the list first
+<span class="fc" id="L216">        addPaths(prependDirectories);</span>
+
+        // add $RUBYLIB paths
+<span class="fc" id="L219">        RubyHash env = (RubyHash) runtime.getObject().getConstant(&quot;ENV&quot;);</span>
+<span class="fc" id="L220">        RubyString env_rubylib = runtime.newString(&quot;RUBYLIB&quot;);</span>
+<span class="pc bpc" id="L221" title="1 of 2 branches missed.">        if (env.has_key_p(env_rubylib).isTrue()) {</span>
+<span class="nc" id="L222">            String rubylib = env.op_aref(runtime.getCurrentContext(), env_rubylib).toString();</span>
+<span class="nc" id="L223">            String[] paths = rubylib.split(File.pathSeparator);</span>
+<span class="nc" id="L224">            addPaths(paths);</span>
+        }
+
+        // wrap in try/catch for security exceptions in an applet
+        try {
+<span class="pc bpc" id="L229" title="1 of 2 branches missed.">            if (jrubyHome != null) {</span>
+                // siteDir has to come first, because rubygems insert paths after it
+                // and we must to prefer Gems to rubyLibDir/rubySharedLibDir (same as MRI)
+<span class="fc" id="L232">                addPath(RbConfigLibrary.getSiteDir(runtime));</span>
+                // if vendorDirGeneral is different than siteDirGeneral,
+                // add vendorDir, too
+                // adding {vendor,site}{Lib,Arch}Dir dirs is not necessary,
+                // since they should be the same as {vendor,site}Dir
+<span class="pc bpc" id="L237" title="1 of 2 branches missed.">                if (!RbConfigLibrary.isSiteVendorSame(runtime)) {</span>
+<span class="nc" id="L238">                    addPath(RbConfigLibrary.getVendorDir(runtime));</span>
+                }
+<span class="fc" id="L240">                String rubygemsDir = RbConfigLibrary.getRubygemsDir(runtime);</span>
+<span class="pc bpc" id="L241" title="1 of 2 branches missed.">                if (rubygemsDir != null) {</span>
+<span class="nc" id="L242">                    addPath(rubygemsDir);</span>
+                }
+<span class="fc" id="L244">                addPath(RbConfigLibrary.getRubySharedLibDir(runtime));</span>
+                // TODO: merge
+<span class="fc" id="L246">                addPath(RbConfigLibrary.getRubyLibDir(runtime));</span>
+            }
+
+<span class="pc" id="L249">        } catch(SecurityException ignore) {}</span>
+<span class="fc" id="L250">    }</span>
+
+    /**
+     * Add additional directories to the load path.
+     *
+     * @param additionalDirectories a List of additional dirs to append to the load path
+     */
+    public void addPaths(List&lt;String&gt; additionalDirectories) {
+<span class="fc bfc" id="L258" title="All 2 branches covered.">        for (String dir : additionalDirectories) {</span>
+<span class="fc" id="L259">            addPath(dir);</span>
+<span class="fc" id="L260">        }</span>
+<span class="fc" id="L261">    }</span>
+
+    /**
+     * Add additional directories to the load path.
+     *
+     * @param additionalDirectories an array of additional dirs to append to the load path
+     */
+    public void addPaths(String... additionalDirectories) {
+<span class="nc bnc" id="L269" title="All 2 branches missed.">        for (String dir : additionalDirectories) {</span>
+<span class="nc" id="L270">            addPath(dir);</span>
+        }
+<span class="nc" id="L272">    }</span>
+
+    // MRI: rb_provide, roughly
+    public void provide(String library) {
+<span class="fc" id="L276">        addBuiltinLibrary(library, Library.DUMMY);</span>
+<span class="fc" id="L277">        addLoadedFeature(library, library);</span>
+<span class="fc" id="L278">    }</span>
+    
+    protected boolean isFeatureInIndex(String shortName) {
+<span class="fc" id="L281">        return loadedFeaturesIndex.containsKey(shortName);</span>
+    }
+
+    @Deprecated
+    protected void addLoadedFeature(String name) {
+<span class="nc" id="L286">        addLoadedFeature(name, name);</span>
+<span class="nc" id="L287">    }</span>
+
+    protected void addLoadedFeature(String shortName, String name) {
+<span class="fc" id="L290">        loadedFeatures.append(RubyString.newString(runtime, name));</span>
+        
+<span class="fc" id="L292">        addFeatureToIndex(shortName, name);</span>
+<span class="fc" id="L293">    }</span>
+    
+    protected void addFeatureToIndex(String shortName, String name) {
+<span class="fc" id="L296">        loadedFeaturesDup = (RubyArray)loadedFeatures.dup();</span>
+<span class="fc" id="L297">        loadedFeaturesIndex.put(shortName, name);</span>
+<span class="fc" id="L298">    }</span>
+
+    protected void addPath(String path) {
+        // Empty paths do not need to be added
+<span class="pc bpc" id="L302" title="2 of 4 branches missed.">        if (path == null || path.length() == 0) return;</span>
+
+<span class="fc" id="L304">        synchronized(loadPath) {</span>
+<span class="fc" id="L305">            loadPath.append(runtime.newString(path.replace('\\', '/')));</span>
+<span class="pc" id="L306">        }</span>
+<span class="fc" id="L307">    }</span>
+
+    public void load(String file, boolean wrap) {
+<span class="fc" id="L310">        long startTime = loadTimer.startLoad(file);</span>
+        try {
+<span class="pc bpc" id="L312" title="1 of 2 branches missed.">            if(!runtime.getProfile().allowLoad(file)) {</span>
+<span class="nc" id="L313">                throw runtime.newLoadError(&quot;no such file to load -- &quot; + file, file);</span>
+            }
+
+<span class="fc" id="L316">            SearchState state = new SearchState(file);</span>
+<span class="fc" id="L317">            state.prepareLoadSearch(file);</span>
+
+<span class="fc" id="L319">            Library library = findLibraryBySearchState(state);</span>
+
+<span class="fc bfc" id="L321" title="All 2 branches covered.">            if (library == null) {</span>
+<span class="fc" id="L322">              throw runtime.newLoadError(&quot;no such file to load -- &quot; + file, file);</span>
+            }
+
+            try {
+<span class="fc" id="L326">                library.load(runtime, wrap);</span>
+<span class="nc" id="L327">            } catch (IOException e) {</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">                if (runtime.getDebug().isTrue()) e.printStackTrace(runtime.getErr());</span>
+<span class="nc" id="L329">                throw newLoadErrorFromThrowable(runtime, file, e);</span>
+<span class="fc" id="L330">            }</span>
+        } finally {
+<span class="fc" id="L332">            loadTimer.endLoad(file, startTime);</span>
+<span class="fc" id="L333">        }</span>
+<span class="fc" id="L334">    }</span>
+
+    public void loadFromClassLoader(ClassLoader classLoader, String file, boolean wrap) {
+<span class="fc" id="L337">        long startTime = loadTimer.startLoad(&quot;classloader:&quot; + file);</span>
+        try {
+<span class="fc" id="L339">            SearchState state = new SearchState(file);</span>
+<span class="fc" id="L340">            state.prepareLoadSearch(file);</span>
+
+<span class="fc" id="L342">            Library library = null;</span>
+<span class="fc" id="L343">            LoadServiceResource resource = getClassPathResource(classLoader, file);</span>
+<span class="pc bpc" id="L344" title="1 of 2 branches missed.">            if (resource != null) {</span>
+<span class="fc" id="L345">                state.setLoadName(resolveLoadName(resource, file));</span>
+<span class="fc" id="L346">                library = createLibrary(state, resource);</span>
+            }
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">            if (library == null) {</span>
+<span class="nc" id="L349">                throw runtime.newLoadError(&quot;no such file to load -- &quot; + file);</span>
+            }
+            try {
+<span class="fc" id="L352">                library.load(runtime, wrap);</span>
+<span class="nc" id="L353">            } catch (IOException e) {</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">                if (runtime.getDebug().isTrue()) e.printStackTrace(runtime.getErr());</span>
+<span class="nc" id="L355">                throw newLoadErrorFromThrowable(runtime, file, e);</span>
+<span class="fc" id="L356">            }</span>
+        } finally {
+<span class="pc" id="L358">            loadTimer.endLoad(&quot;classloader:&quot; + file, startTime);</span>
+<span class="fc" id="L359">        }</span>
+<span class="fc" id="L360">    }</span>
+
+    public SearchState findFileForLoad(String file) {
+<span class="pc bpc" id="L363" title="1 of 2 branches missed.">        if (Platform.IS_WINDOWS) {</span>
+<span class="nc" id="L364">            file = file.replace('\\', '/');</span>
+        }
+        // Even if we don't support .so, some stdlib require .so directly.
+        // Replace it with .jar to look for a java extension
+        // JRUBY-5033: The ExtensionSearcher will locate C exts, too, this way.
+<span class="fc bfc" id="L369" title="All 2 branches covered.">        if (file.endsWith(&quot;.so&quot;)) {</span>
+<span class="fc" id="L370">            file = file.replaceAll(&quot;.so$&quot;, &quot;.jar&quot;);</span>
+        }
+
+<span class="fc" id="L373">        SearchState state = new SearchState(file);</span>
+<span class="fc" id="L374">        state.prepareRequireSearch(file);</span>
+
+<span class="fc" id="L376">        findLibraryBySearchState(state);</span>
+
+<span class="fc" id="L378">        return state;</span>
+    }
+
+    public boolean require(String requireName) {
+<span class="fc bfc" id="L382" title="All 2 branches covered.">        return requireCommon(requireName, true) == RequireState.LOADED;</span>
+    }
+
+    public boolean autoloadRequire(String requireName) {
+<span class="fc bfc" id="L386" title="All 2 branches covered.">        return requireCommon(requireName, false) != RequireState.CIRCULAR;</span>
+    }
+
+<span class="pc" id="L389">    private enum RequireState {</span>
+<span class="fc" id="L390">        LOADED, ALREADY_LOADED, CIRCULAR</span>
+    };
+
+    private RequireState requireCommon(String requireName, boolean circularRequireWarning) {
+        // check for requiredName without extension.
+<span class="fc bfc" id="L395" title="All 2 branches covered.">        if (featureAlreadyLoaded(requireName)) {</span>
+<span class="fc" id="L396">            return RequireState.ALREADY_LOADED;</span>
+        }
+
+<span class="fc bfc" id="L399" title="All 2 branches covered.">        if (!requireLocks.lock(requireName)) {</span>
+<span class="pc bpc" id="L400" title="1 of 4 branches missed.">            if (circularRequireWarning &amp;&amp; runtime.isVerbose()) {</span>
+<span class="nc" id="L401">                warnCircularRequire(requireName);</span>
+            }
+<span class="fc" id="L403">            return RequireState.CIRCULAR;</span>
+        }
+        try {
+<span class="pc bpc" id="L406" title="1 of 2 branches missed.">            if (!runtime.getProfile().allowRequire(requireName)) {</span>
+<span class="nc" id="L407">                throw runtime.newLoadError(&quot;no such file to load -- &quot; + requireName, requireName);</span>
+            }
+
+            // check for requiredName again now that we're locked
+<span class="pc bpc" id="L411" title="1 of 2 branches missed.">            if (featureAlreadyLoaded(requireName)) {</span>
+<span class="nc" id="L412">                return RequireState.ALREADY_LOADED;</span>
+            }
+
+            // numbers from loadTimer does not include lock waiting time.
+<span class="fc" id="L416">            long startTime = loadTimer.startLoad(requireName);</span>
+            try {
+<span class="fc" id="L418">                boolean loaded = smartLoadInternal(requireName);</span>
+<span class="fc bfc" id="L419" title="All 2 branches covered.">                return loaded ? RequireState.LOADED : RequireState.ALREADY_LOADED;</span>
+            } finally {
+<span class="fc" id="L421">                loadTimer.endLoad(requireName, startTime);</span>
+            }
+        } finally {
+<span class="pc" id="L424">            requireLocks.unlock(requireName);</span>
+        }
+    }
+    
+<span class="fc" id="L428">    protected final RequireLocks requireLocks = new RequireLocks();</span>
+
+<span class="pc bpc" id="L430" title="1 of 2 branches missed.">    private class RequireLocks {</span>
+        private final Map&lt;String, ReentrantLock&gt; pool;
+        // global lock for require must be fair
+        private final ReentrantLock globalLock;
+
+<span class="fc" id="L435">        private RequireLocks() {</span>
+<span class="fc" id="L436">            this.pool = new HashMap&lt;String, ReentrantLock&gt;();</span>
+<span class="fc" id="L437">            this.globalLock = new ReentrantLock(true);</span>
+<span class="fc" id="L438">        }</span>
+
+        /**
+         * Get exclusive lock for the specified requireName. Acquire sync object
+         * for the requireName from the pool, then try to lock it. NOTE: This
+         * lock is not fair for now.
+         * 
+         * @param requireName
+         *            just a name for the lock.
+         * @return If the sync object already locked by current thread, it just
+         *         returns false without getting a lock. Otherwise true.
+         */
+        private boolean lock(String requireName) {
+            ReentrantLock lock;
+
+            while (true) {
+<span class="fc" id="L454">                synchronized (pool) {</span>
+<span class="fc" id="L455">                    lock = pool.get(requireName);</span>
+<span class="fc bfc" id="L456" title="All 2 branches covered.">                    if (lock == null) {</span>
+<span class="pc bpc" id="L457" title="1 of 2 branches missed.">                        if (runtime.getInstanceConfig().isGlobalRequireLock()) {</span>
+<span class="nc" id="L458">                            lock = globalLock;</span>
+                        } else {
+<span class="fc" id="L460">                            lock = new ReentrantLock();</span>
+                        }
+<span class="fc" id="L462">                        pool.put(requireName, lock);</span>
+<span class="pc bpc" id="L463" title="1 of 2 branches missed.">                    } else if (lock.isHeldByCurrentThread()) {</span>
+<span class="fc" id="L464">                        return false;</span>
+                    }
+<span class="pc" id="L466">                }</span>
+
+<span class="fc" id="L468">                lock.lock();</span>
+
+                // repeat until locked object still in requireLocks.
+<span class="fc" id="L471">                synchronized (pool) {</span>
+<span class="pc bpc" id="L472" title="1 of 2 branches missed.">                    if (pool.get(requireName) == lock) {</span>
+                        // the object is locked &amp;&amp; the lock is in the pool
+<span class="fc" id="L474">                        return true;</span>
+                    }
+                    // go next try
+<span class="nc" id="L477">                    lock.unlock();</span>
+<span class="nc" id="L478">                }</span>
+            }
+        }
+
+        /**
+         * Unlock the lock for the specified requireName.
+         * 
+         * @param requireName
+         *            name of the lock to be unlocked.
+         */
+        private void unlock(String requireName) {
+<span class="fc" id="L489">            synchronized (pool) {</span>
+<span class="fc" id="L490">                ReentrantLock lock = pool.get(requireName);</span>
+<span class="pc bpc" id="L491" title="1 of 2 branches missed.">                if (lock != null) {</span>
+<span class="pc bpc" id="L492" title="3 of 4 branches missed.">                    assert lock.isHeldByCurrentThread();</span>
+<span class="fc" id="L493">                    lock.unlock();</span>
+<span class="fc" id="L494">                    pool.remove(requireName);</span>
+                }
+<span class="pc" id="L496">            }</span>
+<span class="fc" id="L497">        }</span>
+    }
+
+    protected void warnCircularRequire(String requireName) {
+<span class="nc" id="L501">        runtime.getWarnings().warn(&quot;loading in progress, circular require considered harmful - &quot; + requireName);</span>
+        // it's a hack for c:rb_backtrace impl.
+        // We should introduce new method to Ruby.TraceType when rb_backtrace is widely used not only for this purpose.
+<span class="nc" id="L504">        RaiseException ex = new RaiseException(runtime, runtime.getRuntimeError(), null, false);</span>
+<span class="nc" id="L505">        String trace = runtime.getInstanceConfig().getTraceType().printBacktrace(ex.getException(), runtime.getPosix().isatty(FileDescriptor.err));</span>
+        // rb_backtrace dumps to stderr directly.
+<span class="nc" id="L507">        System.err.print(trace.replaceFirst(&quot;[^\n]*\n&quot;, &quot;&quot;));</span>
+<span class="nc" id="L508">    }</span>
+
+    /**
+     * This method did require the specified file without getting a lock.
+     * Now we offer safe version only. Use {@link LoadService#require(String)} instead.
+     */
+    @Deprecated
+    public boolean smartLoad(String file) {
+<span class="nc" id="L516">        return require(file);</span>
+    }
+
+    private boolean smartLoadInternal(String file) {
+<span class="fc" id="L520">        checkEmptyLoad(file);</span>
+<span class="fc" id="L521">        SearchState state = findFileForLoad(file);</span>
+<span class="pc bpc" id="L522" title="1 of 2 branches missed.">        if (state == null) {</span>
+<span class="nc" id="L523">            return false;</span>
+        }
+<span class="fc bfc" id="L525" title="All 2 branches covered.">        if (state.library == null) {</span>
+<span class="fc" id="L526">            throw runtime.newLoadError(&quot;no such file to load -- &quot; + state.searchFile, state.searchFile);</span>
+        }
+
+        // check with long name
+<span class="fc bfc" id="L530" title="All 2 branches covered.">        if (featureAlreadyLoaded(state.loadName)) {</span>
+<span class="fc" id="L531">            return false;</span>
+        }
+
+<span class="fc" id="L534">        boolean loaded = tryLoadingLibraryOrScript(runtime, state);</span>
+<span class="pc bpc" id="L535" title="1 of 2 branches missed.">        if (loaded) {</span>
+<span class="fc" id="L536">            addLoadedFeature(file, state.loadName);</span>
+        }
+<span class="fc" id="L538">        return loaded;</span>
+    }
+
+<span class="fc" id="L541">    private static class LoadTimer {</span>
+<span class="fc" id="L542">        public long startLoad(String file) { return 0L; }</span>
+<span class="fc" id="L543">        public void endLoad(String file, long startTime) {}</span>
+    }
+
+<span class="nc" id="L546">    private static class TracingLoadTimer extends LoadTimer {</span>
+<span class="nc" id="L547">        private final AtomicInteger indent = new AtomicInteger(0);</span>
+        private String getIndentString() {
+<span class="nc" id="L549">            StringBuilder buf = new StringBuilder();</span>
+<span class="nc" id="L550">            int i = indent.get();</span>
+<span class="nc bnc" id="L551" title="All 2 branches missed.">            for (int j = 0; j &lt; i; j++) {</span>
+<span class="nc" id="L552">                buf.append(&quot;  &quot;);</span>
+            }
+<span class="nc" id="L554">            return buf.toString();</span>
+        }
+        @Override
+        public long startLoad(String file) {
+<span class="nc" id="L558">            indent.incrementAndGet();</span>
+<span class="nc" id="L559">            LOG.info(getIndentString() + &quot;-&gt; &quot; + file);</span>
+<span class="nc" id="L560">            return System.currentTimeMillis();</span>
+        }
+        @Override
+        public void endLoad(String file, long startTime) {
+<span class="nc" id="L564">            LOG.info(getIndentString() + &quot;&lt;- &quot; + file + &quot; - &quot;</span>
+<span class="nc" id="L565">                    + (System.currentTimeMillis() - startTime) + &quot;ms&quot;);</span>
+<span class="nc" id="L566">            indent.decrementAndGet();</span>
+<span class="nc" id="L567">        }</span>
+    }
+
+    /**
+     * Load the org.jruby.runtime.load.Library implementation specified by
+     * className. The purpose of using this method is to avoid having static
+     * references to the given library class, thereby avoiding the additional
+     * classloading when the library is not in use.
+     *
+     * @param runtime The runtime in which to load
+     * @param libraryName The name of the library, to use for error messages
+     * @param className The class of the library
+     * @param classLoader The classloader to use to load it
+     * @param wrap Whether to wrap top-level in an anonymous module
+     */
+    public static void reflectedLoad(Ruby runtime, String libraryName, String className, ClassLoader classLoader, boolean wrap) {
+        try {
+<span class="pc bpc" id="L584" title="3 of 4 branches missed.">            if (classLoader == null &amp;&amp; Ruby.isSecurityRestricted()) {</span>
+<span class="nc" id="L585">                classLoader = runtime.getInstanceConfig().getLoader();</span>
+            }
+
+<span class="fc" id="L588">            Object libObject = classLoader.loadClass(className).newInstance();</span>
+<span class="pc bpc" id="L589" title="1 of 2 branches missed.">            if (libObject instanceof Library) {</span>
+<span class="fc" id="L590">                Library library = (Library)libObject;</span>
+<span class="fc" id="L591">                library.load(runtime, false);</span>
+<span class="pc bnc" id="L592" title="All 2 branches missed.">            } else if (libObject instanceof BasicLibraryService) {</span>
+<span class="nc" id="L593">                BasicLibraryService service = (BasicLibraryService)libObject;</span>
+<span class="nc" id="L594">                service.basicLoad(runtime);</span>
+<span class="nc" id="L595">            } else {</span>
+                // invalid type of library, raise error
+<span class="nc" id="L597">                throw runtime.newLoadError(&quot;library `&quot; + libraryName + &quot;' is not of type Library or BasicLibraryService&quot;, libraryName);</span>
+            }
+<span class="nc" id="L599">        } catch (RaiseException re) {</span>
+<span class="nc" id="L600">            throw re;</span>
+<span class="nc" id="L601">        } catch (Throwable e) {</span>
+<span class="nc bnc" id="L602" title="All 2 branches missed.">            if (runtime.getDebug().isTrue()) e.printStackTrace();</span>
+<span class="nc" id="L603">            throw runtime.newLoadError(&quot;library `&quot; + libraryName + &quot;' could not be loaded: &quot; + e, libraryName);</span>
+<span class="fc" id="L604">        }</span>
+<span class="fc" id="L605">    }</span>
+
+    public IRubyObject getLoadPath() {
+<span class="fc" id="L608">        return loadPath;</span>
+    }
+
+    public IRubyObject getLoadedFeatures() {
+<span class="fc" id="L612">        return loadedFeatures;</span>
+    }
+
+    public void addBuiltinLibrary(String name, Library library) {
+<span class="fc" id="L616">        builtinLibraries.put(name, library);</span>
+<span class="fc" id="L617">    }</span>
+
+    public void removeBuiltinLibrary(String name) {
+<span class="nc" id="L620">        builtinLibraries.remove(name);</span>
+<span class="nc" id="L621">    }</span>
+
+    public void removeInternalLoadedFeature(String name) {
+<span class="nc" id="L624">        RubyString nameRubyString = runtime.newString(name);</span>
+<span class="nc" id="L625">        loadedFeatures.delete(runtime.getCurrentContext(), nameRubyString, Block.NULL_BLOCK);</span>
+<span class="nc" id="L626">    }</span>
+    
+    private boolean isFeaturesIndexUpToDate() {
+        // disable tracing during index check
+<span class="fc" id="L630">        runtime.getCurrentContext().preTrace();</span>
+        try {
+<span class="pc bpc" id="L632" title="1 of 4 branches missed.">            return loadedFeaturesDup != null &amp;&amp; loadedFeaturesDup.eql(loadedFeatures);</span>
+        } finally {
+<span class="pc" id="L634">            runtime.getCurrentContext().postTrace();</span>
+        }
+    }
+
+    protected boolean featureAlreadyLoaded(String name) {
+<span class="fc bfc" id="L639" title="All 2 branches covered.">        if (loadedFeatures.containsString(name)) return true;</span>
+        
+        // Bail if our features index fell out of date.
+<span class="fc bfc" id="L642" title="All 2 branches covered.">        if (!isFeaturesIndexUpToDate()) { </span>
+<span class="fc" id="L643">            loadedFeaturesIndex.clear();</span>
+<span class="fc" id="L644">            return false;</span>
+        }
+        
+<span class="fc" id="L647">        return isFeatureInIndex(name);</span>
+    }
+
+    protected boolean isJarfileLibrary(SearchState state, final String file) {
+<span class="pc bpc" id="L651" title="3 of 4 branches missed.">        return state.library instanceof JarredScript &amp;&amp; file.endsWith(&quot;.jar&quot;);</span>
+    }
+
+    protected void reraiseRaiseExceptions(Throwable e) throws RaiseException {
+<span class="pc bpc" id="L655" title="1 of 2 branches missed.">        if (e instanceof RaiseException) {</span>
+<span class="fc" id="L656">            throw (RaiseException) e;</span>
+        }
+<span class="nc" id="L658">    }</span>
+
+    @Deprecated
+    public interface LoadSearcher {
+        /**
+         * @param state
+         * @return true if trySearch should be called.
+         */
+        public boolean shouldTrySearch(SearchState state);
+
+        /**
+         * @param state
+         * @return false if loadSearch must be bail-out.
+         */
+        public boolean trySearch(SearchState state);
+    }
+
+    @Deprecated
+<span class="fc" id="L676">    public class BailoutSearcher implements LoadSearcher {</span>
+        public boolean shouldTrySearch(SearchState state) {
+<span class="nc bnc" id="L678" title="All 2 branches missed.">            return state.library == null;</span>
+        }
+
+        protected boolean trySearch(String file, SuffixType suffixType) {
+<span class="nc bnc" id="L682" title="All 2 branches missed.">            for (String suffix : suffixType.getSuffixes()) {</span>
+<span class="nc" id="L683">                String searchName = file + suffix;</span>
+<span class="nc bnc" id="L684" title="All 2 branches missed.">                if (featureAlreadyLoaded(searchName)) {</span>
+<span class="nc" id="L685">                    return false;</span>
+                }
+            }
+<span class="nc" id="L688">            return true;</span>
+        }
+
+        public boolean trySearch(SearchState state) {
+<span class="nc" id="L692">            return trySearch(state.searchFile, state.suffixType);</span>
+        }
+    }
+
+    @Deprecated
+<span class="fc" id="L697">    public class SourceBailoutSearcher extends BailoutSearcher {</span>
+        public boolean shouldTrySearch(SearchState state) {
+            // JRUBY-5032: Load extension files if they are required
+            // explicitly, and even if an rb file of the same name
+            // has already been loaded (effectively skipping the search for a source file).
+<span class="nc bnc" id="L702" title="All 2 branches missed.">            return !extensionPattern.matcher(state.loadName).find();</span>
+        }
+
+        // According to Rubyspec, source files should be loaded even if an equally named
+        // extension is loaded already. So we use the bailout search twice, once only
+        // for source files and once for whatever suffix type the state determines
+        public boolean trySearch(SearchState state) {
+<span class="nc" id="L709">            return super.trySearch(state.searchFile, SuffixType.Source);</span>
+        }
+    }
+
+    @Deprecated
+<span class="fc" id="L714">    public class NormalSearcher implements LoadSearcher {</span>
+        public boolean shouldTrySearch(SearchState state) {
+<span class="nc bnc" id="L716" title="All 2 branches missed.">            return state.library == null;</span>
+        }
+
+        public boolean trySearch(SearchState state) {
+<span class="nc" id="L720">            state.library = findLibraryWithoutCWD(state, state.searchFile, state.suffixType);</span>
+<span class="nc" id="L721">            return true;</span>
+        }
+    }
+
+    @Deprecated
+<span class="fc" id="L726">    public class ClassLoaderSearcher implements LoadSearcher {</span>
+        public boolean shouldTrySearch(SearchState state) {
+<span class="nc bnc" id="L728" title="All 2 branches missed.">            return state.library == null;</span>
+        }
+
+        public boolean trySearch(SearchState state) {
+<span class="nc" id="L732">            state.library = findLibraryWithClassloaders(state, state.searchFile, state.suffixType);</span>
+<span class="nc" id="L733">            return true;</span>
+        }
+    }
+
+    @Deprecated
+<span class="fc" id="L738">    public class ExtensionSearcher implements LoadSearcher {</span>
+        public boolean shouldTrySearch(SearchState state) {
+<span class="nc bnc" id="L740" title="All 6 branches missed.">            return (state.library == null || state.library instanceof JarredScript) &amp;&amp; !state.searchFile.equalsIgnoreCase(&quot;&quot;);</span>
+        }
+
+        public boolean trySearch(SearchState state) {
+<span class="nc" id="L744">            debugLogTry(&quot;jarWithExtension&quot;, state.searchFile);</span>
+
+            // This code exploits the fact that all .jar files will be found for the JarredScript feature.
+            // This is where the basic extension mechanism gets fixed
+<span class="nc" id="L748">            Library oldLibrary = state.library;</span>
+<span class="nc" id="L749">            state.library = ClassExtensionLibrary.tryFind(runtime, state.searchFile);</span>
+<span class="nc" id="L750">            debugLogFound(&quot;jarWithExtension&quot;, state.searchFile);</span>
+
+            // If there was a good library before, we go back to that
+<span class="nc bnc" id="L753" title="All 4 branches missed.">            if(state.library == null &amp;&amp; oldLibrary != null) {</span>
+<span class="nc" id="L754">                state.library = oldLibrary;</span>
+            }
+<span class="nc" id="L756">            return true;</span>
+        }
+    }
+
+    @Deprecated
+<span class="fc" id="L761">    public class ScriptClassSearcher implements LoadSearcher {</span>
+<span class="fc" id="L762">        public class ScriptClassLibrary implements Library {</span>
+            private Script script;
+
+<span class="nc" id="L765">            public ScriptClassLibrary(Script script) {</span>
+<span class="nc" id="L766">                this.script = script;</span>
+<span class="nc" id="L767">            }</span>
+
+            public void load(Ruby runtime, boolean wrap) {
+<span class="nc" id="L770">                runtime.loadScript(script, wrap);</span>
+<span class="nc" id="L771">            }</span>
+        }
+
+        public boolean shouldTrySearch(SearchState state) {
+<span class="nc bnc" id="L775" title="All 2 branches missed.">            return state.library == null;</span>
+        }
+
+        public boolean trySearch(SearchState state) throws RaiseException {
+            // no library or extension found, try to load directly as a class
+            Script script;
+<span class="nc" id="L781">            String className = buildClassName(state.searchFile);</span>
+<span class="nc" id="L782">            int lastSlashIndex = className.lastIndexOf('/');</span>
+<span class="nc bnc" id="L783" title="All 6 branches missed.">            if (lastSlashIndex &gt; -1 &amp;&amp; lastSlashIndex &lt; className.length() - 1 &amp;&amp; !Character.isJavaIdentifierStart(className.charAt(lastSlashIndex + 1))) {</span>
+<span class="nc bnc" id="L784" title="All 2 branches missed.">                if (lastSlashIndex == -1) {</span>
+<span class="nc" id="L785">                    className = &quot;_&quot; + className;</span>
+                } else {
+<span class="nc" id="L787">                    className = className.substring(0, lastSlashIndex + 1) + &quot;_&quot; + className.substring(lastSlashIndex + 1);</span>
+                }
+            }
+<span class="nc" id="L790">            className = className.replace('/', '.');</span>
+            try {
+<span class="nc" id="L792">                Class scriptClass = Class.forName(className);</span>
+<span class="nc" id="L793">                script = (Script) scriptClass.newInstance();</span>
+<span class="nc" id="L794">            } catch (Exception cnfe) {</span>
+<span class="nc" id="L795">                return true;</span>
+<span class="nc" id="L796">            }</span>
+<span class="nc" id="L797">            state.library = new ScriptClassLibrary(script);</span>
+<span class="nc" id="L798">            return true;</span>
+        }
+    }
+
+    public static class SearchState {
+        public Library library;
+        public String loadName;
+        public SuffixType suffixType;
+        public String searchFile;
+
+<span class="fc" id="L808">        public SearchState(String file) {</span>
+<span class="fc" id="L809">            loadName = file;</span>
+<span class="fc" id="L810">        }</span>
+
+        public void prepareRequireSearch(final String file) {
+            // if an extension is specified, try more targetted searches
+<span class="fc bfc" id="L814" title="All 2 branches covered.">            if (file.lastIndexOf('.') &gt; file.lastIndexOf('/')) {</span>
+<span class="fc" id="L815">                Matcher matcher = null;</span>
+<span class="fc bfc" id="L816" title="All 2 branches covered.">                if ((matcher = sourcePattern.matcher(file)).find()) {</span>
+                    // source extensions
+<span class="fc" id="L818">                    suffixType = SuffixType.Source;</span>
+
+                    // trim extension to try other options
+<span class="fc" id="L821">                    searchFile = file.substring(0, matcher.start());</span>
+<span class="fc bfc" id="L822" title="All 2 branches covered.">                } else if ((matcher = extensionPattern.matcher(file)).find()) {</span>
+                    // extension extensions
+<span class="fc" id="L824">                    suffixType = SuffixType.Extension;</span>
+
+                    // trim extension to try other options
+<span class="fc" id="L827">                    searchFile = file.substring(0, matcher.start());</span>
+<span class="pc bpc" id="L828" title="1 of 2 branches missed.">                } else if (file.endsWith(&quot;.class&quot;)) {</span>
+                    // For JRUBY-6731, treat require 'foo.class' as no other filename than 'foo.class'.
+<span class="nc" id="L830">                    suffixType = SuffixType.Neither;</span>
+<span class="nc" id="L831">                    searchFile = file;</span>
+                } else {
+                    // unknown extension, fall back to search with extensions
+<span class="fc" id="L834">                    suffixType = SuffixType.Both;</span>
+<span class="fc" id="L835">                    searchFile = file;</span>
+                }
+<span class="fc" id="L837">            } else {</span>
+                // try all extensions
+<span class="fc" id="L839">                suffixType = SuffixType.Both;</span>
+<span class="fc" id="L840">                searchFile = file;</span>
+            }
+<span class="fc" id="L842">        }</span>
+
+        public void prepareLoadSearch(final String file) {
+            // if a source extension is specified, try all source extensions
+<span class="fc bfc" id="L846" title="All 2 branches covered.">            if (file.lastIndexOf('.') &gt; file.lastIndexOf('/')) {</span>
+<span class="fc" id="L847">                Matcher matcher = null;</span>
+<span class="fc bfc" id="L848" title="All 2 branches covered.">                if ((matcher = sourcePattern.matcher(file)).find()) {</span>
+                    // source extensions
+<span class="fc" id="L850">                    suffixType = SuffixType.Source;</span>
+
+                    // trim extension to try other options
+<span class="fc" id="L853">                    searchFile = file.substring(0, matcher.start());</span>
+                } else {
+                    // unknown extension, fall back to exact search
+<span class="fc" id="L856">                    suffixType = SuffixType.Neither;</span>
+<span class="fc" id="L857">                    searchFile = file;</span>
+                }
+<span class="fc" id="L859">            } else {</span>
+                // try only literal search
+<span class="fc" id="L861">                suffixType = SuffixType.Neither;</span>
+<span class="fc" id="L862">                searchFile = file;</span>
+            }
+<span class="fc" id="L864">        }</span>
+
+        public void setLoadName(String loadName) {
+<span class="fc" id="L867">            this.loadName = loadName;</span>
+<span class="fc" id="L868">        }</span>
+
+        @Override
+        public String toString() {
+<span class="nc" id="L872">            StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L873">            sb.append(this.getClass().getName()).append(&quot;: &quot;);</span>
+<span class="nc" id="L874">            sb.append(&quot;library=&quot;).append(library.toString());</span>
+<span class="nc" id="L875">            sb.append(&quot;, loadName=&quot;).append(loadName);</span>
+<span class="nc" id="L876">            sb.append(&quot;, suffixType=&quot;).append(suffixType.toString());</span>
+<span class="nc" id="L877">            sb.append(&quot;, searchFile=&quot;).append(searchFile);</span>
+<span class="nc" id="L878">            return sb.toString();</span>
+        }
+    }
+
+    protected boolean tryLoadingLibraryOrScript(Ruby runtime, SearchState state) {
+        // attempt to load the found library
+        try {
+<span class="fc" id="L885">            state.library.load(runtime, false);</span>
+<span class="fc" id="L886">            return true;</span>
+<span class="nc" id="L887">        } catch (MainExitException mee) {</span>
+            // allow MainExitException to propagate out for exec and friends
+<span class="nc" id="L889">            throw mee;</span>
+<span class="nc" id="L890">        } catch (Throwable e) {</span>
+<span class="nc bnc" id="L891" title="All 2 branches missed.">            if(isJarfileLibrary(state, state.searchFile)) {</span>
+<span class="nc" id="L892">                return true;</span>
+            }
+<span class="nc" id="L894">            reraiseRaiseExceptions(e);</span>
+
+<span class="nc bnc" id="L896" title="All 2 branches missed.">            if(runtime.getDebug().isTrue()) e.printStackTrace(runtime.getErr());</span>
+
+<span class="nc" id="L898">            RaiseException re = newLoadErrorFromThrowable(runtime, state.searchFile, e);</span>
+<span class="nc" id="L899">            re.initCause(e);</span>
+<span class="nc" id="L900">            throw re;</span>
+        }
+    }
+
+    private static RaiseException newLoadErrorFromThrowable(Ruby runtime, String file, Throwable t) {
+<span class="nc bnc" id="L905" title="All 4 branches missed.">        if (RubyInstanceConfig.DEBUG_PARSER || RubyInstanceConfig.IR_READING_DEBUG) t.printStackTrace();</span>
+
+<span class="nc" id="L907">        return runtime.newLoadError(String.format(&quot;load error: %s -- %s: %s&quot;, file, t.getClass().getName(), t.getMessage()), file);</span>
+    }
+
+    // Using the BailoutSearch twice, once only for source files and once for state suffixes,
+    // in order to adhere to Rubyspec
+<span class="fc" id="L912">    protected final List&lt;LoadSearcher&gt; searchers = new ArrayList&lt;LoadSearcher&gt;();</span>
+    {
+<span class="fc" id="L914">        searchers.add(new SourceBailoutSearcher());</span>
+<span class="fc" id="L915">        searchers.add(new NormalSearcher());</span>
+<span class="fc" id="L916">        searchers.add(new ClassLoaderSearcher());</span>
+<span class="fc" id="L917">        searchers.add(new BailoutSearcher());</span>
+<span class="fc" id="L918">        searchers.add(new ExtensionSearcher());</span>
+<span class="fc" id="L919">        searchers.add(new ScriptClassSearcher());</span>
+    }
+
+    protected String buildClassName(String className) {
+        // Remove any relative prefix, e.g. &quot;./foo/bar&quot; becomes &quot;foo/bar&quot;.
+<span class="nc" id="L924">        className = className.replaceFirst(&quot;^\\.\\/&quot;, &quot;&quot;);</span>
+<span class="nc bnc" id="L925" title="All 2 branches missed.">        if (className.lastIndexOf(&quot;.&quot;) != -1) {</span>
+<span class="nc" id="L926">            className = className.substring(0, className.lastIndexOf(&quot;.&quot;));</span>
+        }
+<span class="nc" id="L928">        className = className.replace(&quot;-&quot;, &quot;_minus_&quot;).replace('.', '_');</span>
+<span class="nc" id="L929">        return className;</span>
+    }
+
+    protected void checkEmptyLoad(String file) throws RaiseException {
+<span class="pc bpc" id="L933" title="1 of 2 branches missed.">        if (file.equals(&quot;&quot;)) {</span>
+<span class="nc" id="L934">            throw runtime.newLoadError(&quot;no such file to load -- &quot; + file, file);</span>
+        }
+<span class="fc" id="L936">    }</span>
+
+    @Deprecated
+    protected void debugLogTry(String what, String msg) {
+<span class="pc bpc" id="L940" title="1 of 2 branches missed.">        if (RubyInstanceConfig.DEBUG_LOAD_SERVICE) {</span>
+<span class="nc" id="L941">            LOG.info( &quot;trying &quot; + what + &quot;: &quot; + msg );</span>
+        }
+<span class="fc" id="L943">    }</span>
+
+    @Deprecated
+    protected void debugLogFound(String what, String msg) {
+<span class="nc bnc" id="L947" title="All 2 branches missed.">        if (RubyInstanceConfig.DEBUG_LOAD_SERVICE) {</span>
+<span class="nc" id="L948">            LOG.info( &quot;found &quot; + what + &quot;: &quot; + msg );</span>
+        }
+<span class="nc" id="L950">    }</span>
+
+    @Deprecated
+    protected void debugLogFound( LoadServiceResource resource ) {
+<span class="pc bpc" id="L954" title="1 of 2 branches missed.">        if (RubyInstanceConfig.DEBUG_LOAD_SERVICE) {</span>
+            String resourceUrl;
+            try {
+<span class="nc" id="L957">                resourceUrl = resource.getURL().toString();</span>
+<span class="nc" id="L958">            } catch (IOException e) {</span>
+<span class="nc" id="L959">                resourceUrl = e.getMessage();</span>
+<span class="nc" id="L960">            }</span>
+<span class="nc" id="L961">            LOG.info( &quot;found: &quot; + resourceUrl );</span>
+        }
+<span class="fc" id="L963">    }</span>
+
+    private Library findLibraryBySearchState(SearchState state) {
+<span class="fc bfc" id="L966" title="All 2 branches covered.">        if (librarySearcher.findBySearchState(state) != null) {</span>
+            // findBySearchState should fill the state already
+<span class="fc" id="L968">            return state.library;</span>
+        }
+
+        // TODO(ratnikov): Remove the special classpath case by introducing a classpath file resource
+<span class="fc" id="L972">        Library library = findLibraryWithClassloaders(state, state.searchFile, state.suffixType);</span>
+<span class="fc bfc" id="L973" title="All 2 branches covered.">        if (library != null) {</span>
+<span class="fc" id="L974">            state.library = library;</span>
+        }
+<span class="fc" id="L976">        return library;</span>
+    }
+
+    @Deprecated
+    protected Library findBuiltinLibrary(SearchState state, String baseName, SuffixType suffixType) {
+<span class="nc bnc" id="L981" title="All 2 branches missed.">        for (String suffix : suffixType.getSuffixes()) {</span>
+<span class="nc" id="L982">            String namePlusSuffix = baseName + suffix;</span>
+<span class="nc" id="L983">            debugLogTry( &quot;builtinLib&quot;,  namePlusSuffix );</span>
+<span class="nc bnc" id="L984" title="All 2 branches missed.">            if (builtinLibraries.containsKey(namePlusSuffix)) {</span>
+<span class="nc" id="L985">                state.setLoadName(namePlusSuffix);</span>
+<span class="nc" id="L986">                Library lib = builtinLibraries.get(namePlusSuffix);</span>
+<span class="nc" id="L987">                debugLogFound( &quot;builtinLib&quot;, namePlusSuffix );</span>
+<span class="nc" id="L988">                return lib;</span>
+            }
+        }
+<span class="nc" id="L991">        return null;</span>
+    }
+
+    @Deprecated
+    protected Library findLibraryWithoutCWD(SearchState state, String baseName, SuffixType suffixType) {
+<span class="nc" id="L996">        Library library = null;</span>
+
+<span class="nc bnc" id="L998" title="All 4 branches missed.">        switch (suffixType) {</span>
+        case Both:
+<span class="nc" id="L1000">            library = findBuiltinLibrary(state, baseName, SuffixType.Source);</span>
+<span class="nc bnc" id="L1001" title="All 2 branches missed.">            if (library == null) library = createLibrary(state, tryResourceFromJarURL(state, baseName, SuffixType.Source));</span>
+<span class="nc bnc" id="L1002" title="All 2 branches missed.">            if (library == null) library = createLibrary(state, tryResourceFromLoadPathOrURL(state, baseName, SuffixType.Source));</span>
+            // If we fail to find as a normal Ruby script, we try to find as an extension,
+            // checking for a builtin first.
+<span class="nc bnc" id="L1005" title="All 2 branches missed.">            if (library == null) library = findBuiltinLibrary(state, baseName, SuffixType.Extension);</span>
+<span class="nc bnc" id="L1006" title="All 2 branches missed.">            if (library == null) library = createLibrary(state, tryResourceFromJarURL(state, baseName, SuffixType.Extension));</span>
+<span class="nc bnc" id="L1007" title="All 2 branches missed.">            if (library == null) library = createLibrary(state, tryResourceFromLoadPathOrURL(state, baseName, SuffixType.Extension));</span>
+            break;
+        case Source:
+        case Extension:
+            // Check for a builtin first.
+<span class="nc" id="L1012">            library = findBuiltinLibrary(state, baseName, suffixType);</span>
+<span class="nc bnc" id="L1013" title="All 2 branches missed.">            if (library == null) library = createLibrary(state, tryResourceFromJarURL(state, baseName, suffixType));</span>
+<span class="nc bnc" id="L1014" title="All 2 branches missed.">            if (library == null) library = createLibrary(state, tryResourceFromLoadPathOrURL(state, baseName, suffixType));</span>
+            break;
+        case Neither:
+<span class="nc" id="L1017">            library = createLibrary(state, tryResourceFromJarURL(state, baseName, SuffixType.Neither));</span>
+<span class="nc bnc" id="L1018" title="All 2 branches missed.">            if (library == null) library = createLibrary(state, tryResourceFromLoadPathOrURL(state, baseName, SuffixType.Neither));</span>
+            break;
+        }
+
+<span class="nc" id="L1022">        return library;</span>
+    }
+
+    protected Library findLibraryWithClassloaders(SearchState state, String baseName, SuffixType suffixType) {
+<span class="fc bfc" id="L1026" title="All 2 branches covered.">        for (String suffix : suffixType.getSuffixes()) {</span>
+<span class="fc" id="L1027">            String file = baseName + suffix;</span>
+<span class="fc" id="L1028">            LoadServiceResource resource = findFileInClasspath(file);</span>
+<span class="fc bfc" id="L1029" title="All 2 branches covered.">            if (resource != null) {</span>
+<span class="fc" id="L1030">                state.setLoadName(resolveLoadName(resource, file));</span>
+<span class="fc" id="L1031">                return createLibrary(state, resource);</span>
+            }
+        }
+<span class="fc" id="L1034">        return null;</span>
+    }
+
+    @Deprecated
+    protected Library createLibrary(SearchState state, LoadServiceResource resource) {
+<span class="pc bpc" id="L1039" title="1 of 2 branches missed.">        if (resource == null) {</span>
+<span class="nc" id="L1040">            return null;</span>
+        }
+<span class="fc" id="L1042">        String file = resource.getName();</span>
+<span class="fc" id="L1043">        String location = state.loadName;</span>
+<span class="pc bpc" id="L1044" title="3 of 6 branches missed.">        if (file.endsWith(&quot;.so&quot;) || file.endsWith(&quot;.dll&quot;) || file.endsWith(&quot;.bundle&quot;)) {</span>
+//            if (runtime.getInstanceConfig().isCextEnabled()) {
+//                return new CExtension(resource);
+//            } else {
+//                throw runtime.newLoadError(&quot;C extensions are disabled, can't load `&quot; + resource.getName() + &quot;'&quot;, resource.getName());
+//            }
+<span class="nc" id="L1050">            throw runtime.newLoadError(&quot;C extensions are disabled, can't load `&quot; + resource.getName() + &quot;'&quot;, resource.getName());</span>
+<span class="pc bpc" id="L1051" title="1 of 2 branches missed.">        } else if (file.endsWith(&quot;.jar&quot;)) {</span>
+<span class="nc" id="L1052">            return new JarredScript(resource, state.searchFile);</span>
+<span class="pc bpc" id="L1053" title="1 of 2 branches missed.">        } else if (file.endsWith(&quot;.class&quot;)) {</span>
+<span class="nc" id="L1054">            return new JavaCompiledScript(resource);</span>
+        } else {
+<span class="fc" id="L1056">            return new ExternalScript(resource, location);</span>
+        }
+    }
+
+    @Deprecated
+    protected LoadServiceResource tryResourceFromCWD(SearchState state, String baseName,SuffixType suffixType) throws RaiseException {
+<span class="nc" id="L1062">        LoadServiceResource foundResource = null;</span>
+
+<span class="nc bnc" id="L1064" title="All 2 branches missed.">        for (String suffix : suffixType.getSuffixes()) {</span>
+<span class="nc" id="L1065">            String namePlusSuffix = baseName + suffix;</span>
+            // check current directory; if file exists, retrieve URL and return resource
+            try {
+<span class="nc" id="L1068">                JRubyFile file = JRubyFile.create(runtime.getCurrentDirectory(), RubyFile.expandUserPath(runtime.getCurrentContext(), namePlusSuffix));</span>
+<span class="nc" id="L1069">                debugLogTry(&quot;resourceFromCWD&quot;, file.toString());</span>
+<span class="nc bnc" id="L1070" title="All 6 branches missed.">                if (file.isFile() &amp;&amp; file.isAbsolute() &amp;&amp; file.canRead()) {</span>
+<span class="nc" id="L1071">                    boolean absolute = true;</span>
+<span class="nc" id="L1072">                    foundResource = new LoadServiceResource(file, getFileName(file, namePlusSuffix), absolute);</span>
+<span class="nc" id="L1073">                    debugLogFound(foundResource);</span>
+<span class="nc" id="L1074">                    state.setLoadName(resolveLoadName(foundResource, namePlusSuffix));</span>
+<span class="nc" id="L1075">                    break;</span>
+                }
+<span class="nc" id="L1077">            } catch (IllegalArgumentException illArgEx) {</span>
+<span class="nc" id="L1078">            } catch (SecurityException secEx) {</span>
+<span class="nc" id="L1079">            }</span>
+        }
+
+<span class="nc" id="L1082">        return foundResource;</span>
+    }
+
+    /**
+     * Try loading the resource from the current dir by appending suffixes and
+     * passing it to tryResourceAsIs to have the ./ replaced by CWD.
+     */
+    @Deprecated
+    protected LoadServiceResource tryResourceFromDotSlash(SearchState state, String baseName, SuffixType suffixType) throws RaiseException {
+<span class="nc" id="L1091">        LoadServiceResource foundResource = null;</span>
+
+<span class="nc bnc" id="L1093" title="All 2 branches missed.">        for (String suffix : suffixType.getSuffixes()) {</span>
+<span class="nc" id="L1094">            String namePlusSuffix = baseName + suffix;</span>
+            
+<span class="nc" id="L1096">            foundResource = tryResourceAsIs(namePlusSuffix, &quot;resourceFromDotSlash&quot;);</span>
+            
+<span class="nc bnc" id="L1098" title="All 2 branches missed.">            if (foundResource != null) break;</span>
+        }
+
+<span class="nc" id="L1101">        return foundResource;</span>
+    }
+
+    @Deprecated
+    protected LoadServiceResource tryResourceFromHome(SearchState state, String baseName, SuffixType suffixType) throws RaiseException {
+<span class="nc" id="L1106">        LoadServiceResource foundResource = null;</span>
+
+<span class="nc" id="L1108">        RubyHash env = (RubyHash) runtime.getObject().getConstant(&quot;ENV&quot;);</span>
+<span class="nc" id="L1109">        RubyString env_home = runtime.newString(&quot;HOME&quot;);</span>
+<span class="nc bnc" id="L1110" title="All 2 branches missed.">        if (env.has_key_p(env_home).isFalse()) {</span>
+<span class="nc" id="L1111">            return null;</span>
+        }
+<span class="nc" id="L1113">        String home = env.op_aref(runtime.getCurrentContext(), env_home).toString();</span>
+<span class="nc" id="L1114">        String path = baseName.substring(2);</span>
+
+<span class="nc bnc" id="L1116" title="All 2 branches missed.">        for (String suffix : suffixType.getSuffixes()) {</span>
+<span class="nc" id="L1117">            String namePlusSuffix = path + suffix;</span>
+            // check home directory; if file exists, retrieve URL and return resource
+            try {
+<span class="nc" id="L1120">                JRubyFile file = JRubyFile.create(home, RubyFile.expandUserPath(runtime.getCurrentContext(), namePlusSuffix));</span>
+<span class="nc" id="L1121">                debugLogTry(&quot;resourceFromHome&quot;, file.toString());</span>
+<span class="nc bnc" id="L1122" title="All 6 branches missed.">                if (file.isFile() &amp;&amp; file.isAbsolute() &amp;&amp; file.canRead()) {</span>
+<span class="nc" id="L1123">                    boolean absolute = true;</span>
+
+<span class="nc" id="L1125">                    state.setLoadName(file.getPath());</span>
+<span class="nc" id="L1126">                    foundResource = new LoadServiceResource(file, state.loadName, absolute);</span>
+<span class="nc" id="L1127">                    debugLogFound(foundResource);</span>
+<span class="nc" id="L1128">                    break;</span>
+                }
+<span class="nc" id="L1130">            } catch (IllegalArgumentException illArgEx) {</span>
+<span class="nc" id="L1131">            } catch (SecurityException secEx) {</span>
+<span class="nc" id="L1132">            }</span>
+        }
+
+<span class="nc" id="L1135">        return foundResource;</span>
+    }
+
+    @Deprecated
+    protected LoadServiceResource tryResourceFromJarURL(SearchState state, String baseName, SuffixType suffixType) {
+        // if a jar or file URL, return load service resource directly without further searching
+<span class="nc" id="L1141">        LoadServiceResource foundResource = null;</span>
+<span class="nc bnc" id="L1142" title="All 2 branches missed.">        if (baseName.startsWith(&quot;jar:file:&quot;)) {</span>
+<span class="nc" id="L1143">            return tryResourceFromJarURL(state, baseName.replaceFirst(&quot;jar:&quot;, &quot;&quot;), suffixType);</span>
+<span class="nc bnc" id="L1144" title="All 2 branches missed.">        } else if (baseName.startsWith(&quot;jar:&quot;)) {</span>
+<span class="nc bnc" id="L1145" title="All 2 branches missed.">            for (String suffix : suffixType.getSuffixes()) {</span>
+<span class="nc" id="L1146">                String namePlusSuffix = baseName + suffix;</span>
+                try {
+<span class="nc" id="L1148">                    URI resourceUri = new URI(&quot;jar&quot;, namePlusSuffix.substring(4), null);</span>
+<span class="nc" id="L1149">                    URL url = resourceUri.toURL();</span>
+<span class="nc" id="L1150">                    debugLogTry(&quot;resourceFromJarURL&quot;, url.toString());</span>
+<span class="nc bnc" id="L1151" title="All 2 branches missed.">                    if (url.openStream() != null) {</span>
+<span class="nc" id="L1152">                        foundResource = new LoadServiceResource(url, namePlusSuffix);</span>
+<span class="nc" id="L1153">                        debugLogFound(foundResource);</span>
+                    }
+<span class="nc" id="L1155">                } catch (FileNotFoundException e) {</span>
+<span class="nc" id="L1156">                } catch (URISyntaxException e) {</span>
+<span class="nc" id="L1157">                    throw runtime.newIOError(e.getMessage());</span>
+<span class="nc" id="L1158">                } catch (MalformedURLException e) {</span>
+<span class="nc" id="L1159">                    throw runtime.newIOErrorFromException(e);</span>
+<span class="nc" id="L1160">                } catch (IOException e) {</span>
+<span class="nc" id="L1161">                    throw runtime.newIOErrorFromException(e);</span>
+<span class="nc" id="L1162">                }</span>
+<span class="nc bnc" id="L1163" title="All 2 branches missed.">                if (foundResource != null) {</span>
+<span class="nc" id="L1164">                    state.setLoadName(resolveLoadName(foundResource, namePlusSuffix));</span>
+<span class="nc" id="L1165">                    break; // end suffix iteration</span>
+                }
+            }
+<span class="nc bnc" id="L1168" title="All 4 branches missed.">        } else if(baseName.startsWith(&quot;file:&quot;) &amp;&amp; baseName.indexOf(&quot;!/&quot;) != -1) {</span>
+<span class="nc bnc" id="L1169" title="All 2 branches missed.">            for (String suffix : suffixType.getSuffixes()) {</span>
+<span class="nc" id="L1170">                String namePlusSuffix = baseName + suffix;</span>
+                try {
+<span class="nc" id="L1172">                    String jarFile = namePlusSuffix.substring(5, namePlusSuffix.indexOf(&quot;!/&quot;));</span>
+<span class="nc" id="L1173">                    JarFile file = new JarFile(jarFile);</span>
+<span class="nc" id="L1174">                    String expandedFilename = expandRelativeJarPath(namePlusSuffix.substring(namePlusSuffix.indexOf(&quot;!/&quot;) + 2));</span>
+
+<span class="nc" id="L1176">                    debugLogTry(&quot;resourceFromJarURL&quot;, expandedFilename.toString());</span>
+<span class="nc bnc" id="L1177" title="All 2 branches missed.">                    if(file.getJarEntry(expandedFilename) != null) {</span>
+<span class="nc" id="L1178">                        URI resourceUri = new URI(&quot;jar&quot;, &quot;file:&quot; + jarFile + &quot;!/&quot; + expandedFilename, null);</span>
+<span class="nc" id="L1179">                        foundResource = new LoadServiceResource(resourceUri.toURL(), namePlusSuffix);</span>
+<span class="nc" id="L1180">                        debugLogFound(foundResource);</span>
+                    }
+<span class="nc" id="L1182">                } catch (URISyntaxException e) {</span>
+<span class="nc" id="L1183">                    throw runtime.newIOError(e.getMessage());</span>
+<span class="nc" id="L1184">                } catch (MalformedURLException e) {</span>
+<span class="nc" id="L1185">                    throw runtime.newIOErrorFromException(e);</span>
+<span class="nc" id="L1186">                } catch(Exception e) {}</span>
+<span class="nc bnc" id="L1187" title="All 2 branches missed.">                if (foundResource != null) {</span>
+<span class="nc" id="L1188">                    state.setLoadName(resolveLoadName(foundResource, namePlusSuffix));</span>
+<span class="nc" id="L1189">                    break; // end suffix iteration</span>
+                }
+            }
+        }
+
+<span class="nc" id="L1194">        return foundResource;</span>
+    }
+
+    @Deprecated
+    protected LoadServiceResource tryResourceFromLoadPathOrURL(SearchState state, String baseName, SuffixType suffixType) {
+<span class="nc" id="L1199">        LoadServiceResource foundResource = null;</span>
+
+        // if it's a ./ baseName, use ./ logic
+<span class="nc bnc" id="L1202" title="All 2 branches missed.">        if (baseName.startsWith(&quot;./&quot;)) {</span>
+<span class="nc" id="L1203">            foundResource = tryResourceFromDotSlash(state, baseName, suffixType);</span>
+
+<span class="nc bnc" id="L1205" title="All 2 branches missed.">            if (foundResource != null) {</span>
+<span class="nc" id="L1206">                state.setLoadName(resolveLoadName(foundResource, foundResource.getName()));</span>
+            }
+
+            // not found, don't bother with load path
+<span class="nc" id="L1210">            return foundResource;</span>
+        }
+
+        // if it's a ~/ baseName use HOME logic
+<span class="nc bnc" id="L1214" title="All 2 branches missed.">        if (baseName.startsWith(&quot;~/&quot;)) {</span>
+<span class="nc" id="L1215">            foundResource = tryResourceFromHome(state, baseName, suffixType);</span>
+
+<span class="nc bnc" id="L1217" title="All 2 branches missed.">            if (foundResource != null) {</span>
+<span class="nc" id="L1218">                state.setLoadName(resolveLoadName(foundResource, foundResource.getName()));</span>
+            }
+
+            // not found, don't bother with load path
+<span class="nc" id="L1222">            return foundResource;</span>
+        }
+
+        // if given path is absolute, just try it as-is (with extensions) and no load path
+<span class="nc bnc" id="L1226" title="All 4 branches missed.">        if (new File(baseName).isAbsolute() || baseName.startsWith(&quot;../&quot;)) {</span>
+<span class="nc bnc" id="L1227" title="All 2 branches missed.">            for (String suffix : suffixType.getSuffixes()) {</span>
+<span class="nc" id="L1228">                String namePlusSuffix = baseName + suffix;</span>
+<span class="nc" id="L1229">                foundResource = tryResourceAsIs(namePlusSuffix);</span>
+
+<span class="nc bnc" id="L1231" title="All 2 branches missed.">                if (foundResource != null) {</span>
+<span class="nc" id="L1232">                    state.setLoadName(resolveLoadName(foundResource, namePlusSuffix));</span>
+<span class="nc" id="L1233">                    return foundResource;</span>
+                }
+            }
+
+<span class="nc" id="L1237">            return null;</span>
+        }
+
+<span class="nc bnc" id="L1240" title="All 2 branches missed.">        Outer: for (int i = 0; i &lt; loadPath.size(); i++) {</span>
+            // TODO this is really inefficient, and potentially a problem everytime anyone require's something.
+            // we should try to make LoadPath a special array object.
+<span class="nc" id="L1243">            String loadPathEntry = getLoadPathEntry(loadPath.eltInternal(i));</span>
+
+<span class="nc bnc" id="L1245" title="All 4 branches missed.">            if (loadPathEntry.equals(&quot;.&quot;) || loadPathEntry.equals(&quot;&quot;)) {</span>
+<span class="nc" id="L1246">                foundResource = tryResourceFromCWD(state, baseName, suffixType);</span>
+
+<span class="nc bnc" id="L1248" title="All 2 branches missed.">                if (foundResource != null) {</span>
+<span class="nc" id="L1249">                    String ss = foundResource.getName();</span>
+<span class="nc bnc" id="L1250" title="All 2 branches missed.">                    if(ss.startsWith(&quot;./&quot;)) {</span>
+<span class="nc" id="L1251">                        ss = ss.substring(2);</span>
+                    }
+<span class="nc" id="L1253">                    state.setLoadName(resolveLoadName(foundResource, ss));</span>
+<span class="nc" id="L1254">                    break Outer;</span>
+                }
+            } else {
+<span class="nc" id="L1257">                boolean looksLikeJarURL = loadPathLooksLikeJarURL(loadPathEntry);</span>
+<span class="nc" id="L1258">                boolean looksLikeClasspathURL = loadPathLooksLikeClasspathURL(loadPathEntry);</span>
+<span class="nc bnc" id="L1259" title="All 2 branches missed.">                for (String suffix : suffixType.getSuffixes()) {</span>
+<span class="nc" id="L1260">                    String namePlusSuffix = baseName + suffix;</span>
+
+<span class="nc bnc" id="L1262" title="All 2 branches missed.">                    if (looksLikeJarURL) {</span>
+<span class="nc" id="L1263">                        foundResource = tryResourceFromJarURLWithLoadPath(namePlusSuffix, loadPathEntry);</span>
+<span class="nc bnc" id="L1264" title="All 2 branches missed.">                    } else if (looksLikeClasspathURL) {</span>
+<span class="nc" id="L1265">                        foundResource = findFileInClasspath(loadPathEntry + &quot;/&quot; + namePlusSuffix);</span>
+                    } else {
+<span class="nc" id="L1267">                        foundResource = tryResourceFromLoadPath(namePlusSuffix, loadPathEntry);</span>
+                    }
+
+<span class="nc bnc" id="L1270" title="All 2 branches missed.">                    if (foundResource != null) {</span>
+<span class="nc" id="L1271">                        String ss = namePlusSuffix;</span>
+<span class="nc bnc" id="L1272" title="All 2 branches missed.">                        if(ss.startsWith(&quot;./&quot;)) {</span>
+<span class="nc" id="L1273">                            ss = ss.substring(2);</span>
+                        }
+<span class="nc" id="L1275">                        state.setLoadName(resolveLoadName(foundResource, ss));</span>
+<span class="nc" id="L1276">                        break Outer; // end suffix iteration</span>
+                    }
+                }
+            }
+        }
+
+<span class="nc" id="L1282">        return foundResource;</span>
+    }
+    
+    protected String getLoadPathEntry(IRubyObject entry) {
+<span class="fc" id="L1286">        return RubyFile.get_path(entry.getRuntime().getCurrentContext(), entry).asJavaString();</span>
+    }
+
+    @Deprecated
+    protected LoadServiceResource tryResourceFromJarURLWithLoadPath(String namePlusSuffix, String loadPathEntry) {
+<span class="nc" id="L1291">        LoadServiceResource foundResource = null;</span>
+
+<span class="nc" id="L1293">        String[] urlParts = splitJarUrl(loadPathEntry);</span>
+<span class="nc" id="L1294">        String jarFileName = urlParts[0];</span>
+<span class="nc" id="L1295">        String entryPath = urlParts[1];</span>
+
+<span class="nc" id="L1297">        JarFile current = getJarFile(jarFileName);</span>
+<span class="nc bnc" id="L1298" title="All 2 branches missed.">        if (current != null ) {</span>
+<span class="nc bnc" id="L1299" title="All 2 branches missed.">            String canonicalEntry = (entryPath.length() &gt; 0 ? entryPath + &quot;/&quot; : &quot;&quot;) + namePlusSuffix;</span>
+<span class="nc" id="L1300">            debugLogTry(&quot;resourceFromJarURLWithLoadPath&quot;, current.getName() + &quot;!/&quot; + canonicalEntry);</span>
+<span class="nc bnc" id="L1301" title="All 2 branches missed.">            if (current.getJarEntry(canonicalEntry) != null) {</span>
+                try {
+<span class="nc" id="L1303">                    URI resourceUri = new URI(&quot;jar&quot;, &quot;file:&quot; + jarFileName + &quot;!/&quot; + canonicalEntry, null);</span>
+<span class="nc" id="L1304">                    foundResource = new LoadServiceResource(resourceUri.toURL(), resourceUri.getSchemeSpecificPart());</span>
+<span class="nc" id="L1305">                    debugLogFound(foundResource);</span>
+<span class="nc" id="L1306">                } catch (URISyntaxException e) {</span>
+<span class="nc" id="L1307">                    throw runtime.newIOError(e.getMessage());</span>
+<span class="nc" id="L1308">                } catch (MalformedURLException e) {</span>
+<span class="nc" id="L1309">                    throw runtime.newIOErrorFromException(e);</span>
+<span class="nc" id="L1310">                }</span>
+            }
+        }
+
+<span class="nc" id="L1314">        return foundResource;</span>
+    }
+
+    public JarFile getJarFile(String jarFileName) {
+<span class="nc" id="L1318">        JarFile jarFile = jarFiles.get(jarFileName);</span>
+<span class="nc bnc" id="L1319" title="All 2 branches missed.">        if(null == jarFile) {</span>
+            try {
+<span class="nc" id="L1321">                jarFile = new JarFile(jarFileName);</span>
+<span class="nc" id="L1322">                jarFiles.put(jarFileName, jarFile);</span>
+<span class="nc" id="L1323">            } catch (ZipException ignored) {</span>
+<span class="nc bnc" id="L1324" title="All 2 branches missed.">                if (runtime.getInstanceConfig().isDebug()) {</span>
+<span class="nc" id="L1325">                    LOG.info(&quot;ZipException trying to access &quot; + jarFileName + &quot;, stack trace follows:&quot;);</span>
+<span class="nc" id="L1326">                    ignored.printStackTrace(runtime.getErr());</span>
+                }
+<span class="nc" id="L1328">            } catch (FileNotFoundException ignored) {</span>
+<span class="nc" id="L1329">            } catch (IOException e) {</span>
+<span class="nc" id="L1330">                throw runtime.newIOErrorFromException(e);</span>
+<span class="nc" id="L1331">            }</span>
+        }
+<span class="nc" id="L1333">        return jarFile;</span>
+    }
+
+    protected boolean loadPathLooksLikeJarURL(String loadPathEntry) {
+<span class="nc bnc" id="L1337" title="All 8 branches missed.">        return loadPathEntry.startsWith(&quot;jar:&quot;) || loadPathEntry.endsWith(&quot;.jar&quot;) || (loadPathEntry.startsWith(&quot;file:&quot;) &amp;&amp; loadPathEntry.indexOf(&quot;!&quot;) != -1);</span>
+    }
+
+    protected boolean loadPathLooksLikeClasspathURL(String loadPathEntry) {
+<span class="nc" id="L1341">        return loadPathEntry.startsWith(&quot;classpath:&quot;);</span>
+    }
+    
+    private String[] splitJarUrl(String loadPathEntry) {
+<span class="nc" id="L1345">        String unescaped = loadPathEntry;</span>
+
+        try {
+<span class="nc" id="L1348">            unescaped = new URI(loadPathEntry).getSchemeSpecificPart();</span>
+<span class="nc" id="L1349">        } catch (URISyntaxException e) {</span>
+            // Fall back to using the original string
+<span class="nc" id="L1351">        }</span>
+
+<span class="nc" id="L1353">        int idx = unescaped.indexOf(&quot;!&quot;);</span>
+<span class="nc bnc" id="L1354" title="All 2 branches missed.">        if (idx == -1) {</span>
+<span class="nc" id="L1355">            return new String[]{unescaped, &quot;&quot;};</span>
+        }
+
+<span class="nc" id="L1358">        String filename = unescaped.substring(0, idx);</span>
+<span class="nc bnc" id="L1359" title="All 2 branches missed.">        String entry = idx + 2 &lt; unescaped.length() ? unescaped.substring(idx + 2) : &quot;&quot;;</span>
+
+<span class="nc bnc" id="L1361" title="All 2 branches missed.">        if(filename.startsWith(&quot;jar:&quot;)) {</span>
+<span class="nc" id="L1362">            filename = filename.substring(4);</span>
+        }
+        
+<span class="nc bnc" id="L1365" title="All 2 branches missed.">        if(filename.startsWith(&quot;file:&quot;)) {</span>
+<span class="nc" id="L1366">            filename = filename.substring(5);</span>
+        }
+        
+<span class="nc" id="L1369">        return new String[]{filename, entry};</span>
+    }
+
+    @Deprecated
+    protected LoadServiceResource tryResourceFromLoadPath( String namePlusSuffix,String loadPathEntry) throws RaiseException {
+<span class="nc" id="L1374">        LoadServiceResource foundResource = null;</span>
+
+        try {
+<span class="nc bnc" id="L1377" title="All 2 branches missed.">            if (!Ruby.isSecurityRestricted()) {</span>
+<span class="nc" id="L1378">                String reportedPath = loadPathEntry + &quot;/&quot; + namePlusSuffix;</span>
+<span class="nc" id="L1379">                boolean absolute = true;</span>
+                // we check length == 0 for 'load', which does not use load path
+<span class="nc bnc" id="L1381" title="All 2 branches missed.">                if (!new File(reportedPath).isAbsolute()) {</span>
+<span class="nc" id="L1382">                    absolute = false;</span>
+                    // prepend ./ if . is not already there, since we're loading based on CWD
+<span class="nc bnc" id="L1384" title="All 2 branches missed.">                    if (reportedPath.charAt(0) != '.') {</span>
+<span class="nc" id="L1385">                        reportedPath = &quot;./&quot; + reportedPath;</span>
+                    }
+<span class="nc" id="L1387">                    loadPathEntry = JRubyFile.create(runtime.getCurrentDirectory(), loadPathEntry).getAbsolutePath();</span>
+                }
+<span class="nc" id="L1389">                JRubyFile actualPath = JRubyFile.create(loadPathEntry, RubyFile.expandUserPath(runtime.getCurrentContext(), namePlusSuffix));</span>
+<span class="nc bnc" id="L1390" title="All 2 branches missed.">                if (RubyInstanceConfig.DEBUG_LOAD_SERVICE) {</span>
+<span class="nc" id="L1391">                    debugLogTry(&quot;resourceFromLoadPath&quot;, &quot;'&quot; + actualPath.toString() + &quot;' &quot; + actualPath.isFile() + &quot; &quot; + actualPath.canRead());</span>
+                }
+<span class="nc bnc" id="L1393" title="All 2 branches missed.">                if (actualPath.canRead()) {</span>
+<span class="nc" id="L1394">                    foundResource = new LoadServiceResource(actualPath, reportedPath, absolute);</span>
+<span class="nc" id="L1395">                    debugLogFound(foundResource);</span>
+                }
+            }
+<span class="nc" id="L1398">        } catch (SecurityException secEx) {</span>
+<span class="nc" id="L1399">        }</span>
+
+<span class="nc" id="L1401">        return foundResource;</span>
+    }
+
+    @Deprecated
+    protected LoadServiceResource tryResourceAsIs(String namePlusSuffix) throws RaiseException {
+<span class="nc" id="L1406">        return tryResourceAsIs(namePlusSuffix, &quot;resourceAsIs&quot;);</span>
+    }
+
+    @Deprecated
+    protected LoadServiceResource tryResourceAsIs(String namePlusSuffix, String debugName) throws RaiseException {
+<span class="nc" id="L1411">        LoadServiceResource foundResource = null;</span>
+
+        try {
+<span class="nc bnc" id="L1414" title="All 2 branches missed.">            if (!Ruby.isSecurityRestricted()) {</span>
+<span class="nc" id="L1415">                String reportedPath = namePlusSuffix;</span>
+                File actualPath;
+                
+<span class="nc bnc" id="L1418" title="All 2 branches missed.">                if (new File(reportedPath).isAbsolute()) {</span>
+                    // it's an absolute path, use it as-is
+<span class="nc" id="L1420">                    actualPath = new File(RubyFile.expandUserPath(runtime.getCurrentContext(), namePlusSuffix));</span>
+                } else {
+                    // replace leading ./ with current directory
+<span class="nc bnc" id="L1423" title="All 4 branches missed.">                    if (reportedPath.charAt(0) == '.' &amp;&amp; reportedPath.charAt(1) == '/') {</span>
+<span class="nc" id="L1424">                        reportedPath = reportedPath.replaceFirst(&quot;\\./&quot;, runtime.getCurrentDirectory());</span>
+                    }
+
+<span class="nc" id="L1427">                    actualPath = JRubyFile.create(runtime.getCurrentDirectory(), RubyFile.expandUserPath(runtime.getCurrentContext(), namePlusSuffix));</span>
+                }
+                
+<span class="nc" id="L1430">                debugLogTry(debugName, actualPath.toString());</span>
+                
+<span class="nc bnc" id="L1432" title="All 2 branches missed.">                if (reportedPath.contains(&quot;..&quot;)) {</span>
+                    // try to canonicalize if path contains ..
+                    try {
+<span class="nc" id="L1435">                        actualPath = actualPath.getCanonicalFile();</span>
+<span class="nc" id="L1436">                    } catch (IOException ioe) {</span>
+<span class="nc" id="L1437">                    }</span>
+                }
+                
+<span class="nc bnc" id="L1440" title="All 4 branches missed.">                if (actualPath.isFile() &amp;&amp; actualPath.canRead()) {</span>
+<span class="nc" id="L1441">                    foundResource = new LoadServiceResource(actualPath, reportedPath);</span>
+<span class="nc" id="L1442">                    debugLogFound(foundResource);</span>
+                }
+            }
+<span class="nc" id="L1445">        } catch (SecurityException secEx) {</span>
+<span class="nc" id="L1446">        }</span>
+
+<span class="nc" id="L1448">        return foundResource;</span>
+    }
+
+    /**
+     * this method uses the appropriate lookup strategy to find a file.
+     * It is used by Kernel#require.
+     *
+     * @mri rb_find_file
+     * @param name the file to find, this is a path name
+     * @return the correct file
+     */
+    protected LoadServiceResource findFileInClasspath(String name) {
+        // Look in classpath next (we do not use File as a test since UNC names will match)
+        // Note: Jar resources must NEVER begin with an '/'. (previous code said &quot;always begin with a /&quot;)
+<span class="fc" id="L1462">        ClassLoader classLoader = runtime.getJRubyClassLoader();</span>
+
+        // handle security-sensitive case
+<span class="pc bpc" id="L1465" title="3 of 4 branches missed.">        if (Ruby.isSecurityRestricted() &amp;&amp; classLoader == null) {</span>
+<span class="nc" id="L1466">            classLoader = runtime.getInstanceConfig().getLoader();</span>
+        }
+
+        // absolute classpath URI, no need to iterate over loadpaths
+<span class="pc bpc" id="L1470" title="1 of 2 branches missed.">        if (name.startsWith(&quot;classpath:/&quot;)) {</span>
+<span class="nc" id="L1471">            LoadServiceResource foundResource = getClassPathResource(classLoader, name);</span>
+<span class="nc bnc" id="L1472" title="All 2 branches missed.">            if (foundResource != null) {</span>
+<span class="nc" id="L1473">                return foundResource;</span>
+            }
+<span class="pc bpc" id="L1475" title="1 of 2 branches missed.">        } else if (name.startsWith(&quot;classpath:&quot;)) {</span>
+            // &quot;relative&quot; classpath URI
+<span class="nc" id="L1477">            name = name.substring(&quot;classpath:&quot;.length());</span>
+        }
+
+<span class="fc bfc" id="L1480" title="All 2 branches covered.">        for (int i = 0; i &lt; loadPath.size(); i++) {</span>
+            // TODO this is really inefficient, and potentially a problem everytime anyone require's something.
+            // we should try to make LoadPath a special array object.
+<span class="fc" id="L1483">            String entry = getLoadPathEntry(loadPath.eltInternal(i));</span>
+
+            // if entry is an empty string, skip it
+<span class="pc bpc" id="L1486" title="1 of 2 branches missed.">            if (entry.length() == 0) continue;</span>
+
+            // if entry starts with a slash, skip it since classloader resources never start with a /
+<span class="pc bpc" id="L1489" title="2 of 6 branches missed.">            if (entry.charAt(0) == '/' || (entry.length() &gt; 1 &amp;&amp; entry.charAt(1) == ':')) continue;</span>
+
+<span class="pc bpc" id="L1491" title="1 of 2 branches missed.">            if (entry.startsWith(&quot;classpath:/&quot;)) {</span>
+<span class="nc" id="L1492">                entry = entry.substring(&quot;classpath:/&quot;.length());</span>
+<span class="pc bpc" id="L1493" title="1 of 2 branches missed.">            } else if (entry.startsWith(&quot;classpath:&quot;)) {</span>
+<span class="nc" id="L1494">                entry = entry.substring(&quot;classpath:&quot;.length());</span>
+            }
+
+            String entryName;
+<span class="pc bpc" id="L1498" title="1 of 2 branches missed.">            if (name.startsWith(entry)) {</span>
+<span class="nc" id="L1499">                entryName = name.substring(entry.length());</span>
+            } else {
+<span class="fc" id="L1501">                entryName = name;</span>
+            }
+
+            // otherwise, try to load from classpath (Note: Jar resources always uses '/')
+<span class="fc" id="L1505">            LoadServiceResource foundResource = getClassPathResource(classLoader, entry + &quot;/&quot; + entryName);</span>
+<span class="pc bpc" id="L1506" title="1 of 2 branches missed.">            if (foundResource != null) {</span>
+<span class="nc" id="L1507">                return foundResource;</span>
+            }
+        }
+
+        // if name starts with a / we're done (classloader resources won't load with an initial /)
+<span class="pc bpc" id="L1512" title="2 of 6 branches missed.">        if (name.charAt(0) == '/' || (name.length() &gt; 1 &amp;&amp; name.charAt(1) == ':')) return null;</span>
+
+        // Try to load from classpath without prefix. &quot;A/b.rb&quot; will not load as
+        // &quot;./A/b.rb&quot; in a jar file.
+<span class="fc" id="L1516">        LoadServiceResource foundResource = getClassPathResource(classLoader, name);</span>
+<span class="fc bfc" id="L1517" title="All 2 branches covered.">        if (foundResource != null) {</span>
+<span class="fc" id="L1518">            return foundResource;</span>
+        }
+
+<span class="fc" id="L1521">        return null;</span>
+    }
+
+    /* Directories and unavailable resources are not able to open a stream. */
+    protected static boolean isRequireable(URL loc) {
+<span class="pc bpc" id="L1526" title="1 of 2 branches missed.">        if (loc != null) {</span>
+<span class="pc bpc" id="L1527" title="1 of 4 branches missed.">                if (loc.getProtocol().equals(&quot;file&quot;) &amp;&amp; new java.io.File(getPath(loc)).isDirectory()) {</span>
+<span class="nc" id="L1528">                        return false;</span>
+                }
+
+                try {
+<span class="fc" id="L1532">                loc.openConnection();</span>
+<span class="fc" id="L1533">                return true;</span>
+<span class="nc" id="L1534">            } catch (Exception e) {}</span>
+        }
+<span class="nc" id="L1536">        return false;</span>
+    }
+
+<span class="fc" id="L1539">    private static final Pattern URI_PATTERN = Pattern.compile(&quot;([a-z]+?://.*)$&quot;);</span>
+    public LoadServiceResource getClassPathResource(ClassLoader classLoader, String name) {
+<span class="fc" id="L1541">        boolean isClasspathScheme = false;</span>
+
+        // strip the classpath scheme first
+<span class="pc bpc" id="L1544" title="1 of 2 branches missed.">        if (name.startsWith(&quot;classpath:/&quot;)) {</span>
+<span class="nc" id="L1545">            isClasspathScheme = true;</span>
+<span class="nc" id="L1546">            name = name.substring(&quot;classpath:/&quot;.length());</span>
+<span class="pc bpc" id="L1547" title="1 of 2 branches missed.">        } else if (name.startsWith(&quot;classpath:&quot;)) {</span>
+<span class="nc" id="L1548">            isClasspathScheme = true;</span>
+<span class="nc" id="L1549">            name = name.substring(&quot;classpath:&quot;.length());</span>
+<span class="pc bpc" id="L1550" title="3 of 4 branches missed.">        } else if(name.startsWith(&quot;file:&quot;) &amp;&amp; name.indexOf(&quot;!/&quot;) != -1) {</span>
+<span class="nc" id="L1551">            name = name.substring(name.indexOf(&quot;!/&quot;) + 2);</span>
+        }
+
+        URL loc;
+<span class="fc" id="L1555">        Matcher m = URI_PATTERN.matcher( name );</span>
+        final String pn;
+<span class="pc bpc" id="L1557" title="1 of 2 branches missed.">        if (m.matches()) {</span>
+<span class="nc" id="L1558">            debugLogTry(&quot;fileInClassloader&quot;, m.group( 1 ) );</span>
+            try
+            {
+<span class="nc" id="L1561">                loc = new URL( m.group( 1 ).replaceAll(&quot;([^:])//&quot;, &quot;$1/&quot;) );</span>
+<span class="nc" id="L1562">                loc.openStream();</span>
+            }
+<span class="nc" id="L1564">            catch (IOException e)</span>
+            {
+<span class="nc" id="L1566">                loc = null;</span>
+<span class="nc" id="L1567">            }</span>
+        }
+        else {
+<span class="fc" id="L1570">            debugLogTry(&quot;fileInClasspath&quot;, name);</span>
+            try
+            {
+<span class="fc" id="L1573">                loc = classLoader.getResource(name);</span>
+            }
+            // some classloaders can throw IllegalArgumentException here
+            //  	at org.apache.felix.framework.BundleWiringImpl$BundleClassLoader.getResource(BundleWiringImpl.java:2419) ~[org.apache.felix.framework-4.2.1.jar:na]
+            //  	at java.lang.ClassLoader.getResource(ClassLoader.java:1142) ~[na:1.7.0_65]
+<span class="nc" id="L1578">            catch (IllegalArgumentException e)</span>
+            {
+<span class="nc" id="L1580">                loc = null;</span>
+<span class="fc" id="L1581">            }</span>
+        }
+
+<span class="fc bfc" id="L1584" title="All 2 branches covered.">        if (loc != null) { // got it</span>
+<span class="fc" id="L1585">            String path = classpathFilenameFromURL(name, loc, isClasspathScheme);</span>
+<span class="fc" id="L1586">            LoadServiceResource foundResource = new LoadServiceResource(loc, path);</span>
+<span class="fc" id="L1587">            debugLogFound(foundResource);</span>
+<span class="fc" id="L1588">            return foundResource;</span>
+        }
+<span class="fc" id="L1590">        return null;</span>
+    }
+
+    /**
+     * Given a URL to a classloader resource, build an appropriate load string.
+     *
+     * @param name the original filename requested
+     * @param loc the URL to the resource
+     * @param isClasspathScheme whether we're using the classpath: sceheme
+     * @return
+     */
+    public static String classpathFilenameFromURL(String name, URL loc, boolean isClasspathScheme) {
+<span class="fc" id="L1602">        String path = &quot;classpath:/&quot; + name;</span>
+        // special case for typical jar:file URLs, but only if the name didn't have
+        // the classpath scheme explicitly
+<span class="pc bpc" id="L1605" title="1 of 2 branches missed.">        if (!isClasspathScheme &amp;&amp;</span>
+<span class="pc bpc" id="L1606" title="1 of 4 branches missed.">                (loc.getProtocol().equals(&quot;jar&quot;) || loc.getProtocol().equals(&quot;file&quot;))</span>
+<span class="pc bpc" id="L1607" title="1 of 2 branches missed.">                &amp;&amp; isRequireable(loc)) {</span>
+<span class="fc" id="L1608">            path = getPath(loc);</span>
+            // On windows file: urls converted to names will return /C:/foo from
+            // getPath versus C:/foo.  Since getPath is used in a million places
+            // putting the newFile.getPath broke some file with-in Jar loading.
+            // So I moved it to only this site.
+<span class="pc bpc" id="L1613" title="3 of 4 branches missed.">            if (Platform.IS_WINDOWS &amp;&amp; loc.getProtocol().equals(&quot;file&quot;)) {</span>
+<span class="nc" id="L1614">                path = new File(path).getPath();</span>
+            }
+        }
+<span class="fc" id="L1617">        return path;</span>
+    }
+
+    private String expandRelativeJarPath(String path) {
+<span class="nc" id="L1621">        return path.replaceAll(&quot;/[^/]+/\\.\\.|[^/]+/\\.\\./|\\./&quot;,&quot;&quot;).replace(&quot;^\\\\&quot;,&quot;/&quot;);</span>
+    }
+
+    protected String resolveLoadName(LoadServiceResource foundResource, String previousPath) {
+<span class="pc bpc" id="L1625" title="1 of 2 branches missed.">        if (canGetAbsolutePath) {</span>
+            try {
+<span class="fc" id="L1627">                String path = foundResource.getAbsolutePath();</span>
+<span class="pc bpc" id="L1628" title="1 of 2 branches missed.">                if (Platform.IS_WINDOWS) {</span>
+<span class="nc" id="L1629">                    path = path.replace('\\', '/');</span>
+                }
+<span class="fc" id="L1631">                return path;</span>
+<span class="nc" id="L1632">            } catch (AccessControlException ace) {</span>
+                // can't get absolute path in this security context, so we give up forever
+<span class="nc" id="L1634">                runtime.getWarnings().warn(&quot;can't canonicalize loaded names due to security restrictions; disabling&quot;);</span>
+<span class="nc" id="L1635">                canGetAbsolutePath = false;</span>
+            }
+        }
+<span class="nc" id="L1638">        return resolveLoadName(foundResource, previousPath);</span>
+    }
+
+    protected String getFileName(JRubyFile file, String namePlusSuffix) {
+<span class="nc" id="L1642">        return file.getAbsolutePath();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

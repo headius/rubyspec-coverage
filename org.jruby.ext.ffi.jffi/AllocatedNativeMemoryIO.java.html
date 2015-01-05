@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AllocatedNativeMemoryIO.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.ffi.jffi</a> &gt; <span class="el_source">AllocatedNativeMemoryIO.java</span></div><h1>AllocatedNativeMemoryIO.java</h1><pre class="source lang-java linenums">package org.jruby.ext.ffi.jffi;
+
+import java.lang.ref.Reference;
+import java.lang.ref.SoftReference;
+import java.lang.ref.WeakReference;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.jruby.Ruby;
+import org.jruby.ext.ffi.AllocatedDirectMemoryIO;
+import org.jruby.util.PhantomReferenceReaper;
+
+final class AllocatedNativeMemoryIO extends BoundedNativeMemoryIO implements AllocatedDirectMemoryIO {
+    /** Keeps strong references to the memory bucket until cleanup */
+<span class="nc" id="L15">    private static final Map&lt;AllocationGroup, Boolean&gt; referenceSet = new ConcurrentHashMap&lt;AllocationGroup, Boolean&gt;();</span>
+<span class="nc" id="L16">    private static final ThreadLocal&lt;Reference&lt;AllocationGroup&gt;&gt; currentBucket = new ThreadLocal&lt;Reference&lt;AllocationGroup&gt;&gt;();</span>
+
+    private final MemoryAllocation allocation;
+    private final Object sentinel;
+
+    /**
+     * Allocates native memory
+     *
+     * @param runtime The Ruby runtime
+     * @param size The number of bytes to allocate
+     * @param clear Whether the memory should be cleared (zeroed)
+     * @return A new {@link AllocatedDirectMemoryIO}
+     */
+    static final AllocatedNativeMemoryIO allocate(Ruby runtime, int size, boolean clear) {
+<span class="nc" id="L30">        return allocateAligned(runtime, size, 1, clear);</span>
+    }
+
+    /**
+     * Allocates native memory, aligned to a minimum boundary.
+     * 
+     * @param runtime The Ruby runtime
+     * @param size The number of bytes to allocate
+     * @param align The minimum alignment of the memory
+     * @param clear Whether the memory should be cleared (zeroed)
+     * @return A new {@link AllocatedDirectMemoryIO}
+     */
+    static AllocatedNativeMemoryIO allocateAligned(Ruby runtime, int size, int align, boolean clear) {
+        long address;
+<span class="nc bnc" id="L44" title="All 4 branches missed.">        for (int i = 0; (address = IO.allocateMemory(size + align - 1, clear)) == 0L &amp;&amp; i &lt; 100; i++) {</span>
+            // No available memory; trigger a full GC to reclaim some memory
+<span class="nc" id="L46">            System.gc();</span>
+        }
+<span class="nc bnc" id="L48" title="All 2 branches missed.">        if (address == 0L) {</span>
+<span class="nc" id="L49">            throw runtime.newRuntimeError(&quot;failed to allocate &quot; + size + &quot; bytes of native memory&quot;);</span>
+        }
+
+        try {
+            /*
+            * Instead of using a WeakReference per memory allocation to free the native memory, memory allocations
+            * are grouped together into a bucket with a reference to a common object which is tracked via a PhantomReference.
+            *
+            * When all the MemoryIO instances are no longer referenced, the common object can be garbage collected
+            * and its PhantomReference en-queued, and then the group of memory allocations will be freed in one hit.
+            *
+            * This reduces the overhead of automatically freed native memory allocations by about 70%
+            */
+<span class="nc" id="L62">            Reference&lt;AllocationGroup&gt; allocationGroupReference = currentBucket.get();</span>
+<span class="nc bnc" id="L63" title="All 2 branches missed.">            AllocationGroup allocationGroup = allocationGroupReference != null ? allocationGroupReference.get() : null;</span>
+<span class="nc bnc" id="L64" title="All 2 branches missed.">            Object sentinel = allocationGroup != null ? allocationGroup.sentinel() : null;</span>
+
+<span class="nc bnc" id="L66" title="All 4 branches missed.">            if (sentinel == null || !allocationGroup.canAccept(size)) {</span>
+<span class="nc" id="L67">                referenceSet.put(allocationGroup = new AllocationGroup(sentinel = new Object()), Boolean.TRUE);</span>
+<span class="nc" id="L68">                currentBucket.set(new SoftReference&lt;AllocationGroup&gt;(allocationGroup));</span>
+            }
+
+<span class="nc" id="L71">            AllocatedNativeMemoryIO io = new AllocatedNativeMemoryIO(runtime, sentinel, address, size, align);</span>
+<span class="nc" id="L72">            allocationGroup.add(io.allocation, size);</span>
+
+<span class="nc" id="L74">            return io;</span>
+
+<span class="nc" id="L76">        } catch (Throwable t) {</span>
+<span class="nc" id="L77">            IO.freeMemory(address);</span>
+<span class="nc" id="L78">            throw new RuntimeException(t);</span>
+        }
+    }
+    
+    private AllocatedNativeMemoryIO(Ruby runtime, Object sentinel, long address, int size, int align) {
+<span class="nc" id="L83">        super(runtime, ((address - 1) &amp; ~(align - 1)) + align, size);</span>
+<span class="nc" id="L84">        this.sentinel = sentinel;</span>
+<span class="nc" id="L85">        this.allocation = new MemoryAllocation(address);</span>
+<span class="nc" id="L86">    }</span>
+
+    public void free() {
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        if (allocation.released) {</span>
+<span class="nc" id="L90">            throw getRuntime().newRuntimeError(&quot;memory already freed&quot;);</span>
+        }
+        
+<span class="nc" id="L93">        allocation.free();</span>
+<span class="nc" id="L94">    }</span>
+
+    public void setAutoRelease(boolean autorelease) {
+<span class="nc bnc" id="L97" title="All 4 branches missed.">        if (autorelease &amp;&amp; !allocation.released) {</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">            allocation.unmanaged = !autorelease;</span>
+        }
+<span class="nc" id="L100">    }</span>
+
+    public boolean isAutoRelease() {
+<span class="nc bnc" id="L103" title="All 2 branches missed.">        return !allocation.unmanaged;</span>
+    }
+
+    /**
+     * Holder for a group of memory allocations.
+     */
+    private static final class AllocationGroup extends PhantomReferenceReaper&lt;Object&gt; implements Runnable {
+        public static final int MAX_BYTES_PER_BUCKET = 4096;
+        private final WeakReference&lt;Object&gt; weakref;
+<span class="nc" id="L112">        private volatile MemoryAllocation head = null;</span>
+<span class="nc" id="L113">        private long bytesUsed = 0;</span>
+        
+        AllocationGroup(Object sentinel) {
+<span class="nc" id="L116">            super(sentinel);</span>
+<span class="nc" id="L117">            this.weakref = new WeakReference&lt;Object&gt;(sentinel);</span>
+<span class="nc" id="L118">        }</span>
+        
+        Object sentinel() {
+<span class="nc" id="L121">            return weakref.get();</span>
+        }
+
+        void add(MemoryAllocation m, int size) {
+<span class="nc" id="L125">            bytesUsed += size;</span>
+<span class="nc" id="L126">            m.next = head;</span>
+<span class="nc" id="L127">            head = m;</span>
+<span class="nc" id="L128">        }</span>
+
+        boolean canAccept(int size) {
+<span class="nc bnc" id="L131" title="All 2 branches missed.">            return bytesUsed + size &lt; MAX_BYTES_PER_BUCKET;</span>
+        }
+
+        public final void run() {
+<span class="nc" id="L135">            referenceSet.remove(this);</span>
+<span class="nc" id="L136">            MemoryAllocation m = head;</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">            while (m != null) {</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">                if (!m.unmanaged) {</span>
+<span class="nc" id="L139">                    m.dispose();</span>
+                }
+<span class="nc" id="L141">                m = m.next;</span>
+            }
+<span class="nc" id="L143">        }</span>
+    }
+
+    /**
+     * Represents a single native memory allocation
+     */
+    private static final class MemoryAllocation {
+        private final long address;
+        volatile boolean released;
+        volatile boolean unmanaged;
+        volatile MemoryAllocation next;
+
+<span class="nc" id="L155">        MemoryAllocation(long address) {</span>
+<span class="nc" id="L156">            this.address = address;</span>
+<span class="nc" id="L157">        }</span>
+
+        final void dispose() {
+<span class="nc" id="L160">            IO.freeMemory(address);</span>
+<span class="nc" id="L161">        }</span>
+
+        final void free() {
+<span class="nc bnc" id="L164" title="All 2 branches missed.">            if (!released) {</span>
+<span class="nc" id="L165">                released = true;</span>
+<span class="nc" id="L166">                unmanaged = true;</span>
+<span class="nc" id="L167">                dispose();</span>
+            }
+<span class="nc" id="L169">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

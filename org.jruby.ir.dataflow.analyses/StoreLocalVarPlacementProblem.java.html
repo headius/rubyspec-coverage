@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>StoreLocalVarPlacementProblem.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.dataflow.analyses</a> &gt; <span class="el_source">StoreLocalVarPlacementProblem.java</span></div><h1>StoreLocalVarPlacementProblem.java</h1><pre class="source lang-java linenums">package org.jruby.ir.dataflow.analyses;
+
+import org.jruby.ir.IRClosure;
+import org.jruby.ir.IREvalScript;
+import org.jruby.ir.IRScope;
+import org.jruby.ir.dataflow.DataFlowProblem;
+import org.jruby.ir.instructions.Instr;
+import org.jruby.ir.instructions.ReceiveJRubyExceptionInstr;
+import org.jruby.ir.instructions.StoreLocalVarInstr;
+import org.jruby.ir.instructions.ThrowExceptionInstr;
+import org.jruby.ir.operands.*;
+import org.jruby.ir.representations.BasicBlock;
+import org.jruby.ir.representations.CFG;
+
+import java.util.HashSet;
+import java.util.ListIterator;
+import java.util.Map;
+import java.util.Set;
+
+// This problem tries to find places to insert binding stores -- for spilling local variables onto a heap store
+// It does better than spilling all local variables to the heap at all call sites.  This is similar to a
+// available expressions analysis in that it tries to propagate availability of stores through the flow graph.
+<span class="pc bpc" id="L23" title="1 of 2 branches missed.">public class StoreLocalVarPlacementProblem extends DataFlowProblem&lt;StoreLocalVarPlacementProblem, StoreLocalVarPlacementNode&gt; {</span>
+    public static final String NAME = &quot;Placement of local-var stores&quot;;
+
+    private boolean scopeHasLocalVarStores;
+    private boolean scopeHasUnrescuedExceptions;
+
+    public StoreLocalVarPlacementProblem() {
+<span class="fc" id="L30">        super(DataFlowProblem.DF_Direction.FORWARD);</span>
+<span class="fc" id="L31">    }</span>
+
+    @Override
+    public String getName() {
+<span class="nc" id="L35">        return &quot;Binding Stores Placement Analysis&quot;;</span>
+    }
+
+    @Override
+    public StoreLocalVarPlacementNode buildFlowGraphNode(BasicBlock bb) {
+<span class="fc" id="L40">        return new StoreLocalVarPlacementNode(this, bb);</span>
+    }
+
+    @Override
+    public String getDataFlowVarsForOutput() {
+<span class="nc" id="L45">        return &quot;&quot;;</span>
+    }
+
+    public boolean scopeHasLocalVarStores() {
+<span class="nc" id="L49">        return scopeHasLocalVarStores;</span>
+    }
+
+    public boolean scopeHasUnrescuedExceptions() {
+<span class="nc" id="L53">        return scopeHasUnrescuedExceptions;</span>
+    }
+
+    TemporaryLocalVariable getLocalVarReplacement(LocalVariable v, Map&lt;Operand, Operand&gt; varRenameMap) {
+<span class="fc" id="L57">         TemporaryLocalVariable value = (TemporaryLocalVariable)varRenameMap.get(v);</span>
+<span class="fc bfc" id="L58" title="All 2 branches covered.">         if (value == null) {</span>
+<span class="fc" id="L59">             value = getScope().getNewTemporaryVariableFor(v);</span>
+<span class="fc" id="L60">             varRenameMap.put(v, value);</span>
+         }
+<span class="fc" id="L62">         return value;</span>
+    }
+
+    boolean addClosureExitStoreLocalVars(ListIterator&lt;Instr&gt; instrs, Set&lt;LocalVariable&gt; dirtyVars, Map&lt;Operand, Operand&gt; varRenameMap) {
+<span class="fc" id="L66">        IRScope scope        = getScope();</span>
+<span class="fc" id="L67">        boolean addedStores  = false;</span>
+<span class="fc" id="L68">        boolean isEvalScript = scope instanceof IREvalScript;</span>
+<span class="fc bfc" id="L69" title="All 2 branches covered.">        for (LocalVariable v : dirtyVars) {</span>
+<span class="pc bpc" id="L70" title="2 of 6 branches missed.">            if (isEvalScript || !(v instanceof ClosureLocalVariable) || (scope != ((ClosureLocalVariable)v).definingScope)) {</span>
+<span class="fc" id="L71">                addedStores = true;</span>
+<span class="fc" id="L72">                instrs.add(new StoreLocalVarInstr(getLocalVarReplacement(v, varRenameMap), scope, v));</span>
+            }
+<span class="fc" id="L74">        }</span>
+<span class="fc" id="L75">        return addedStores;</span>
+    }
+
+    public void addStores(Map&lt;Operand, Operand&gt; varRenameMap) {
+        /* --------------------------------------------------------------------
+         * If this is a closure, introduce a global ensure block that spills
+         * into the binding the union of dirty vars from all call sites that
+         * aren't protected by any other rescue or ensure block.
+         *
+         * This conservative scenario ensures that no matter what call site
+         * we receive an exception from, when we exit the closure, all dirty
+         * vars from the parent scope have been stored.
+         * -------------------------------------------------------------------- */
+<span class="fc" id="L88">        boolean mightRequireGlobalEnsureBlock = false;</span>
+
+<span class="fc" id="L90">        Set&lt;LocalVariable&gt; dirtyVars = null;</span>
+<span class="fc" id="L91">        IRScope cfgScope = getScope();</span>
+<span class="fc" id="L92">        CFG     cfg      = cfgScope.cfg();</span>
+
+<span class="fc" id="L94">        this.scopeHasLocalVarStores      = false;</span>
+<span class="fc" id="L95">        this.scopeHasUnrescuedExceptions = false;</span>
+
+<span class="fc bfc" id="L97" title="All 2 branches covered.">        if (cfgScope instanceof IRClosure) {</span>
+<span class="fc" id="L98">            mightRequireGlobalEnsureBlock = true;</span>
+<span class="fc" id="L99">            dirtyVars = new HashSet&lt;LocalVariable&gt;();</span>
+        }
+
+        // Add local-var stores
+<span class="fc bfc" id="L103" title="All 2 branches covered.">        for (StoreLocalVarPlacementNode bspn: flowGraphNodes) {</span>
+            boolean bbAddedStores;
+            // SSS: This is highly conservative.  If the bb has an exception raising instr.
+            // and we dont have a rescuer, only then do we have unrescued exceptions.
+            // Right now, we are only checking for rescuers.
+<span class="fc bfc" id="L108" title="All 2 branches covered.">            boolean bbHasUnrescuedExceptions = !bspn.hasExceptionsRescued();</span>
+<span class="fc bfc" id="L109" title="All 4 branches covered.">            if (mightRequireGlobalEnsureBlock &amp;&amp; bbHasUnrescuedExceptions) {</span>
+<span class="fc" id="L110">                bbAddedStores = bspn.addStores(varRenameMap, dirtyVars);</span>
+            } else {
+<span class="fc" id="L112">                bbAddedStores = bspn.addStores(varRenameMap, null);</span>
+            }
+
+<span class="pc bpc" id="L115" title="1 of 4 branches missed.">            scopeHasUnrescuedExceptions = scopeHasUnrescuedExceptions || bbHasUnrescuedExceptions;</span>
+<span class="fc bfc" id="L116" title="All 4 branches covered.">            scopeHasLocalVarStores      = scopeHasLocalVarStores || bbAddedStores;</span>
+<span class="fc" id="L117">        }</span>
+
+        // Allocate global-ensure block, if necessary
+<span class="fc bfc" id="L120" title="All 4 branches covered.">        if ((mightRequireGlobalEnsureBlock == true) &amp;&amp; !dirtyVars.isEmpty()) {</span>
+            ListIterator&lt;Instr&gt; instrs;
+<span class="fc" id="L122">            BasicBlock geb = cfg.getGlobalEnsureBB();</span>
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">            if (geb == null) {</span>
+<span class="nc" id="L124">                Variable exc = cfgScope.createTemporaryVariable();</span>
+<span class="nc" id="L125">                geb = new BasicBlock(cfg, Label.getGlobalEnsureBlockLabel());</span>
+<span class="nc" id="L126">                geb.addInstr(new ReceiveJRubyExceptionInstr(exc)); // JRuby implementation exception handling</span>
+<span class="nc" id="L127">                geb.addInstr(new ThrowExceptionInstr(exc));</span>
+<span class="nc" id="L128">                cfg.addGlobalEnsureBB(geb);</span>
+            }
+
+<span class="fc" id="L131">            instrs = geb.getInstrs().listIterator(geb.getInstrs().size());</span>
+<span class="fc" id="L132">            Instr i = instrs.previous();</span>
+            // Assumption: Last instr should always be a control-transfer instruction
+<span class="pc bpc" id="L134" title="3 of 4 branches missed.">            assert i.getOperation().transfersControl(): &quot;Last instruction of GEB in scope: &quot; + getScope() + &quot; is &quot; + i + &quot;, not a control-xfer instruction&quot;;</span>
+<span class="fc" id="L135">            addClosureExitStoreLocalVars(instrs, dirtyVars, varRenameMap);</span>
+        }
+<span class="fc" id="L137">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

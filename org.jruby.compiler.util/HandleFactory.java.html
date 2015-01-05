@@ -1,0 +1,347 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>HandleFactory.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.compiler.util</a> &gt; <span class="el_source">HandleFactory.java</span></div><h1>HandleFactory.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2008 Charles O Nutter &lt;headius@headius.com&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.compiler.util;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import org.jruby.compiler.JITCompiler;
+import org.jruby.compiler.impl.SkinnyMethodAdapter;
+import org.jruby.util.ClassDefininngJRubyClassLoader;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.ClassWriter;
+import static org.jruby.util.CodegenUtils.*;
+import static org.objectweb.asm.Opcodes.*;
+
+<span class="nc" id="L44">public class HandleFactory {</span>
+<span class="nc" id="L45">    public static class Handle {</span>
+<span class="nc" id="L46">        private Error fail() { return new AbstractMethodError(&quot;invalid call signature for target method: &quot; + getClass()); }</span>
+<span class="nc" id="L47">        public Object invoke(Object receiver) { throw fail(); }</span>
+<span class="nc" id="L48">        public Object invoke(Object receiver, Object arg0) { throw fail(); }</span>
+<span class="nc" id="L49">        public Object invoke(Object receiver, Object arg0, Object arg1) { throw fail(); }</span>
+<span class="nc" id="L50">        public Object invoke(Object receiver, Object arg0, Object arg1, Object arg2) { throw fail(); }</span>
+//        public Object invoke(Object receiver, Object arg0, Object arg1, Object arg2, Object arg3) { throw fail(); }
+//        public Object invoke(Object receiver, Object arg0, Object arg1, Object arg2, Object arg3, Object arg4) { throw fail(); }
+<span class="nc" id="L53">        public Object invoke(Object receiver, Object... args) { throw fail(); }</span>
+    }
+    
+    public static Handle createHandle(ClassDefininngJRubyClassLoader classLoader, Method method) {
+<span class="nc" id="L57">        String name = createHandleName(method);</span>
+
+        Class handleClass;
+        try {
+<span class="nc" id="L61">            handleClass = classLoader.loadClass(name);</span>
+<span class="nc" id="L62">            return (Handle)handleClass.newInstance();</span>
+<span class="nc" id="L63">        } catch (Exception e) {</span>
+        }
+
+<span class="nc" id="L66">        handleClass = createHandleClass(classLoader, method, name);</span>
+        
+        try {
+<span class="nc" id="L69">            return (Handle)handleClass.newInstance();</span>
+<span class="nc" id="L70">        } catch (Exception e) {</span>
+<span class="nc" id="L71">            throw new RuntimeException(e);</span>
+        }
+    }
+
+    public static Class createHandleClass(ClassDefininngJRubyClassLoader classLoader, Method method, String name) {
+<span class="nc" id="L76">        byte[] bytes = createHandleBytes(method, name);</span>
+<span class="nc bnc" id="L77" title="All 2 branches missed.">        return (classLoader != null ? classLoader : new ClassDefininngJRubyClassLoader(ClassDefininngJRubyClassLoader.class.getClassLoader())).defineClass(name, bytes);</span>
+    }
+
+    public static byte[] createHandleBytes(Method method, String name) {
+<span class="nc" id="L81">        Class returnType = method.getReturnType();</span>
+<span class="nc" id="L82">        Class[] paramTypes = method.getParameterTypes();</span>
+<span class="nc" id="L83">        ClassVisitor cv = new ClassWriter(ClassWriter.COMPUTE_MAXS);</span>
+<span class="nc" id="L84">        cv.visit(ACC_PUBLIC | ACC_FINAL | ACC_SUPER, V1_5, name, null, p(Handle.class), null);</span>
+
+        SkinnyMethodAdapter m;
+        String signature;
+<span class="nc" id="L88">        boolean needsArgsVersion = true;</span>
+<span class="nc bnc" id="L89" title="All 5 branches missed.">        switch (paramTypes.length) {</span>
+        case 0:
+<span class="nc" id="L91">            signature = sig(Object.class, Object.class);</span>
+<span class="nc" id="L92">            break;</span>
+        case 1:
+<span class="nc" id="L94">            signature = sig(Object.class, Object.class, Object.class);</span>
+<span class="nc" id="L95">            break;</span>
+        case 2:
+<span class="nc" id="L97">            signature = sig(Object.class, Object.class, Object.class, Object.class);</span>
+<span class="nc" id="L98">            break;</span>
+        case 3:
+<span class="nc" id="L100">            signature = sig(Object.class, Object.class, Object.class, Object.class, Object.class);</span>
+<span class="nc" id="L101">            break;</span>
+//        case 4:
+//            signature = sig(Object.class, Object.class, Object.class, Object.class, Object.class);
+//            break;
+//        case 5:
+//            signature = sig(Object.class, Object.class, Object.class, Object.class, Object.class, Object.class);
+//            break;
+        default:
+<span class="nc" id="L109">            needsArgsVersion = false;</span>
+<span class="nc" id="L110">            signature = sig(Object.class, Object.class, Object[].class);</span>
+            break;
+        }
+<span class="nc" id="L113">        m = new SkinnyMethodAdapter(cv, ACC_PUBLIC | ACC_FINAL | ACC_SYNTHETIC, &quot;invoke&quot;, signature, null, null);</span>
+
+<span class="nc" id="L115">        m.start();</span>
+
+        // load receiver
+<span class="nc bnc" id="L118" title="All 2 branches missed.">        if (!Modifier.isStatic(method.getModifiers())) {</span>
+<span class="nc" id="L119">            m.aload(1); // receiver</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">            if (method.getDeclaringClass() != Object.class) {</span>
+<span class="nc" id="L121">                m.checkcast(p(method.getDeclaringClass()));</span>
+            }
+        }
+
+        // load arguments
+<span class="nc bnc" id="L126" title="All 2 branches missed.">        switch (paramTypes.length) {</span>
+        case 0:
+        case 1:
+        case 2:
+        case 3:
+//        case 4:
+//        case 5:
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            for (int i = 0; i &lt; paramTypes.length; i++) {</span>
+<span class="nc" id="L134">                loadUnboxedArgument(m, i + 2, paramTypes[i]);</span>
+            }
+<span class="nc" id="L136">            break;</span>
+        default:
+<span class="nc bnc" id="L138" title="All 2 branches missed.">            for (int i = 0; i &lt; paramTypes.length; i++) {</span>
+<span class="nc" id="L139">                m.aload(2); // Object[] args</span>
+<span class="nc" id="L140">                m.pushInt(i);</span>
+<span class="nc" id="L141">                m.aaload();</span>
+<span class="nc" id="L142">                Class paramClass = paramTypes[i];</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">                if (paramClass.isPrimitive()) {</span>
+<span class="nc" id="L144">                    Class boxType = getBoxType(paramClass);</span>
+<span class="nc" id="L145">                    m.checkcast(p(boxType));</span>
+<span class="nc" id="L146">                    m.invokevirtual(p(boxType), paramClass.toString() + &quot;Value&quot;, sig(paramClass));</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">                } else if (paramClass != Object.class) {</span>
+<span class="nc" id="L148">                    m.checkcast(p(paramClass));</span>
+                }
+            }
+            break;
+        }
+
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        if (Modifier.isStatic(method.getModifiers())) {</span>
+<span class="nc" id="L155">            m.invokestatic(p(method.getDeclaringClass()), method.getName(), sig(returnType, paramTypes));</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">        } else if (Modifier.isInterface(method.getDeclaringClass().getModifiers())) {</span>
+<span class="nc" id="L157">            m.invokeinterface(p(method.getDeclaringClass()), method.getName(), sig(returnType, paramTypes));</span>
+        } else {
+<span class="nc" id="L159">            m.invokevirtual(p(method.getDeclaringClass()), method.getName(), sig(returnType, paramTypes));</span>
+        }
+
+<span class="nc bnc" id="L162" title="All 2 branches missed.">        if (returnType == void.class) {</span>
+<span class="nc" id="L163">            m.aconst_null();</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        } else if (returnType.isPrimitive()) {</span>
+<span class="nc" id="L165">            Class boxType = getBoxType(returnType);</span>
+<span class="nc" id="L166">            m.invokestatic(p(boxType), &quot;valueOf&quot;, sig(boxType, returnType));</span>
+        }
+<span class="nc" id="L168">        m.areturn();</span>
+<span class="nc" id="L169">        m.end();</span>
+
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        if (needsArgsVersion) {</span>
+<span class="nc" id="L172">            m = new SkinnyMethodAdapter(cv, ACC_PUBLIC | ACC_FINAL | ACC_SYNTHETIC, &quot;invoke&quot;, sig(Object.class, Object.class, Object[].class), null, null);</span>
+
+<span class="nc" id="L174">            m.start();</span>
+
+            // load handle
+<span class="nc" id="L177">            m.aload(0);</span>
+
+            // load receiver
+<span class="nc" id="L180">            m.aload(1);</span>
+
+            // load arguments
+<span class="nc bnc" id="L183" title="All 2 branches missed.">            for (int i = 0; i &lt; paramTypes.length; i++) {</span>
+<span class="nc" id="L184">                m.aload(2); // args array</span>
+<span class="nc" id="L185">                m.ldc(i);</span>
+<span class="nc" id="L186">                m.aaload(); // i'th argument</span>
+            }
+
+            // invoke specific arity version
+<span class="nc" id="L190">            m.invokevirtual(name, &quot;invoke&quot;, sig(Object.class, params(Object.class, Object.class, paramTypes.length)));</span>
+
+            // return result
+<span class="nc" id="L193">            m.areturn();</span>
+<span class="nc" id="L194">            m.end();</span>
+        }
+
+        // constructor
+<span class="nc" id="L198">        m = new SkinnyMethodAdapter(cv, ACC_PUBLIC, &quot;&lt;init&gt;&quot;, sig(void.class), null, null);</span>
+<span class="nc" id="L199">        m.start();</span>
+<span class="nc" id="L200">        m.aload(0);</span>
+<span class="nc" id="L201">        m.invokespecial(p(Handle.class), &quot;&lt;init&gt;&quot;, sig(void.class));</span>
+<span class="nc" id="L202">        m.voidreturn();</span>
+<span class="nc" id="L203">        m.end();</span>
+
+<span class="nc" id="L205">        cv.visitEnd();</span>
+
+<span class="nc" id="L207">        byte[] bytes = ((ClassWriter)cv).toByteArray();</span>
+
+<span class="nc" id="L209">        return bytes;</span>
+    }
+    private static String createHandleName(Method method) {
+<span class="nc" id="L212">        Class returnType = method.getReturnType();</span>
+<span class="nc" id="L213">        Class[] paramTypes = method.getParameterTypes();</span>
+<span class="nc" id="L214">        return method.getDeclaringClass().getCanonicalName().replaceAll(&quot;\\.&quot;, &quot;__&quot;) + &quot;#&quot; + method.getName() + &quot;#&quot; + JITCompiler.getHashForString(pretty(returnType, paramTypes));</span>
+    }
+    
+    public static void loadUnboxedArgument(SkinnyMethodAdapter m, int index, Class type) {
+<span class="nc" id="L218">        m.aload(index); // Object arg0</span>
+<span class="nc" id="L219">        unboxAndCast(m, type);</span>
+<span class="nc" id="L220">    }</span>
+    
+    public static void unboxAndCast(SkinnyMethodAdapter m, Class paramClass) {
+<span class="nc bnc" id="L223" title="All 2 branches missed.">        if (paramClass.isPrimitive()) {</span>
+<span class="nc" id="L224">            Class boxType = getBoxType(paramClass);</span>
+<span class="nc" id="L225">            m.checkcast(p(boxType));</span>
+<span class="nc" id="L226">            m.invokevirtual(p(boxType), paramClass.toString() + &quot;Value&quot;, sig(paramClass));</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">        } else if (paramClass != Object.class) {</span>
+<span class="nc" id="L228">            m.checkcast(p(paramClass));</span>
+        }
+<span class="nc" id="L230">    }</span>
+
+    private static class FakeLoader extends ClassLoader {
+        public FakeLoader(ClassLoader parent) {
+<span class="nc" id="L234">            super(parent);</span>
+<span class="nc" id="L235">        }</span>
+
+        public Class&lt;?&gt; loadClass(String name, boolean resolve) throws ClassNotFoundException {
+<span class="nc" id="L238">            return super.loadClass(name, resolve);</span>
+        }
+    };
+<span class="nc" id="L241">    public static class Tool {</span>
+        public static void main(String[] args) {
+<span class="nc bnc" id="L243" title="All 2 branches missed.">            if (args.length != 2) {</span>
+<span class="nc" id="L244">                System.err.println(&quot;Usage:\n  tool &lt;java class&gt; &lt;target dir&gt;&quot;);</span>
+<span class="nc" id="L245">                System.exit(1);</span>
+            }
+
+<span class="nc" id="L248">            String classname = args[0];</span>
+<span class="nc" id="L249">            String target = args[1];</span>
+
+<span class="nc" id="L251">            FakeLoader loader = new FakeLoader(Tool.class.getClassLoader());</span>
+            try {
+<span class="nc" id="L253">                Class klass = loader.loadClass(classname, false);</span>
+<span class="nc bnc" id="L254" title="All 2 branches missed.">                for (Method method : klass.getMethods()) {</span>
+<span class="nc" id="L255">                    String name = createHandleName(method);</span>
+<span class="nc" id="L256">                    byte[] bytes = createHandleBytes(method, name);</span>
+<span class="nc" id="L257">                    FileOutputStream fos = null;</span>
+                    try {
+<span class="nc" id="L259">                        fos = new FileOutputStream(new File(target, name + &quot;.class&quot;));</span>
+<span class="nc" id="L260">                        fos.write(bytes);</span>
+<span class="nc" id="L261">                    } catch (IOException ioe) {</span>
+<span class="nc" id="L262">                        throw new RuntimeException(ioe);</span>
+                    } finally {
+<span class="nc" id="L264">                        try {fos.close();} catch (IOException ioe) {}</span>
+<span class="nc" id="L265">                    }</span>
+                }
+<span class="nc" id="L267">            } catch (ClassNotFoundException cnfe) {</span>
+<span class="nc" id="L268">                throw new RuntimeException(cnfe);</span>
+<span class="nc" id="L269">            }</span>
+<span class="nc" id="L270">        }</span>
+    }
+    
+    public static void main(String[] args) {
+        try {
+<span class="nc" id="L275">            Method method = HandleFactory.class.getMethod(&quot;dummy&quot;, new Class[] {String.class});</span>
+<span class="nc" id="L276">            Handle handle = createHandle(null, method);</span>
+            
+<span class="nc" id="L278">            String prop1 = &quot;java.class.path&quot;;</span>
+<span class="nc" id="L279">            String prop2 = &quot;&quot;;</span>
+            String tmp;
+            Object result;
+            
+<span class="nc bnc" id="L283" title="All 2 branches missed.">            for (int i = 0; i &lt; 10; i++) {</span>
+                long time;
+                
+<span class="nc" id="L286">                System.out.print(&quot;reflected invocation: &quot;);</span>
+<span class="nc" id="L287">                time = System.currentTimeMillis();</span>
+<span class="nc bnc" id="L288" title="All 2 branches missed.">                for (int j = 0; j &lt; 50000000; j++) {</span>
+<span class="nc" id="L289">                    result = method.invoke(null, prop1);</span>
+<span class="nc" id="L290">                    method.invoke(null, prop2);</span>
+<span class="nc" id="L291">                    tmp = prop1;</span>
+<span class="nc" id="L292">                    prop1 = prop2;</span>
+<span class="nc" id="L293">                    prop2 = tmp;</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">                    if (j % 10000000 == 0) {</span>
+<span class="nc" id="L295">                        System.out.println(prop2);</span>
+                    }
+                }
+<span class="nc" id="L298">                System.out.println(System.currentTimeMillis() - time);</span>
+                
+<span class="nc" id="L300">                System.out.print(&quot;method invocation: &quot;);</span>
+<span class="nc" id="L301">                time = System.currentTimeMillis();</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">                for (int j = 0; j &lt; 50000000; j++) {</span>
+<span class="nc" id="L303">                    result = dummy(prop1);</span>
+<span class="nc" id="L304">                    dummy(prop2);</span>
+<span class="nc" id="L305">                    tmp = prop1;</span>
+<span class="nc" id="L306">                    prop1 = prop2;</span>
+<span class="nc" id="L307">                    prop2 = tmp;</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">                    if (j % 10000000 == 0) {</span>
+<span class="nc" id="L309">                        System.out.println(prop2);</span>
+                    }
+                }
+<span class="nc" id="L312">                System.out.println(System.currentTimeMillis() - time);</span>
+
+<span class="nc" id="L314">                System.out.print(&quot;handle invocation: &quot;);</span>
+<span class="nc" id="L315">                time = System.currentTimeMillis();</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">                for (int j = 0; j &lt; 50000000; j++) {</span>
+<span class="nc" id="L317">                    result = handle.invoke(null, prop1);</span>
+<span class="nc" id="L318">                    handle.invoke(null, prop2);</span>
+<span class="nc" id="L319">                    tmp = prop1;</span>
+<span class="nc" id="L320">                    prop1 = prop2;</span>
+<span class="nc" id="L321">                    prop2 = tmp;</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">                    if (j % 10000000 == 0) {</span>
+<span class="nc" id="L323">                        System.out.println(prop2);</span>
+                    }
+                }
+<span class="nc" id="L326">                System.out.println(System.currentTimeMillis() - time);</span>
+            }
+<span class="nc" id="L328">        } catch (Exception e) {</span>
+<span class="nc" id="L329">            e.printStackTrace();</span>
+<span class="nc" id="L330">            System.exit(1);</span>
+<span class="nc" id="L331">        }</span>
+<span class="nc" id="L332">    }</span>
+    
+    public static String dummy(String str) {
+<span class="nc bnc" id="L335" title="All 2 branches missed.">        if (str.length() == 0) return null;</span>
+<span class="nc" id="L336">        return str;</span>
+    }
+    
+    public static int dummy2() {
+<span class="nc" id="L340">        return 1;</span>
+    }
+    
+    public static Object dummy3(Object obj) {
+<span class="nc" id="L344">        return obj;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

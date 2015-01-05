@@ -1,0 +1,256 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IRReaderFile.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.persistence</a> &gt; <span class="el_source">IRReaderFile.java</span></div><h1>IRReaderFile.java</h1><pre class="source lang-java linenums">/*
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+
+package org.jruby.ir.persistence;
+
+import org.jruby.RubyInstanceConfig;
+import org.jruby.ir.IRManager;
+import org.jruby.ir.IRScope;
+import org.jruby.ir.IRScopeType;
+import org.jruby.ir.Operation;
+import org.jruby.ir.instructions.Instr;
+import org.jruby.ir.operands.Operand;
+import org.jruby.ir.operands.OperandType;
+import org.jruby.ir.operands.TemporaryVariableType;
+import org.jruby.ir.operands.Variable;
+import org.jruby.parser.StaticScope;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ *
+ * @author enebo
+ */
+public class IRReaderFile implements IRReaderDecoder, IRPersistenceValues {
+    private ByteBuffer buf;
+    private final InstrDecoderMap instrDecoderMap;
+    private final OperandDecoderMap operandDecoderMap;
+<span class="nc" id="L41">    private final List&lt;IRScope&gt; scopes = new ArrayList&lt;IRScope&gt;();</span>
+<span class="nc" id="L42">    private IRScope currentScope = null; // FIXME: This is not thread-safe and more than a little gross</span>
+
+<span class="nc" id="L44">    public IRReaderFile(IRManager manager, File file) {</span>
+        try {
+<span class="nc" id="L46">            byte[] bytes = new byte[(int)file.length()];</span>
+<span class="nc bnc" id="L47" title="All 2 branches missed.">            if (RubyInstanceConfig.IR_READING_DEBUG) System.out.println(&quot;READING IN &quot; + bytes.length + &quot; BYTES OF DATA FROM &quot; + file);</span>
+<span class="nc" id="L48">            ByteBuffer buffer = ByteBuffer.wrap(bytes);</span>
+<span class="nc" id="L49">            FileInputStream fis = new FileInputStream(file);</span>
+<span class="nc" id="L50">            FileChannel fc = fis.getChannel();</span>
+<span class="nc" id="L51">            fc.read(buffer);</span>
+<span class="nc" id="L52">            fis.close();</span>
+<span class="nc" id="L53">            buf = ByteBuffer.wrap(bytes);</span>
+<span class="nc" id="L54">        } catch (IOException ex) {</span>
+<span class="nc" id="L55">            Logger.getLogger(IRReaderFile.class.getName()).log(Level.SEVERE, null, ex);</span>
+
+<span class="nc" id="L57">        }</span>
+
+<span class="nc" id="L59">        instrDecoderMap = new InstrDecoderMap(manager, this);</span>
+<span class="nc" id="L60">        operandDecoderMap = new OperandDecoderMap(manager, this);</span>
+<span class="nc" id="L61">    }</span>
+
+    @Override
+    public String decodeString() {
+<span class="nc" id="L65">        int strLength = decodeInt();</span>
+<span class="nc" id="L66">        byte[] bytes = new byte[strLength]; // FIXME: This seems really innefficient</span>
+<span class="nc" id="L67">        buf.get(bytes);</span>
+
+<span class="nc" id="L69">        String newString = new String(bytes).intern();</span>
+
+<span class="nc bnc" id="L71" title="All 2 branches missed.">        if (RubyInstanceConfig.IR_READING_DEBUG) System.out.println(&quot;STR&lt;&quot; + newString + &quot;&gt;&quot;);</span>
+
+<span class="nc" id="L73">        return newString;</span>
+    }
+
+    @Override
+    public void addScope(IRScope scope) {
+<span class="nc" id="L78">        scopes.add(scope);</span>
+<span class="nc" id="L79">    }</span>
+
+    @Override
+    public IRScope getCurrentScope() {
+<span class="nc" id="L83">        return currentScope;</span>
+    }
+
+    @Override
+    public String[] decodeStringArray() {
+<span class="nc" id="L88">        int arrayLength = decodeInt();</span>
+<span class="nc" id="L89">        String[] array = new String[arrayLength];</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        for (int i = 0; i &lt; arrayLength; i++) {</span>
+<span class="nc" id="L91">            array[i] = decodeString();</span>
+        }
+<span class="nc" id="L93">        return array;</span>
+    }
+
+<span class="nc" id="L96">    private Map&lt;String, Operand&gt; vars = null;</span>
+
+    @Override
+    public Map&lt;String, Operand&gt; getVars() {
+<span class="nc" id="L100">        return vars;</span>
+    }
+
+    @Override
+    public List&lt;Instr&gt; decodeInstructionsAt(IRScope scope, int offset) {
+<span class="nc" id="L105">        currentScope = scope;</span>
+<span class="nc" id="L106">        vars = new HashMap&lt;String, Operand&gt;();</span>
+<span class="nc" id="L107">        buf.position(offset);</span>
+
+<span class="nc" id="L109">        int numberOfInstructions = decodeInt();</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">        if (RubyInstanceConfig.IR_READING_DEBUG) System.out.println(&quot;Number of Instructions: &quot; + numberOfInstructions);</span>
+<span class="nc" id="L111">        List&lt;Instr&gt; instrs = new ArrayList(numberOfInstructions);</span>
+
+<span class="nc bnc" id="L113" title="All 2 branches missed.">        for (int i = 0; i &lt; numberOfInstructions; i++) {</span>
+<span class="nc" id="L114">            Instr decodedInstr = decodeInstr();</span>
+
+<span class="nc bnc" id="L116" title="All 2 branches missed.">            if (RubyInstanceConfig.IR_READING_DEBUG) System.out.println(&quot;&gt;INSTR = &quot; + decodedInstr);</span>
+
+<span class="nc" id="L118">            instrs.add(decodedInstr);</span>
+        }
+
+<span class="nc" id="L121">        return instrs;</span>
+    }
+
+    @Override
+    public Instr decodeInstr() {
+<span class="nc" id="L126">        return instrDecoderMap.decode(decodeOperation());</span>
+    }
+
+    @Override
+    public IRScopeType decodeIRScopeType() {
+<span class="nc" id="L131">        return IRScopeType.fromOrdinal(decodeInt());</span>
+    }
+
+    @Override
+    public TemporaryVariableType decodeTemporaryVariableType() {
+<span class="nc" id="L136">        return TemporaryVariableType.fromOrdinal(decodeInt());</span>
+    }
+
+    @Override
+    public StaticScope.Type decodeStaticScopeType() {
+<span class="nc" id="L141">        return StaticScope.Type.fromOrdinal(decodeInt());</span>
+    }
+
+    @Override
+    public Operation decodeOperation() {
+<span class="nc" id="L146">        Operation operation = Operation.fromOrdinal(decodeInt());</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">        if (RubyInstanceConfig.IR_READING_DEBUG) System.out.println(&quot;INSTR&lt;&quot; + operation);</span>
+<span class="nc" id="L148">        return operation;</span>
+    }
+
+    @Override
+    public Operand decodeOperand() {
+<span class="nc" id="L153">        OperandType operandType = decodeOperandType();</span>
+
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        if (RubyInstanceConfig.IR_READING_DEBUG) System.out.println(&quot;OP&lt;&quot; + operandType);</span>
+
+<span class="nc" id="L157">        Operand decodedOperand = operandDecoderMap.decode(operandType);</span>
+
+<span class="nc bnc" id="L159" title="All 2 branches missed.">        if (RubyInstanceConfig.IR_READING_DEBUG) System.out.println(&quot;&gt;OP = &quot; + decodedOperand);</span>
+
+<span class="nc" id="L161">        return decodedOperand;</span>
+    }
+
+    @Override
+    public Variable decodeVariable() {
+<span class="nc" id="L166">        return (Variable) decodeOperand();</span>
+    }
+
+    @Override
+    public Operand[] decodeOperandArray() {
+<span class="nc" id="L171">        int size = decodeInt();</span>
+<span class="nc" id="L172">        Operand[] list = new Operand[size];</span>
+
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        for (int i = 0; i &lt; size; i++) {</span>
+<span class="nc" id="L175">            list[i] = decodeOperand();</span>
+        }
+
+<span class="nc" id="L178">        return list;</span>
+    }
+
+    @Override
+    public List&lt;Operand&gt; decodeOperandList() {
+<span class="nc" id="L183">        int size = decodeInt();</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        if (RubyInstanceConfig.IR_READING_DEBUG) System.out.println(&quot;OPERAND LIST of size: &quot; + size);</span>
+<span class="nc" id="L185">        List&lt;Operand&gt; list = new ArrayList&lt;Operand&gt;(size);</span>
+
+<span class="nc bnc" id="L187" title="All 2 branches missed.">        for (int i = 0; i &lt; size; i++) {</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">            if (RubyInstanceConfig.IR_READING_DEBUG) System.out.println(&quot;OPERAND #&quot; + i);</span>
+<span class="nc" id="L189">            list.add(decodeOperand());</span>
+        }
+
+<span class="nc" id="L192">        return list;</span>
+    }
+
+    @Override
+    public OperandType decodeOperandType() {
+<span class="nc" id="L197">        return OperandType.fromCoded(decodeByte());</span>
+    }
+
+    @Override
+    public boolean decodeBoolean() {
+<span class="nc" id="L202">        byte value = buf.get();</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (value == TRUE) return true;</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">        if (value == FALSE) return false;</span>
+
+<span class="nc" id="L206">        throw new IllegalArgumentException(&quot;Value (&quot; + ((int) value) + &quot;, &quot; + (char) value + &quot;) is not a boolean.&quot;);</span>
+    }
+
+    @Override
+    public byte decodeByte() {
+<span class="nc" id="L211">        return buf.get();</span>
+    }
+
+    @Override
+    public char decodeChar() {
+<span class="nc" id="L216">        return buf.getChar();</span>
+    }
+
+    @Override
+    public int decodeInt() {
+<span class="nc" id="L221">        byte b = buf.get();</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">        return b == FULL ? buf.getInt() : (int) b;</span>
+    }
+
+    @Override
+    public int decodeIntRaw() {
+<span class="nc" id="L227">        return buf.getInt();</span>
+    }
+
+    @Override
+    public long decodeLong() {
+<span class="nc" id="L232">        byte b = buf.get();</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">        return b == FULL ? buf.getLong() : (int) b;</span>
+    }
+
+    @Override
+    public double decodeDouble() {
+<span class="nc" id="L238">        return buf.getDouble();</span>
+    }
+
+    @Override
+    public float decodeFloat() {
+<span class="nc" id="L243">        return buf.getFloat();</span>
+    }
+
+    @Override
+    public IRScope decodeScope() {
+<span class="nc" id="L248">        return scopes.get(decodeInt());</span>
+    }
+
+    @Override
+    public void seek(int headersOffset) {
+<span class="nc" id="L253">        buf.position(headersOffset);</span>
+<span class="nc" id="L254">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

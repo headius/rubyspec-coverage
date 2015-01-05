@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>NativeCallbackFactory.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.ffi.jffi</a> &gt; <span class="el_source">NativeCallbackFactory.java</span></div><h1>NativeCallbackFactory.java</h1><pre class="source lang-java linenums">package org.jruby.ext.ffi.jffi;
+
+import com.kenai.jffi.CallingConvention;
+import com.kenai.jffi.ClosurePool;
+import org.jruby.Ruby;
+import org.jruby.RubyClass;
+import org.jruby.RubyObject;
+import org.jruby.ext.ffi.*;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.callsite.CachingCallSite;
+import org.jruby.runtime.callsite.FunctionalCachingCallSite;
+import org.jruby.util.WeakIdentityHashMap;
+
+/**
+ * 
+ */
+public class NativeCallbackFactory {
+<span class="nc" id="L18">    private final WeakIdentityHashMap closures = new WeakIdentityHashMap();</span>
+    private final Ruby runtime;
+    private final ClosurePool closurePool;
+    private final NativeFunctionInfo closureInfo;
+    private final CallbackInfo callbackInfo;
+    private final RubyClass callbackClass;
+<span class="nc" id="L24">    private final CachingCallSite callSite = new FunctionalCachingCallSite(&quot;call&quot;);</span>
+
+<span class="nc" id="L26">    public NativeCallbackFactory(Ruby runtime, CallbackInfo cbInfo) {</span>
+<span class="nc" id="L27">        this.runtime = runtime;</span>
+<span class="nc" id="L28">        this.closureInfo = newFunctionInfo(runtime, cbInfo);</span>
+<span class="nc" id="L29">        this.closurePool = com.kenai.jffi.ClosureManager.getInstance().getClosurePool(closureInfo.callContext);</span>
+<span class="nc" id="L30">        this.callbackInfo = cbInfo;</span>
+<span class="nc" id="L31">        this.callbackClass = runtime.getModule(&quot;FFI&quot;).getClass(&quot;Callback&quot;);</span>
+<span class="nc" id="L32">    }</span>
+
+    public final Pointer getCallback(RubyObject callable) {
+<span class="nc" id="L35">        return getCallback(callable, callSite);</span>
+    }
+
+    public final Pointer getCallback(IRubyObject callable, CachingCallSite callSite) {
+<span class="nc bnc" id="L39" title="All 2 branches missed.">        if (callable instanceof Pointer) {</span>
+<span class="nc" id="L40">            return (Pointer) callable;</span>
+        }
+
+<span class="nc" id="L43">        Object ffiHandle = callable.getMetaClass().getRealClass().getFFIHandleAccessorField().getVariableAccessorForRead().get(callable);</span>
+        NativeCallbackPointer cbptr;
+<span class="nc bnc" id="L45" title="All 4 branches missed.">        if (ffiHandle instanceof NativeCallbackPointer &amp;&amp; ((cbptr = (NativeCallbackPointer) ffiHandle).cbInfo == callbackInfo)) {</span>
+<span class="nc" id="L46">            return cbptr;</span>
+        }
+
+<span class="nc" id="L49">        return getCallbackPointer(callable, callSite);</span>
+    }
+
+    private synchronized Pointer getCallbackPointer(IRubyObject callable, CachingCallSite callSite) {
+<span class="nc" id="L53">        NativeCallbackPointer cbptr = (NativeCallbackPointer) closures.get(callable);</span>
+<span class="nc bnc" id="L54" title="All 2 branches missed.">        if (cbptr != null) {</span>
+<span class="nc" id="L55">            return cbptr;</span>
+        }
+
+<span class="nc" id="L58">        closures.put(callable, cbptr = newCallback(callable, callSite));</span>
+
+<span class="nc bnc" id="L60" title="All 2 branches missed.">        if (callable.getMetaClass().getFFIHandleAccessorForRead().get(callable) == null) {</span>
+<span class="nc" id="L61">            callable.getMetaClass().getFFIHandleAccessorForWrite().set(callable, cbptr);</span>
+        }
+
+<span class="nc" id="L64">        return cbptr;</span>
+    }
+
+    NativeCallbackPointer newCallback(IRubyObject callable, CachingCallSite callSite) {
+<span class="nc bnc" id="L68" title="All 2 branches missed.">        if (callSite.retrieveCache(callable.getMetaClass(), callSite.getMethodName()).method.isUndefined()) {</span>
+<span class="nc" id="L69">            throw runtime.newArgumentError(&quot;callback does not respond to :&quot; + callSite.getMethodName());</span>
+        }
+
+<span class="nc" id="L72">        return new NativeCallbackPointer(runtime, callbackClass,</span>
+<span class="nc" id="L73">                closurePool.newClosureHandle(new NativeClosureProxy(runtime, closureInfo, callable, callSite)),</span>
+                callbackInfo, closureInfo);
+    }
+
+    NativeCallbackPointer newCallback(Object callable) {
+<span class="nc" id="L78">        return new NativeCallbackPointer(runtime, callbackClass,</span>
+<span class="nc" id="L79">                closurePool.newClosureHandle(new NativeClosureProxy(runtime, closureInfo, callable, callSite)),</span>
+                callbackInfo, closureInfo);
+    }
+
+    private final NativeFunctionInfo newFunctionInfo(Ruby runtime, CallbackInfo cbInfo) {
+
+<span class="nc" id="L85">        org.jruby.ext.ffi.Type[] paramTypes = cbInfo.getParameterTypes();</span>
+<span class="nc bnc" id="L86" title="All 2 branches missed.">        for (int i = 0; i &lt; paramTypes.length; ++i) {</span>
+<span class="nc bnc" id="L87" title="All 4 branches missed.">            if (!isParameterTypeValid(paramTypes[i]) || FFIUtil.getFFIType(paramTypes[i]) == null) {</span>
+<span class="nc" id="L88">                throw runtime.newTypeError(&quot;invalid callback parameter type: &quot; + paramTypes[i]);</span>
+            }
+        }
+
+<span class="nc bnc" id="L92" title="All 4 branches missed.">        if (!isReturnTypeValid(cbInfo.getReturnType()) || FFIUtil.getFFIType(cbInfo.getReturnType()) == null) {</span>
+<span class="nc" id="L93">            runtime.newTypeError(&quot;invalid callback return type: &quot; + cbInfo.getReturnType());</span>
+        }
+
+<span class="nc" id="L96">        return new NativeFunctionInfo(runtime, cbInfo.getReturnType(), cbInfo.getParameterTypes(),</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">                cbInfo.isStdcall() ? CallingConvention.STDCALL : CallingConvention.DEFAULT);</span>
+    }
+
+
+    /**
+     * Checks if a type is a valid callback return type
+     *
+     * @param type The type to examine
+     * @return &lt;tt&gt;true&lt;/tt&gt; if &lt;tt&gt;type&lt;/tt&gt; is a valid return type for a callback.
+     */
+    private static final boolean isReturnTypeValid(Type type) {
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        if (type instanceof Type.Builtin) {</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">            switch (type.getNativeType()) {</span>
+                case CHAR:
+                case UCHAR:
+                case SHORT:
+                case USHORT:
+                case INT:
+                case UINT:
+                case LONG:
+                case ULONG:
+                case LONG_LONG:
+                case ULONG_LONG:
+                case FLOAT:
+                case DOUBLE:
+                case POINTER:
+                case VOID:
+                case BOOL:
+<span class="nc" id="L125">                    return true;</span>
+            }
+
+<span class="nc bnc" id="L128" title="All 2 branches missed.">        } else if (type instanceof CallbackInfo) {</span>
+<span class="nc" id="L129">            return true;</span>
+
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        } else if (type instanceof StructByValue) {</span>
+<span class="nc" id="L132">            return true;</span>
+        }
+<span class="nc" id="L134">        return false;</span>
+    }
+
+    /**
+     * Checks if a type is a valid parameter type for a callback
+     *
+     * @param type The type to examine
+     * @return &lt;tt&gt;true&lt;/tt&gt; if &lt;tt&gt;type&lt;/tt&gt; is a valid parameter type for a callback.
+     */
+    private static final boolean isParameterTypeValid(Type type) {
+<span class="nc bnc" id="L144" title="All 2 branches missed.">        if (type instanceof Type.Builtin) {</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">            switch (type.getNativeType()) {</span>
+                case CHAR:
+                case UCHAR:
+                case SHORT:
+                case USHORT:
+                case INT:
+                case UINT:
+                case LONG:
+                case ULONG:
+                case LONG_LONG:
+                case ULONG_LONG:
+                case FLOAT:
+                case DOUBLE:
+                case POINTER:
+                case STRING:
+                case TRANSIENT_STRING:
+                case BOOL:
+<span class="nc" id="L162">                    return true;</span>
+            }
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        } else if (type instanceof CallbackInfo) {</span>
+<span class="nc" id="L165">            return true;</span>
+
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        } else if (type instanceof StructByValue) {</span>
+<span class="nc" id="L168">            return true;</span>
+
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        } else if (type instanceof MappedType) {</span>
+<span class="nc" id="L171">            return isParameterTypeValid(((MappedType) type).getRealType());</span>
+        }
+
+<span class="nc" id="L174">        return false;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

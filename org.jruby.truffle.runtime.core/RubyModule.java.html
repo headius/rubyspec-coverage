@@ -1,0 +1,538 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyModule.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.runtime.core</a> &gt; <span class="el_source">RubyModule.java</span></div><h1>RubyModule.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2013, 2014 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.runtime.core;
+
+import com.oracle.truffle.api.Assumption;
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
+import com.oracle.truffle.api.Truffle;
+import com.oracle.truffle.api.frame.Frame;
+import com.oracle.truffle.api.frame.FrameInstance;
+import com.oracle.truffle.api.frame.FrameSlot;
+import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.utilities.CyclicAssumption;
+
+import org.jruby.runtime.Visibility;
+import org.jruby.truffle.nodes.RubyNode;
+import org.jruby.truffle.nodes.objects.Allocator;
+import org.jruby.truffle.runtime.*;
+import org.jruby.truffle.runtime.control.RaiseException;
+import org.jruby.truffle.runtime.methods.RubyMethod;
+import org.jruby.truffle.runtime.subsystems.ObjectSpaceManager;
+
+import java.util.*;
+
+/**
+ * Represents the Ruby {@code Module} class.
+ */
+<span class="nc bnc" id="L35" title="All 2 branches missed.">public class RubyModule extends RubyBasicObject implements ModuleChain {</span>
+
+    /**
+     * A reference to an included RubyModule.
+     */
+    private static class IncludedModule implements ModuleChain {
+        private final RubyModule includedModule;
+        private final ModuleChain parentModule;
+
+<span class="nc" id="L44">        public IncludedModule(RubyModule includedModule, ModuleChain parentModule) {</span>
+<span class="nc" id="L45">            this.includedModule = includedModule;</span>
+<span class="nc" id="L46">            this.parentModule = parentModule;</span>
+<span class="nc" id="L47">        }</span>
+
+        @Override
+        public ModuleChain getParentModule() {
+<span class="nc" id="L51">            return parentModule;</span>
+        }
+
+        @Override
+        public RubyModule getActualModule() {
+<span class="nc" id="L56">            return includedModule;</span>
+        }
+
+        @Override
+        public String toString() {
+<span class="nc" id="L61">            return super.toString() + &quot;(&quot; + includedModule + &quot;)&quot;;</span>
+        }
+    }
+
+    public static void debugModuleChain(RubyModule module) {
+<span class="nc" id="L66">        ModuleChain chain = module;</span>
+<span class="nc bnc" id="L67" title="All 2 branches missed.">        while (chain != null) {</span>
+<span class="nc" id="L68">            System.err.print(chain.getClass());</span>
+
+<span class="nc" id="L70">            RubyModule real = chain.getActualModule();</span>
+<span class="nc" id="L71">            System.err.print(&quot; &quot; + real.getName());</span>
+
+<span class="nc" id="L73">            System.err.println();</span>
+<span class="nc" id="L74">            chain = chain.getParentModule();</span>
+<span class="nc" id="L75">        }</span>
+<span class="nc" id="L76">    }</span>
+
+    /**
+     * The slot within a module definition method frame where we store the implicit state that is
+     * the current visibility for new methods.
+     */
+<span class="nc" id="L82">    public static final Object VISIBILITY_FRAME_SLOT_ID = new Object();</span>
+
+    /**
+     * The slot within a module definition method frame where we store the implicit state that is
+     * the flag for whether or not new methods will be module methods (functions is the term).
+     */
+<span class="nc" id="L88">    public static final Object MODULE_FUNCTION_FLAG_FRAME_SLOT_ID = new Object();</span>
+
+    // The context is stored here - objects can obtain it via their class (which is a module)
+    private final RubyContext context;
+
+    @CompilationFinal protected ModuleChain parentModule;
+    private LexicalScope lexicalScope;
+    private String name;
+
+<span class="nc" id="L97">    private final Map&lt;String, RubyMethod&gt; methods = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L98">    private final Map&lt;String, RubyConstant&gt; constants = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L99">    private final Map&lt;String, Object&gt; classVariables = new HashMap&lt;&gt;();</span>
+
+    private final CyclicAssumption unmodifiedAssumption;
+
+    /**
+     * Keep track of other modules that depend on the configuration of this module in some way. The
+     * include subclasses and modules that include this module.
+     */
+<span class="nc" id="L107">    private final Set&lt;RubyModule&gt; dependents = Collections.newSetFromMap(new WeakHashMap&lt;RubyModule, Boolean&gt;());</span>
+    /**
+     * Lexical dependent modules, to take care of changes to a module constants.
+     */
+<span class="nc" id="L111">    private final Set&lt;RubyModule&gt; lexicalDependents = Collections.newSetFromMap(new WeakHashMap&lt;RubyModule, Boolean&gt;());</span>
+
+    public RubyModule(RubyContext context, RubyModule lexicalParent, String name) {
+<span class="nc" id="L114">        this(context, lexicalParent, name, null);</span>
+<span class="nc" id="L115">    }</span>
+
+    public RubyModule(RubyContext context, RubyModule lexicalParent, String name, RubyNode currentNode) {
+<span class="nc" id="L118">        this(context, context.getCoreLibrary().getModuleClass(), lexicalParent, name, currentNode);</span>
+<span class="nc" id="L119">    }</span>
+
+    protected RubyModule(RubyContext context, RubyClass selfClass, RubyModule lexicalParent, String name, RubyNode currentNode) {
+<span class="nc" id="L122">        super(selfClass, context);</span>
+<span class="nc" id="L123">        this.context = context;</span>
+<span class="nc" id="L124">        this.name = name;</span>
+
+<span class="nc" id="L126">        unmodifiedAssumption = new CyclicAssumption(name + &quot; is unmodified&quot;);</span>
+
+<span class="nc" id="L128">        getAdoptedByLexicalParent(lexicalParent, currentNode);</span>
+<span class="nc" id="L129">    }</span>
+
+    protected void getAdoptedByLexicalParent(RubyModule lexicalParent, RubyNode currentNode) {
+<span class="nc bnc" id="L132" title="All 2 branches missed.">        if (lexicalParent != null) {</span>
+<span class="nc" id="L133">            lexicalParent.setConstant(currentNode, name, this);</span>
+<span class="nc" id="L134">            lexicalParent.addLexicalDependent(this);</span>
+
+<span class="nc bnc" id="L136" title="All 2 branches missed.">            if (lexicalParent != context.getCoreLibrary().getObjectClass()) {</span>
+<span class="nc" id="L137">                name = lexicalParent.getName() + &quot;::&quot; + name;</span>
+            }
+        }
+<span class="nc" id="L140">    }</span>
+
+    public void initCopy(RubyModule other) {
+<span class="nc" id="L143">        this.name = other.name;</span>
+<span class="nc" id="L144">        this.parentModule = other.parentModule;</span>
+<span class="nc" id="L145">        this.methods.putAll(other.methods);</span>
+<span class="nc" id="L146">        this.constants.putAll(other.constants);</span>
+<span class="nc" id="L147">        this.classVariables.putAll(other.classVariables);</span>
+<span class="nc" id="L148">    }</span>
+
+    /** If this instance is a module and not a class. */
+    public boolean isOnlyAModule() {
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        return !(this instanceof RubyClass);</span>
+    }
+
+    /**
+     * This method supports initialization and solves boot-order problems and should not normally be
+     * used.
+     */
+    protected void unsafeSetParent(RubyModule parent) {
+<span class="nc" id="L160">        parentModule = parent;</span>
+<span class="nc" id="L161">        parent.addDependent(this);</span>
+<span class="nc" id="L162">        newVersion();</span>
+<span class="nc" id="L163">    }</span>
+
+    public void include(Node currentNode, RubyModule module) {
+<span class="nc" id="L166">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L168">        checkFrozen(currentNode);</span>
+
+        // We need to traverse the module chain in reverse order
+<span class="nc" id="L171">        Stack&lt;RubyModule&gt; moduleAncestors = new Stack&lt;&gt;();</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">        for (RubyModule ancestor : module.ancestors()) {</span>
+<span class="nc" id="L173">            moduleAncestors.push(ancestor);</span>
+<span class="nc" id="L174">        }</span>
+
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        while (!moduleAncestors.isEmpty()) {</span>
+<span class="nc" id="L177">            RubyModule mod = moduleAncestors.pop();</span>
+<span class="nc" id="L178">            parentModule = new IncludedModule(mod, parentModule);</span>
+<span class="nc" id="L179">            mod.addDependent(this);</span>
+<span class="nc" id="L180">        }</span>
+<span class="nc" id="L181">        newVersion();</span>
+<span class="nc" id="L182">    }</span>
+
+    /**
+     * Set the value of a constant, possibly redefining it.
+     */
+    public void setConstant(RubyNode currentNode, String name, Object value) {
+<span class="nc" id="L188">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L190">        checkFrozen(currentNode);</span>
+
+<span class="nc" id="L192">        RubyConstant previous = getConstants().get(name);</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        if (previous == null) {</span>
+<span class="nc" id="L194">            getConstants().put(name, new RubyConstant(this, value, false));</span>
+        } else {
+            // TODO(CS): warn when redefining a constant
+<span class="nc" id="L197">            getConstants().put(name, new RubyConstant(this, value, previous.isPrivate()));</span>
+        }
+
+<span class="nc" id="L200">        newLexicalVersion();</span>
+<span class="nc" id="L201">    }</span>
+
+    public void removeConstant(RubyNode currentNode, String data) {
+<span class="nc" id="L204">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L206">        checkFrozen(currentNode);</span>
+<span class="nc" id="L207">        getConstants().remove(data);</span>
+<span class="nc" id="L208">        newLexicalVersion();</span>
+<span class="nc" id="L209">    }</span>
+
+    public void removeClassVariable(RubyNode currentNode, String variableName) {
+<span class="nc" id="L212">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L214">        checkFrozen(currentNode);</span>
+
+<span class="nc" id="L216">        classVariables.remove(variableName);</span>
+<span class="nc" id="L217">    }</span>
+
+    public void addMethod(RubyNode currentNode, RubyMethod method) {
+<span class="nc" id="L220">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L222" title="All 4 branches missed.">        assert method != null;</span>
+<span class="nc bnc" id="L223" title="All 4 branches missed.">        assert getMethods() != null;</span>
+
+<span class="nc" id="L225">        checkFrozen(currentNode);</span>
+<span class="nc" id="L226">        getMethods().put(method.getName(), method.withDeclaringModule(this));</span>
+<span class="nc" id="L227">        newVersion();</span>
+<span class="nc" id="L228">    }</span>
+
+    public void removeMethod(RubyNode currentNode, String methodName) {
+<span class="nc" id="L231">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L233">        checkFrozen(currentNode);</span>
+
+<span class="nc" id="L235">        getMethods().remove(methodName);</span>
+<span class="nc" id="L236">        newVersion();</span>
+<span class="nc" id="L237">    }</span>
+
+    public void undefMethod(RubyNode currentNode, String methodName) {
+<span class="nc" id="L240">        RubyNode.notDesignedForCompilation();</span>
+<span class="nc" id="L241">        final RubyMethod method = ModuleOperations.lookupMethod(this, methodName);</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">        if (method == null) {</span>
+<span class="nc" id="L243">            throw new UnsupportedOperationException();</span>
+        } else {
+<span class="nc" id="L245">            undefMethod(currentNode, method);</span>
+        }
+<span class="nc" id="L247">    }</span>
+
+    public void undefMethod(RubyNode currentNode, RubyMethod method) {
+<span class="nc" id="L250">        RubyNode.notDesignedForCompilation();</span>
+<span class="nc" id="L251">        addMethod(currentNode, method.undefined());</span>
+<span class="nc" id="L252">    }</span>
+
+    /**
+     * Also searches on Object for modules.
+     * Used for alias_method, visibility changes, etc.
+     */
+    private RubyMethod deepMethodSearch(String name) {
+<span class="nc" id="L259">        RubyMethod method = ModuleOperations.lookupMethod(this, name);</span>
+
+        // Also search on Object if we are a Module. JRuby calls it deepMethodSearch().
+<span class="nc bnc" id="L262" title="All 4 branches missed.">        if (method == null &amp;&amp; isOnlyAModule()) { // TODO: handle undefined methods</span>
+<span class="nc" id="L263">            method = ModuleOperations.lookupMethod(context.getCoreLibrary().getObjectClass(), name);</span>
+        }
+
+<span class="nc" id="L266">        return method;</span>
+    }
+
+    public void alias(RubyNode currentNode, String newName, String oldName) {
+<span class="nc" id="L270">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L272">        RubyMethod method = deepMethodSearch(oldName);</span>
+
+<span class="nc bnc" id="L274" title="All 2 branches missed.">        if (method == null) {</span>
+<span class="nc" id="L275">            CompilerDirectives.transferToInterpreter();</span>
+<span class="nc" id="L276">            throw new RaiseException(getContext().getCoreLibrary().noMethodError(oldName, getName(), currentNode));</span>
+        }
+
+<span class="nc" id="L279">        addMethod(currentNode, method.withNewName(newName));</span>
+<span class="nc" id="L280">    }</span>
+
+    public void changeConstantVisibility(RubyNode currentNode, RubySymbol constant, boolean isPrivate) {
+<span class="nc" id="L283">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L285">        RubyConstant rubyConstant = ModuleOperations.lookupConstant(getContext(), LexicalScope.NONE, this, constant.toString());</span>
+<span class="nc" id="L286">        checkFrozen(currentNode);</span>
+
+<span class="nc bnc" id="L288" title="All 2 branches missed.">        if (rubyConstant != null) {</span>
+<span class="nc" id="L289">            rubyConstant.setPrivate(isPrivate);</span>
+<span class="nc" id="L290">            newLexicalVersion();</span>
+        } else {
+<span class="nc" id="L292">            throw new RaiseException(context.getCoreLibrary().nameErrorUninitializedConstant(this, constant.toString(), currentNode));</span>
+        }
+<span class="nc" id="L294">    }</span>
+
+    public void appendFeatures(RubyNode currentNode, RubyModule other) {
+<span class="nc" id="L297">        RubyNode.notDesignedForCompilation();</span>
+
+        // TODO(CS): check only run once
+<span class="nc" id="L300">        other.include(currentNode, this);</span>
+<span class="nc" id="L301">    }</span>
+
+    public RubyContext getContext() {
+<span class="nc" id="L304">        return context;</span>
+    }
+
+    public String getName() {
+<span class="nc" id="L308">        return name;</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="nc" id="L313">        return super.toString() + &quot;(&quot; + name + &quot;)&quot;;</span>
+    }
+
+    public void newVersion() {
+<span class="nc" id="L317">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L319">        newVersion(new HashSet&lt;RubyModule&gt;(), false);</span>
+<span class="nc" id="L320">    }</span>
+
+    public void newLexicalVersion() {
+<span class="nc" id="L323">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L325">        newVersion(new HashSet&lt;RubyModule&gt;(), true);</span>
+<span class="nc" id="L326">    }</span>
+
+    private void newVersion(Set&lt;RubyModule&gt; alreadyInvalidated, boolean considerLexicalDependents) {
+<span class="nc bnc" id="L329" title="All 2 branches missed.">        if (alreadyInvalidated.contains(this))</span>
+<span class="nc" id="L330">            return;</span>
+
+<span class="nc" id="L332">        unmodifiedAssumption.invalidate();</span>
+<span class="nc" id="L333">        alreadyInvalidated.add(this);</span>
+
+        // Make dependents new versions
+<span class="nc bnc" id="L336" title="All 2 branches missed.">        for (RubyModule dependent : dependents) {</span>
+<span class="nc" id="L337">            dependent.newVersion(alreadyInvalidated, considerLexicalDependents);</span>
+<span class="nc" id="L338">        }</span>
+
+<span class="nc bnc" id="L340" title="All 2 branches missed.">        if (considerLexicalDependents) {</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">            for (RubyModule dependent : lexicalDependents) {</span>
+<span class="nc" id="L342">                dependent.newVersion(alreadyInvalidated, considerLexicalDependents);</span>
+<span class="nc" id="L343">            }</span>
+        }
+<span class="nc" id="L345">    }</span>
+
+    public void addDependent(RubyModule dependent) {
+<span class="nc" id="L348">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L350">        dependents.add(dependent);</span>
+<span class="nc" id="L351">    }</span>
+
+    public void addLexicalDependent(RubyModule lexicalChild) {
+<span class="nc" id="L354">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L356" title="All 2 branches missed.">        if (lexicalChild != this)</span>
+<span class="nc" id="L357">            lexicalDependents.add(lexicalChild);</span>
+<span class="nc" id="L358">    }</span>
+
+    public Assumption getUnmodifiedAssumption() {
+<span class="nc" id="L361">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L363">        return unmodifiedAssumption.getAssumption();</span>
+    }
+
+    public static void setCurrentVisibility(Visibility visibility) {
+<span class="nc" id="L367">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L369">        final Frame callerFrame = Truffle.getRuntime().getCallerFrame().getFrame(FrameInstance.FrameAccess.READ_WRITE, false);</span>
+
+<span class="nc bnc" id="L371" title="All 4 branches missed.">        assert callerFrame != null;</span>
+<span class="nc bnc" id="L372" title="All 4 branches missed.">        assert callerFrame.getFrameDescriptor() != null;</span>
+
+<span class="nc" id="L374">        final FrameSlot visibilitySlot = callerFrame.getFrameDescriptor().findFrameSlot(VISIBILITY_FRAME_SLOT_ID);</span>
+<span class="nc bnc" id="L375" title="All 4 branches missed.">        assert visibilitySlot != null;</span>
+
+<span class="nc" id="L377">        callerFrame.setObject(visibilitySlot, visibility);</span>
+<span class="nc" id="L378">    }</span>
+
+    public void visibilityMethod(RubyNode currentNode, Object[] arguments, Visibility visibility) {
+<span class="nc" id="L381">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc bnc" id="L383" title="All 2 branches missed.">        if (arguments.length == 0) {</span>
+<span class="nc" id="L384">            setCurrentVisibility(visibility);</span>
+        } else {
+<span class="nc bnc" id="L386" title="All 2 branches missed.">            for (Object arg : arguments) {</span>
+                final String methodName;
+
+<span class="nc bnc" id="L389" title="All 2 branches missed.">                if (arg instanceof RubySymbol) {</span>
+<span class="nc" id="L390">                    methodName = ((RubySymbol) arg).toString();</span>
+                } else {
+<span class="nc" id="L392">                    throw new UnsupportedOperationException();</span>
+                }
+
+<span class="nc" id="L395">                final RubyMethod method = deepMethodSearch(methodName);</span>
+
+<span class="nc bnc" id="L397" title="All 2 branches missed.">                if (method == null) {</span>
+<span class="nc" id="L398">                    throw new RuntimeException(&quot;Couldn't find method &quot; + arg.toString());</span>
+                }
+
+                /*
+                 * If the method was already defined in this class, that's fine {@link addMethod}
+                 * will overwrite it, otherwise we do actually want to add a copy of the method with
+                 * a different visibility to this module.
+                 */
+
+<span class="nc" id="L407">                addMethod(currentNode, method.withVisibility(visibility));</span>
+            }
+        }
+<span class="nc" id="L410">    }</span>
+
+    public Map&lt;String, RubyConstant&gt; getConstants() {
+<span class="nc" id="L413">        return constants;</span>
+    }
+
+    public Map&lt;String, RubyMethod&gt; getMethods() {
+<span class="nc" id="L417">        return methods;</span>
+    }
+
+    public Map&lt;String, Object&gt; getClassVariables() {
+<span class="nc" id="L421">        return classVariables;</span>
+    }
+
+    @Override
+    public void visitObjectGraphChildren(ObjectSpaceManager.ObjectGraphVisitor visitor) {
+<span class="nc bnc" id="L426" title="All 2 branches missed.">        for (RubyConstant constant : constants.values()) {</span>
+<span class="nc bnc" id="L427" title="All 2 branches missed.">            if (constant.getValue() instanceof RubyBasicObject) {</span>
+<span class="nc" id="L428">                ((RubyBasicObject) constant.getValue()).visitObjectGraph(visitor);</span>
+            }
+<span class="nc" id="L430">        }</span>
+
+<span class="nc bnc" id="L432" title="All 2 branches missed.">        for (RubyMethod method : methods.values()) {</span>
+<span class="nc bnc" id="L433" title="All 2 branches missed.">            if (method.getDeclarationFrame() != null) {</span>
+<span class="nc" id="L434">                getContext().getObjectSpaceManager().visitFrame(method.getDeclarationFrame(), visitor);</span>
+            }
+<span class="nc" id="L436">        }</span>
+<span class="nc" id="L437">    }</span>
+
+    public ModuleChain getParentModule() {
+<span class="nc" id="L440">        return parentModule;</span>
+    }
+
+    public RubyModule getActualModule() {
+<span class="nc" id="L444">        return this;</span>
+    }
+
+    private class AncestorIterator implements Iterator&lt;RubyModule&gt; {
+        ModuleChain module;
+
+<span class="nc" id="L450">        public AncestorIterator(ModuleChain top) {</span>
+<span class="nc" id="L451">            module = top;</span>
+<span class="nc" id="L452">        }</span>
+
+        @Override
+        public boolean hasNext() {
+<span class="nc bnc" id="L456" title="All 2 branches missed.">            return module != null;</span>
+        }
+
+        @Override
+        public RubyModule next() throws NoSuchElementException {
+<span class="nc bnc" id="L461" title="All 2 branches missed.">            if (!hasNext()) {</span>
+<span class="nc" id="L462">                throw new NoSuchElementException();</span>
+            }
+<span class="nc" id="L464">            ModuleChain mod = module;</span>
+<span class="nc" id="L465">            module = module.getParentModule();</span>
+<span class="nc" id="L466">            return mod.getActualModule();</span>
+        }
+
+        @Override
+        public void remove() {
+<span class="nc" id="L471">            throw new UnsupportedOperationException(&quot;remove&quot;);</span>
+        }
+    }
+
+    private class IncludedModulesIterator extends AncestorIterator {
+<span class="nc" id="L476">        public IncludedModulesIterator(ModuleChain top) {</span>
+<span class="nc" id="L477">            super(top);</span>
+<span class="nc" id="L478">        }</span>
+
+        @Override
+        public boolean hasNext() {
+<span class="nc bnc" id="L482" title="All 4 branches missed.">            return super.hasNext() &amp;&amp; !(module instanceof RubyClass);</span>
+        }
+    }
+
+    public Iterable&lt;RubyModule&gt; ancestors() {
+<span class="nc" id="L487">        final RubyModule top = this;</span>
+<span class="nc" id="L488">        return new Iterable&lt;RubyModule&gt;() {</span>
+            @Override
+            public Iterator&lt;RubyModule&gt; iterator() {
+<span class="nc" id="L491">                return new AncestorIterator(top);</span>
+            }
+        };
+    }
+
+    public Iterable&lt;RubyModule&gt; parentAncestors() {
+<span class="nc" id="L497">        final ModuleChain top = parentModule;</span>
+<span class="nc" id="L498">        return new Iterable&lt;RubyModule&gt;() {</span>
+            @Override
+            public Iterator&lt;RubyModule&gt; iterator() {
+<span class="nc" id="L501">                return new AncestorIterator(top);</span>
+            }
+        };
+    }
+
+    public Iterable&lt;RubyModule&gt; includedModules() {
+<span class="nc" id="L507">        final ModuleChain top = parentModule;</span>
+<span class="nc" id="L508">        return new Iterable&lt;RubyModule&gt;() {</span>
+            @Override
+            public Iterator&lt;RubyModule&gt; iterator() {
+<span class="nc" id="L511">                return new IncludedModulesIterator(top);</span>
+            }
+        };
+    }
+
+    public void setName(String name) {
+<span class="nc" id="L517">        this.name = name;</span>
+<span class="nc" id="L518">    }</span>
+
+    public void setLexicalScope(LexicalScope lexicalScope) {
+<span class="nc" id="L521">        this.lexicalScope = lexicalScope;</span>
+<span class="nc" id="L522">    }</span>
+
+    public LexicalScope getLexicalScope() {
+<span class="nc" id="L525">        return lexicalScope;</span>
+    }
+
+<span class="nc" id="L528">    public static class ModuleAllocator implements Allocator {</span>
+
+        @Override
+        public RubyBasicObject allocate(RubyContext context, RubyClass rubyClass, RubyNode currentNode) {
+<span class="nc" id="L532">            return new RubyModule(context, null, null);</span>
+        }
+
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

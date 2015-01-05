@@ -1,0 +1,1005 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyFloat.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyFloat.java</span></div><h1>RubyFloat.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2001 Alan Moore &lt;alan_moore@gmx.net&gt;
+ * Copyright (C) 2001-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002 Don Schwartz &lt;schwardo@users.sourceforge.net&gt;
+ * Copyright (C) 2002 Benoit Cerrina &lt;b.cerrina@wanadoo.fr&gt;
+ * Copyright (C) 2002-2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2004 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2006 Miguel Covarrubias &lt;mlcovarrubias@gmail.com&gt;
+ * Copyright (C) 2008 Joseph LaFata &lt;joe@quibb.org&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import static org.jruby.util.Numeric.f_abs;
+import static org.jruby.util.Numeric.f_add;
+import static org.jruby.util.Numeric.f_expt;
+import static org.jruby.util.Numeric.f_lshift;
+import static org.jruby.util.Numeric.f_mul;
+import static org.jruby.util.Numeric.f_negate;
+import static org.jruby.util.Numeric.f_negative_p;
+import static org.jruby.util.Numeric.f_sub;
+import static org.jruby.util.Numeric.f_to_r;
+import static org.jruby.util.Numeric.f_zero_p;
+import static org.jruby.util.Numeric.frexp;
+import static org.jruby.util.Numeric.ldexp;
+import static org.jruby.util.Numeric.nurat_rationalize_internal;
+
+import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
+import java.util.Locale;
+import java.lang.Math;
+
+import org.jcodings.specific.ASCIIEncoding;
+import org.jcodings.specific.USASCIIEncoding;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.marshal.MarshalStream;
+import org.jruby.runtime.marshal.UnmarshalStream;
+import org.jruby.util.ByteList;
+import org.jruby.util.ConvertDouble;
+import org.jruby.util.Sprintf;
+
+import static org.jruby.runtime.Helpers.invokedynamic;
+import static org.jruby.runtime.invokedynamic.MethodNames.OP_EQUAL;
+
+/**
+  * A representation of a float object
+ */
+@JRubyClass(name=&quot;Float&quot;, parent=&quot;Numeric&quot;, include=&quot;Precision&quot;)
+public class RubyFloat extends RubyNumeric {
+    public static final int ROUNDS = 1;
+    public static final int RADIX = 2;
+    public static final int MANT_DIG = 53;
+    public static final int DIG = 15;
+    public static final int MIN_EXP = -1021;
+    public static final int MAX_EXP = 1024;
+    public static final int MAX_10_EXP = 308;
+    public static final int MIN_10_EXP = -307;
+    public static final double EPSILON = 2.2204460492503131e-16;
+    public static final double INFINITY = Double.POSITIVE_INFINITY;
+    public static final double NAN = Double.NaN;
+
+    public static RubyClass createFloatClass(Ruby runtime) {
+<span class="fc" id="L96">        RubyClass floatc = runtime.defineClass(&quot;Float&quot;, runtime.getNumeric(), ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);</span>
+<span class="fc" id="L97">        runtime.setFloat(floatc);</span>
+
+<span class="fc" id="L99">        floatc.setClassIndex(ClassIndex.FLOAT);</span>
+<span class="fc" id="L100">        floatc.setReifiedClass(RubyFloat.class);</span>
+        
+<span class="fc" id="L102">        floatc.kindOf = new RubyModule.JavaClassKindOf(RubyFloat.class);</span>
+
+<span class="fc" id="L104">        floatc.getSingletonClass().undefineMethod(&quot;new&quot;);</span>
+
+        // Java Doubles are 64 bit long:            
+<span class="fc" id="L107">        floatc.defineConstant(&quot;ROUNDS&quot;, RubyFixnum.newFixnum(runtime, ROUNDS));</span>
+<span class="fc" id="L108">        floatc.defineConstant(&quot;RADIX&quot;, RubyFixnum.newFixnum(runtime, RADIX));</span>
+<span class="fc" id="L109">        floatc.defineConstant(&quot;MANT_DIG&quot;, RubyFixnum.newFixnum(runtime, MANT_DIG));</span>
+<span class="fc" id="L110">        floatc.defineConstant(&quot;DIG&quot;, RubyFixnum.newFixnum(runtime, DIG));</span>
+        // Double.MAX_EXPONENT since Java 1.6
+<span class="fc" id="L112">        floatc.defineConstant(&quot;MIN_EXP&quot;, RubyFixnum.newFixnum(runtime, MIN_EXP));</span>
+        // Double.MAX_EXPONENT since Java 1.6            
+<span class="fc" id="L114">        floatc.defineConstant(&quot;MAX_EXP&quot;, RubyFixnum.newFixnum(runtime, MAX_EXP));</span>
+<span class="fc" id="L115">        floatc.defineConstant(&quot;MIN_10_EXP&quot;, RubyFixnum.newFixnum(runtime, MIN_10_EXP));</span>
+<span class="fc" id="L116">        floatc.defineConstant(&quot;MAX_10_EXP&quot;, RubyFixnum.newFixnum(runtime, MAX_10_EXP));</span>
+<span class="fc" id="L117">        floatc.defineConstant(&quot;MIN&quot;, RubyFloat.newFloat(runtime, Double.MIN_VALUE));</span>
+<span class="fc" id="L118">        floatc.defineConstant(&quot;MAX&quot;, RubyFloat.newFloat(runtime, Double.MAX_VALUE));</span>
+<span class="fc" id="L119">        floatc.defineConstant(&quot;EPSILON&quot;, RubyFloat.newFloat(runtime, EPSILON));</span>
+
+<span class="fc" id="L121">        floatc.defineConstant(&quot;INFINITY&quot;, RubyFloat.newFloat(runtime, INFINITY));</span>
+<span class="fc" id="L122">        floatc.defineConstant(&quot;NAN&quot;, RubyFloat.newFloat(runtime, NAN));</span>
+
+<span class="fc" id="L124">        floatc.defineAnnotatedMethods(RubyFloat.class);</span>
+
+<span class="fc" id="L126">        return floatc;</span>
+    }
+
+    private final double value;
+    
+    @Override
+    public ClassIndex getNativeClassIndex() {
+<span class="fc" id="L133">        return ClassIndex.FLOAT;</span>
+    }
+
+    public RubyFloat(Ruby runtime) {
+<span class="nc" id="L137">        this(runtime, 0.0);</span>
+<span class="nc" id="L138">    }</span>
+
+    public RubyFloat(Ruby runtime, double value) {
+<span class="fc" id="L141">        super(runtime.getFloat());</span>
+<span class="fc" id="L142">        this.value = value;</span>
+<span class="fc" id="L143">        this.flags |= FROZEN_F;</span>
+<span class="fc" id="L144">    }</span>
+
+    @Override
+    public RubyClass getSingletonClass() {
+<span class="fc" id="L148">        throw getRuntime().newTypeError(&quot;can't define singleton&quot;);</span>
+    }
+
+    @Override
+    public Class&lt;?&gt; getJavaClass() {
+<span class="nc" id="L153">        return double.class;</span>
+    }
+
+    /** Getter for property value.
+     * @return Value of property value.
+     */
+    public double getValue() {
+<span class="fc" id="L160">        return this.value;</span>
+    }
+
+    @Override
+    public double getDoubleValue() {
+<span class="fc" id="L165">        return value;</span>
+    }
+
+    @Override
+    public long getLongValue() {
+<span class="nc" id="L170">        return (long) value;</span>
+    }
+
+    @Override
+    public int getIntValue() {
+<span class="nc" id="L175">        return (int) value;</span>
+    }
+
+    @Override
+    public BigInteger getBigIntegerValue() {
+<span class="nc" id="L180">        return BigInteger.valueOf((long)value);</span>
+    }
+    
+    @Override
+    public RubyFloat convertToFloat() {
+<span class="fc" id="L185">    	return this;</span>
+    }
+
+    protected int compareValue(RubyNumeric other) {
+<span class="nc" id="L189">        double otherVal = other.getDoubleValue();</span>
+<span class="nc bnc" id="L190" title="All 4 branches missed.">        return getValue() &gt; otherVal ? 1 : getValue() &lt; otherVal ? -1 : 0;</span>
+    }
+
+    public static RubyFloat newFloat(Ruby runtime, double value) {
+<span class="fc" id="L194">        return new RubyFloat(runtime, value);</span>
+    }
+
+    /*  ================
+     *  Instance Methods
+     *  ================ 
+     */
+
+    /** rb_flo_induced_from
+     * 
+     */
+    @Deprecated
+    public static IRubyObject induced_from(ThreadContext context, IRubyObject recv, IRubyObject number) {
+<span class="nc bnc" id="L207" title="All 6 branches missed.">        if (number instanceof RubyFixnum || number instanceof RubyBignum || number instanceof RubyRational) {</span>
+<span class="nc" id="L208">            return number.callMethod(context, &quot;to_f&quot;);</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">        } else if (number instanceof RubyFloat) {</span>
+<span class="nc" id="L210">            return number;</span>
+        }
+<span class="nc" id="L212">        throw recv.getRuntime().newTypeError(</span>
+<span class="nc" id="L213">                &quot;failed to convert &quot; + number.getMetaClass() + &quot; into Float&quot;);</span>
+    }
+
+<span class="fc" id="L216">    private final static DecimalFormat FORMAT = new DecimalFormat(&quot;##############0.0##############&quot;,</span>
+            new DecimalFormatSymbols(Locale.ENGLISH));
+
+    /** flo_to_s
+     * 
+     */
+    @JRubyMethod(name = &quot;to_s&quot;)
+    @Override
+    public IRubyObject to_s() {
+<span class="fc" id="L225">        Ruby runtime = getRuntime();</span>
+<span class="fc bfc" id="L226" title="All 4 branches covered.">        if (Double.isInfinite(value)) return RubyString.newString(runtime, value &lt; 0 ? &quot;-Infinity&quot; : &quot;Infinity&quot;);</span>
+<span class="fc bfc" id="L227" title="All 2 branches covered.">        if (Double.isNaN(value)) return RubyString.newString(runtime, &quot;NaN&quot;);</span>
+
+<span class="fc" id="L229">        ByteList buf = new ByteList();</span>
+        // Under 1.9, use full-precision float formatting (JRUBY-4846).
+        // Double-precision can represent around 16 decimal digits;
+        // we use 20 to ensure full representation.
+<span class="fc" id="L233">        Sprintf.sprintf(buf, Locale.US, &quot;%#.20g&quot;, this);</span>
+<span class="fc" id="L234">        int e = buf.indexOf('e');</span>
+<span class="fc bfc" id="L235" title="All 2 branches covered.">        if (e == -1) e = buf.getRealSize();</span>
+<span class="fc" id="L236">        ASCIIEncoding ascii = ASCIIEncoding.INSTANCE; </span>
+
+<span class="pc bpc" id="L238" title="1 of 2 branches missed.">        if (!ascii.isDigit(buf.get(e - 1))) {</span>
+<span class="nc" id="L239">            buf.setRealSize(0);</span>
+<span class="nc" id="L240">            Sprintf.sprintf(buf, Locale.US, &quot;%#.14e&quot;, this);</span>
+<span class="nc" id="L241">            e = buf.indexOf('e');</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">            if (e == -1) e = buf.getRealSize();</span>
+        }
+
+<span class="fc" id="L245">        int p = e;</span>
+<span class="fc bfc" id="L246" title="All 4 branches covered.">        while (buf.get(p - 1) == '0' &amp;&amp; ascii.isDigit(buf.get(p - 2))) p--;</span>
+<span class="fc" id="L247">        System.arraycopy(buf.getUnsafeBytes(), e, buf.getUnsafeBytes(), p, buf.getRealSize() - e);</span>
+<span class="fc" id="L248">        buf.setRealSize(p + buf.getRealSize() - e);</span>
+
+<span class="fc" id="L250">        buf.setEncoding(USASCIIEncoding.INSTANCE);</span>
+
+<span class="fc" id="L252">        return runtime.newString(buf);</span>
+    }
+
+    /** flo_coerce
+     * 
+     */
+    @JRubyMethod(name = &quot;coerce&quot;, required = 1)
+    @Override
+    public IRubyObject coerce(IRubyObject other) {
+<span class="fc" id="L261">        return getRuntime().newArray(RubyKernel.new_float(this, other), this);</span>
+    }
+
+    /** flo_uminus
+     * 
+     */
+    @JRubyMethod(name = &quot;-@&quot;)
+    public IRubyObject op_uminus() {
+<span class="fc" id="L269">        return RubyFloat.newFloat(getRuntime(), -value);</span>
+    }
+
+    /** flo_plus
+     * 
+     */
+    @JRubyMethod(name = &quot;+&quot;, required = 1)
+    public IRubyObject op_plus(ThreadContext context, IRubyObject other) {
+<span class="pc bfc" id="L277" title="All 2 branches covered.">        switch (other.getMetaClass().getClassIndex()) {</span>
+        case FIXNUM:
+        case BIGNUM:
+        case FLOAT:
+<span class="fc" id="L281">            return RubyFloat.newFloat(getRuntime(), value + ((RubyNumeric) other).getDoubleValue());</span>
+        default:
+<span class="fc" id="L283">            return coerceBin(context, &quot;+&quot;, other);</span>
+        }
+    }
+
+    public IRubyObject op_plus(ThreadContext context, double other) {
+<span class="fc" id="L288">        return RubyFloat.newFloat(getRuntime(), value + other);</span>
+    }
+
+    /** flo_minus
+     * 
+     */
+    @JRubyMethod(name = &quot;-&quot;, required = 1)
+    public IRubyObject op_minus(ThreadContext context, IRubyObject other) {
+<span class="fc bfc" id="L296" title="All 2 branches covered.">        switch (other.getMetaClass().getClassIndex()) {</span>
+        case FIXNUM:
+        case BIGNUM:
+        case FLOAT:
+<span class="fc" id="L300">            return RubyFloat.newFloat(getRuntime(), value - ((RubyNumeric) other).getDoubleValue());</span>
+        default:
+<span class="fc" id="L302">            return coerceBin(context, &quot;-&quot;, other);</span>
+        }
+    }
+
+    public IRubyObject op_minus(ThreadContext context, double other) {
+<span class="fc" id="L307">        return RubyFloat.newFloat(getRuntime(), value - other);</span>
+    }
+
+    /** flo_mul
+     * 
+     */
+    @JRubyMethod(name = &quot;*&quot;, required = 1)
+    public IRubyObject op_mul(ThreadContext context, IRubyObject other) {
+<span class="fc bfc" id="L315" title="All 2 branches covered.">        switch (other.getMetaClass().getClassIndex()) {</span>
+        case FIXNUM:
+        case BIGNUM:
+        case FLOAT:
+<span class="fc" id="L319">            return RubyFloat.newFloat(</span>
+<span class="fc" id="L320">                    getRuntime(), value * ((RubyNumeric) other).getDoubleValue());</span>
+        default:
+<span class="fc" id="L322">            return coerceBin(context, &quot;*&quot;, other);</span>
+        }
+    }
+
+    public IRubyObject op_mul(ThreadContext context, double other) {
+<span class="fc" id="L327">        return RubyFloat.newFloat(</span>
+<span class="fc" id="L328">                getRuntime(), value * other);</span>
+    }
+    
+    /** flo_div
+     * 
+     */
+    @JRubyMethod(name = &quot;/&quot;, required = 1)
+    public IRubyObject op_fdiv(ThreadContext context, IRubyObject other) { // don't override Numeric#div !
+<span class="fc bfc" id="L336" title="All 2 branches covered.">        switch (other.getMetaClass().getClassIndex()) {</span>
+        case FIXNUM:
+        case BIGNUM:
+        case FLOAT:
+<span class="fc" id="L340">            return RubyFloat.newFloat(getRuntime(), value / ((RubyNumeric) other).getDoubleValue());</span>
+        default:
+<span class="fc" id="L342">            return coerceBin(context, &quot;/&quot;, other);</span>
+        }
+    }
+
+    public IRubyObject op_fdiv(ThreadContext context, double other) { // don't override Numeric#div !
+<span class="nc" id="L347">        return RubyFloat.newFloat(getRuntime(), value / other);</span>
+    }
+
+    /** flo_quo
+    *
+    */
+    @JRubyMethod(name = &quot;quo&quot;)
+        public IRubyObject magnitude(ThreadContext context, IRubyObject other) {
+<span class="fc" id="L355">        return callMethod(context, &quot;/&quot;, other);</span>
+    }
+
+    /** flo_mod
+     * 
+     */
+    public IRubyObject op_mod(ThreadContext context, IRubyObject other) {
+<span class="pc bpc" id="L362" title="1 of 2 branches missed.">        switch (other.getMetaClass().getClassIndex()) {</span>
+        case FIXNUM:
+        case BIGNUM:
+        case FLOAT:
+<span class="fc" id="L366">            double y = ((RubyNumeric) other).getDoubleValue();</span>
+<span class="fc" id="L367">            return op_mod(context, y);</span>
+        default:
+<span class="nc" id="L369">            return coerceBin(context, &quot;%&quot;, other);</span>
+        }
+    }
+
+    public IRubyObject op_mod(ThreadContext context, double other) {
+        // Modelled after c ruby implementation (java /,% not same as ruby)
+<span class="fc" id="L375">        double x = value;</span>
+
+<span class="fc" id="L377">        double mod = Math.IEEEremainder(x, other);</span>
+<span class="fc bfc" id="L378" title="All 2 branches covered.">        if (other * mod &lt; 0) {</span>
+<span class="fc" id="L379">            mod += other;</span>
+        }
+
+<span class="fc" id="L382">        return RubyFloat.newFloat(getRuntime(), mod);</span>
+    }
+
+    /** flo_mod
+     * 
+     */
+    @JRubyMethod(name = {&quot;%&quot;, &quot;modulo&quot;}, required = 1)
+    public IRubyObject op_mod19(ThreadContext context, IRubyObject other) {
+<span class="pc bpc" id="L390" title="2 of 4 branches missed.">        if (!other.isNil() &amp;&amp; other instanceof RubyNumeric</span>
+<span class="fc bfc" id="L391" title="All 2 branches covered.">            &amp;&amp; ((RubyNumeric)other).getDoubleValue() == 0) {</span>
+<span class="fc" id="L392">            throw context.runtime.newZeroDivisionError();</span>
+        }
+<span class="fc" id="L394">        return op_mod(context, other);</span>
+    }
+
+    /** flo_divmod
+     * 
+     */
+    @Override
+    public IRubyObject divmod(ThreadContext context, IRubyObject other) {
+<span class="pc bpc" id="L402" title="1 of 2 branches missed.">        switch (other.getMetaClass().getClassIndex()) {</span>
+        case FIXNUM:
+        case BIGNUM:
+        case FLOAT:
+<span class="fc" id="L406">            double y = ((RubyNumeric) other).getDoubleValue();</span>
+<span class="fc" id="L407">            double x = value;</span>
+
+<span class="fc" id="L409">            double mod = Math.IEEEremainder(x, y);</span>
+            // MRI behavior:
+<span class="fc bfc" id="L411" title="All 2 branches covered.">            if (Double.isNaN(mod)) {</span>
+<span class="fc" id="L412">                throw getRuntime().newFloatDomainError(&quot;NaN&quot;);</span>
+            }
+<span class="fc" id="L414">            double div = Math.floor(x / y);</span>
+
+<span class="fc bfc" id="L416" title="All 2 branches covered.">            if (y * mod &lt; 0) {</span>
+<span class="fc" id="L417">                mod += y;</span>
+            }
+<span class="fc" id="L419">            final Ruby runtime = getRuntime();</span>
+<span class="fc" id="L420">            IRubyObject car = dbl2num(runtime, div);</span>
+<span class="fc" id="L421">            RubyFloat cdr = RubyFloat.newFloat(runtime, mod);</span>
+<span class="fc" id="L422">            return RubyArray.newArray(runtime, car, cdr);</span>
+        default:
+<span class="nc" id="L424">            return coerceBin(context, &quot;divmod&quot;, other);</span>
+        }
+    }
+    	
+    /** flo_divmod
+     * 
+     */
+    @JRubyMethod(name = &quot;divmod&quot;, required = 1)
+    public IRubyObject divmod19(ThreadContext context, IRubyObject other) {
+<span class="pc bpc" id="L433" title="2 of 4 branches missed.">        if (!other.isNil() &amp;&amp; other instanceof RubyNumeric</span>
+<span class="fc bfc" id="L434" title="All 2 branches covered.">            &amp;&amp; ((RubyNumeric)other).getDoubleValue() == 0) {</span>
+<span class="fc" id="L435">            throw context.runtime.newZeroDivisionError();</span>
+        }
+<span class="fc" id="L437">        return divmod(context, other);</span>
+    }
+    	
+    /** flo_pow
+     * 
+     */
+    public IRubyObject op_pow(ThreadContext context, IRubyObject other) {
+<span class="pc bpc" id="L444" title="1 of 2 branches missed.">        switch (other.getMetaClass().getClassIndex()) {</span>
+        case FIXNUM:
+        case BIGNUM:
+        case FLOAT:
+<span class="fc" id="L448">            return RubyFloat.newFloat(getRuntime(), Math.pow(value, ((RubyNumeric) other)</span>
+<span class="fc" id="L449">                    .getDoubleValue()));</span>
+        default:
+<span class="nc" id="L451">            return coerceBin(context, &quot;**&quot;, other);</span>
+        }
+    }
+
+    public IRubyObject op_pow(ThreadContext context, double other) {
+<span class="nc" id="L456">        return RubyFloat.newFloat(getRuntime(), Math.pow(value, other));</span>
+    }
+    
+    @JRubyMethod(name = &quot;**&quot;, required = 1)
+    public IRubyObject op_pow19(ThreadContext context, IRubyObject other) {
+<span class="fc bfc" id="L461" title="All 2 branches covered.">        switch (other.getMetaClass().getClassIndex()) {</span>
+            case FIXNUM:
+            case BIGNUM:
+            case FLOAT:
+<span class="fc" id="L465">                double d_other = ((RubyNumeric) other).getDoubleValue();</span>
+<span class="fc bfc" id="L466" title="All 4 branches covered.">                if (value &lt; 0 &amp;&amp; (d_other != Math.round(d_other))) {</span>
+<span class="fc" id="L467">                    return RubyComplex.newComplexRaw(getRuntime(), this).callMethod(context, &quot;**&quot;, other);</span>
+                } else {
+<span class="fc" id="L469">                    return op_pow(context, other);</span>
+                }
+            default:
+<span class="fc" id="L472">                return coerceBin(context, &quot;**&quot;, other);</span>
+        }
+    }
+
+    /** flo_eq
+     * 
+     */
+    @JRubyMethod(name = &quot;==&quot;, required = 1)
+    @Override
+    public IRubyObject op_equal(ThreadContext context, IRubyObject other) {
+<span class="fc bfc" id="L482" title="All 2 branches covered.">        if (Double.isNaN(value)) {</span>
+<span class="fc" id="L483">            return getRuntime().getFalse();</span>
+        }
+<span class="fc bfc" id="L485" title="All 2 branches covered.">        switch (other.getMetaClass().getClassIndex()) {</span>
+        case FIXNUM:
+        case BIGNUM:
+        case FLOAT:
+<span class="fc" id="L489">            return RubyBoolean.newBoolean(getRuntime(), value == ((RubyNumeric) other)</span>
+<span class="fc bfc" id="L490" title="All 2 branches covered.">                    .getDoubleValue());</span>
+        default:
+            // Numeric.equal            
+<span class="fc" id="L493">            return super.op_num_equal(context, other);</span>
+        }
+    }
+
+    public IRubyObject op_equal(ThreadContext context, double other) {
+<span class="nc bnc" id="L498" title="All 2 branches missed.">        if (Double.isNaN(value)) {</span>
+<span class="nc" id="L499">            return getRuntime().getFalse();</span>
+        }
+<span class="nc bnc" id="L501" title="All 2 branches missed.">        return RubyBoolean.newBoolean(getRuntime(), value == other);</span>
+    }
+
+    public boolean fastEqual(RubyFloat other) {
+<span class="pc bpc" id="L505" title="1 of 2 branches missed.">        if (Double.isNaN(value)) {</span>
+<span class="nc" id="L506">            return false;</span>
+        }
+<span class="fc bfc" id="L508" title="All 2 branches covered.">        return value == ((RubyFloat)other).value;</span>
+    }
+
+    @Override
+    public final int compareTo(IRubyObject other) {
+<span class="nc bnc" id="L513" title="All 2 branches missed.">        switch (other.getMetaClass().getClassIndex()) {</span>
+        case FIXNUM:
+        case BIGNUM:
+        case FLOAT:
+<span class="nc" id="L517">            return Double.compare(value, ((RubyNumeric) other).getDoubleValue());</span>
+        default:
+<span class="nc" id="L519">            return (int)coerceCmp(getRuntime().getCurrentContext(), &quot;&lt;=&gt;&quot;, other).convertToInteger().getLongValue();</span>
+        }
+    }
+
+    /** flo_cmp
+     * 
+     */
+    @JRubyMethod(name = &quot;&lt;=&gt;&quot;, required = 1)
+    public IRubyObject op_cmp(ThreadContext context, IRubyObject other) {
+<span class="fc bfc" id="L528" title="All 3 branches covered.">        switch (other.getMetaClass().getClassIndex()) {</span>
+        case FIXNUM:
+        case BIGNUM:
+<span class="fc bfc" id="L531" title="All 2 branches covered.">            if (Double.isInfinite(value)) {</span>
+<span class="fc bfc" id="L532" title="All 2 branches covered.">                return value &gt; 0.0 ? RubyFixnum.one(getRuntime()) : RubyFixnum.minus_one(getRuntime());</span>
+            }
+        case FLOAT:
+<span class="fc" id="L535">            double b = ((RubyNumeric) other).getDoubleValue();</span>
+<span class="fc" id="L536">            return dbl_cmp(getRuntime(), value, b);</span>
+        default:
+<span class="pc bpc" id="L538" title="3 of 4 branches missed.">            if (Double.isInfinite(value) &amp;&amp; other.respondsTo(&quot;infinite?&quot;)) {</span>
+<span class="nc" id="L539">                IRubyObject infinite = other.callMethod(context, &quot;infinite?&quot;);</span>
+<span class="nc bnc" id="L540" title="All 2 branches missed.">                if (infinite.isNil()) {</span>
+<span class="nc bnc" id="L541" title="All 2 branches missed.">                    return value &gt; 0.0 ? RubyFixnum.one(getRuntime()) : RubyFixnum.minus_one(getRuntime());</span>
+                } else {
+<span class="nc" id="L543">                    int sign = RubyFixnum.fix2int(infinite);</span>
+
+<span class="nc bnc" id="L545" title="All 2 branches missed.">                    if (sign &gt; 0) {</span>
+<span class="nc bnc" id="L546" title="All 2 branches missed.">                        if (value &gt; 0.0) {</span>
+<span class="nc" id="L547">                            return RubyFixnum.zero(getRuntime());</span>
+                        } else {
+<span class="nc" id="L549">                            return RubyFixnum.minus_one(getRuntime());</span>
+                        }
+                    } else {
+<span class="nc bnc" id="L552" title="All 2 branches missed.">                        if (value &lt; 0.0) {</span>
+<span class="nc" id="L553">                            return RubyFixnum.zero(getRuntime());</span>
+                        } else {
+<span class="nc" id="L555">                            return RubyFixnum.one(getRuntime());</span>
+                        }
+                    }
+                }
+            }
+<span class="fc" id="L560">            return coerceCmp(context, &quot;&lt;=&gt;&quot;, other);</span>
+        }
+    }
+
+    public IRubyObject op_cmp(ThreadContext context, double other) {
+<span class="fc" id="L565">        return dbl_cmp(getRuntime(), value, other);</span>
+    }
+
+    /** flo_gt
+     * 
+     */
+    @JRubyMethod(name = &quot;&gt;&quot;, required = 1)
+    public IRubyObject op_gt(ThreadContext context, IRubyObject other) {
+<span class="pc bpc" id="L573" title="1 of 2 branches missed.">        switch (other.getMetaClass().getClassIndex()) {</span>
+        case FIXNUM:
+        case BIGNUM:
+        case FLOAT:
+<span class="fc" id="L577">            double b = ((RubyNumeric) other).getDoubleValue();</span>
+<span class="pc bpc" id="L578" title="1 of 4 branches missed.">            return RubyBoolean.newBoolean(getRuntime(), !Double.isNaN(b) &amp;&amp; value &gt; b);</span>
+        default:
+<span class="nc" id="L580">            return coerceRelOp(context, &quot;&gt;&quot;, other);</span>
+        }
+    }
+
+    public IRubyObject op_gt(ThreadContext context, double other) {
+<span class="pc bpc" id="L585" title="1 of 4 branches missed.">        return RubyBoolean.newBoolean(getRuntime(), !Double.isNaN(other) &amp;&amp; value &gt; other);</span>
+    }
+
+    /** flo_ge
+     * 
+     */
+    @JRubyMethod(name = &quot;&gt;=&quot;, required = 1)
+    public IRubyObject op_ge(ThreadContext context, IRubyObject other) {
+<span class="pc bpc" id="L593" title="1 of 2 branches missed.">        switch (other.getMetaClass().getClassIndex()) {</span>
+        case FIXNUM:
+        case BIGNUM:
+        case FLOAT:
+<span class="fc" id="L597">            double b = ((RubyNumeric) other).getDoubleValue();</span>
+<span class="pc bpc" id="L598" title="2 of 4 branches missed.">            return RubyBoolean.newBoolean(getRuntime(), !Double.isNaN(b) &amp;&amp; value &gt;= b);</span>
+        default:
+<span class="nc" id="L600">            return coerceRelOp(context, &quot;&gt;=&quot;, other);</span>
+        }
+    }
+
+    public IRubyObject op_ge(ThreadContext context, double other) {
+<span class="pc bpc" id="L605" title="1 of 4 branches missed.">        return RubyBoolean.newBoolean(getRuntime(), !Double.isNaN(other) &amp;&amp; value &gt;= other);</span>
+    }
+
+    /** flo_lt
+     * 
+     */
+    @JRubyMethod(name = &quot;&lt;&quot;, required = 1)
+    public IRubyObject op_lt(ThreadContext context, IRubyObject other) {
+<span class="pc bpc" id="L613" title="1 of 2 branches missed.">        switch (other.getMetaClass().getClassIndex()) {</span>
+        case FIXNUM:
+        case BIGNUM:
+        case FLOAT:
+<span class="fc" id="L617">            double b = ((RubyNumeric) other).getDoubleValue();</span>
+<span class="pc bpc" id="L618" title="1 of 4 branches missed.">            return RubyBoolean.newBoolean(getRuntime(), !Double.isNaN(b) &amp;&amp; value &lt; b);</span>
+        default:
+<span class="nc" id="L620">            return coerceRelOp(context, &quot;&lt;&quot;, other);</span>
+		}
+    }
+
+    public IRubyObject op_lt(ThreadContext context, double other) {
+<span class="pc bpc" id="L625" title="1 of 4 branches missed.">        return RubyBoolean.newBoolean(getRuntime(), !Double.isNaN(other) &amp;&amp; value &lt; other);</span>
+    }
+
+    /** flo_le
+     * 
+     */
+    @JRubyMethod(name = &quot;&lt;=&quot;, required = 1)
+    public IRubyObject op_le(ThreadContext context, IRubyObject other) {
+<span class="pc bpc" id="L633" title="1 of 2 branches missed.">        switch (other.getMetaClass().getClassIndex()) {</span>
+        case FIXNUM:
+        case BIGNUM:
+        case FLOAT:
+<span class="fc" id="L637">            double b = ((RubyNumeric) other).getDoubleValue();</span>
+<span class="pc bpc" id="L638" title="2 of 4 branches missed.">            return RubyBoolean.newBoolean(getRuntime(), !Double.isNaN(b) &amp;&amp; value &lt;= b);</span>
+        default:
+<span class="nc" id="L640">            return coerceRelOp(context, &quot;&lt;=&quot;, other);</span>
+		}
+	}
+
+    public IRubyObject op_le(ThreadContext context, double other) {
+<span class="pc bpc" id="L645" title="1 of 4 branches missed.">        return RubyBoolean.newBoolean(getRuntime(), !Double.isNaN(other) &amp;&amp; value &lt;= other);</span>
+	}
+	
+    /** flo_eql
+     * 
+     */
+    @JRubyMethod(name = &quot;eql?&quot;, required = 1)
+    @Override
+    public IRubyObject eql_p(IRubyObject other) {
+<span class="fc bfc" id="L654" title="All 2 branches covered.">        if (other instanceof RubyFloat) {</span>
+<span class="fc" id="L655">            double b = ((RubyFloat) other).value;</span>
+<span class="pc bpc" id="L656" title="2 of 4 branches missed.">            if (Double.isNaN(value) || Double.isNaN(b)) {</span>
+<span class="nc" id="L657">                return getRuntime().getFalse();</span>
+            }
+<span class="fc bfc" id="L659" title="All 2 branches covered.">            if (value == b) {</span>
+<span class="fc" id="L660">                return getRuntime().getTrue();</span>
+            }
+        }
+<span class="fc" id="L663">        return getRuntime().getFalse();</span>
+    }
+
+    /** flo_hash
+     * 
+     */
+    @JRubyMethod(name = &quot;hash&quot;)
+    @Override
+    public RubyFixnum hash() {
+<span class="fc" id="L672">        return getRuntime().newFixnum(hashCode());</span>
+    }
+
+    @Override
+    public final int hashCode() {
+<span class="fc" id="L677">        long l = Double.doubleToLongBits(value);</span>
+<span class="fc" id="L678">        return (int)(l ^ l &gt;&gt;&gt; 32);</span>
+    }    
+
+    /** flo_fo 
+     * 
+     */
+    @JRubyMethod(name = &quot;to_f&quot;)
+    public IRubyObject to_f() {
+<span class="fc" id="L686">        return this;</span>
+    }
+
+    /** flo_abs
+     * 
+     */
+    @JRubyMethod(name = &quot;abs&quot;)
+    @Override
+    public IRubyObject abs(ThreadContext context) {
+<span class="fc bfc" id="L695" title="All 2 branches covered.">        if (Double.doubleToLongBits(value) &lt; 0) {</span>
+<span class="fc" id="L696">            return RubyFloat.newFloat(context.runtime, Math.abs(value));</span>
+        }
+<span class="fc" id="L698">        return this;</span>
+    }
+
+    /** flo_abs/1.9
+     * 
+     */
+    @JRubyMethod(name = &quot;magnitude&quot;)
+    @Override
+    public IRubyObject magnitude(ThreadContext context) {
+<span class="fc" id="L707">        return abs(context);</span>
+    }
+
+    /** flo_zero_p
+     * 
+     */
+    @JRubyMethod(name = &quot;zero?&quot;)
+    public IRubyObject zero_p() {
+<span class="fc bfc" id="L715" title="All 2 branches covered.">        return RubyBoolean.newBoolean(getRuntime(), value == 0.0);</span>
+    }
+
+    /** flo_truncate
+     * 
+     */
+    @JRubyMethod(name = {&quot;truncate&quot;, &quot;to_i&quot;, &quot;to_int&quot;})
+    @Override
+    public IRubyObject truncate() {
+<span class="fc" id="L724">        double f = value;</span>
+<span class="fc bfc" id="L725" title="All 2 branches covered.">        if (f &gt; 0.0) f = Math.floor(f);</span>
+<span class="fc bfc" id="L726" title="All 2 branches covered.">        if (f &lt; 0.0) f = Math.ceil(f);</span>
+
+<span class="fc" id="L728">        return dbl2num(getRuntime(), f);</span>
+    }
+
+    /** flo_numerator
+     * 
+     */
+    @JRubyMethod(name = &quot;numerator&quot;)
+    @Override
+    public IRubyObject numerator(ThreadContext context) {
+<span class="fc bfc" id="L737" title="All 4 branches covered.">        if (Double.isInfinite(value) || Double.isNaN(value)) return this;</span>
+<span class="fc" id="L738">        return super.numerator(context);</span>
+    }
+
+    /** flo_denominator
+     * 
+     */
+    @JRubyMethod(name = &quot;denominator&quot;)
+    @Override
+    public IRubyObject denominator(ThreadContext context) {
+<span class="fc bfc" id="L747" title="All 4 branches covered.">        if (Double.isInfinite(value) || Double.isNaN(value)) {</span>
+<span class="fc" id="L748">            return RubyFixnum.one(context.runtime);</span>
+        }
+<span class="fc" id="L750">        return super.denominator(context);</span>
+    }
+
+    /** float_to_r, float_decode
+     * 
+     */
+    static final int DBL_MANT_DIG = 53;
+    static final int FLT_RADIX = 2;
+    @JRubyMethod(name = &quot;to_r&quot;)
+    public IRubyObject to_r(ThreadContext context) {
+<span class="fc" id="L760">        long[]exp = new long[1]; </span>
+<span class="fc" id="L761">        double f = frexp(value, exp);</span>
+<span class="fc" id="L762">        f = ldexp(f, DBL_MANT_DIG);</span>
+<span class="fc" id="L763">        long n = exp[0] - DBL_MANT_DIG;</span>
+
+<span class="fc" id="L765">        Ruby runtime = context.runtime;</span>
+
+<span class="fc" id="L767">        IRubyObject rf = RubyNumeric.dbl2num(runtime, f);</span>
+<span class="fc" id="L768">        IRubyObject rn = RubyFixnum.newFixnum(runtime, n);</span>
+<span class="fc" id="L769">        return f_mul(context, rf, f_expt(context, RubyFixnum.newFixnum(runtime, FLT_RADIX), rn));</span>
+    }
+
+    /** float_rationalize
+     *
+     */
+    @JRubyMethod(name = &quot;rationalize&quot;, optional = 1)
+    public IRubyObject rationalize(ThreadContext context, IRubyObject[] args) {
+<span class="fc bfc" id="L777" title="All 2 branches covered.">        if (f_negative_p(context, this))</span>
+<span class="fc" id="L778">            return f_negate(context, ((RubyFloat) f_abs(context, this)).rationalize(context, args));</span>
+
+<span class="fc" id="L780">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L781">        RubyFixnum one = RubyFixnum.one(runtime);</span>
+<span class="fc" id="L782">        RubyFixnum two = RubyFixnum.two(runtime);</span>
+
+        IRubyObject eps, a, b;
+<span class="fc bfc" id="L785" title="All 2 branches covered.">        if (args.length != 0) {</span>
+<span class="fc" id="L786">            eps = f_abs(context, args[0]);</span>
+<span class="fc" id="L787">            a = f_sub(context, this, eps);</span>
+<span class="fc" id="L788">            b = f_add(context, this, eps);</span>
+        } else {
+<span class="fc" id="L790">            long[] exp = new long[1];</span>
+<span class="fc" id="L791">            double f = frexp(value, exp);</span>
+<span class="fc" id="L792">            f = ldexp(f, DBL_MANT_DIG);</span>
+<span class="fc" id="L793">            long n = exp[0] - DBL_MANT_DIG;</span>
+
+
+<span class="fc" id="L796">            IRubyObject rf = RubyNumeric.dbl2num(runtime, f);</span>
+<span class="fc" id="L797">            IRubyObject rn = RubyFixnum.newFixnum(runtime, n);</span>
+
+<span class="pc bpc" id="L799" title="4 of 6 branches missed.">            if (f_zero_p(context, rf) || !(f_negative_p(context, rn) || f_zero_p(context, rn)))</span>
+<span class="nc" id="L800">                return RubyRational.newRationalRaw(runtime, f_lshift(context,rf,rn));</span>
+
+<span class="fc" id="L802">            a = RubyRational.newRationalRaw(runtime,</span>
+<span class="fc" id="L803">                    f_sub(context,f_mul(context, two, rf),one),</span>
+<span class="fc" id="L804">                    f_lshift(context, one, f_sub(context,one,rn)));</span>
+<span class="fc" id="L805">            b = RubyRational.newRationalRaw(runtime,</span>
+<span class="fc" id="L806">                    f_add(context,f_mul(context, two, rf),one),</span>
+<span class="fc" id="L807">                    f_lshift(context, one, f_sub(context,one,rn)));</span>
+        }
+
+<span class="pc bpc" id="L810" title="1 of 2 branches missed.">        if (invokedynamic(context, a, OP_EQUAL, b).isTrue()) return f_to_r(context, this);</span>
+
+<span class="fc" id="L812">        IRubyObject[] ary = new IRubyObject[2];</span>
+<span class="fc" id="L813">        ary[0] = a;</span>
+<span class="fc" id="L814">        ary[1] = b;</span>
+<span class="fc" id="L815">        IRubyObject[] ans = nurat_rationalize_internal(context, ary);</span>
+
+<span class="fc" id="L817">        return RubyRational.newRationalRaw(runtime, ans[0], ans[1]);</span>
+
+    }
+
+    /** floor
+     * 
+     */
+    @JRubyMethod(name = &quot;floor&quot;)
+    @Override
+    public IRubyObject floor() {
+<span class="fc" id="L827">        return dbl2num(getRuntime(), Math.floor(value));</span>
+    }
+
+    /** flo_ceil
+     * 
+     */
+    @JRubyMethod(name = &quot;ceil&quot;)
+    @Override
+    public IRubyObject ceil() {
+<span class="fc" id="L836">        return dbl2num(getRuntime(), Math.ceil(value));</span>
+    }
+
+    /** flo_round
+     * 
+     */
+    @Override
+    public IRubyObject round() {
+<span class="fc" id="L844">        return dbl2num(getRuntime(), val2dbl());</span>
+    }
+    
+    @JRubyMethod(name = &quot;round&quot;, optional = 1)
+    public IRubyObject round(ThreadContext context, IRubyObject[] args) {
+<span class="fc bfc" id="L849" title="All 2 branches covered.">        if (args.length == 0) return round();</span>
+        // truncate floats.
+<span class="fc" id="L851">        double digits = num2long(args[0]);</span>
+        
+<span class="fc" id="L853">        double magnifier = Math.pow(10.0, Math.abs(digits));</span>
+<span class="fc" id="L854">        double number = value;</span>
+        
+<span class="fc bfc" id="L856" title="All 2 branches covered.">        if (Double.isInfinite(value)) {</span>
+<span class="fc bfc" id="L857" title="All 4 branches covered.">            if (digits &lt;= 0) throw getRuntime().newFloatDomainError(value &lt; 0 ? &quot;-Infinity&quot; : &quot;Infinity&quot;);</span>
+<span class="fc" id="L858">            return this;</span>
+        }
+        
+<span class="fc bfc" id="L861" title="All 2 branches covered.">        if (Double.isNaN(value)) {</span>
+<span class="fc bfc" id="L862" title="All 2 branches covered.">            if (digits &lt;= 0) throw getRuntime().newFloatDomainError(&quot;NaN&quot;);</span>
+<span class="fc" id="L863">            return this;</span>
+        }
+
+        double binexp;
+        // Missing binexp values for NaN and (-|+)Infinity.  frexp man page just says unspecified.
+<span class="pc bpc" id="L868" title="1 of 2 branches missed.">        if (value == 0) {</span>
+<span class="nc" id="L869">            binexp = 0;</span>
+        } else {
+<span class="fc" id="L871">            binexp = Math.ceil(Math.log(value)/Math.log(2));</span>
+        }
+        
+        // MRI flo_round logic to deal with huge precision numbers.
+<span class="fc bfc" id="L875" title="All 4 branches covered.">        if (digits &gt;= (DIG+2) - (binexp &gt; 0 ? binexp / 4 : binexp / 3 - 1)) {</span>
+<span class="fc" id="L876">            return RubyFloat.newFloat(context.runtime, number);</span>
+        }
+<span class="fc bfc" id="L878" title="All 4 branches covered.">        if (digits &lt; -(binexp &gt; 0 ? binexp / 3 + 1 : binexp / 4)) {</span>
+<span class="fc" id="L879">            return dbl2num(context.runtime, (long) 0);</span>
+        }
+        
+<span class="pc bpc" id="L882" title="1 of 2 branches missed.">        if (Double.isInfinite(magnifier)) {</span>
+<span class="nc bnc" id="L883" title="All 2 branches missed.">            if (digits &lt; 0) number = 0;</span>
+        } else {
+<span class="fc bfc" id="L885" title="All 2 branches covered.">            if (digits &lt; 0) {</span>
+<span class="fc" id="L886">                number /= magnifier;</span>
+            } else {
+<span class="fc" id="L888">                number *= magnifier;</span>
+            }
+
+<span class="fc" id="L891">            number = Math.round(Math.abs(number))*Math.signum(number);</span>
+<span class="fc bfc" id="L892" title="All 2 branches covered.">            if (digits &lt; 0) {</span>
+<span class="fc" id="L893">                number *= magnifier;</span>
+            } else {
+<span class="fc" id="L895">                number /= magnifier;</span>
+            }
+        }
+        
+<span class="fc bfc" id="L899" title="All 2 branches covered.">        if (digits &gt; 0) {</span>
+<span class="fc" id="L900">            return RubyFloat.newFloat(context.runtime, number);</span>
+        } else {
+<span class="fc bfc" id="L902" title="All 4 branches covered.">            if (number &gt; Long.MAX_VALUE || number &lt; Long.MIN_VALUE) {</span>
+                // The only way to get huge precise values with BigDecimal is 
+                // to convert the double to String first.
+<span class="fc" id="L905">                BigDecimal roundedNumber = new BigDecimal(Double.toString(number));</span>
+<span class="fc" id="L906">                return RubyBignum.newBignum(context.runtime, roundedNumber.toBigInteger());</span>
+            }
+<span class="fc" id="L908">            return dbl2num(context.runtime, (long)number);</span>
+        }
+    }
+    
+    private double val2dbl() {
+<span class="fc" id="L913">        double f = value;</span>
+<span class="fc bfc" id="L914" title="All 2 branches covered.">        if (f &gt; 0.0) {</span>
+<span class="fc" id="L915">            f = Math.floor(f);</span>
+<span class="fc bfc" id="L916" title="All 2 branches covered.">            if (value - f &gt;= 0.5) {</span>
+<span class="fc" id="L917">                f += 1.0;</span>
+            }
+<span class="fc bfc" id="L919" title="All 2 branches covered.">        } else if (f &lt; 0.0) {</span>
+<span class="fc" id="L920">            f = Math.ceil(f);</span>
+<span class="fc bfc" id="L921" title="All 2 branches covered.">            if (f - value &gt;= 0.5) {</span>
+<span class="fc" id="L922">                f -= 1.0;</span>
+            }
+        }
+        
+<span class="fc" id="L926">        return f;</span>
+    }
+        
+    /** flo_is_nan_p
+     * 
+     */
+    @JRubyMethod(name = &quot;nan?&quot;)
+    public IRubyObject nan_p() {
+<span class="fc" id="L934">        return RubyBoolean.newBoolean(getRuntime(), Double.isNaN(value));</span>
+    }
+
+    /** flo_is_infinite_p
+     * 
+     */
+    @JRubyMethod(name = &quot;infinite?&quot;)
+    public IRubyObject infinite_p() {
+<span class="fc bfc" id="L942" title="All 2 branches covered.">        if (Double.isInfinite(value)) {</span>
+<span class="fc bfc" id="L943" title="All 2 branches covered.">            return RubyFixnum.newFixnum(getRuntime(), value &lt; 0 ? -1 : 1);</span>
+        }
+<span class="fc" id="L945">        return getRuntime().getNil();</span>
+    }
+            
+    /** flo_is_finite_p
+     * 
+     */
+    @JRubyMethod(name = &quot;finite?&quot;)
+    public IRubyObject finite_p() {
+<span class="fc bfc" id="L953" title="All 4 branches covered.">        if (Double.isInfinite(value) || Double.isNaN(value)) {</span>
+<span class="fc" id="L954">            return getRuntime().getFalse();</span>
+        }
+<span class="fc" id="L956">        return getRuntime().getTrue();</span>
+    }
+
+    private ByteList marshalDump() {
+<span class="fc bfc" id="L960" title="All 4 branches covered.">        if (Double.isInfinite(value)) return value &lt; 0 ? NEGATIVE_INFINITY_BYTELIST : INFINITY_BYTELIST;</span>
+<span class="fc bfc" id="L961" title="All 2 branches covered.">        if (Double.isNaN(value)) return NAN_BYTELIST;</span>
+
+<span class="fc" id="L963">        ByteList byteList = new ByteList();</span>
+        // Always use US locale, to ensure &quot;.&quot; separator. JRUBY-5918
+<span class="fc" id="L965">        Sprintf.sprintf(byteList, Locale.US, &quot;%.17g&quot;, RubyArray.newArray(getRuntime(), this));</span>
+<span class="fc" id="L966">        return byteList;</span>
+    }
+
+    public static void marshalTo(RubyFloat aFloat, MarshalStream output) throws java.io.IOException {
+<span class="fc" id="L970">        output.registerLinkTarget(aFloat);</span>
+<span class="fc" id="L971">        output.writeString(aFloat.marshalDump());</span>
+<span class="fc" id="L972">    }</span>
+        
+    public static RubyFloat unmarshalFrom(UnmarshalStream input) throws java.io.IOException {
+<span class="fc" id="L975">        ByteList value = input.unmarshalString();</span>
+        RubyFloat result;
+<span class="fc bfc" id="L977" title="All 2 branches covered.">        if (value.equals(NAN_BYTELIST)) {</span>
+<span class="fc" id="L978">            result = RubyFloat.newFloat(input.getRuntime(), RubyFloat.NAN);</span>
+<span class="fc bfc" id="L979" title="All 2 branches covered.">        } else if (value.equals(NEGATIVE_INFINITY_BYTELIST)) {</span>
+<span class="fc" id="L980">            result = RubyFloat.newFloat(input.getRuntime(), Double.NEGATIVE_INFINITY);</span>
+<span class="fc bfc" id="L981" title="All 2 branches covered.">        } else if (value.equals(INFINITY_BYTELIST)) {</span>
+<span class="fc" id="L982">            result = RubyFloat.newFloat(input.getRuntime(), Double.POSITIVE_INFINITY);</span>
+        } else {
+<span class="fc" id="L984">            result = RubyFloat.newFloat(input.getRuntime(),</span>
+<span class="fc" id="L985">                    ConvertDouble.byteListToDouble(value, false));</span>
+        }
+<span class="fc" id="L987">        input.registerLinkTarget(result);</span>
+<span class="fc" id="L988">        return result;</span>
+    }
+
+<span class="fc" id="L991">    private static final ByteList NAN_BYTELIST = new ByteList(&quot;nan&quot;.getBytes());</span>
+<span class="fc" id="L992">    private static final ByteList NEGATIVE_INFINITY_BYTELIST = new ByteList(&quot;-inf&quot;.getBytes());</span>
+<span class="fc" id="L993">    private static final ByteList INFINITY_BYTELIST = new ByteList(&quot;inf&quot;.getBytes());</span>
+
+    @JRubyMethod(name = &quot;next_float&quot;)
+    public IRubyObject next_float() {
+<span class="nc" id="L997">        return RubyFloat.newFloat(getRuntime(), Math.nextAfter(value, Double.POSITIVE_INFINITY));</span>
+    }
+
+    @JRubyMethod(name = &quot;prev_float&quot;)
+    public IRubyObject prev_float() {
+<span class="nc" id="L1002">        return RubyFloat.newFloat(getRuntime(), Math.nextAfter(value, Double.NEGATIVE_INFINITY));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

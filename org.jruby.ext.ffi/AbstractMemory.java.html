@@ -1,0 +1,2062 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AbstractMemory.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.ffi</a> &gt; <span class="el_source">AbstractMemory.java</span></div><h1>AbstractMemory.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2008 JRuby project
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+
+package org.jruby.ext.ffi;
+
+import java.nio.ByteOrder;
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyFloat;
+import org.jruby.RubyModule;
+import org.jruby.RubyNumeric;
+import org.jruby.RubyObject;
+import org.jruby.RubyString;
+import org.jruby.RubySymbol;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
+
+/**
+ * A abstract memory object that defines operations common to both pointers and
+ * memory buffers
+ */
+@JRubyClass(name=&quot;FFI::AbtractMemory&quot; + AbstractMemory.ABSTRACT_MEMORY_RUBY_CLASS, parent=&quot;Object&quot;)
+abstract public class AbstractMemory extends MemoryObject {
+    public final static String ABSTRACT_MEMORY_RUBY_CLASS = &quot;AbstractMemory&quot;;
+
+    /** The total size of the memory area */
+    protected long size;
+
+    /** The size of each element of this memory area - e.g. :char is 1, :int is 4 */
+    protected int typeSize;
+
+    public static RubyClass createAbstractMemoryClass(Ruby runtime, RubyModule module) {
+<span class="fc" id="L65">        RubyClass result = module.defineClassUnder(ABSTRACT_MEMORY_RUBY_CLASS,</span>
+<span class="fc" id="L66">                runtime.getObject(),</span>
+                ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);
+        
+<span class="fc" id="L69">        result.defineAnnotatedMethods(AbstractMemory.class);</span>
+<span class="fc" id="L70">        result.defineAnnotatedConstants(AbstractMemory.class);</span>
+
+<span class="fc" id="L72">        return result;</span>
+    }
+    
+    protected static final int calculateTypeSize(ThreadContext context, IRubyObject sizeArg) {
+<span class="nc bnc" id="L76" title="All 2 branches missed.">        if (sizeArg instanceof RubyFixnum) {</span>
+<span class="nc" id="L77">            return (int) ((RubyFixnum) sizeArg).getLongValue();</span>
+
+<span class="nc bnc" id="L79" title="All 2 branches missed.">        } else if (sizeArg instanceof RubySymbol) {</span>
+<span class="nc" id="L80">            return TypeSizeMapper.getTypeSize(context, (RubySymbol) sizeArg);</span>
+
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        } else if (sizeArg instanceof Type) {</span>
+<span class="nc" id="L83">            return ((Type) sizeArg).getNativeSize();</span>
+
+        } else {
+            DynamicMethod sizeMethod;
+<span class="nc bnc" id="L87" title="All 4 branches missed.">            if (sizeArg instanceof RubyClass &amp;&amp; Struct.isStruct(context.runtime, (RubyClass) sizeArg)) {</span>
+<span class="nc" id="L88">                return Struct.getStructSize(context.runtime, sizeArg);</span>
+
+<span class="nc bnc" id="L90" title="All 2 branches missed.">            } else if (!(sizeMethod = sizeArg.getMetaClass().searchMethod(&quot;size&quot;)).isUndefined()) {</span>
+<span class="nc" id="L91">                return (int) RubyFixnum.num2long(sizeMethod.call(context, sizeArg, sizeArg.getMetaClass(), &quot;size&quot;));</span>
+
+            } else {
+<span class="nc" id="L94">                throw context.runtime.newArgumentError(&quot;Invalid size argument&quot;);</span>
+            }
+        }
+    }
+
+    protected static final RubyArray checkArray(IRubyObject obj) {
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        if (!(obj instanceof RubyArray)) {</span>
+<span class="nc" id="L101">            throw obj.getRuntime().newArgumentError(&quot;Array expected&quot;);</span>
+        }
+<span class="nc" id="L103">        return (RubyArray) obj;</span>
+    }
+
+    private static int checkArrayLength(IRubyObject val) {
+<span class="nc" id="L107">        int i = RubyNumeric.num2int(val);</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        if (i &lt; 0) {</span>
+<span class="nc" id="L109">            throw val.getRuntime().newArgumentError(&quot;negative array length&quot;);</span>
+        }
+
+<span class="nc" id="L112">        return i;</span>
+    }
+
+    protected AbstractMemory(Ruby runtime, RubyClass klass, MemoryIO io, long size) {
+<span class="fc" id="L116">        this(runtime, klass, io, size, 1);</span>
+<span class="fc" id="L117">    }</span>
+
+    protected AbstractMemory(Ruby runtime, RubyClass klass, MemoryIO io, long size, int typeSize) {
+<span class="fc" id="L120">        super(runtime, klass);</span>
+<span class="fc" id="L121">        setMemoryIO(io);</span>
+<span class="fc" id="L122">        this.size = size;</span>
+<span class="fc" id="L123">        this.typeSize = typeSize;</span>
+<span class="fc" id="L124">    }</span>
+
+    @Override
+    protected MemoryIO allocateMemoryIO() {
+<span class="nc" id="L128">        throw getRuntime().newRuntimeError(&quot;allocateMemoryIO should not be called&quot;);</span>
+    }
+
+    /**
+     * Calculates the absolute offset within the base memory pointer for a given offset.
+     *
+     * @param offset The offset to add to the base offset.
+     *
+     * @return The total offset from the base memory pointer.
+     */
+    protected final long getOffset(IRubyObject offset) {
+<span class="nc" id="L139">        return Util.longValue(offset);</span>
+    }
+    
+    /**
+     * Gets the size of the memory area.
+     *
+     * @return The size of the memory area.
+     */
+    public final long getSize() {
+<span class="nc" id="L148">        return this.size;</span>
+    }
+
+    /**
+     * Calculates a hash code for the pointer.
+     *
+     * @return A RubyFixnum containing the hash code.
+     */
+    @JRubyMethod(name = &quot;hash&quot;)
+    public RubyFixnum hash(ThreadContext context) {
+<span class="nc" id="L158">        return context.runtime.newFixnum(hashCode());</span>
+    }
+
+    @JRubyMethod(name = &quot;to_s&quot;, optional = 1)
+    public IRubyObject to_s(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L163">        return RubyString.newString(context.runtime, ABSTRACT_MEMORY_RUBY_CLASS + &quot;[size=&quot; + size + &quot;]&quot;);</span>
+    }
+
+    @JRubyMethod(name = &quot;[]&quot;)
+    public final IRubyObject aref(ThreadContext context, IRubyObject indexArg) {
+<span class="nc" id="L168">        final int index = RubyNumeric.num2int(indexArg);</span>
+<span class="nc" id="L169">        final int offset = index * typeSize;</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        if (offset &gt;= size) {</span>
+<span class="nc" id="L171">            throw context.runtime.newIndexError(String.format(&quot;Index %d out of range&quot;, index));</span>
+        }
+<span class="nc" id="L173">        return slice(context.runtime, offset);</span>
+    }
+
+    /**
+     * Compares this &lt;tt&gt;MemoryPointer&lt;/tt&gt; to another &lt;tt&gt;MemoryPointer&lt;/tt&gt;.
+     *
+     * @param obj The other &lt;tt&gt;MemoryPointer&lt;/tt&gt; to compare to.
+     * @return true if the memory address of &lt;tt&gt;obj&lt;/tt&gt; is equal to the address
+     * of this &lt;tt&gt;MemoryPointer&lt;/tt&gt;.
+     */
+    @Override
+    public boolean equals(Object obj) {
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        if (!(obj instanceof AbstractMemory)) {</span>
+<span class="nc" id="L186">            return false;</span>
+        }
+<span class="nc" id="L188">        final AbstractMemory other = (AbstractMemory) obj;</span>
+<span class="nc" id="L189">        return other.getMemoryIO().equals(getMemoryIO());</span>
+    }
+    
+    @JRubyMethod(name = &quot;==&quot;, required = 1)
+    @Override
+    public IRubyObject op_equal(ThreadContext context, IRubyObject obj) {
+<span class="nc" id="L195">        return context.runtime.newBoolean(this.equals(obj));</span>
+    }
+    @Override
+    public final boolean eql(IRubyObject other) {
+<span class="nc" id="L199">        return this.equals(other);</span>
+    }
+    /**
+     * Calculates the hash code for this &lt;tt&gt;MemoryPointer&lt;/tt&gt;
+     *
+     * @return The hashcode of the memory address.
+     */
+    @Override
+    public int hashCode() {
+<span class="nc" id="L208">        return 67 * getMemoryIO().hashCode();</span>
+    }
+
+    /**
+     * Clears (zeros out) the memory contents.
+     */
+    @JRubyMethod(name = &quot;clear&quot;)
+    public IRubyObject clear(ThreadContext context) {
+<span class="nc" id="L216">        getMemoryIO().setMemory(0, size, (byte) 0);</span>
+<span class="nc" id="L217">        return this;</span>
+    }
+
+    /**
+     * Gets the total size (in bytes) of the Memory.
+     *
+     * @return The total size in bytes.
+     */
+    @JRubyMethod(name = { &quot;total&quot;, &quot;size&quot;, &quot;length&quot; })
+    public IRubyObject total(ThreadContext context) {
+<span class="nc" id="L227">        return RubyFixnum.newFixnum(context.runtime, size);</span>
+    }
+    
+    /**
+     * Indicates how many bytes the intrinsic type of the memory uses.
+     *
+     * @param context
+     * @return
+     */
+    @JRubyMethod(name = &quot;type_size&quot;)
+    public final IRubyObject type_size(ThreadContext context) {
+<span class="nc" id="L238">        return context.runtime.newFixnum(typeSize);</span>
+    }
+
+    /**
+     * Writes a 8 bit signed integer value to the memory area.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;write_char&quot; } , required = 1)
+    public IRubyObject write_char(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L249">        getMemoryIO().putByte(0, Util.int8Value(value));</span>
+
+<span class="nc" id="L251">        return this;</span>
+    }
+
+    /**
+     * Writes a 8 bit signed integer value to the memory area.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_int8&quot;, &quot;put_char&quot; } , required = 1)
+    public IRubyObject put_int8(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L262">        getMemoryIO().putByte(0, Util.int8Value(value));</span>
+
+<span class="nc" id="L264">        return this;</span>
+    }
+
+    /**
+     * Writes a 8 bit signed integer value to the memory area.
+     *
+     * @param offset The offset from the base pointer address to write the value.
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_int8&quot;, &quot;put_char&quot; } , required = 2)
+    public IRubyObject put_int8(ThreadContext context, IRubyObject offset, IRubyObject value) {
+<span class="nc" id="L276">        getMemoryIO().putByte(getOffset(offset), Util.int8Value(value));</span>
+
+<span class="nc" id="L278">        return this;</span>
+    }
+    
+    /**
+     * Reads an 8 bit signed integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;read_char&quot; })
+    public IRubyObject read_char(ThreadContext context) {
+<span class="nc" id="L288">        return Util.newSigned8(context.runtime, getMemoryIO().getByte(0));</span>
+    }
+
+    /**
+     * Reads an 8 bit signed integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_int8&quot;, &quot;get_char&quot; })
+    public IRubyObject get_int8(ThreadContext context) {
+<span class="nc" id="L298">        return Util.newSigned8(context.runtime, getMemoryIO().getByte(0));</span>
+    }
+
+    /**
+     * Reads an 8 bit signed integer value from the memory address.
+     *
+     * @param offset The offset from the base pointer address to read the value.
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_int8&quot;, &quot;get_char&quot; }, required = 1)
+    public IRubyObject get_int8(ThreadContext context, IRubyObject offset) {
+<span class="nc" id="L309">        return Util.newSigned8(context.runtime, getMemoryIO().getByte(getOffset(offset)));</span>
+    }
+
+    /**
+     * Writes a 8 bit unsigned integer value to the memory area.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;write_uchar&quot; }, required = 1)
+    public IRubyObject write_uchar(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L320">        getMemoryIO().putByte(0, (byte) Util.uint8Value(value));</span>
+<span class="nc" id="L321">        return this;</span>
+    }
+
+    /**
+     * Writes a 8 bit unsigned integer value to the memory area.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_uint8&quot;, &quot;put_uchar&quot; }, required = 1)
+    public IRubyObject put_uint8(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L332">        getMemoryIO().putByte(0, (byte) Util.uint8Value(value));</span>
+<span class="nc" id="L333">        return this;</span>
+    }
+
+    /**
+     * Writes a 8 bit unsigned integer value to the memory area.
+     *
+     * @param offset The offset from the base pointer address to write the value.
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_uint8&quot;, &quot;put_uchar&quot; }, required = 2)
+    public IRubyObject put_uint8(ThreadContext context, IRubyObject offset, IRubyObject value) {
+<span class="nc" id="L345">        getMemoryIO().putByte(getOffset(offset), (byte) Util.uint8Value(value));</span>
+<span class="nc" id="L346">        return this;</span>
+    }
+    
+    /**
+     * Reads an 8 bit unsigned integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;read_uchar&quot; })
+    public IRubyObject read_uchar(ThreadContext context) {
+<span class="nc" id="L356">        return Util.newUnsigned8(context.runtime, getMemoryIO().getByte(0));</span>
+    }
+
+    /**
+     * Reads an 8 bit unsigned integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_uint8&quot;, &quot;get_uchar&quot; })
+    public IRubyObject get_uint8(ThreadContext context) {
+<span class="nc" id="L366">        return Util.newUnsigned8(context.runtime, getMemoryIO().getByte(0));</span>
+    }
+
+    /**
+     * Reads an 8 bit unsigned integer value from the memory address.
+     *
+     * @param offset The offset from the base pointer address to read the value.
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_uint8&quot;, &quot;get_uchar&quot; }, required = 1)
+    public IRubyObject get_uint8(ThreadContext context, IRubyObject offset) {
+<span class="nc" id="L377">        return Util.newUnsigned8(context.runtime, getMemoryIO().getByte(getOffset(offset)));</span>
+    }
+
+    /**
+     * Writes a 16 bit signed integer value to the memory address.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;write_short&quot; }, required = 1)
+    public IRubyObject write_short(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L388">        getMemoryIO().putShort(0, Util.int16Value(value));</span>
+
+<span class="nc" id="L390">        return this;</span>
+    }
+
+    /**
+     * Writes a 16 bit signed integer value to the memory address.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_int16&quot;, &quot;put_short&quot; }, required = 1)
+    public IRubyObject put_int16(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L401">        getMemoryIO().putShort(0, Util.int16Value(value));</span>
+
+<span class="nc" id="L403">        return this;</span>
+    }
+
+    /**
+     * Writes a 16 bit signed integer value to the memory address.
+     *
+     * @param offset The offset from the base pointer address to write the value.
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_int16&quot;, &quot;put_short&quot; }, required = 2)
+    public IRubyObject put_int16(ThreadContext context, IRubyObject offset, IRubyObject value) {
+<span class="nc" id="L415">        getMemoryIO().putShort(getOffset(offset), Util.int16Value(value));</span>
+
+<span class="nc" id="L417">        return this;</span>
+    }
+
+    /**
+     * Reads a 16 bit signed integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;read_short&quot; })
+    public IRubyObject read_short(ThreadContext context) {
+<span class="nc" id="L427">        return Util.newSigned16(context.runtime, getMemoryIO().getShort(0));</span>
+    }
+
+    /**
+     * Reads a 16 bit signed integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_int16&quot;, &quot;get_short&quot; })
+    public IRubyObject get_int16(ThreadContext context) {
+<span class="nc" id="L437">        return Util.newSigned16(context.runtime, getMemoryIO().getShort(0));</span>
+    }
+
+    /**
+     * Reads a 16 bit signed integer value from the memory address.
+     *
+     * @param offset The offset from the base pointer address to read the value.
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_int16&quot;, &quot;get_short&quot; }, required = 1)
+    public IRubyObject get_int16(ThreadContext context, IRubyObject offset) {
+<span class="nc" id="L448">        return Util.newSigned16(context.runtime, getMemoryIO().getShort(getOffset(offset)));</span>
+    }
+    
+    /**
+     * Writes a 16 bit unsigned integer value to the memory address.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;write_ushort&quot; }, required = 1)
+    public IRubyObject write_ushort(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L459">        getMemoryIO().putShort(0, (short) Util.uint16Value(value));</span>
+
+<span class="nc" id="L461">        return this;</span>
+    }
+
+    /**
+     * Writes a 16 bit unsigned integer value to the memory address.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_uint16&quot;, &quot;put_ushort&quot; }, required = 1)
+    public IRubyObject put_uint16(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L472">        getMemoryIO().putShort(0, (short) Util.uint16Value(value));</span>
+
+<span class="nc" id="L474">        return this;</span>
+    }
+
+    /**
+     * Writes a 16 bit unsigned integer value to the memory address.
+     *
+     * @param offset The offset from the base pointer address to write the value.
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_uint16&quot;, &quot;put_ushort&quot; }, required = 2)
+    public IRubyObject put_uint16(ThreadContext context, IRubyObject offset, IRubyObject value) {
+<span class="nc" id="L486">        getMemoryIO().putShort(getOffset(offset), (short) Util.uint16Value(value));</span>
+
+<span class="nc" id="L488">        return this;</span>
+    }
+
+    /**
+     * Reads a 16 bit unsigned integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;read_ushort&quot; })
+    public IRubyObject read_ushort(ThreadContext context) {
+<span class="nc" id="L498">        return Util.newUnsigned16(context.runtime, getMemoryIO().getShort(0));</span>
+    }
+
+    /**
+     * Reads a 16 bit unsigned integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_uint16&quot;, &quot;get_ushort&quot; })
+    public IRubyObject get_uint16(ThreadContext context) {
+<span class="nc" id="L508">        return Util.newUnsigned16(context.runtime, getMemoryIO().getShort(0));</span>
+    }
+
+    /**
+     * Reads a 16 bit unsigned integer value from the memory address.
+     *
+     * @param offset The offset from the base pointer address to read the value.
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_uint16&quot;, &quot;get_ushort&quot; }, required = 1)
+    public IRubyObject get_uint16(ThreadContext context, IRubyObject offset) {
+<span class="nc" id="L519">        return Util.newUnsigned16(context.runtime, getMemoryIO().getShort(getOffset(offset)));</span>
+    }
+
+    /**
+     * Writes a 32 bit signed integer value to the memory address.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;write_int&quot; })
+    public IRubyObject write_int(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L530">        getMemoryIO().putInt(0, Util.int32Value(value));</span>
+
+<span class="nc" id="L532">        return this;</span>
+    }
+
+    /**
+     * Writes a 32 bit signed integer value to the memory address.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_int32&quot;, &quot;put_int&quot; })
+    public IRubyObject put_int32(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L543">        getMemoryIO().putInt(0, Util.int32Value(value));</span>
+
+<span class="nc" id="L545">        return this;</span>
+    }
+
+    /**
+     * Writes a 32 bit signed integer value to the memory address.
+     *
+     * @param offset The offset from the base pointer address to write the value.
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_int32&quot;, &quot;put_int&quot; }, required = 2)
+    public IRubyObject put_int32(ThreadContext context, IRubyObject offset, IRubyObject value) {
+<span class="nc" id="L557">        getMemoryIO().putInt(getOffset(offset), Util.int32Value(value));</span>
+
+<span class="nc" id="L559">        return this;</span>
+    }
+
+    /**
+     * Reads a 32 bit signed integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;read_int&quot; })
+    public IRubyObject read_int(ThreadContext context) {
+<span class="nc" id="L569">        return Util.newSigned32(context.runtime, getMemoryIO().getInt(0));</span>
+    }
+
+    /**
+     * Reads a 32 bit signed integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_int32&quot;, &quot;get_int&quot; })
+    public IRubyObject get_int32(ThreadContext context) {
+<span class="nc" id="L579">        return Util.newSigned32(context.runtime, getMemoryIO().getInt(0));</span>
+    }
+
+    /**
+     * Reads a 32 bit signed integer value from the memory address.
+     *
+     * @param offset The offset from the base pointer address to read the value.
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_int32&quot;, &quot;get_int&quot; }, required = 1)
+    public IRubyObject get_int32(ThreadContext context, IRubyObject offset) {
+<span class="nc" id="L590">        return Util.newSigned32(context.runtime, getMemoryIO().getInt(getOffset(offset)));</span>
+    }
+
+    /**
+     * Writes an 32 bit unsigned integer value to the memory address.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;write_uint&quot; }, required = 1)
+    public IRubyObject write_uint(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L601">        getMemoryIO().putInt(0, (int) Util.uint32Value(value));</span>
+
+<span class="nc" id="L603">        return this;</span>
+    }
+
+    /**
+     * Writes an 32 bit unsigned integer value to the memory address.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_uint32&quot;, &quot;put_uint&quot; }, required = 1)
+    public IRubyObject put_uint32(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L614">        getMemoryIO().putInt(0, (int) Util.uint32Value(value));</span>
+
+<span class="nc" id="L616">        return this;</span>
+    }
+
+    /**
+     * Writes an 32 bit unsigned integer value to the memory address.
+     *
+     * @param offset The offset from the base pointer address to write the value.
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_uint32&quot;, &quot;put_uint&quot; }, required = 2)
+    public IRubyObject put_uint32(ThreadContext context, IRubyObject offset, IRubyObject value) {
+<span class="nc" id="L628">        getMemoryIO().putInt(getOffset(offset), (int) Util.uint32Value(value));</span>
+
+<span class="nc" id="L630">        return this;</span>
+    }
+
+    /**
+     * Reads a 32 bit unsigned integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;read_uint&quot; })
+    public IRubyObject read_uint(ThreadContext context) {
+<span class="nc" id="L640">        return Util.newUnsigned32(context.runtime, getMemoryIO().getInt(0));</span>
+    }
+
+    /**
+     * Reads a 32 bit unsigned integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_uint32&quot;, &quot;get_uint&quot; })
+    public IRubyObject get_uint32(ThreadContext context) {
+<span class="nc" id="L650">        return Util.newUnsigned32(context.runtime, getMemoryIO().getInt(0));</span>
+    }
+
+    /**
+     * Reads a 32 bit unsigned integer value from the memory address.
+     *
+     * @param offset The offset from the base pointer address to read the value.
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_uint32&quot;, &quot;get_uint&quot; }, required = 1)
+    public IRubyObject get_uint32(ThreadContext context, IRubyObject offset) {
+<span class="nc" id="L661">        return Util.newUnsigned32(context.runtime, getMemoryIO().getInt(getOffset(offset)));</span>
+    }
+    
+    /**
+     * Writes a 64 bit integer value to the memory area.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;write_long_long&quot; }, required = 1)
+    public IRubyObject write_long_long(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L672">        getMemoryIO().putLong(0, Util.int64Value(value));</span>
+
+<span class="nc" id="L674">        return this;</span>
+    }
+
+    /**
+     * Writes a 64 bit integer value to the memory area.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_int64&quot;, &quot;put_long_long&quot; }, required = 1)
+    public IRubyObject put_int64(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L685">        getMemoryIO().putLong(0, Util.int64Value(value));</span>
+
+<span class="nc" id="L687">        return this;</span>
+    }
+
+    /**
+     * Writes a 64 bit integer value to the memory area.
+     *
+     * @param offset The offset from the base pointer address to write the value.
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_int64&quot;, &quot;put_long_long&quot; }, required = 2)
+    public IRubyObject put_int64(ThreadContext context, IRubyObject offset, IRubyObject value) {
+<span class="nc" id="L699">        getMemoryIO().putLong(getOffset(offset), Util.int64Value(value));</span>
+
+<span class="nc" id="L701">        return this;</span>
+    }
+    
+    /**
+     * Reads a 64 bit integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;read_long_long&quot; })
+    public IRubyObject read_long_long(ThreadContext context) {
+<span class="nc" id="L711">        return Util.newSigned64(context.runtime, getMemoryIO().getLong(0));</span>
+    }
+
+    /**
+     * Reads a 64 bit integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_int64&quot;, &quot;get_long_long&quot; })
+    public IRubyObject get_int64(ThreadContext context) {
+<span class="nc" id="L721">        return Util.newSigned64(context.runtime, getMemoryIO().getLong(0));</span>
+    }
+
+    /**
+     * Reads a 64 bit integer value from the memory address.
+     *
+     * @param offset The offset from the base pointer address to read the value.
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_int64&quot;, &quot;get_long_long&quot; }, required = 1)
+    public IRubyObject get_int64(ThreadContext context, IRubyObject offset) {
+<span class="nc" id="L732">        return Util.newSigned64(context.runtime, getMemoryIO().getLong(getOffset(offset)));</span>
+    }
+
+    /**
+     * Writes a 64 bit unsigned integer value to the memory area.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;write_ulong_long&quot; }, required = 1)
+    public IRubyObject write_ulong_long(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L743">        getMemoryIO().putLong(0, Util.uint64Value(value));</span>
+
+<span class="nc" id="L745">        return this;</span>
+    }
+
+    /**
+     * Writes a 64 bit unsigned integer value to the memory area.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_uint64&quot;, &quot;put_ulong_long&quot; }, required = 1)
+    public IRubyObject put_uint64(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L756">        getMemoryIO().putLong(0, Util.uint64Value(value));</span>
+
+<span class="nc" id="L758">        return this;</span>
+    }
+
+    /**
+     * Writes a 64 bit unsigned integer value to the memory area.
+     *
+     * @param offset The offset from the base pointer address to write the value.
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_uint64&quot;, &quot;put_ulong_long&quot; }, required = 2)
+    public IRubyObject put_uint64(ThreadContext context, IRubyObject offset, IRubyObject value) {
+<span class="nc" id="L770">        getMemoryIO().putLong(getOffset(offset), Util.uint64Value(value));</span>
+
+<span class="nc" id="L772">        return this;</span>
+    }
+
+    /**
+     * Reads a 64 bit unsigned integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;read_ulong_long&quot; })
+    public IRubyObject read_ulong_long(ThreadContext context) {
+<span class="nc" id="L782">        return Util.newUnsigned64(context.runtime, getMemoryIO().getLong(0));</span>
+    }
+
+    /**
+     * Reads a 64 bit unsigned integer value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_uint64&quot;, &quot;get_ulong_long&quot; })
+    public IRubyObject get_uint64(ThreadContext context) {
+<span class="nc" id="L792">        return Util.newUnsigned64(context.runtime, getMemoryIO().getLong(0));</span>
+    }
+
+    /**
+     * Reads a 64 bit unsigned integer value from the memory address.
+     *
+     * @param offset The offset from the base pointer address to read the value.
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_uint64&quot;, &quot;get_ulong_long&quot; }, required = 1)
+    public IRubyObject get_uint64(ThreadContext context, IRubyObject offset) {
+<span class="nc" id="L803">        return Util.newUnsigned64(context.runtime, getMemoryIO().getLong(getOffset(offset)));</span>
+    }
+
+    /**
+     * Writes a C long integer value to the memory area. This version is added
+     * to support the &quot;write_long&quot; alias for the single-arg &quot;put_long&quot;.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = &quot;write_long&quot;, required = 1)
+    public IRubyObject write_long(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L815">        return put_long(context, value);</span>
+    }
+
+    /**
+     * Writes a C long integer value to the memory area.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = &quot;put_long&quot;, required = 1)
+    public IRubyObject put_long(ThreadContext context, IRubyObject value) {
+<span class="nc bnc" id="L826" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L827">                ? put_int32(context, value)</span>
+<span class="nc" id="L828">                : put_int64(context, value);</span>
+    }
+
+    /**
+     * Writes a C long integer value to the memory area.
+     *
+     * @param offset The offset from the base pointer address to write the value.
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = &quot;put_long&quot;, required = 2)
+    public IRubyObject put_long(ThreadContext context, IRubyObject offset, IRubyObject value) {
+<span class="nc bnc" id="L840" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L841">                ? put_int32(context, offset, value)</span>
+<span class="nc" id="L842">                : put_int64(context, offset, value);</span>
+    }
+
+    /**
+     * Reads a C long integer value from the memory area.
+     *
+     * @return The value read.
+     */
+    @JRubyMethod(name = { &quot;read_long&quot; })
+    public IRubyObject read_long(ThreadContext context) {
+<span class="nc" id="L852">        return get_long(context);</span>
+    }
+
+    /**
+     * Reads a C long integer value from the memory area.
+     *
+     * @return The value read.
+     */
+    @JRubyMethod(name = { &quot;get_long&quot; })
+    public IRubyObject get_long(ThreadContext context) {
+<span class="nc bnc" id="L862" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L863">                ? get_int32(context) : get_int64(context);</span>
+    }
+
+    /**
+     * Reads a C long integer value from the memory area.
+     *
+     * @param offset The offset from the base pointer address to read the value.
+     * @return The value read.
+     */
+    @JRubyMethod(name = &quot;get_long&quot;, required = 1)
+    public IRubyObject get_long(ThreadContext context, IRubyObject offset) {
+<span class="nc bnc" id="L874" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L875">                ? get_int32(context, offset)</span>
+<span class="nc" id="L876">                : get_int64(context, offset);</span>
+    }
+    
+    /**
+     * Writes a C long integer value to the memory area.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_ulong&quot;, &quot;write_ulong&quot; }, required = 1)
+    public IRubyObject put_ulong(ThreadContext context, IRubyObject value) {
+<span class="nc bnc" id="L887" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L888">                ? put_uint32(context, value)</span>
+<span class="nc" id="L889">                : put_uint64(context, value);</span>
+    }
+
+    /**
+     * Writes a C long integer value to the memory area.
+     *
+     * @param offset The offset from the base pointer address to write the value.
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = &quot;put_ulong&quot;, required = 2)
+    public IRubyObject put_ulong(ThreadContext context, IRubyObject offset, IRubyObject value) {
+<span class="nc bnc" id="L901" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L902">                ? put_uint32(context, offset, value)</span>
+<span class="nc" id="L903">                : put_uint64(context, offset, value);</span>
+    }
+
+    
+    /**
+     * Reads a C unsigned long integer value from the memory area.
+     *
+     * @return The value read.
+     */
+    @JRubyMethod(name = { &quot;read_ulong&quot; })
+    public IRubyObject read_ulong(ThreadContext context) {
+<span class="nc" id="L914">        return get_ulong(context);</span>
+    }
+
+    /**
+     * Reads a C unsigned long integer value from the memory area.
+     *
+     * @return The value read.
+     */
+    @JRubyMethod(name = { &quot;get_ulong&quot;, &quot;read_ulong&quot; })
+    public IRubyObject get_ulong(ThreadContext context) {
+<span class="nc bnc" id="L924" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L925">                ? get_uint32(context) : get_uint64(context);</span>
+    }
+
+    /**
+     * Reads a C unsigned long integer value from the memory area.
+     *
+     * @param offset The offset from the base pointer address to read the value.
+     * @return The value read.
+     */
+    @JRubyMethod(name = &quot;get_ulong&quot;, required = 1)
+    public IRubyObject get_ulong(ThreadContext context, IRubyObject offset) {
+<span class="nc bnc" id="L936" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L937">                ? get_uint32(context, offset)</span>
+<span class="nc" id="L938">                : get_uint64(context, offset);</span>
+    }
+
+    /**
+     * Writes an 32 bit floating point value to the memory area.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;write_float&quot; }, required = 1)
+    public IRubyObject write_float(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L949">        getMemoryIO().putFloat(0, Util.floatValue(value));</span>
+
+<span class="nc" id="L951">        return this;</span>
+    }
+
+    /**
+     * Writes an 32 bit floating point value to the memory area.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_float32&quot;, &quot;put_float&quot; }, required = 1)
+    public IRubyObject put_float32(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L962">        getMemoryIO().putFloat(0, Util.floatValue(value));</span>
+
+<span class="nc" id="L964">        return this;</span>
+    }
+
+    /**
+     * Writes an 32 bit floating point value to the memory area.
+     *
+     * @param offset The offset from the base pointer address to write the value.
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_float32&quot;, &quot;put_float&quot; }, required = 2)
+    public IRubyObject put_float32(ThreadContext context, IRubyObject offset, IRubyObject value) {
+<span class="nc" id="L976">        getMemoryIO().putFloat(getOffset(offset), Util.floatValue(value));</span>
+
+<span class="nc" id="L978">        return this;</span>
+    }
+
+    /**
+     * Reads a 32 bit floating point value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;read_float&quot; })
+    public IRubyObject read_float(ThreadContext context) {
+<span class="nc" id="L988">        return RubyFloat.newFloat(context.runtime, getMemoryIO().getFloat(0));</span>
+    }
+
+    /**
+     * Reads a 32 bit floating point value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_float32&quot;, &quot;get_float&quot; })
+    public IRubyObject get_float32(ThreadContext context) {
+<span class="nc" id="L998">        return RubyFloat.newFloat(context.runtime, getMemoryIO().getFloat(0));</span>
+    }
+
+    /**
+     * Reads a 32 bit floating point value from the memory address.
+     *
+     * @param offset The offset from the base pointer address to read the value.
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_float32&quot;, &quot;get_float&quot; }, required = 1)
+    public IRubyObject get_float32(ThreadContext context, IRubyObject offset) {
+<span class="nc" id="L1009">        return RubyFloat.newFloat(context.runtime, getMemoryIO().getFloat(getOffset(offset)));</span>
+    }
+    
+    /**
+     * Writes an 64 bit floating point value to the memory area.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;write_double&quot; }, required = 1)
+    public IRubyObject write_double(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L1020">        getMemoryIO().putDouble(0, Util.doubleValue(value));</span>
+
+<span class="nc" id="L1022">        return this;</span>
+    }
+
+    /**
+     * Writes an 64 bit floating point value to the memory area.
+     *
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_float64&quot;, &quot;put_double&quot; }, required = 1)
+    public IRubyObject put_float64(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L1033">        getMemoryIO().putDouble(0, Util.doubleValue(value));</span>
+
+<span class="nc" id="L1035">        return this;</span>
+    }
+
+    /**
+     * Writes an 64 bit floating point value to the memory area.
+     *
+     * @param offset The offset from the base pointer address to write the value.
+     * @param value The value to write.
+     * @return The value written.
+     */
+    @JRubyMethod(name = { &quot;put_float64&quot;, &quot;put_double&quot; }, required = 2)
+    public IRubyObject put_float64(ThreadContext context, IRubyObject offset, IRubyObject value) {
+<span class="nc" id="L1047">        getMemoryIO().putDouble(getOffset(offset), Util.doubleValue(value));</span>
+
+<span class="nc" id="L1049">        return this;</span>
+    }
+
+    /**
+     * Reads a 64 bit floating point value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;read_double&quot; })
+    public IRubyObject read_double(ThreadContext context) {
+<span class="nc" id="L1059">        return RubyFloat.newFloat(context.runtime, getMemoryIO().getDouble(0));</span>
+    }
+
+    /**
+     * Reads a 64 bit floating point value from the memory address.
+     *
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_float64&quot;, &quot;get_double&quot; })
+    public IRubyObject get_float64(ThreadContext context) {
+<span class="nc" id="L1069">        return RubyFloat.newFloat(context.runtime, getMemoryIO().getDouble(0));</span>
+    }
+
+    /**
+     * Reads a 64 bit floating point value from the memory address.
+     *
+     * @param offset The offset from the base pointer address to read the value.
+     * @return The value read from the address.
+     */
+    @JRubyMethod(name = { &quot;get_float64&quot;, &quot;get_double&quot; }, required = 1)
+    public IRubyObject get_float64(ThreadContext context, IRubyObject offset) {
+<span class="nc" id="L1080">        return RubyFloat.newFloat(context.runtime, getMemoryIO().getDouble(getOffset(offset)));</span>
+    }
+
+    /**
+     * Reads an array of signed 8 bit integer values from the memory address.
+     *
+     * @param offset The offset from the start of the memory area to read the values.
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;get_array_of_int8&quot;, &quot;get_array_of_char&quot; }, required = 2)
+    public IRubyObject get_array_of_int8(ThreadContext context, IRubyObject offset, IRubyObject length) {
+<span class="nc" id="L1092">        return MemoryUtil.getArrayOfSigned8(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of signed 8 bit integer values to the memory area.
+     *
+     * @param offset The offset from the start of the memory area to write the values.
+     * @param length The number of values to be written to memory.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;put_array_of_int8&quot;, &quot;put_array_of_char&quot; }, required = 2)
+    public IRubyObject put_array_of_int8(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
+
+<span class="nc" id="L1105">        MemoryUtil.putArrayOfSigned8(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));</span>
+
+<span class="nc" id="L1107">        return this;</span>
+    }
+
+    /**
+     * Reads an array of unsigned 8 bit integer values from the memory address.
+     *
+     * @param offset The offset from the start of the memory area to read the values.
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;get_array_of_uint8&quot;, &quot;get_array_of_uchar&quot; }, required = 2)
+    public IRubyObject get_array_of_uint8(ThreadContext context, IRubyObject offset, IRubyObject length) {
+<span class="nc" id="L1119">        return MemoryUtil.getArrayOfUnsigned8(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of unsigned 8 bit integer values to the memory area.
+     *
+     * @param offset The offset from the start of the memory area to write the values.
+     * @param length The number of values to be written to memory.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;put_array_of_uint8&quot;, &quot;put_array_of_uchar&quot; }, required = 2)
+    public IRubyObject put_array_of_uint8(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
+
+<span class="nc" id="L1132">        MemoryUtil.putArrayOfUnsigned8(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));</span>
+
+<span class="nc" id="L1134">        return this;</span>
+    }
+
+    /**
+     * Reads an array of signed 16 bit integer values from the memory address.
+     *
+     * @param offset The offset from the start of the memory area to read the values.
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;get_array_of_int16&quot;, &quot;get_array_of_short&quot; }, required = 2)
+    public IRubyObject get_array_of_int16(ThreadContext context, IRubyObject offset, IRubyObject length) {
+<span class="nc" id="L1146">        return MemoryUtil.getArrayOfSigned16(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of signed 16 bit integer values to the memory area.
+     *
+     * @param offset The offset from the start of the memory area to write the values.
+     * @param length The number of values to be written to memory.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;put_array_of_int16&quot;, &quot;put_array_of_short&quot; }, required = 2)
+    public IRubyObject put_array_of_int16(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
+
+<span class="nc" id="L1159">        MemoryUtil.putArrayOfSigned16(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));</span>
+        
+<span class="nc" id="L1161">        return this;</span>
+    }
+
+    /**
+     * Reads an array of unsigned 16 bit integer values from the memory address.
+     *
+     * @param offset The offset from the start of the memory area to read the values.
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;get_array_of_uint16&quot;, &quot;get_array_of_ushort&quot; }, required = 2)
+    public IRubyObject get_array_of_uint16(ThreadContext context, IRubyObject offset, IRubyObject length) {
+<span class="nc" id="L1173">        return MemoryUtil.getArrayOfUnsigned16(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of unsigned 16 bit integer values to the memory area.
+     *
+     * @param offset The offset from the start of the memory area to write the values.
+     * @param length The number of values to be written to memory.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;put_array_of_uint16&quot;, &quot;put_array_of_ushort&quot; }, required = 2)
+    public IRubyObject put_array_of_uint16(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
+
+<span class="nc" id="L1186">        MemoryUtil.putArrayOfUnsigned16(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));</span>
+
+<span class="nc" id="L1188">        return this;</span>
+    }
+
+    /**
+     * Reads an array of signed 32 bit integer values from the memory address.
+     *
+     * @param offset The offset from the start of the memory area to read the values.
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;get_array_of_int32&quot;, &quot;get_array_of_int&quot; }, required = 2)
+    public IRubyObject get_array_of_int32(ThreadContext context, IRubyObject offset, IRubyObject length) {
+<span class="nc" id="L1200">        return MemoryUtil.getArrayOfSigned32(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of signed 32 bit integer values to the memory area.
+     *
+     * @param offset The offset from the start of the memory area to write the values.
+     * @param length The number of values to be written to memory.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;put_array_of_int32&quot;, &quot;put_array_of_int&quot; }, required = 2)
+    public IRubyObject put_array_of_int32(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
+<span class="nc" id="L1212">        MemoryUtil.putArrayOfSigned32(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));</span>
+
+<span class="nc" id="L1214">        return this;</span>
+    }
+
+    /**
+     * Reads an array of unsigned 32 bit integer values from the memory address.
+     *
+     * @param offset The offset from the start of the memory area to read the values.
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;get_array_of_uint32&quot;, &quot;get_array_of_uint&quot; }, required = 2)
+    public IRubyObject get_array_of_uint32(ThreadContext context, IRubyObject offset, IRubyObject length) {
+<span class="nc" id="L1226">        return MemoryUtil.getArrayOfUnsigned32(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of unsigned 32 bit integer values to the memory area.
+     *
+     * @param offset The offset from the start of the memory area to write the values.
+     * @param length The number of values to be written to memory.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;put_array_of_uint32&quot;, &quot;put_array_of_uint&quot; }, required = 2)
+    public IRubyObject put_array_of_uint32(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
+<span class="nc" id="L1238">        MemoryUtil.putArrayOfUnsigned32(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));</span>
+
+<span class="nc" id="L1240">        return this;</span>
+    }
+
+    /**
+     * Reads an array of signed long integer values from the memory address.
+     *
+     * @param offset The offset from the start of the memory area to read the values.
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = &quot;get_array_of_long&quot;, required = 2)
+    public IRubyObject get_array_of_long(ThreadContext context, IRubyObject offset, IRubyObject length) {
+<span class="nc bnc" id="L1252" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L1253">                ? get_array_of_int32(context, offset, length)</span>
+<span class="nc" id="L1254">                : get_array_of_int64(context, offset, length);</span>
+    }
+
+    /**
+     * Writes an array of signed long integer values to the memory area.
+     *
+     * @param offset The offset from the start of the memory area to write the values.
+     * @param length The number of values to be written to memory.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = &quot;put_array_of_long&quot;, required = 2)
+    public IRubyObject put_array_of_long(ThreadContext context, IRubyObject offset, IRubyObject arr) {
+<span class="nc bnc" id="L1266" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L1267">                ? put_array_of_int32(context, offset, arr)</span>
+<span class="nc" id="L1268">                : put_array_of_int64(context, offset, arr);</span>
+    }
+
+    /**
+     * Reads an array of unsigned long integer values from the memory address.
+     *
+     * @param offset The offset from the start of the memory area to read the values.
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = &quot;get_array_of_ulong&quot;, required = 2)
+    public IRubyObject get_array_of_ulong(ThreadContext context, IRubyObject offset, IRubyObject length) {
+<span class="nc bnc" id="L1280" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L1281">                ? get_array_of_uint32(context, offset, length)</span>
+<span class="nc" id="L1282">                : get_array_of_uint64(context, offset, length);</span>
+    }
+
+    /**
+     * Writes an array of unsigned long integer values to the memory area.
+     *
+     * @param offset The offset from the start of the memory area to write the values.
+     * @param length The number of values to be written to memory.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = &quot;put_array_of_ulong&quot;, required = 2)
+    public IRubyObject put_array_of_ulong(ThreadContext context, IRubyObject offset, IRubyObject arr) {
+<span class="nc bnc" id="L1294" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L1295">                ? put_array_of_uint32(context, offset, arr)</span>
+<span class="nc" id="L1296">                : put_array_of_uint64(context, offset, arr);</span>
+    }
+
+    /**
+     * Reads an array of signed 64 bit integer values from the memory address.
+     *
+     * @param offset The offset from the start of the memory area to read the values.
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;get_array_of_int64&quot;, &quot;get_array_of_long_long&quot; }, required = 2)
+    public IRubyObject get_array_of_int64(ThreadContext context, IRubyObject offset, IRubyObject length) {
+<span class="nc" id="L1308">        return MemoryUtil.getArrayOfSigned64(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of signed 64 bit integer values to the memory area.
+     *
+     * @param offset The offset from the start of the memory area to write the values.
+     * @param length The number of values to be written to memory.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;put_array_of_int64&quot;, &quot;put_array_of_long_long&quot; }, required = 2)
+    public IRubyObject put_array_of_int64(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
+
+<span class="nc" id="L1321">        MemoryUtil.putArrayOfSigned64(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));</span>
+
+<span class="nc" id="L1323">        return this;</span>
+    }
+
+    /**
+     * Reads an array of unsigned 64 bit integer values from the memory address.
+     *
+     * @param offset The offset from the start of the memory area to read the values.
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;get_array_of_uint64&quot;, &quot;get_array_of_ulong_long&quot; }, required = 2)
+    public IRubyObject get_array_of_uint64(ThreadContext context, IRubyObject offset, IRubyObject length) {
+<span class="nc" id="L1335">        return MemoryUtil.getArrayOfUnsigned64(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of unsigned 64 bit integer values to the memory area.
+     *
+     * @param offset The offset from the start of the memory area to write the values.
+     * @param length The number of values to be written to memory.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;put_array_of_uint64&quot;, &quot;put_array_of_ulong_long&quot; }, required = 2)
+    public IRubyObject put_array_of_uint64(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
+
+<span class="nc" id="L1348">        MemoryUtil.putArrayOfUnsigned64(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));</span>
+
+<span class="nc" id="L1350">        return this;</span>
+    }
+
+    /**
+     * Reads an array of signed 32 bit floating point values from the memory address.
+     *
+     * @param offset The offset from the start of the memory area to read the values.
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;get_array_of_float32&quot;, &quot;get_array_of_float&quot; }, required = 2)
+    public IRubyObject get_array_of_float(ThreadContext context, IRubyObject offset, IRubyObject length) {
+<span class="nc" id="L1362">        return MemoryUtil.getArrayOfFloat32(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of 32 bit floating point values to the memory area.
+     *
+     * @param offset The offset from the start of the memory area to write the values.
+     * @param length The number of values to be written to memory.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;put_array_of_float32&quot;, &quot;put_array_of_float&quot; }, required = 2)
+    public IRubyObject put_array_of_float(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
+
+<span class="nc" id="L1375">        MemoryUtil.putArrayOfFloat32(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));</span>
+
+<span class="nc" id="L1377">        return this;</span>
+    }
+
+    /**
+     * Reads an array of signed 64 bit floating point values from the memory address.
+     *
+     * @param offset The offset from the start of the memory area to read the values.
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;get_array_of_float64&quot;, &quot;get_array_of_double&quot; }, required = 2)
+    public IRubyObject get_array_of_float64(ThreadContext context, IRubyObject offset, IRubyObject length) {
+<span class="nc" id="L1389">        return MemoryUtil.getArrayOfFloat64(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of 64 bit floating point values to the memory area.
+     *
+     * @param offset The offset from the start of the memory area to write the values.
+     * @param arrParam Array of values to write to memory.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;put_array_of_float64&quot;, &quot;put_array_of_double&quot; }, required = 2)
+    public IRubyObject put_array_of_float64(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
+<span class="nc" id="L1401">        MemoryUtil.putArrayOfFloat64(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));</span>
+
+<span class="nc" id="L1403">        return this;</span>
+    }
+    
+    /**
+     * Reads an array of signed 8 bit integer values from the memory address.
+     *
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;read_array_of_int8&quot;, &quot;read_array_of_char&quot; }, required = 1)
+    public IRubyObject read_array_of_int8(ThreadContext context, IRubyObject length) {
+<span class="nc" id="L1414">        return MemoryUtil.getArrayOfSigned8(context.runtime, getMemoryIO(), 0, Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of signed 8 bit integer values to the memory area.
+     *
+     * @param ary The array of values to write to the memory area.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;write_array_of_int8&quot;, &quot;write_array_of_char&quot; }, required = 1)
+    public IRubyObject write_array_of_int8(ThreadContext context, IRubyObject ary) {
+
+<span class="nc" id="L1426">        MemoryUtil.putArrayOfSigned8(context.runtime, getMemoryIO(), 0, checkArray(ary));</span>
+
+<span class="nc" id="L1428">        return this;</span>
+    }
+    
+    /**
+     * Reads an array of unsigned 8 bit integer values from the memory address.
+     *
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;read_array_of_uint8&quot;, &quot;read_array_of_uchar&quot; }, required = 1)
+    public IRubyObject read_array_of_uint8(ThreadContext context, IRubyObject length) {
+<span class="nc" id="L1439">        return MemoryUtil.getArrayOfUnsigned8(context.runtime, getMemoryIO(), 0, Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of unsigned 8 bit integer values to the memory area.
+     *
+     * @param ary The array of values to write to the memory area.
+     * @param ary Array of values to write to memory.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;write_array_of_uint8&quot;, &quot;write_array_of_uchar&quot; }, required = 1)
+    public IRubyObject write_array_of_uint8(ThreadContext context, IRubyObject ary) {
+
+<span class="nc" id="L1452">        MemoryUtil.putArrayOfUnsigned8(context.runtime, getMemoryIO(), 0, checkArray(ary));</span>
+
+<span class="nc" id="L1454">        return this;</span>
+    }
+    
+    /**
+     * Reads an array of signed 16 bit integer values from the memory address.
+     *
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;read_array_of_int16&quot;, &quot;read_array_of_short&quot; }, required = 1)
+    public IRubyObject read_array_of_int16(ThreadContext context, IRubyObject length) {
+<span class="nc" id="L1465">        return MemoryUtil.getArrayOfSigned16(context.runtime, getMemoryIO(), 0, Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of signed 16 bit integer values to the memory area.
+     *
+     * @param ary The array of values to write to the memory area.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;write_array_of_int16&quot;, &quot;write_array_of_short&quot; }, required = 1)
+    public IRubyObject write_array_of_int16(ThreadContext context, IRubyObject ary) {
+
+<span class="nc" id="L1477">        MemoryUtil.putArrayOfSigned16(context.runtime, getMemoryIO(), 0, checkArray(ary));</span>
+
+<span class="nc" id="L1479">        return this;</span>
+    }
+    
+    /**
+     * Reads an array of unsigned 16 bit integer values from the memory address.
+     *
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;read_array_of_uint16&quot;, &quot;read_array_of_ushort&quot; }, required = 1)
+    public IRubyObject read_array_of_uint16(ThreadContext context, IRubyObject length) {
+<span class="nc" id="L1490">        return MemoryUtil.getArrayOfUnsigned16(context.runtime, getMemoryIO(), 0, Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of unsigned 16 bit integer values to the memory area.
+     *
+     * @param ary The array of values to write to the memory area.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;write_array_of_uint16&quot;, &quot;write_array_of_ushort&quot; }, required = 1)
+    public IRubyObject write_array_of_uint16(ThreadContext context, IRubyObject ary) {
+
+<span class="nc" id="L1502">        MemoryUtil.putArrayOfUnsigned16(context.runtime, getMemoryIO(), 0, checkArray(ary));</span>
+
+<span class="nc" id="L1504">        return this;</span>
+    }
+    
+    
+    /**
+     * Reads an array of signed 32 bit integer values from the memory address.
+     *
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;read_array_of_int32&quot;, &quot;read_array_of_int&quot; }, required = 1)
+    public IRubyObject read_array_of_int32(ThreadContext context, IRubyObject length) {
+<span class="nc" id="L1516">        return MemoryUtil.getArrayOfSigned32(context.runtime, getMemoryIO(), 0, Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of signed 32 bit integer values to the memory area.
+     *
+     * @param ary The array of values to write to the memory area.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;write_array_of_int32&quot;, &quot;write_array_of_int&quot; }, required = 1)
+    public IRubyObject write_array_of_int32(ThreadContext context, IRubyObject ary) {
+
+<span class="nc" id="L1528">        MemoryUtil.putArrayOfSigned32(context.runtime, getMemoryIO(), 0, checkArray(ary));</span>
+
+<span class="nc" id="L1530">        return this;</span>
+    }
+    
+    /**
+     * Reads an array of unsigned 32 bit integer values from the memory address.
+     *
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;read_array_of_uint32&quot;, &quot;read_array_of_uint&quot; }, required = 1)
+    public IRubyObject read_array_of_uint32(ThreadContext context, IRubyObject length) {
+<span class="nc" id="L1541">        return MemoryUtil.getArrayOfUnsigned32(context.runtime, getMemoryIO(), 0, Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of unsigned 32 bit integer values to the memory area.
+     *
+     * @param ary The array of values to write to the memory area.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;write_array_of_uint32&quot;, &quot;write_array_of_uint&quot; }, required = 1)
+    public IRubyObject write_array_of_uint32(ThreadContext context, IRubyObject ary) {
+
+<span class="nc" id="L1553">        MemoryUtil.putArrayOfUnsigned32(context.runtime, getMemoryIO(), 0, checkArray(ary));</span>
+
+<span class="nc" id="L1555">        return this;</span>
+    }
+
+    /**
+     * Reads an array of signed 64 bit integer values from the memory address.
+     *
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;read_array_of_int64&quot;, &quot;read_array_of_long_long&quot; }, required = 1)
+    public IRubyObject read_array_of_int64(ThreadContext context, IRubyObject length) {
+<span class="nc" id="L1566">        return MemoryUtil.getArrayOfSigned64(context.runtime, getMemoryIO(), 0, Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of signed 64 bit integer values to the memory area.
+     *
+     * @param ary The array of values to write to the memory area.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;write_array_of_int64&quot;, &quot;write_array_of_long_long&quot; }, required = 1)
+    public IRubyObject write_array_of_int64(ThreadContext context, IRubyObject ary) {
+
+<span class="nc" id="L1578">        MemoryUtil.putArrayOfSigned64(context.runtime, getMemoryIO(), 0, checkArray(ary));</span>
+
+<span class="nc" id="L1580">        return this;</span>
+    }
+    
+    /**
+     * Reads an array of unsigned 64 bit integer values from the memory address.
+     *
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;read_array_of_uint64&quot;, &quot;read_array_of_ulong_long&quot; }, required = 1)
+    public IRubyObject read_array_of_uint64(ThreadContext context, IRubyObject length) {
+<span class="nc" id="L1591">        return MemoryUtil.getArrayOfUnsigned64(context.runtime, getMemoryIO(), 0, Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of unsigned 64 bit integer values to the memory area.
+     *
+     * @param ary The array of values to write to the memory area.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;write_array_of_uint64&quot;, &quot;write_array_of_ulong_long&quot; }, required = 1)
+    public IRubyObject write_array_of_uint64(ThreadContext context, IRubyObject ary) {
+
+<span class="nc" id="L1603">        MemoryUtil.putArrayOfUnsigned64(context.runtime, getMemoryIO(), 0, checkArray(ary));</span>
+
+<span class="nc" id="L1605">        return this;</span>
+    }
+    
+    /**
+     * Reads an array of signed long integer values from the memory address.
+     *
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;read_array_of_long&quot; }, required = 1)
+    public IRubyObject read_array_of_long(ThreadContext context, IRubyObject length) {
+<span class="nc bnc" id="L1616" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L1617">                ? read_array_of_int32(context, length)</span>
+<span class="nc" id="L1618">                : read_array_of_int64(context, length);</span>
+    }
+
+    /**
+     * Writes an array of signed long integer values to the memory area.
+     *
+     * @param ary The array of values to write to the memory area.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;write_array_of_long&quot; }, required = 1)
+    public IRubyObject write_array_of_long(ThreadContext context, IRubyObject ary) {
+<span class="nc bnc" id="L1629" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L1630">                ? write_array_of_int32(context, ary)</span>
+<span class="nc" id="L1631">                : write_array_of_int64(context, ary);</span>
+    }
+    
+    /**
+     * Reads an array of unsigned long integer values from the memory address.
+     *
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;read_array_of_ulong&quot; }, required = 1)
+    public IRubyObject read_array_of_ulong(ThreadContext context, IRubyObject length) {
+<span class="nc bnc" id="L1642" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L1643">                ? read_array_of_uint32(context, length)</span>
+<span class="nc" id="L1644">                : read_array_of_uint64(context, length);</span>
+    }
+
+    /**
+     * Writes an array of unsigned long integer values to the memory area.
+     *
+     * @param ary The array of values to write to the memory area.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;write_array_of_ulong&quot; }, required = 1)
+    public IRubyObject write_array_of_ulong(ThreadContext context, IRubyObject ary) {
+<span class="nc bnc" id="L1655" title="All 2 branches missed.">        return Platform.getPlatform().longSize() == 32</span>
+<span class="nc" id="L1656">                ? write_array_of_uint32(context, ary)</span>
+<span class="nc" id="L1657">                : write_array_of_uint64(context, ary);</span>
+    }
+    
+    /**
+     * Reads an array of signed 32 bit floating point values from the memory address.
+     *
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;read_array_of_float32&quot;, &quot;read_array_of_float&quot; }, required = 1)
+    public IRubyObject read_array_of_float(ThreadContext context, IRubyObject length) {
+<span class="nc" id="L1668">        return MemoryUtil.getArrayOfFloat32(context.runtime, getMemoryIO(), 0, Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of 32 bit floating point values to the memory area.
+     *
+     * @param ary The array of values to write to the memory area.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;write_array_of_float32&quot;, &quot;write_array_of_float&quot; }, required = 1)
+    public IRubyObject write_array_of_float(ThreadContext context, IRubyObject ary) {
+
+<span class="nc" id="L1680">        MemoryUtil.putArrayOfFloat32(context.runtime, getMemoryIO(), 0, checkArray(ary));</span>
+
+<span class="nc" id="L1682">        return this;</span>
+    }
+
+    /**
+     * Reads an array of signed 64 bit floating point values from the memory address.
+     *
+     * @param length The number of values to be read from memory.
+     * @return An array containing the values.
+     */
+    @JRubyMethod(name = { &quot;read_array_of_float64&quot;, &quot;read_array_of_double&quot; }, required = 1)
+    public IRubyObject read_array_of_float64(ThreadContext context, IRubyObject length) {
+<span class="nc" id="L1693">        return MemoryUtil.getArrayOfFloat64(context.runtime, getMemoryIO(), 0, Util.int32Value(length));</span>
+    }
+
+    /**
+     * Writes an array of 64 bit floating point values to the memory area.
+     *
+     * @param ary The array of values to write to the memory area.
+     * @return &lt;tt&gt;this&lt;/tt&gt; object.
+     */
+    @JRubyMethod(name = { &quot;write_array_of_float64&quot;, &quot;write_array_of_double&quot; }, required = 1)
+    public IRubyObject write_array_of_float64(ThreadContext context, IRubyObject ary) {
+<span class="nc" id="L1704">        MemoryUtil.putArrayOfFloat64(context.runtime, getMemoryIO(), 0, checkArray(ary));</span>
+
+<span class="nc" id="L1706">        return this;</span>
+    }
+
+    @JRubyMethod(name = { &quot;read_array_of_type&quot; }, required = 2)
+    public IRubyObject read_array_of_type(ThreadContext context, IRubyObject typeArg, IRubyObject lenArg) {
+<span class="nc" id="L1711">        Type type = context.runtime.getFFI().getTypeResolver().findType(context.runtime, typeArg);</span>
+<span class="nc" id="L1712">        MemoryOp op = MemoryOp.getMemoryOp(type);</span>
+<span class="nc bnc" id="L1713" title="All 2 branches missed.">        if (op == null) {</span>
+<span class="nc" id="L1714">            throw context.runtime.newTypeError(&quot;cannot get memory reader for type &quot; + type);</span>
+        }
+
+<span class="nc" id="L1717">        int len = checkArrayLength(lenArg);</span>
+<span class="nc" id="L1718">        RubyArray arr = RubyArray.newArray(context.runtime, len);</span>
+
+<span class="nc bnc" id="L1720" title="All 2 branches missed.">        for (int i = 0, off = 0; i &lt; len; i++, off += type.size) {</span>
+<span class="nc" id="L1721">            arr.add(op.get(context, getMemoryIO(), off));</span>
+        }
+
+<span class="nc" id="L1724">        return arr;</span>
+    }
+
+    @JRubyMethod(name = { &quot;read_array_of_type&quot; }, required = 3)
+    public IRubyObject read_array_of_type(ThreadContext context, IRubyObject typeArg, IRubyObject reader, IRubyObject lenArg) {
+<span class="nc" id="L1729">        Type type = context.runtime.getFFI().getTypeResolver().findType(context.runtime, typeArg);</span>
+<span class="nc" id="L1730">        DynamicMethod method = getMetaClass().searchMethod(reader.asJavaString());</span>
+        
+<span class="nc" id="L1732">        int len = checkArrayLength(lenArg);</span>
+<span class="nc" id="L1733">        RubyArray arr = RubyArray.newArray(context.runtime, len);</span>
+
+<span class="nc bnc" id="L1735" title="All 2 branches missed.">        for (int i = 0, off = 0; i &lt; len; i++, off += type.size) {</span>
+<span class="nc" id="L1736">            arr.add(method.call(context, this.slice(context.runtime, off, type.size), this.getMetaClass(), reader.asJavaString()));</span>
+        }
+
+<span class="nc" id="L1739">        return arr;</span>
+    }
+
+    @JRubyMethod(name = { &quot;write_array_of_type&quot; }, required = 2)
+    public IRubyObject write_array_of_type(ThreadContext context, IRubyObject typeArg, IRubyObject aryArg) {
+<span class="nc" id="L1744">        Type type = context.runtime.getFFI().getTypeResolver().findType(context.runtime, typeArg);</span>
+<span class="nc" id="L1745">        MemoryOp op = MemoryOp.getMemoryOp(type);</span>
+<span class="nc bnc" id="L1746" title="All 2 branches missed.">        if (op == null) {</span>
+<span class="nc" id="L1747">            throw context.runtime.newTypeError(&quot;cannot get memory writer for type &quot; + type);</span>
+        }
+
+<span class="nc" id="L1750">        RubyArray arr = aryArg.convertToArray();</span>
+<span class="nc" id="L1751">        int len = arr.size();</span>
+
+<span class="nc bnc" id="L1753" title="All 2 branches missed.">        for (int i = 0, off = 0; i &lt; len; i++, off += type.size) {</span>
+<span class="nc" id="L1754">            op.put(context, getMemoryIO(), off, arr.entry(i));</span>
+        }
+
+<span class="nc" id="L1757">        return this;</span>
+    }
+
+    @JRubyMethod(name = { &quot;write_array_of_type&quot; }, required = 3)
+    public IRubyObject write_array_of_type(ThreadContext context, IRubyObject typeArg, IRubyObject writer, IRubyObject aryArg) {
+<span class="nc" id="L1762">        Type type = context.runtime.getFFI().getTypeResolver().findType(context.runtime, typeArg);</span>
+<span class="nc" id="L1763">        DynamicMethod method = getMetaClass().searchMethod(writer.asJavaString());</span>
+
+<span class="nc" id="L1765">        RubyArray arr = aryArg.convertToArray();</span>
+<span class="nc" id="L1766">        int len = arr.size();</span>
+
+<span class="nc bnc" id="L1768" title="All 2 branches missed.">        for (int i = 0, off = 0; i &lt; len; i++, off += type.size) {</span>
+<span class="nc" id="L1769">            method.call(context, this.slice(context.runtime, off, type.size), this.getMetaClass(), writer.asJavaString(), arr.entry(i));</span>
+        }
+
+<span class="nc" id="L1772">        return this;</span>
+    }
+
+    
+
+    @JRubyMethod(name = &quot;read_string&quot;)
+    public IRubyObject read_string(ThreadContext context) {
+<span class="nc" id="L1779">        return MemoryUtil.getTaintedString(context.runtime, getMemoryIO(), 0);</span>
+    }
+
+    @JRubyMethod(name = &quot;read_string&quot;)
+    public IRubyObject read_string(ThreadContext context, IRubyObject rbLength) {
+        /* When a length is given, read_string acts like get_bytes */
+<span class="nc bnc" id="L1785" title="All 2 branches missed.">        return !rbLength.isNil()</span>
+<span class="nc" id="L1786">                ? MemoryUtil.getTaintedByteString(context.runtime, getMemoryIO(), 0, Util.int32Value(rbLength))</span>
+<span class="nc" id="L1787">                : MemoryUtil.getTaintedString(context.runtime, getMemoryIO(), 0);</span>
+    }
+
+    @JRubyMethod(name = &quot;get_string&quot;)
+    public IRubyObject get_string(ThreadContext context) {
+<span class="nc" id="L1792">        return MemoryUtil.getTaintedString(context.runtime, getMemoryIO(), 0);</span>
+    }
+
+    @JRubyMethod(name = &quot;get_string&quot;)
+    public IRubyObject get_string(ThreadContext context, IRubyObject offArg) {
+<span class="nc" id="L1797">        return MemoryUtil.getTaintedString(context.runtime, getMemoryIO(), getOffset(offArg));</span>
+    }
+
+    @JRubyMethod(name = &quot;get_string&quot;)
+    public IRubyObject get_string(ThreadContext context, IRubyObject offArg, IRubyObject lenArg) {
+<span class="nc" id="L1802">        return MemoryUtil.getTaintedString(context.runtime, getMemoryIO(),</span>
+<span class="nc" id="L1803">                getOffset(offArg), Util.int32Value(lenArg));</span>
+    }
+
+    @JRubyMethod(name = { &quot;get_array_of_string&quot; }, required = 1)
+    public IRubyObject get_array_of_string(ThreadContext context, IRubyObject rbOffset) {
+<span class="nc" id="L1808">        final int POINTER_SIZE = (Platform.getPlatform().addressSize() / 8);</span>
+
+<span class="nc" id="L1810">        final Ruby runtime = context.runtime;</span>
+<span class="nc" id="L1811">        final RubyArray arr = RubyArray.newArray(runtime);</span>
+
+<span class="nc bnc" id="L1813" title="All 2 branches missed.">        for (long off = getOffset(rbOffset); off &lt;= size - POINTER_SIZE; off += POINTER_SIZE) {</span>
+<span class="nc" id="L1814">            final MemoryIO mem = getMemoryIO().getMemoryIO(off);</span>
+<span class="nc bnc" id="L1815" title="All 4 branches missed.">            if (mem == null || mem.isNull()) {</span>
+<span class="nc" id="L1816">                break;</span>
+            }
+<span class="nc" id="L1818">            arr.add(MemoryUtil.getTaintedString(runtime, mem, 0));</span>
+        }
+
+<span class="nc" id="L1821">        return arr;</span>
+    }
+
+    @JRubyMethod(name = { &quot;get_array_of_string&quot; }, required = 2)
+    public IRubyObject get_array_of_string(ThreadContext context, IRubyObject rbOffset, IRubyObject rbCount) {
+<span class="nc" id="L1826">        final int POINTER_SIZE = (Platform.getPlatform().addressSize() / 8);</span>
+<span class="nc" id="L1827">        final long off = getOffset(rbOffset);</span>
+<span class="nc" id="L1828">        final int count = Util.int32Value(rbCount);</span>
+
+<span class="nc" id="L1830">        final Ruby runtime = context.runtime;</span>
+<span class="nc" id="L1831">        final RubyArray arr = RubyArray.newArray(runtime, count);</span>
+
+<span class="nc bnc" id="L1833" title="All 2 branches missed.">        for (int i = 0; i &lt; count; ++i) {</span>
+<span class="nc" id="L1834">            final MemoryIO mem = getMemoryIO().getMemoryIO(off + (i * POINTER_SIZE));</span>
+<span class="nc bnc" id="L1835" title="All 4 branches missed.">            arr.add(mem != null &amp;&amp; !mem.isNull()</span>
+<span class="nc" id="L1836">                    ? MemoryUtil.getTaintedString(runtime, mem, 0)</span>
+<span class="nc" id="L1837">                    : runtime.getNil());</span>
+        }
+
+<span class="nc" id="L1840">        return arr;</span>
+    }
+    
+    @JRubyMethod(name = { &quot;read_array_of_string&quot; })
+    public IRubyObject read_array_of_string(ThreadContext context) {
+<span class="nc" id="L1845">        return get_array_of_string(context, RubyFixnum.zero(context.runtime));</span>
+    }
+    
+    @JRubyMethod(name = { &quot;read_array_of_string&quot; }, required = 1)
+    public IRubyObject read_array_of_string(ThreadContext context, IRubyObject rbLength) {
+<span class="nc" id="L1850">        return get_array_of_string(context, RubyFixnum.zero(context.runtime), rbLength);</span>
+    }
+    
+
+
+    @JRubyMethod(name = &quot;put_string&quot;)
+    public IRubyObject put_string(ThreadContext context, IRubyObject offArg, IRubyObject strArg) {
+<span class="nc" id="L1857">        long off = getOffset(offArg);</span>
+<span class="nc" id="L1858">        ByteList bl = strArg.convertToString().getByteList();</span>
+<span class="nc" id="L1859">        getMemoryIO().putZeroTerminatedByteArray(off, bl.getUnsafeBytes(), bl.begin(), bl.length());</span>
+<span class="nc" id="L1860">        return this;</span>
+    }
+
+    @JRubyMethod(name = &quot;write_string&quot;)
+    public IRubyObject write_string(ThreadContext context, IRubyObject strArg) {
+<span class="nc" id="L1865">        ByteList bl = strArg.convertToString().getByteList();</span>
+<span class="nc" id="L1866">        getMemoryIO().put(0, bl.getUnsafeBytes(), bl.begin(), bl.length());</span>
+<span class="nc" id="L1867">        return this;</span>
+    }
+
+    @JRubyMethod(name = &quot;write_string&quot;)
+    public IRubyObject write_string(ThreadContext context, IRubyObject strArg, IRubyObject lenArg) {
+<span class="nc" id="L1872">        ByteList bl = strArg.convertToString().getByteList();</span>
+<span class="nc" id="L1873">        getMemoryIO().put(0, bl.getUnsafeBytes(), bl.begin(),</span>
+<span class="nc" id="L1874">                Math.min(bl.length(), (int) org.jruby.RubyInteger.num2long(lenArg)));</span>
+<span class="nc" id="L1875">        return this;</span>
+    }
+
+    @JRubyMethod(name = &quot;get_bytes&quot;)
+    public IRubyObject get_bytes(ThreadContext context, IRubyObject offArg, IRubyObject lenArg) {
+<span class="nc" id="L1880">        return MemoryUtil.getTaintedByteString(context.runtime, getMemoryIO(),</span>
+<span class="nc" id="L1881">                getOffset(offArg), Util.int32Value(lenArg));</span>
+    }
+
+    private IRubyObject putBytes(ThreadContext context, long off, ByteList bl, int idx, int len) {
+<span class="nc bnc" id="L1885" title="All 4 branches missed.">        if (idx &lt; 0 || idx &gt; bl.length()) {</span>
+<span class="nc" id="L1886">            throw context.runtime.newRangeError(&quot;invalid string index&quot;);</span>
+        }
+
+<span class="nc bnc" id="L1889" title="All 4 branches missed.">        if (len &lt; 0 || len &gt; (bl.length() - idx)) {</span>
+<span class="nc" id="L1890">            throw context.runtime.newRangeError(&quot;invalid length&quot;);</span>
+        }
+<span class="nc" id="L1892">        getMemoryIO().put(off, bl.getUnsafeBytes(), bl.begin() + idx, len);</span>
+
+<span class="nc" id="L1894">        return this;</span>
+    }
+
+    @JRubyMethod(name = &quot;put_bytes&quot;, required = 2, optional = 2)
+    public IRubyObject put_bytes(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L1899">        ByteList bl = args[1].convertToString().getByteList();</span>
+<span class="nc bnc" id="L1900" title="All 2 branches missed.">        int idx = args.length &gt; 2 ? Util.int32Value(args[2]) : 0;</span>
+<span class="nc bnc" id="L1901" title="All 2 branches missed.">        int len = args.length &gt; 3 ? Util.int32Value(args[3]) : (bl.length() - idx);</span>
+
+<span class="nc" id="L1903">        return putBytes(context, getOffset(args[0]), bl, idx, len);</span>
+    }
+
+    @JRubyMethod(name = &quot;read_bytes&quot;)
+    public IRubyObject read_bytes(ThreadContext context, IRubyObject lenArg) {
+<span class="nc" id="L1908">        return MemoryUtil.getTaintedByteString(context.runtime, getMemoryIO(), 0, Util.int32Value(lenArg));</span>
+    }
+
+    @JRubyMethod(name = &quot;write_bytes&quot;, required = 1, optional = 2)
+    public IRubyObject write_bytes(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L1913">        ByteList bl = args[0].convertToString().getByteList();</span>
+<span class="nc bnc" id="L1914" title="All 2 branches missed.">        int idx = args.length &gt; 1 ? Util.int32Value(args[1]) : 0;</span>
+<span class="nc bnc" id="L1915" title="All 2 branches missed.">        int len = args.length &gt; 2 ? Util.int32Value(args[2]) : (bl.length() - idx);</span>
+<span class="nc" id="L1916">        return putBytes(context, 0, bl, idx, len);</span>
+    }
+
+
+    @JRubyMethod(name = { &quot;read_pointer&quot; })
+    public IRubyObject read_pointer(ThreadContext context) {
+<span class="nc" id="L1922">        return getPointer(context.runtime, 0);</span>
+    }
+
+    @JRubyMethod(name = { &quot;get_pointer&quot; })
+    public IRubyObject get_pointer(ThreadContext context) {
+<span class="nc" id="L1927">        return getPointer(context.runtime, 0);</span>
+    }
+
+    @JRubyMethod(name = &quot;get_pointer&quot;, required = 1)
+    public IRubyObject get_pointer(ThreadContext context, IRubyObject offset) {
+<span class="nc" id="L1932">        return getPointer(context.runtime, getOffset(offset));</span>
+    }
+
+    private void putPointer(ThreadContext context, long offset, IRubyObject value) {
+        DynamicMethod conversionMethod;
+        
+<span class="nc bnc" id="L1938" title="All 2 branches missed.">        if (value instanceof Pointer) {</span>
+<span class="nc" id="L1939">            putPointer(context, offset, (Pointer) value);</span>
+        
+<span class="nc bnc" id="L1941" title="All 2 branches missed.">        } else if (value.isNil()) {</span>
+<span class="nc" id="L1942">            getMemoryIO().putAddress(offset, 0L);</span>
+        
+<span class="nc bnc" id="L1944" title="All 2 branches missed.">        } else if (!(conversionMethod = value.getMetaClass().searchMethod(&quot;to_ptr&quot;)).isUndefined()) {</span>
+<span class="nc" id="L1945">            putPointer(context, offset, conversionMethod.call(context, value, value.getMetaClass(), &quot;to_ptr&quot;));</span>
+        
+        } else {
+<span class="nc" id="L1948">            throw context.runtime.newTypeError(value, context.runtime.getFFI().pointerClass);</span>
+        }
+<span class="nc" id="L1950">    }</span>
+
+    private void putPointer(ThreadContext context, long offset, Pointer value) {
+<span class="nc" id="L1953">        MemoryIO ptr = value.getMemoryIO();</span>
+<span class="nc bnc" id="L1954" title="All 2 branches missed.">        if (ptr.isDirect()) {</span>
+<span class="nc" id="L1955">            getMemoryIO().putMemoryIO(offset, ptr);</span>
+<span class="nc bnc" id="L1956" title="All 2 branches missed.">        } else if (ptr.isNull()) {</span>
+<span class="nc" id="L1957">            getMemoryIO().putAddress(offset, 0L);</span>
+        } else {
+<span class="nc" id="L1959">            throw context.runtime.newArgumentError(&quot;Cannot convert argument to pointer&quot;);</span>
+        }
+<span class="nc" id="L1961">    }</span>
+
+    @JRubyMethod(name = { &quot;write_pointer&quot; })
+    public IRubyObject write_pointer(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L1965">        putPointer(context, 0, value);</span>
+<span class="nc" id="L1966">        return this;</span>
+    }
+
+    @JRubyMethod(name = { &quot;put_pointer&quot; }, required = 1)
+    public IRubyObject put_pointer(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L1971">        putPointer(context, 0, value);</span>
+<span class="nc" id="L1972">        return this;</span>
+    }
+
+    @JRubyMethod(name = &quot;put_pointer&quot;, required = 2)
+    public IRubyObject put_pointer(ThreadContext context, IRubyObject offset, IRubyObject value) {
+<span class="nc" id="L1977">        putPointer(context, getOffset(offset), value);</span>
+<span class="nc" id="L1978">        return this;</span>
+    }
+
+    @JRubyMethod(name = { &quot;get_array_of_pointer&quot; }, required = 2)
+    public IRubyObject get_array_of_pointer(ThreadContext context, IRubyObject offset, IRubyObject length) {
+<span class="nc" id="L1983">        final int POINTER_SIZE = (Platform.getPlatform().addressSize / 8);</span>
+<span class="nc" id="L1984">        int count = Util.int32Value(length);</span>
+<span class="nc" id="L1985">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L1986">        RubyArray arr = RubyArray.newArray(runtime, count);</span>
+<span class="nc" id="L1987">        long off = getOffset(offset);</span>
+
+<span class="nc bnc" id="L1989" title="All 2 branches missed.">        for (int i = 0; i &lt; count; ++i) {</span>
+<span class="nc" id="L1990">            arr.add(getPointer(runtime, off + (i * POINTER_SIZE)));</span>
+        }
+
+<span class="nc" id="L1993">        return arr;</span>
+    }
+
+    @JRubyMethod(name = { &quot;put_array_of_pointer&quot; }, required = 2)
+    public IRubyObject put_array_of_pointer(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
+<span class="nc" id="L1998">        final int POINTER_SIZE = (Platform.getPlatform().addressSize / 8);</span>
+<span class="nc" id="L1999">        final RubyArray arr = (RubyArray) arrParam;</span>
+<span class="nc" id="L2000">        final int count = arr.getLength();</span>
+
+<span class="nc" id="L2002">        long off = getOffset(offset);</span>
+<span class="nc bnc" id="L2003" title="All 2 branches missed.">        for (int i = 0; i &lt; count; ++i) {</span>
+<span class="nc" id="L2004">            putPointer(context, off + (i * POINTER_SIZE), arr.entry(i));</span>
+        }
+<span class="nc" id="L2006">        return this;</span>
+    }
+    
+    @JRubyMethod(name = { &quot;read_array_of_pointer&quot; }, required = 1)
+    public IRubyObject read_array_of_pointer(ThreadContext context, IRubyObject length) {
+<span class="nc" id="L2011">        return get_array_of_pointer(context, RubyFixnum.zero(context.runtime), length);</span>
+    }
+    
+    @JRubyMethod(name = { &quot;write_array_of_pointer&quot; }, required = 1)
+    public IRubyObject write_array_of_pointer(ThreadContext context, IRubyObject arrParam) {
+<span class="nc" id="L2016">        return put_array_of_pointer(context, RubyFixnum.zero(context.runtime), arrParam);</span>
+    }
+    
+    
+
+    @JRubyMethod(name = &quot;put_callback&quot;, required = 3)
+    public IRubyObject put_callback(ThreadContext context, IRubyObject offset, IRubyObject proc, IRubyObject cbInfo) {
+<span class="nc bnc" id="L2023" title="All 2 branches missed.">        if (!(cbInfo instanceof CallbackInfo)) {</span>
+<span class="nc" id="L2024">            throw context.runtime.newArgumentError(&quot;invalid CallbackInfo&quot;);</span>
+        }
+<span class="nc" id="L2026">        Pointer ptr = Factory.getInstance().getCallbackManager().getCallback(context.runtime, (CallbackInfo) cbInfo, proc);</span>
+<span class="nc" id="L2027">        getMemoryIO().putMemoryIO(getOffset(offset), ((AbstractMemory) ptr).getMemoryIO());</span>
+<span class="nc" id="L2028">        return this;</span>
+    }
+    
+    @JRubyMethod(name = &quot;+&quot;, required = 1)
+    public IRubyObject op_plus(ThreadContext context, IRubyObject value) {
+<span class="nc" id="L2033">        return slice(context.runtime, RubyNumeric.fix2long(value));</span>
+    }
+
+    @JRubyMethod(name = &quot;order&quot;, required = 0)
+    public final IRubyObject order(ThreadContext context) {
+<span class="nc bnc" id="L2038" title="All 2 branches missed.">        return context.runtime.newSymbol(getMemoryIO().order().equals(ByteOrder.LITTLE_ENDIAN) ? &quot;little&quot; : &quot;big&quot;);</span>
+    }
+
+    @JRubyMethod(name = &quot;order&quot;, required = 1)
+    public final IRubyObject order(ThreadContext context, IRubyObject byte_order) {
+<span class="nc" id="L2043">        return order(context.runtime, Util.parseByteOrder(context.runtime, byte_order));</span>
+    }
+
+    @JRubyMethod(name = &quot;to_ptr&quot;)
+    public final IRubyObject to_ptr(ThreadContext context) {
+<span class="nc" id="L2048">        return this;</span>
+    }
+    
+    @JRubyMethod(name = &quot;slice&quot;)
+    public final IRubyObject slice(ThreadContext context, IRubyObject offset, IRubyObject size) {
+<span class="nc" id="L2053">        return slice(context.getRuntime(), RubyNumeric.num2int(offset), RubyNumeric.num2int(size));</span>
+    }
+
+    abstract public AbstractMemory order(Ruby runtime, ByteOrder order);
+    abstract protected AbstractMemory slice(Ruby runtime, long offset);
+    abstract protected AbstractMemory slice(Ruby runtime, long offset, long size);
+    abstract protected Pointer getPointer(Ruby runtime, long offset);
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

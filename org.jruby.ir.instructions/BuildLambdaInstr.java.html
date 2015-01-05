@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>BuildLambdaInstr.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.instructions</a> &gt; <span class="el_source">BuildLambdaInstr.java</span></div><h1>BuildLambdaInstr.java</h1><pre class="source lang-java linenums">package org.jruby.ir.instructions;
+
+import org.jruby.RubyProc;
+import org.jruby.ir.IRScope;
+import org.jruby.ir.IRVisitor;
+import org.jruby.ir.Operation;
+import org.jruby.ir.operands.*;
+import org.jruby.ir.transformations.inlining.CloneInfo;
+import org.jruby.lexer.yacc.ISourcePosition;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.DynamicScope;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+
+import org.jruby.ir.IRFlags;
+
+import java.util.Map;
+
+public class BuildLambdaInstr extends Instr implements ResultInstr, FixedArityInstr, ClosureAcceptingInstr {
+    /** The position for the block */
+    private final ISourcePosition position;
+    private Variable result;
+    private Operand lambdaBody;
+
+    public BuildLambdaInstr(Variable lambda, Operand lambdaBody, ISourcePosition position) {
+<span class="fc" id="L27">        super(Operation.LAMBDA);</span>
+
+<span class="fc" id="L29">        this.result = lambda;</span>
+<span class="fc" id="L30">        this.lambdaBody = lambdaBody;</span>
+<span class="fc" id="L31">        this.position = position;</span>
+<span class="fc" id="L32">    }</span>
+
+    public String getLambdaBodyName() {
+        // SSS FIXME: this requires a fix 
+<span class="nc" id="L36">        return &quot;&quot;; // getLambdaBody().getClosure().getName();</span>
+    }
+
+    @Override
+    public Operand[] getOperands() {
+<span class="fc" id="L41">        return new Operand[] { lambdaBody, new StringLiteral(position.getFile()), new Fixnum(position.getLine()) };</span>
+    }
+
+    public ISourcePosition getPosition() {
+<span class="nc" id="L45">        return position;</span>
+    }
+
+    @Override
+    public Variable getResult() {
+<span class="fc" id="L50">        return result;</span>
+    }
+
+    @Override
+    public void updateResult(Variable v) {
+<span class="fc" id="L55">        this.result = v;</span>
+<span class="fc" id="L56">    }</span>
+
+    @Override
+    public boolean computeScopeFlags(IRScope scope) {
+<span class="fc" id="L60">        scope.getFlags().add(IRFlags.BINDING_HAS_ESCAPED);</span>
+<span class="fc" id="L61">        return true;</span>
+    }
+
+    @Override
+    public Instr clone(CloneInfo ii) {
+<span class="fc" id="L66">        return new BuildLambdaInstr(ii.getRenamedVariable(getResult()), getLambdaBody().cloneForInlining(ii), position);</span>
+    }
+
+    @Override
+    public void simplifyOperands(Map&lt;Operand, Operand&gt; valueMap, boolean force) {
+<span class="fc" id="L71">        lambdaBody = lambdaBody.getSimplifiedOperand(valueMap, force);</span>
+<span class="fc" id="L72">    }</span>
+
+    public Operand getLambdaBody() {
+<span class="fc" id="L75">        return lambdaBody;</span>
+    }
+
+    public Operand getClosureArg() {
+<span class="nc" id="L79">        return lambdaBody;</span>
+    }
+
+    @Override
+    public Object interpret(ThreadContext context, StaticScope currScope, DynamicScope currDynScope, IRubyObject self, Object[] temp) {
+        // SSS FIXME: Copied this from ast/LambdaNode ... Is this required here as well?
+        //
+        // JRUBY-5686: do this before executing so first time sets cref module
+<span class="fc" id="L87">        ((WrappedIRClosure) getLambdaBody()).getClosure().getStaticScope().determineModule();</span>
+
+        // CON: This must not be happening, because nil would never cast to Block
+//        IRClosure body = getLambdaBody().getClosure();
+//        Block block = (Block) (body == null ? context.runtime.getIRManager().getNil() : getLambdaBody()).retrieve(context, self, currScope, currDynScope, temp);
+<span class="fc" id="L92">        Block block = (Block)getLambdaBody().retrieve(context, self, currScope, currDynScope, temp);</span>
+        // ENEBO: Now can live nil be passed as block reference?
+        // SSS FIXME: Should we do the same %self retrieval as in the case of WrappedIRClosure? Or are lambdas special??
+<span class="fc" id="L95">        return RubyProc.newProc(context.runtime,</span>
+                block,
+                Block.Type.LAMBDA,
+<span class="fc" id="L98">                position.getFile(),</span>
+<span class="fc" id="L99">                position.getLine());</span>
+    }
+
+    @Override
+    public void visit(IRVisitor visitor) {
+<span class="nc" id="L104">        visitor.BuildLambdaInstr(this);</span>
+<span class="nc" id="L105">    }</span>
+
+    @Override
+    public String toString() {
+<span class="nc" id="L109">        return &quot;&quot; + ((ResultInstr)this).getResult() + &quot; = lambda(&quot; + lambdaBody + &quot;)&quot;;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

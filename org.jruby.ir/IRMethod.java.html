@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IRMethod.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir</a> &gt; <span class="el_source">IRMethod.java</span></div><h1>IRMethod.java</h1><pre class="source lang-java linenums">package org.jruby.ir;
+
+import org.jcodings.specific.USASCIIEncoding;
+import org.jruby.ast.MethodDefNode;
+import org.jruby.ast.Node;
+import org.jruby.internal.runtime.methods.IRMethodArgs;
+import org.jruby.ir.instructions.Instr;
+import org.jruby.ir.instructions.ReceiveArgBase;
+import org.jruby.ir.instructions.ReceiveKeywordArgInstr;
+import org.jruby.ir.instructions.ReceiveKeywordRestArgInstr;
+import org.jruby.ir.instructions.ReceiveRestArgInstr;
+import org.jruby.ir.interpreter.InterpreterContext;
+import org.jruby.ir.operands.LocalVariable;
+import org.jruby.ir.operands.Operand;
+import org.jruby.ir.operands.Symbol;
+import org.jruby.ir.operands.Hash;
+import org.jruby.ir.operands.Splat;
+import org.jruby.ir.representations.BasicBlock;
+import org.jruby.util.KeyValuePair;
+import org.jruby.parser.StaticScope;
+
+import java.lang.invoke.MethodType;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+<span class="pc bpc" id="L29" title="1 of 2 branches missed.">public class IRMethod extends IRScope {</span>
+    public final boolean isInstanceMethod;
+
+    // Note that if operands from the method are modified,
+    // callArgs would have to be updated as well
+    //
+    // Call parameters
+    private List&lt;Operand&gt; callArgs;
+    private List&lt;KeyValuePair&lt;Operand, Operand&gt;&gt; keywordArgs;
+
+    // Argument description of the form [:req, &quot;a&quot;], [:opt, &quot;b&quot;] ..
+    private List&lt;String[]&gt; argDesc;
+
+    // Signatures to the jitted versions of this method
+    private Map&lt;Integer, MethodType&gt; signatures;
+
+    // Method name in the jitted version of this method
+    private String jittedName;
+
+    private MethodDefNode defn;
+
+    public IRMethod(IRManager manager, IRScope lexicalParent, MethodDefNode defn, String name,
+            boolean isInstanceMethod, int lineNumber, StaticScope staticScope) {
+<span class="fc" id="L52">        super(manager, lexicalParent, name, lexicalParent.getFileName(), lineNumber, staticScope);</span>
+
+<span class="fc" id="L54">        this.defn = defn;</span>
+<span class="fc" id="L55">        this.isInstanceMethod = isInstanceMethod;</span>
+<span class="fc" id="L56">        this.callArgs = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L57">        this.keywordArgs = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L58">        this.argDesc = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L59">        this.signatures = new HashMap&lt;&gt;();</span>
+
+<span class="pc bpc" id="L61" title="2 of 4 branches missed.">        if (!getManager().isDryRun() &amp;&amp; staticScope != null) {</span>
+<span class="fc" id="L62">            staticScope.setIRScope(this);</span>
+<span class="fc" id="L63">            staticScope.setScopeType(this.getScopeType());</span>
+        }
+<span class="fc" id="L65">    }</span>
+
+    /** Run any necessary passes to get the IR ready for interpretation */
+    public synchronized InterpreterContext prepareForInterpretation() {
+<span class="fc bfc" id="L69" title="All 2 branches covered.">        if (defn != null) {</span>
+<span class="fc" id="L70">            IRBuilder.newIRBuilder(getManager()).defineMethodInner(defn, this, getLexicalParent());</span>
+
+<span class="fc" id="L72">            defn = null;</span>
+        }
+
+<span class="fc" id="L75">        return super.prepareForInterpretation();</span>
+    }
+
+    public synchronized List&lt;BasicBlock&gt; prepareForCompilation() {
+<span class="fc bfc" id="L79" title="All 2 branches covered.">        if (defn != null) prepareForInterpretation();</span>
+
+<span class="fc" id="L81">        return super.prepareForCompilation();</span>
+    }
+
+    @Override
+    public IRScopeType getScopeType() {
+<span class="fc bfc" id="L86" title="All 2 branches covered.">        return isInstanceMethod ? IRScopeType.INSTANCE_METHOD : IRScopeType.CLASS_METHOD;</span>
+    }
+
+    @Override
+    public void addInstr(Instr i) {
+        // Accumulate call arguments
+<span class="fc bfc" id="L92" title="All 2 branches covered.">        if (i instanceof ReceiveKeywordRestArgInstr) {</span>
+            // Always add the keyword rest arg to the beginning
+<span class="fc" id="L94">            keywordArgs.add(0, new KeyValuePair&lt;Operand, Operand&gt;(Symbol.KW_REST_ARG_DUMMY, ((ReceiveArgBase) i).getResult()));</span>
+<span class="fc bfc" id="L95" title="All 2 branches covered.">        } else if (i instanceof ReceiveKeywordArgInstr) {</span>
+<span class="fc" id="L96">            ReceiveKeywordArgInstr rkai = (ReceiveKeywordArgInstr)i;</span>
+            // FIXME: This lost encoding information when name was converted to string earlier in IRBuilder
+<span class="fc" id="L98">            keywordArgs.add(new KeyValuePair&lt;Operand, Operand&gt;(new Symbol(rkai.argName, USASCIIEncoding.INSTANCE), rkai.getResult()));</span>
+<span class="fc bfc" id="L99" title="All 2 branches covered.">        } else if (i instanceof ReceiveRestArgInstr) {</span>
+<span class="fc" id="L100">            callArgs.add(new Splat(((ReceiveRestArgInstr)i).getResult(), true));</span>
+<span class="fc bfc" id="L101" title="All 2 branches covered.">        } else if (i instanceof ReceiveArgBase) {</span>
+<span class="fc" id="L102">            callArgs.add(((ReceiveArgBase) i).getResult());</span>
+        }
+
+<span class="fc" id="L105">        super.addInstr(i);</span>
+<span class="fc" id="L106">    }</span>
+
+    public void addArgDesc(IRMethodArgs.ArgType type, String argName) {
+<span class="fc" id="L109">        argDesc.add(new String[]{type.name(), argName});</span>
+<span class="fc" id="L110">    }</span>
+
+    public List&lt;String[]&gt; getArgDesc() {
+<span class="fc" id="L113">        return argDesc;</span>
+    }
+
+    public Operand[] getCallArgs() {
+<span class="pc bpc" id="L117" title="1 of 2 branches missed.">        if (receivesKeywordArgs()) {</span>
+<span class="nc" id="L118">            int i = 0;</span>
+<span class="nc" id="L119">            Operand[] args = new Operand[callArgs.size() + 1];</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">            for (Operand arg: callArgs) {</span>
+<span class="nc" id="L121">                args[i++] = arg;</span>
+<span class="nc" id="L122">            }</span>
+<span class="nc" id="L123">            args[i] = new Hash(keywordArgs, true);</span>
+<span class="nc" id="L124">            return args;</span>
+        } else {
+<span class="fc" id="L126">            return callArgs.toArray(new Operand[callArgs.size()]);</span>
+        }
+    }
+
+    @Override
+    protected LocalVariable findExistingLocalVariable(String name, int scopeDepth) {
+<span class="pc bpc" id="L132" title="3 of 4 branches missed.">        assert scopeDepth == 0: &quot;Local variable depth in IRMethod should always be zero (&quot; + name + &quot; had depth of &quot; + scopeDepth + &quot;)&quot;;</span>
+<span class="fc" id="L133">        return localVars.get(name);</span>
+    }
+
+    @Override
+    public LocalVariable getLocalVariable(String name, int scopeDepth) {
+<span class="fc" id="L138">        LocalVariable lvar = findExistingLocalVariable(name, scopeDepth);</span>
+<span class="fc bfc" id="L139" title="All 2 branches covered.">        if (lvar == null) lvar = getNewLocalVariable(name, scopeDepth);</span>
+<span class="fc" id="L140">        return lvar;</span>
+    }
+
+    public void addNativeSignature(int arity, MethodType signature) {
+<span class="fc" id="L144">        signatures.put(arity, signature);</span>
+<span class="fc" id="L145">    }</span>
+
+    public MethodType getNativeSignature(int arity) {
+<span class="nc" id="L148">        return signatures.get(arity);</span>
+    }
+
+    public Map&lt;Integer, MethodType&gt; getNativeSignatures() {
+<span class="fc" id="L152">        return Collections.unmodifiableMap(signatures);</span>
+    }
+
+    public String getJittedName() {
+<span class="fc" id="L156">        return jittedName;</span>
+    }
+
+    public void setJittedName(String jittedName) {
+<span class="fc" id="L160">        this.jittedName = jittedName;</span>
+<span class="fc" id="L161">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

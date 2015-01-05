@@ -1,0 +1,263 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LoadLocalVarPlacementNode.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.dataflow.analyses</a> &gt; <span class="el_source">LoadLocalVarPlacementNode.java</span></div><h1>LoadLocalVarPlacementNode.java</h1><pre class="source lang-java linenums">package org.jruby.ir.dataflow.analyses;
+
+import org.jruby.dirgra.Edge;
+import org.jruby.ir.IRClosure;
+import org.jruby.ir.IREvalScript;
+import org.jruby.ir.IRScope;
+import org.jruby.ir.Operation;
+import org.jruby.ir.dataflow.FlowGraphNode;
+import org.jruby.ir.instructions.*;
+import org.jruby.ir.operands.*;
+import org.jruby.ir.representations.BasicBlock;
+
+import java.util.*;
+
+public class LoadLocalVarPlacementNode extends FlowGraphNode&lt;LoadLocalVarPlacementProblem, LoadLocalVarPlacementNode&gt; {
+    public LoadLocalVarPlacementNode(LoadLocalVarPlacementProblem prob, BasicBlock n) {
+<span class="fc" id="L17">        super(prob, n);</span>
+<span class="fc" id="L18">    }</span>
+
+    @Override
+    public void init() {
+<span class="fc" id="L22">        inRequiredLoads = new HashSet&lt;LocalVariable&gt;();</span>
+<span class="fc" id="L23">        outRequiredLoads = new HashSet&lt;LocalVariable&gt;();</span>
+<span class="fc" id="L24">    }</span>
+
+    @Override
+    public void buildDataFlowVars(Instr i) {
+        // Nothing to do -- because we are going to simply use non-closure, non-self, non-block LocalVariables as our data flow variables
+        // rather than build a new data flow type for it
+<span class="fc" id="L30">    }</span>
+
+    @Override
+    public void applyPreMeetHandler() {
+<span class="fc bfc" id="L34" title="All 2 branches covered.">        if (basicBlock.isExitBB()) inRequiredLoads = problem.getLoadsOnScopeExit();</span>
+<span class="fc" id="L35">    }</span>
+
+    @Override
+    public void compute_MEET(Edge e, LoadLocalVarPlacementNode pred) {
+<span class="fc" id="L39">        inRequiredLoads.addAll(pred.outRequiredLoads);</span>
+<span class="fc" id="L40">    }</span>
+
+    @Override
+    public void initSolution() {
+<span class="fc" id="L44">        reqdLoads = new HashSet&lt;LocalVariable&gt;(inRequiredLoads);</span>
+<span class="fc" id="L45">    }</span>
+
+    @Override
+    public void applyTransferFunction(Instr i) {
+<span class="fc" id="L49">        IRScope scope = problem.getScope();</span>
+<span class="fc" id="L50">        boolean scopeBindingHasEscaped = scope.bindingHasEscaped();</span>
+
+        // Right away, clear the variable defined by this instruction -- it doesn't have to be loaded!
+<span class="fc bfc" id="L53" title="All 2 branches covered.">        if (i instanceof ResultInstr) {</span>
+<span class="fc" id="L54">            reqdLoads.remove(((ResultInstr) i).getResult());</span>
+        }
+
+        // Process closure accepting instrs specially -- these are the sites of binding loads!
+<span class="fc bfc" id="L58" title="All 2 branches covered.">        if (i instanceof ClosureAcceptingInstr) {</span>
+<span class="fc" id="L59">            Operand o = ((ClosureAcceptingInstr)i).getClosureArg();</span>
+<span class="fc bfc" id="L60" title="All 4 branches covered.">            if (o != null &amp;&amp; o instanceof WrappedIRClosure) {</span>
+<span class="fc" id="L61">                IRClosure cl = ((WrappedIRClosure) o).getClosure();</span>
+
+                // Variables defined in the closure do not need to be loaded anymore at
+                // program points before the call, because they will be loaded after the
+                // call completes to fetch the latest value.
+                //
+                // Allocate a new hash-set and modify it to get around ConcurrentModificationException on reqdLoads
+<span class="fc" id="L68">                Set&lt;LocalVariable&gt; newReqdLoads = new HashSet&lt;LocalVariable&gt;(reqdLoads);</span>
+<span class="fc bfc" id="L69" title="All 2 branches covered.">                for (LocalVariable v: reqdLoads) {</span>
+<span class="fc bfc" id="L70" title="All 2 branches covered.">                    if (cl.definesLocalVariable(v)) newReqdLoads.remove(v);</span>
+<span class="fc" id="L71">                }</span>
+<span class="fc" id="L72">                reqdLoads = newReqdLoads;</span>
+            }
+
+            // In this case, we are going to blindly load everything -- so, at the call site, pending loads dont carry over!
+<span class="fc bfc" id="L76" title="All 2 branches covered.">            if (scopeBindingHasEscaped) {</span>
+<span class="fc" id="L77">                reqdLoads.clear();</span>
+            } else {
+                // All variables not defined in the current scope have to be always loaded
+                // because of multi-threading scenarios where some other scope
+                // could update this variable concurrently.
+                //
+                // Allocate a new hash-set and modify it to get around ConcurrentModificationException on reqdLoads
+<span class="fc" id="L84">                Set&lt;LocalVariable&gt; newReqdLoads = new HashSet&lt;LocalVariable&gt;(reqdLoads);</span>
+<span class="fc bfc" id="L85" title="All 2 branches covered.">                for (LocalVariable v: reqdLoads) {</span>
+<span class="fc bfc" id="L86" title="All 2 branches covered.">                    if (!scope.definesLocalVariable(v)) newReqdLoads.remove(v);</span>
+<span class="fc" id="L87">                }</span>
+<span class="fc" id="L88">                reqdLoads = newReqdLoads;</span>
+            }
+<span class="fc bfc" id="L90" title="All 4 branches covered.">        } else if (scopeBindingHasEscaped &amp;&amp; (i.getOperation() == Operation.PUT_GLOBAL_VAR)) {</span>
+            // global-var tracing can execute closures set up in previous trace-var calls
+            // in which case we would have the 'scopeBindingHasEscaped' flag set to true
+<span class="fc" id="L93">            reqdLoads.clear();</span>
+        }
+
+<span class="fc bfc" id="L96" title="All 2 branches covered.">        if (i.getOperation() == Operation.BINDING_STORE) {</span>
+<span class="fc" id="L97">            LocalVariable lv = ((StoreLocalVarInstr)i).getLocalVar();</span>
+<span class="pc bpc" id="L98" title="1 of 2 branches missed.">            if (!lv.isSelf()) reqdLoads.add(lv);</span>
+<span class="fc" id="L99">        } else {</span>
+            // The variables used as arguments will need to be loaded
+            // %self is local to every scope and never crosses scope boundaries and need not be spilled/refilled
+<span class="fc bfc" id="L102" title="All 2 branches covered.">            for (Variable x : i.getUsedVariables()) {</span>
+<span class="fc bfc" id="L103" title="All 4 branches covered.">                if (x instanceof LocalVariable &amp;&amp; !x.isSelf()) {</span>
+<span class="fc" id="L104">                    reqdLoads.add((LocalVariable)x);</span>
+                }
+<span class="fc" id="L106">            }</span>
+        }
+<span class="fc" id="L108">    }</span>
+
+    @Override
+    public boolean solutionChanged() {
+        // At the beginning of the scope and rescue block entries, required loads can be discarded
+        // since all these loads will be executed there.
+<span class="fc bfc" id="L114" title="All 4 branches covered.">        if (basicBlock.isEntryBB() || basicBlock.isRescueEntry()) reqdLoads.clear();</span>
+
+        //System.out.println(&quot;\n For CFG &quot; + getCFG() + &quot; BB &quot; + _bb.getID());
+        //System.out.println(&quot;\t--&gt; IN reqd loads   : &quot; + java.util.Arrays.toString(_inReqdLoads.toArray()));
+        //System.out.println(&quot;\t--&gt; OUT reqd loads  : &quot; + java.util.Arrays.toString(_outReqdLoads.toArray()));
+<span class="fc bfc" id="L119" title="All 2 branches covered.">        return !outRequiredLoads.equals(reqdLoads);</span>
+    }
+
+    @Override
+    public void finalizeSolution() {
+
+<span class="fc" id="L125">        outRequiredLoads = reqdLoads;</span>
+<span class="fc" id="L126">    }</span>
+
+    @Override
+    public String toString() {
+<span class="nc" id="L130">        return &quot;&quot;;</span>
+    }
+
+    private TemporaryLocalVariable getLocalVarReplacement(LocalVariable v, IRScope scope, Map&lt;Operand, Operand&gt; varRenameMap) {
+<span class="fc" id="L134">         TemporaryLocalVariable value = (TemporaryLocalVariable)varRenameMap.get(v);</span>
+<span class="fc bfc" id="L135" title="All 2 branches covered.">         if (value == null) {</span>
+<span class="fc" id="L136">             value = scope.getNewTemporaryVariableFor(v);</span>
+<span class="fc" id="L137">             varRenameMap.put(v, value);</span>
+         }
+<span class="fc" id="L139">         return value;</span>
+    }
+
+    public void addLoads(Map&lt;Operand, Operand&gt; varRenameMap) {
+<span class="fc" id="L143">        IRScope scope                  = problem.getScope();</span>
+<span class="fc" id="L144">        boolean isEvalScript           = scope instanceof IREvalScript;</span>
+<span class="fc" id="L145">        boolean scopeBindingHasEscaped = scope.bindingHasEscaped();</span>
+
+<span class="fc" id="L147">        List&lt;Instr&gt;         instrs    = basicBlock.getInstrs();</span>
+<span class="fc" id="L148">        ListIterator&lt;Instr&gt; it        = instrs.listIterator(instrs.size());</span>
+
+<span class="fc" id="L150">        initSolution();</span>
+<span class="fc bfc" id="L151" title="All 2 branches covered.">        while (it.hasPrevious()) {</span>
+<span class="fc" id="L152">            Instr i = it.previous();</span>
+
+            // Right away, clear the variable defined by this instruction -- it doesn't have to be loaded!
+<span class="fc bfc" id="L155" title="All 2 branches covered.">            if (i instanceof ResultInstr) reqdLoads.remove(((ResultInstr) i).getResult());</span>
+
+            // Process closure accepting instrs specially -- these are the sites of binding loads!
+<span class="fc bfc" id="L158" title="All 2 branches covered.">            if (i instanceof ClosureAcceptingInstr) {</span>
+<span class="fc" id="L159">                Operand o = ((ClosureAcceptingInstr)i).getClosureArg();</span>
+<span class="fc bfc" id="L160" title="All 4 branches covered.">                if (o != null &amp;&amp; o instanceof WrappedIRClosure) {</span>
+<span class="fc" id="L161">                    IRClosure cl = ((WrappedIRClosure) o).getClosure();</span>
+
+                    // Only those variables that are defined in the closure, and are in the required loads set
+                    // will need to be loaded from the binding after the call!  Rest can wait ..
+<span class="fc" id="L165">                    it.next();</span>
+<span class="fc bfc" id="L166" title="All 2 branches covered.">                    for (Iterator&lt;LocalVariable&gt; iter = reqdLoads.iterator(); iter.hasNext();) {</span>
+<span class="fc" id="L167">                        LocalVariable v = iter.next();</span>
+<span class="fc bfc" id="L168" title="All 2 branches covered.">                        if (cl.definesLocalVariable(v)) {</span>
+<span class="fc" id="L169">                            it.add(new LoadLocalVarInstr(scope, getLocalVarReplacement(v, scope, varRenameMap), v));</span>
+<span class="fc" id="L170">                            it.previous();</span>
+<span class="fc" id="L171">                            iter.remove();</span>
+                        }
+<span class="fc" id="L173">                    }</span>
+<span class="fc" id="L174">                    it.previous();</span>
+                }
+
+                // In this case, we are going to blindly load everything
+<span class="fc bfc" id="L178" title="All 2 branches covered.">                if (scopeBindingHasEscaped) {</span>
+<span class="fc" id="L179">                    it.next();</span>
+<span class="fc bfc" id="L180" title="All 2 branches covered.">                    for (LocalVariable v: reqdLoads) {</span>
+<span class="fc" id="L181">                        it.add(new LoadLocalVarInstr(scope, getLocalVarReplacement(v, scope, varRenameMap), v));</span>
+<span class="fc" id="L182">                        it.previous();</span>
+<span class="fc" id="L183">                    }</span>
+<span class="fc" id="L184">                    it.previous();</span>
+<span class="fc" id="L185">                    reqdLoads.clear();</span>
+                } else {
+                    // All variables not defined in the current scope have to be always loaded
+                    // because of multi-threading scenarios where some other scope
+                    // could update this variable concurrently.
+<span class="fc" id="L190">                    it.next();</span>
+<span class="fc bfc" id="L191" title="All 2 branches covered.">                    for (Iterator&lt;LocalVariable&gt; iter = reqdLoads.iterator(); iter.hasNext();) {</span>
+<span class="fc" id="L192">                        LocalVariable v = iter.next();</span>
+<span class="fc bfc" id="L193" title="All 2 branches covered.">                        if (!scope.definesLocalVariable(v)) {</span>
+<span class="fc" id="L194">                            it.add(new LoadLocalVarInstr(scope, getLocalVarReplacement(v, scope, varRenameMap), v));</span>
+<span class="fc" id="L195">                            it.previous();</span>
+<span class="fc" id="L196">                            iter.remove();</span>
+                        }
+<span class="fc" id="L198">                    }</span>
+<span class="fc" id="L199">                    it.previous();</span>
+                }
+<span class="fc bfc" id="L201" title="All 4 branches covered.">            } else if (scopeBindingHasEscaped &amp;&amp; (i.getOperation() == Operation.PUT_GLOBAL_VAR)) {</span>
+                // global-var tracing can execute closures set up in previous trace-var calls
+                // in which case we would have the 'scopeBindingHasEscaped' flag set to true
+<span class="fc" id="L204">                it.next();</span>
+<span class="pc bpc" id="L205" title="1 of 2 branches missed.">                for (LocalVariable v : reqdLoads) {</span>
+<span class="nc" id="L206">                    it.add(new LoadLocalVarInstr(scope, getLocalVarReplacement(v, scope, varRenameMap), v));</span>
+<span class="nc" id="L207">                    it.previous();</span>
+<span class="nc" id="L208">                }</span>
+<span class="fc" id="L209">                it.previous();</span>
+<span class="fc" id="L210">                reqdLoads.clear();</span>
+            }
+
+<span class="fc bfc" id="L213" title="All 2 branches covered.">            if (i.getOperation() == Operation.BINDING_STORE) {</span>
+<span class="fc" id="L214">                LocalVariable lv = ((StoreLocalVarInstr)i).getLocalVar();</span>
+<span class="pc bpc" id="L215" title="1 of 2 branches missed.">                if (!lv.isSelf()) {</span>
+<span class="fc" id="L216">                    reqdLoads.add(lv);</span>
+                    // SSS FIXME: Why is this reqd again?  Document with example
+                    // Make sure there is a replacement var for all local vars
+<span class="fc" id="L219">                    getLocalVarReplacement(lv, scope, varRenameMap);</span>
+                }
+<span class="fc" id="L221">            } else {</span>
+                // The variables used as arguments will need to be loaded
+                // %self is local to every scope and never crosses scope boundaries and need not be spilled/refilled
+<span class="fc bfc" id="L224" title="All 2 branches covered.">                for (Variable v : i.getUsedVariables()) {</span>
+<span class="fc bfc" id="L225" title="All 2 branches covered.">                    if (!(v instanceof LocalVariable)) continue;</span>
+
+<span class="fc" id="L227">                    LocalVariable lv = (LocalVariable)v;</span>
+<span class="fc bfc" id="L228" title="All 2 branches covered.">                    if (!lv.isSelf()) {</span>
+<span class="fc" id="L229">                        reqdLoads.add(lv);</span>
+                        // SSS FIXME: Why is this reqd again?  Document with example
+                        // Make sure there is a replacement var for all local vars
+<span class="fc" id="L232">                        getLocalVarReplacement(lv, scope, varRenameMap);</span>
+                    }
+<span class="fc" id="L234">                }</span>
+            }
+<span class="fc" id="L236">        }</span>
+
+        // Add loads on entry of a rescue block.
+<span class="fc bfc" id="L239" title="All 2 branches covered.">        if (basicBlock.isRescueEntry()) {</span>
+<span class="fc bfc" id="L240" title="All 2 branches covered.">            for (LocalVariable v : reqdLoads) {</span>
+<span class="fc" id="L241">                it.add(new LoadLocalVarInstr(scope, getLocalVarReplacement(v, scope, varRenameMap), v));</span>
+<span class="fc" id="L242">            }</span>
+        }
+
+        // Load first use of variables in closures
+<span class="fc bfc" id="L246" title="All 4 branches covered.">        if (scope instanceof IRClosure &amp;&amp; basicBlock.isEntryBB()) {</span>
+            // System.out.println(&quot;\n[In Entry BB] For CFG &quot; + getCFG() + &quot;:&quot;);
+            // System.out.println(&quot;\t--&gt; Reqd loads   : &quot; + java.util.Arrays.toString(reqdLoads.toArray()));
+<span class="fc bfc" id="L249" title="All 2 branches covered.">            for (LocalVariable v : reqdLoads) {</span>
+<span class="pc bpc" id="L250" title="3 of 4 branches missed.">                if (scope.usesLocalVariable(v) || scope.definesLocalVariable(v)) {</span>
+<span class="pc bpc" id="L251" title="2 of 6 branches missed.">                    if (isEvalScript || !(v instanceof ClosureLocalVariable) || (scope != ((ClosureLocalVariable)v).definingScope)) {</span>
+<span class="fc" id="L252">                        it.add(new LoadLocalVarInstr(scope, getLocalVarReplacement(v, scope, varRenameMap), v));</span>
+                    }
+                }
+<span class="fc" id="L255">            }</span>
+        }
+<span class="fc" id="L257">    }</span>
+
+    Set&lt;LocalVariable&gt; inRequiredLoads;  // On entry to flow graph node:  Variables that need to be loaded from the heap binding
+    Set&lt;LocalVariable&gt; outRequiredLoads; // On exit from flow graph node: Variables that need to be loaded from the heap binding
+    Set&lt;LocalVariable&gt; reqdLoads;        // Temporary state while applying transfer function
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

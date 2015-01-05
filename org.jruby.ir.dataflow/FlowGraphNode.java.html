@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>FlowGraphNode.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.dataflow</a> &gt; <span class="el_source">FlowGraphNode.java</span></div><h1>FlowGraphNode.java</h1><pre class="source lang-java linenums">package org.jruby.ir.dataflow;
+
+import org.jruby.dirgra.Edge;
+import org.jruby.ir.instructions.Instr;
+import org.jruby.ir.representations.BasicBlock;
+import org.jruby.ir.representations.CFG;
+
+import java.util.BitSet;
+import java.util.List;
+import java.util.ListIterator;
+
+/* This framework right now implicitly uses the CFG as the flow graph -- perhaps it is worth abstracting away from this assumption
+ * so that we can use this framework over non-CFG flow graphs.
+ *
+ * In any case, till such time we generalize this to other kinds of flow graphs, a flow graph node is just a wrapper over a CFG node,
+ * the basic block.  As such, a flow graph is not explicitly constructed.
+ *
+ * Different dataflow problems encapsulate different dataflow properties, and a different flow graph node is built in each case */
+public abstract class FlowGraphNode&lt;T extends DataFlowProblem&lt;T, U&gt;, U extends FlowGraphNode&lt;T, U&gt;&gt; {
+<span class="fc" id="L20">    public FlowGraphNode(T problem, BasicBlock basicBlock) {</span>
+<span class="fc" id="L21">        this.problem = problem;</span>
+<span class="fc" id="L22">        this.basicBlock = basicBlock;</span>
+
+        // Cache the rescuer node for easy access
+<span class="fc" id="L25">        rescuer = problem.getScope().cfg().getRescuerBBFor(basicBlock);</span>
+<span class="fc" id="L26">    }</span>
+
+    /**
+     * Builds the data-flow variables (or facts) for a particular instruction.
+     */
+    public abstract void buildDataFlowVars(Instr i);
+
+    /**
+     * Initialize this data flow node for solving the current problem
+     * This is done after building dataflow variables for the problem.
+     */
+<span class="nc" id="L37">    public void init() { }</span>
+
+    /**
+     * Initialize this data flow node to compute the new solution
+     * This is done before iteratively calling the MEET operator.
+     */
+    public abstract void applyPreMeetHandler();
+
+    /**
+     * &quot;MEET&quot; current solution of &quot;IN/OUT&quot; with &quot;OUT/IN(pred)&quot;, where &quot;pred&quot;
+     * is a predecessor of the current node!  The choice of &quot;IN/OUT&quot; is
+     * determined by the direction of data flow.
+     */
+    public abstract void compute_MEET(Edge e, U pred);
+
+    /**
+     * Any setting up of state/initialization before applying transfer function
+     */
+<span class="nc" id="L55">    public void initSolution() { }</span>
+
+    /**
+     * Apply transfer function to the instruction
+     */
+    public abstract void applyTransferFunction(Instr i);
+
+    /**
+     * Did dataflow solution for this node change from last time?
+     */
+    public abstract boolean solutionChanged();
+
+    /**
+     * Any required cleanup of state after applying transfer function
+     */
+<span class="nc" id="L70">    public void finalizeSolution() { }</span>
+
+    public BasicBlock getBB() {
+<span class="fc" id="L73">        return basicBlock;</span>
+    }
+
+    /**
+     * Get the control flow graph
+     */
+    public CFG getCFG() {
+<span class="fc" id="L80">        return problem.scope.getCFG();</span>
+    }
+
+    /** Builds the data-flow variables (or facts) for a particular node.
+        Need only create the DF_Var for them to be added to the  problem.
+        Goes over the instructions in this basic block and collect
+        all relevant LOCAL data flow vars for this problem! */
+    public void buildDataFlowVars() {
+<span class="fc bfc" id="L88" title="All 2 branches covered.">        for (Instr i: basicBlock.getInstrs()) {</span>
+<span class="fc" id="L89">            buildDataFlowVars(i);</span>
+<span class="fc" id="L90">        }</span>
+<span class="fc" id="L91">    }</span>
+
+    private void processDestBB(List&lt;U&gt; workList, BitSet bbSet, BasicBlock d) {
+<span class="fc" id="L94">        int id = d.getID();</span>
+<span class="fc bfc" id="L95" title="All 2 branches covered.">        if (!bbSet.get(id)) {</span>
+<span class="fc" id="L96">            bbSet.set(id);</span>
+<span class="fc" id="L97">            workList.add(problem.getFlowGraphNode(d));</span>
+        }
+<span class="fc" id="L99">    }</span>
+
+    public void computeDataFlowInfo(List&lt;U&gt; workList, BitSet bbSet) {
+<span class="pc bpc" id="L102" title="1 of 2 branches missed.">        if (problem.getFlowDirection() == DataFlowProblem.DF_Direction.BIDIRECTIONAL) {</span>
+<span class="nc" id="L103">            throw new RuntimeException(&quot;Bidirectional data flow computation not implemented yet!&quot;);</span>
+        }
+
+        // System.out.println(&quot;----- processing bb &quot; + basicBlock.getID() + &quot; -----&quot;);
+<span class="fc" id="L107">        bbSet.clear(basicBlock.getID());</span>
+
+        // Compute meet over all &quot;sources&quot; and compute &quot;destination&quot; basic blocks that should then be processed.
+        // sources &amp; targets depends on direction of the data flow problem
+<span class="fc" id="L111">        applyPreMeetHandler();</span>
+
+<span class="fc bfc" id="L113" title="All 2 branches covered.">        if (problem.getFlowDirection() == DataFlowProblem.DF_Direction.FORWARD) {</span>
+<span class="fc" id="L114">            computeDataFlowInfoForward(workList, bbSet);</span>
+        } else {
+<span class="fc" id="L116">            computeDataFlowInfoBackward(workList, bbSet);</span>
+        }
+<span class="fc" id="L118">    }</span>
+
+    public void computeDataFlowInfoBackward(List&lt;U&gt; workList, BitSet bbSet) {
+<span class="fc bfc" id="L121" title="All 2 branches covered.">        for (Edge&lt;BasicBlock&gt; e: getCFG().getOutgoingEdges(basicBlock)) {</span>
+<span class="fc" id="L122">            compute_MEET(e, problem.getFlowGraphNode(e.getDestination().getData()));</span>
+<span class="fc" id="L123">        }</span>
+
+<span class="fc" id="L125">        initSolution();                                  // Initialize computation</span>
+
+        // Apply transfer function (analysis-specific) based on new facts after computing MEET
+<span class="fc" id="L128">        List&lt;Instr&gt; instrs = basicBlock.getInstrs();</span>
+<span class="fc" id="L129">        ListIterator&lt;Instr&gt; it = instrs.listIterator(instrs.size());</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">        while (it.hasPrevious()) {</span>
+<span class="fc" id="L131">            Instr i = it.previous();</span>
+            // System.out.println(&quot;TF: Processing: &quot; + i);
+<span class="fc" id="L133">            applyTransferFunction(i);</span>
+<span class="fc" id="L134">        }</span>
+
+        // If the solution has changed, add &quot;dsts&quot; to the work list.
+        // No duplicates please which is why we have bbset.
+<span class="fc bfc" id="L138" title="All 2 branches covered.">        if (solutionChanged()) {</span>
+<span class="fc bfc" id="L139" title="All 2 branches covered.">            for (BasicBlock b: getCFG().getIncomingSources(basicBlock)) {</span>
+<span class="fc" id="L140">                processDestBB(workList, bbSet, b);</span>
+<span class="fc" id="L141">            }</span>
+        }
+
+<span class="fc" id="L144">        finalizeSolution();                              // Any post-computation cleanup</span>
+<span class="fc" id="L145">    }</span>
+
+    public void computeDataFlowInfoForward(List&lt;U&gt; workList, BitSet bbSet) {
+<span class="fc bfc" id="L148" title="All 2 branches covered.">        for (Edge&lt;BasicBlock&gt; e: getCFG().getIncomingEdges(basicBlock)) {</span>
+<span class="fc" id="L149">            compute_MEET(e, problem.getFlowGraphNode(e.getSource().getData()));</span>
+<span class="fc" id="L150">        }</span>
+
+<span class="fc" id="L152">        initSolution();                                  // Initialize computation</span>
+
+        // Apply transfer function (analysis-specific) based on new facts after computing MEET
+<span class="fc bfc" id="L155" title="All 2 branches covered.">        for (Instr i : basicBlock.getInstrs()) {</span>
+            // System.out.println(&quot;TF: Processing: &quot; + i);
+<span class="fc" id="L157">            applyTransferFunction(i);</span>
+<span class="fc" id="L158">        }</span>
+
+        // If the solution has changed, add &quot;dsts&quot; to the work list.
+        // No duplicates please which is why we have bbset.
+<span class="fc bfc" id="L162" title="All 2 branches covered.">        if (solutionChanged()) {</span>
+<span class="fc bfc" id="L163" title="All 2 branches covered.">            for (BasicBlock b: getCFG().getOutgoingDestinations(basicBlock)) {</span>
+<span class="fc" id="L164">                processDestBB(workList, bbSet, b);</span>
+<span class="fc" id="L165">            }</span>
+        }
+
+<span class="fc" id="L168">        finalizeSolution();                              // Any post-computation cleanup</span>
+<span class="fc" id="L169">    }</span>
+
+    public boolean hasExceptionsRescued() {
+<span class="fc bfc" id="L172" title="All 2 branches covered.">        return rescuer != null;</span>
+    }
+
+    public U getExceptionTargetNode() {
+        // If there is a rescue node, on exception, control goes to the rescuer bb.  If not, it goes to the scope exit.
+<span class="fc bfc" id="L177" title="All 2 branches covered.">        return problem.getFlowGraphNode(rescuer == null ? getCFG().getExitBB() : rescuer);</span>
+    }
+
+/* --------- protected fields/methods below --------- */
+    protected final T problem;   // Dataflow problem with which this node is associated
+    protected final BasicBlock basicBlock;     // CFG node for which this node contains info.
+    private final BasicBlock rescuer;        // Basicblock that protects any exceptions raised in this node
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

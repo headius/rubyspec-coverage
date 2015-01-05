@@ -1,0 +1,228 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>BacktraceData.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime.backtrace</a> &gt; <span class="el_source">BacktraceData.java</span></div><h1>BacktraceData.java</h1><pre class="source lang-java linenums">package org.jruby.runtime.backtrace;
+
+import org.jruby.Ruby;
+import org.jruby.compiler.JITCompiler;
+import org.jruby.util.JavaNameMangler;
+
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Pattern;
+
+public class BacktraceData implements Serializable {
+    private RubyStackTraceElement[] backtraceElements;
+    private final StackTraceElement[] javaTrace;
+    private final BacktraceElement[] rubyTrace;
+    private final boolean fullTrace;
+    private final boolean maskNative;
+    private final boolean includeNonFiltered;
+
+<span class="fc" id="L21">    private final Pattern FILTER_CLASSES = Pattern.compile(&quot;^(org\\.jruby)|(sun\\.reflect)&quot;);</span>
+
+<span class="fc" id="L23">    public BacktraceData(StackTraceElement[] javaTrace, BacktraceElement[] rubyTrace, boolean fullTrace, boolean maskNative, boolean includeNonFiltered) {</span>
+<span class="fc" id="L24">        this.javaTrace = javaTrace;</span>
+<span class="fc" id="L25">        this.rubyTrace = rubyTrace;</span>
+<span class="fc" id="L26">        this.fullTrace = fullTrace;</span>
+<span class="fc" id="L27">        this.includeNonFiltered = includeNonFiltered;</span>
+<span class="fc" id="L28">        this.maskNative = maskNative;</span>
+<span class="fc" id="L29">    }</span>
+
+<span class="fc" id="L31">    public static final BacktraceData EMPTY = new BacktraceData(</span>
+            new StackTraceElement[0],
+            new BacktraceElement[0],
+            false,
+            false,
+            false);
+
+    public RubyStackTraceElement[] getBacktrace(Ruby runtime) {
+<span class="fc bfc" id="L39" title="All 2 branches covered.">        if (backtraceElements == null) {</span>
+<span class="fc" id="L40">            backtraceElements = transformBacktrace(runtime.getBoundMethods());</span>
+        }
+<span class="fc" id="L42">        return backtraceElements;</span>
+    }
+
+    private RubyStackTraceElement[] transformBacktrace(Map&lt;String, Map&lt;String, String&gt;&gt; boundMethods) {
+<span class="fc" id="L46">        List&lt;RubyStackTraceElement&gt; trace = new ArrayList&lt;RubyStackTraceElement&gt;(javaTrace.length);</span>
+
+        // used for duplicating the previous Ruby frame when masking native calls
+<span class="fc" id="L49">        boolean dupFrame = false;</span>
+<span class="fc" id="L50">        String dupFrameName = null;</span>
+
+        // a running index into the Ruby backtrace stack, incremented for each
+        // interpreter frame we encounter in the Java backtrace.
+<span class="pc bpc" id="L54" title="1 of 2 branches missed.">        int rubyFrameIndex = rubyTrace == null ? -1 : rubyTrace.length - 1;</span>
+
+        // loop over all elements in the Java stack trace
+<span class="fc bfc" id="L57" title="All 2 branches covered.">        for (int i = 0; i &lt; javaTrace.length; i++) {</span>
+
+<span class="fc" id="L59">            StackTraceElement element = javaTrace[i];</span>
+
+            // skip unnumbered frames
+<span class="fc" id="L62">            int line = element.getLineNumber();</span>
+<span class="fc bfc" id="L63" title="All 2 branches covered.">            if (line == -1) continue;</span>
+
+<span class="fc" id="L65">            String className = element.getClassName();</span>
+<span class="fc" id="L66">            String methodName = element.getMethodName();</span>
+<span class="fc" id="L67">            String filename = element.getFileName();</span>
+
+<span class="pc bpc" id="L69" title="1 of 2 branches missed.">            if (filename != null) {</span>
+
+                // Don't process .java files
+<span class="fc bfc" id="L72" title="All 2 branches covered.">                if (!filename.endsWith(&quot;.java&quot;)) {</span>
+
+<span class="fc" id="L74">                    boolean compiled = false;</span>
+<span class="fc" id="L75">                    int index = -1;</span>
+
+                    // Check for compiled name markers
+                    // FIXME: Formalize jitted method structure so this isn't quite as hacky
+<span class="pc bpc" id="L79" title="1 of 2 branches missed.">                    if (className.startsWith(JITCompiler.RUBY_JIT_PREFIX)) {</span>
+
+                        // JIT-compiled code
+<span class="nc" id="L82">                        compiled = true;</span>
+
+                        // pull out and demangle the method name
+<span class="nc" id="L85">                        String tmpClassName = className;</span>
+<span class="nc" id="L86">                        int start = JITCompiler.RUBY_JIT_PREFIX.length() + 1;</span>
+<span class="nc" id="L87">                        int hash = tmpClassName.indexOf(JITCompiler.CLASS_METHOD_DELIMITER, start);</span>
+<span class="nc" id="L88">                        int end = tmpClassName.lastIndexOf(&quot;_&quot;);</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">                        if( hash != -1 ) { // TODO in case the class file was loaded by jit codeCache. Is this right</span>
+<span class="nc" id="L90">                            className = tmpClassName.substring(start, hash);</span>
+                        }
+<span class="nc" id="L92">                        methodName = tmpClassName.substring(hash + JITCompiler.CLASS_METHOD_DELIMITER.length(), end);</span>
+
+<span class="pc bpc" id="L94" title="1 of 2 branches missed.">                    } else if ((index = methodName.indexOf(&quot;$RUBY$&quot;)) &gt;= 0) {</span>
+
+                        // AOT-compiled code
+<span class="nc" id="L97">                        compiled = true;</span>
+
+                        // pull out and demangle the method name
+<span class="nc" id="L100">                        index += &quot;$RUBY$&quot;.length();</span>
+<span class="nc bnc" id="L101" title="All 2 branches missed.">                        if (methodName.indexOf(&quot;SYNTHETIC&quot;, index) == index) {</span>
+<span class="nc" id="L102">                            methodName = methodName.substring(index + &quot;SYNTHETIC&quot;.length());</span>
+                        } else {
+<span class="nc" id="L104">                            methodName = methodName.substring(index);</span>
+                        }
+
+                    }
+
+                    // demangle any JVM-prohibited names
+<span class="fc" id="L110">                    methodName = JavaNameMangler.demangleMethodName(methodName);</span>
+
+                    // root body gets named (root)
+<span class="pc bpc" id="L113" title="1 of 2 branches missed.">                    if (methodName.equals(&quot;__file__&quot;)) methodName = &quot;(root)&quot;;</span>
+
+                    // construct Ruby trace element
+<span class="fc" id="L116">                    RubyStackTraceElement rubyElement = new RubyStackTraceElement(className, methodName, filename, line, false);</span>
+
+                    // add duplicate if masking native and previous frame was native (Kernel#caller)
+<span class="fc bfc" id="L119" title="All 4 branches covered.">                    if (maskNative &amp;&amp; dupFrame) {</span>
+<span class="fc" id="L120">                        dupFrame = false;</span>
+<span class="fc" id="L121">                        trace.add(new RubyStackTraceElement(className, dupFrameName, filename, line, false));</span>
+                    }
+<span class="fc" id="L123">                    trace.add(rubyElement);</span>
+
+<span class="pc bpc" id="L125" title="1 of 2 branches missed.">                    if (compiled) {</span>
+                        // if it's a synthetic call, gobble up parent calls
+                        // TODO: need to formalize this better
+<span class="nc bnc" id="L128" title="All 4 branches missed.">                        while (element.getMethodName().contains(&quot;$RUBY$SYNTHETIC&quot;) &amp;&amp; ++i &lt; javaTrace.length) {</span>
+<span class="nc" id="L129">                            element = javaTrace[i];</span>
+                        }
+                    }
+                }
+            }
+
+            // Java-based Ruby core methods
+<span class="fc" id="L136">            String rubyName = null;</span>
+<span class="pc bpc" id="L137" title="1 of 2 branches missed.">            if (</span>
+                    fullTrace || // full traces show all elements
+<span class="fc bfc" id="L139" title="All 2 branches covered.">                    (rubyName = getBoundMethodName(boundMethods, className, methodName)) != null // if a bound Java impl, always show</span>
+                    ) {
+
+<span class="pc bpc" id="L142" title="1 of 2 branches missed.">                if (rubyName == null) rubyName = methodName;</span>
+
+                // add package to filename
+<span class="fc" id="L145">                filename = packagedFilenameFromElement(filename, className);</span>
+
+                // mask .java frames out for e.g. Kernel#caller
+<span class="fc bfc" id="L148" title="All 2 branches covered.">                if (maskNative) {</span>
+                    // for Kernel#caller, don't show .java frames in the trace
+<span class="fc" id="L150">                    dupFrame = true;</span>
+<span class="fc" id="L151">                    dupFrameName = rubyName;</span>
+<span class="fc" id="L152">                    continue;</span>
+                }
+
+                // construct Ruby trace element
+<span class="fc" id="L156">                trace.add(new RubyStackTraceElement(className, rubyName, filename, line, false));</span>
+
+                // if not full trace, we're done; don't check interpreted marker
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">                if (!fullTrace) {</span>
+<span class="fc" id="L160">                    continue;</span>
+                }
+            }
+
+            // Interpreted frames
+<span class="pc bpc" id="L165" title="1 of 2 branches missed.">            if (rubyFrameIndex &gt;= 0 &amp;&amp;</span>
+<span class="fc bfc" id="L166" title="All 2 branches covered.">                    FrameType.INTERPRETED_CLASSES.contains(className) &amp;&amp;</span>
+<span class="fc bfc" id="L167" title="All 2 branches covered.">                    FrameType.INTERPRETED_FRAMES.containsKey(methodName)) {</span>
+
+                // pop interpreter frame
+<span class="fc" id="L170">                BacktraceElement rubyFrame = rubyTrace[rubyFrameIndex--];</span>
+
+                // construct Ruby trace element
+<span class="fc" id="L173">                RubyStackTraceElement rubyElement = new RubyStackTraceElement(&quot;RUBY&quot;, rubyFrame.method, rubyFrame.filename, rubyFrame.line + 1, false);</span>
+
+                // dup if masking native and previous frame was native
+<span class="fc bfc" id="L176" title="All 4 branches covered.">                if (maskNative &amp;&amp; dupFrame) {</span>
+<span class="fc" id="L177">                    dupFrame = false;</span>
+<span class="fc" id="L178">                    trace.add(new RubyStackTraceElement(rubyElement.getClassName(), dupFrameName, rubyElement.getFileName(), rubyElement.getLineNumber(), rubyElement.isBinding()));</span>
+                }
+<span class="fc" id="L180">                trace.add(rubyElement);</span>
+
+<span class="fc" id="L182">                continue;</span>
+            }
+
+            // if all else fails and this is a non-JRuby element we want to include, add it
+<span class="pc bpc" id="L186" title="3 of 4 branches missed.">            if (includeNonFiltered &amp;&amp; !isFilteredClass(className)) {</span>
+<span class="nc" id="L187">                trace.add(new RubyStackTraceElement(</span>
+                        className,
+                        methodName,
+<span class="nc" id="L190">                        packagedFilenameFromElement(filename, className),</span>
+                        line,
+                        false
+                ));
+<span class="nc" id="L194">                continue;</span>
+            }
+        }
+
+<span class="fc" id="L198">        RubyStackTraceElement[] rubyStackTrace = new RubyStackTraceElement[trace.size()];</span>
+<span class="fc" id="L199">        return trace.toArray(rubyStackTrace);</span>
+    }
+
+    public static String getBoundMethodName(Map&lt;String,Map&lt;String,String&gt;&gt; boundMethods, String className, String methodName) {
+<span class="fc" id="L203">        Map&lt;String, String&gt; javaToRuby = boundMethods.get(className);</span>
+
+<span class="fc bfc" id="L205" title="All 2 branches covered.">        if (javaToRuby == null) return null;</span>
+
+<span class="fc" id="L207">        return javaToRuby.get(methodName);</span>
+    }
+
+    private static String packagedFilenameFromElement(String filename, String className) {
+        // stick package on the beginning
+<span class="pc bpc" id="L212" title="1 of 2 branches missed.">        if (filename == null) {</span>
+<span class="nc" id="L213">            filename = className.replaceAll(&quot;\\.&quot;, &quot;/&quot;);</span>
+        } else {
+<span class="fc" id="L215">            int lastDot = className.lastIndexOf('.');</span>
+<span class="pc bpc" id="L216" title="1 of 2 branches missed.">            if (lastDot != -1) {</span>
+<span class="fc" id="L217">                filename = className.substring(0, lastDot + 1).replaceAll(&quot;\\.&quot;, &quot;/&quot;) + filename;</span>
+            }
+        }
+
+<span class="fc" id="L221">        return filename;</span>
+    }
+
+    private boolean isFilteredClass(String className) {
+<span class="nc" id="L225">        return FILTER_CLASSES.matcher(className).find();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

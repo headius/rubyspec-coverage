@@ -1,0 +1,646 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IRBytecodeAdapter6.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.targets</a> &gt; <span class="el_source">IRBytecodeAdapter6.java</span></div><h1>IRBytecodeAdapter6.java</h1><pre class="source lang-java linenums">/*
+ * To change this template, choose Tools | Templates
+ * and open the template in the editor.
+ */
+package org.jruby.ir.targets;
+
+import com.headius.invokebinder.Signature;
+import java.math.BigInteger;
+import org.jcodings.Encoding;
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyBignum;
+import org.jruby.RubyBoolean;
+import org.jruby.RubyClass;
+import org.jruby.RubyEncoding;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyFloat;
+import org.jruby.RubyHash;
+import org.jruby.RubyModule;
+import org.jruby.RubyRegexp;
+import org.jruby.RubyString;
+import org.jruby.RubySymbol;
+import org.jruby.compiler.NotCompilableException;
+import org.jruby.compiler.impl.SkinnyMethodAdapter;
+import org.jruby.ir.runtime.IRRuntimeHelpers;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.callsite.CachingCallSite;
+import org.jruby.runtime.callsite.FunctionalCachingCallSite;
+import org.jruby.util.ByteList;
+import org.jruby.util.JavaNameMangler;
+import org.jruby.util.RegexpOptions;
+import org.objectweb.asm.Label;
+import org.objectweb.asm.Opcodes;
+
+import static org.jruby.util.CodegenUtils.ci;
+import static org.jruby.util.CodegenUtils.p;
+import static org.jruby.util.CodegenUtils.params;
+import static org.jruby.util.CodegenUtils.sig;
+
+/**
+ * Java 6 and lower-compatible version of bytecode adapter for IR JIT.
+ *
+ * CON FIXME: These are all dirt-stupid impls that will not be as efficient.
+ */
+public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
+    public IRBytecodeAdapter6(SkinnyMethodAdapter adapter, Signature signature, ClassData classData) {
+<span class="fc" id="L51">        super(adapter, signature, classData);</span>
+<span class="fc" id="L52">    }</span>
+
+    public void pushFixnum(long l) {
+<span class="fc" id="L55">        loadRuntime();</span>
+<span class="fc" id="L56">        adapter.ldc(l);</span>
+<span class="fc" id="L57">        adapter.invokevirtual(p(Ruby.class), &quot;newFixnum&quot;, sig(RubyFixnum.class, long.class));</span>
+<span class="fc" id="L58">    }</span>
+
+    public void pushFloat(double d) {
+<span class="fc" id="L61">        loadRuntime();</span>
+<span class="fc" id="L62">        adapter.ldc(d);</span>
+<span class="fc" id="L63">        adapter.invokevirtual(p(Ruby.class), &quot;newFloat&quot;, sig(RubyFloat.class, double.class));</span>
+<span class="fc" id="L64">    }</span>
+
+    public void pushString(ByteList bl) {
+<span class="fc" id="L67">        loadRuntime();</span>
+<span class="fc" id="L68">        pushByteList(bl);</span>
+<span class="fc" id="L69">        adapter.invokestatic(p(RubyString.class), &quot;newStringShared&quot;, sig(RubyString.class, Ruby.class, ByteList.class));</span>
+<span class="fc" id="L70">    }</span>
+
+    /**
+     * Stack required: none
+     *
+     * @param bl ByteList for the String to push
+     */
+    public void pushFrozenString(ByteList bl) {
+        // FIXME: too much bytecode
+<span class="nc" id="L79">        String cacheField = &quot;frozenString&quot; + getClassData().callSiteCount.getAndIncrement();</span>
+<span class="nc" id="L80">        Label done = new Label();</span>
+<span class="nc" id="L81">        adapter.getClassVisitor().visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC, cacheField, ci(RubyString.class), null, null).visitEnd();</span>
+<span class="nc" id="L82">        adapter.getstatic(getClassData().clsName, cacheField, ci(RubyString.class));</span>
+<span class="nc" id="L83">        adapter.dup();</span>
+<span class="nc" id="L84">        adapter.ifnonnull(done);</span>
+<span class="nc" id="L85">        adapter.pop();</span>
+<span class="nc" id="L86">        loadRuntime();</span>
+<span class="nc" id="L87">        adapter.ldc(bl.toString());</span>
+<span class="nc" id="L88">        adapter.ldc(bl.getEncoding().toString());</span>
+<span class="nc" id="L89">        invokeIRHelper(&quot;newFrozenStringFromRaw&quot;, sig(RubyString.class, Ruby.class, String.class, String.class));</span>
+<span class="nc" id="L90">        adapter.dup();</span>
+<span class="nc" id="L91">        adapter.putstatic(getClassData().clsName, cacheField, ci(RubyString.class));</span>
+<span class="nc" id="L92">        adapter.label(done);</span>
+<span class="nc" id="L93">    }</span>
+
+    public void pushByteList(ByteList bl) {
+        // FIXME: too much bytecode
+<span class="fc" id="L97">        String cacheField = &quot;byteList&quot; + getClassData().callSiteCount.getAndIncrement();</span>
+<span class="fc" id="L98">        Label done = new Label();</span>
+<span class="fc" id="L99">        adapter.getClassVisitor().visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC, cacheField, ci(ByteList.class), null, null).visitEnd();</span>
+<span class="fc" id="L100">        adapter.getstatic(getClassData().clsName, cacheField, ci(ByteList.class));</span>
+<span class="fc" id="L101">        adapter.dup();</span>
+<span class="fc" id="L102">        adapter.ifnonnull(done);</span>
+<span class="fc" id="L103">        adapter.pop();</span>
+<span class="fc" id="L104">        loadRuntime();</span>
+<span class="fc" id="L105">        adapter.ldc(bl.toString());</span>
+<span class="fc" id="L106">        adapter.ldc(bl.getEncoding().toString());</span>
+<span class="fc" id="L107">        invokeIRHelper(&quot;newByteListFromRaw&quot;, sig(ByteList.class, Ruby.class, String.class, String.class));</span>
+<span class="fc" id="L108">        adapter.dup();</span>
+<span class="fc" id="L109">        adapter.putstatic(getClassData().clsName, cacheField, ci(ByteList.class));</span>
+<span class="fc" id="L110">        adapter.label(done);</span>
+<span class="fc" id="L111">    }</span>
+
+    public void pushRegexp(int options) {
+<span class="fc" id="L114">        adapter.pushInt(options);</span>
+<span class="fc" id="L115">        invokeIRHelper(&quot;constructRubyRegexp&quot;, sig(RubyRegexp.class, ThreadContext.class, RubyString.class, int.class));</span>
+<span class="fc" id="L116">    }</span>
+
+    public void pushDRegexp(Runnable callback, RegexpOptions options, int arity) {
+<span class="pc bpc" id="L119" title="1 of 2 branches missed.">        if (arity &gt; MAX_ARGUMENTS) throw new NotCompilableException(&quot;dynamic regexp has more than &quot; + MAX_ARGUMENTS + &quot; elements&quot;);</span>
+
+        SkinnyMethodAdapter adapter2;
+<span class="fc" id="L122">        String incomingSig = sig(RubyRegexp.class, params(ThreadContext.class, RubyString.class, arity, int.class));</span>
+
+<span class="fc bfc" id="L124" title="All 2 branches covered.">        if (!getClassData().dregexpMethodsDefined.contains(arity)) {</span>
+<span class="fc" id="L125">            adapter2 = new SkinnyMethodAdapter(</span>
+<span class="fc" id="L126">                    adapter.getClassVisitor(),</span>
+                    Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                    &quot;dregexp:&quot; + arity,
+                    incomingSig,
+                    null,
+                    null);
+
+<span class="fc" id="L133">            adapter2.aload(0);</span>
+<span class="fc" id="L134">            buildArrayFromLocals(adapter2, 1, arity);</span>
+<span class="fc" id="L135">            adapter2.iload(1 + arity);</span>
+
+<span class="fc" id="L137">            adapter2.invokestatic(p(IRRuntimeHelpers.class), &quot;newDynamicRegexp&quot;, sig(RubyRegexp.class, ThreadContext.class, IRubyObject[].class, int.class));</span>
+<span class="fc" id="L138">            adapter2.areturn();</span>
+<span class="fc" id="L139">            adapter2.end();</span>
+
+<span class="fc" id="L141">            getClassData().dregexpMethodsDefined.add(arity);</span>
+        }
+
+<span class="fc" id="L144">        String cacheField = null;</span>
+<span class="fc" id="L145">        Label done = null;</span>
+
+<span class="pc bpc" id="L147" title="1 of 2 branches missed.">        if (options.isOnce()) {</span>
+            // need to cache result forever
+<span class="nc" id="L149">            cacheField = &quot;dregexp&quot; + getClassData().callSiteCount.getAndIncrement();</span>
+<span class="nc" id="L150">            done = new Label();</span>
+<span class="nc" id="L151">            adapter.getClassVisitor().visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC, cacheField, ci(RubyRegexp.class), null, null).visitEnd();</span>
+<span class="nc" id="L152">            adapter.getstatic(getClassData().clsName, cacheField, ci(RubyRegexp.class));</span>
+<span class="nc" id="L153">            adapter.dup();</span>
+<span class="nc" id="L154">            adapter.ifnonnull(done);</span>
+<span class="nc" id="L155">            adapter.pop();</span>
+        }
+
+        // call synthetic method if we still need to build dregexp
+<span class="fc" id="L159">        callback.run();</span>
+<span class="fc" id="L160">        adapter.ldc(options.toEmbeddedOptions());</span>
+<span class="fc" id="L161">        adapter.invokestatic(getClassData().clsName, &quot;dregexp:&quot; + arity, incomingSig);</span>
+
+<span class="pc bpc" id="L163" title="1 of 2 branches missed.">        if (done != null) {</span>
+<span class="nc" id="L164">            adapter.dup();</span>
+<span class="nc" id="L165">            adapter.putstatic(getClassData().clsName, cacheField, ci(RubyRegexp.class));</span>
+<span class="nc" id="L166">            adapter.label(done);</span>
+        }
+<span class="fc" id="L168">    }</span>
+
+    public void pushSymbol(String sym, Encoding encoding) {
+<span class="fc" id="L171">        loadRuntime();</span>
+<span class="fc" id="L172">        adapter.ldc(sym);</span>
+
+        // FIXME: Should be a helper somewhere?  Load Encoding
+<span class="fc" id="L175">        loadContext();</span>
+<span class="fc" id="L176">        adapter.ldc(encoding.toString());</span>
+<span class="fc" id="L177">        invokeIRHelper(&quot;retrieveJCodingsEncoding&quot;, sig(Encoding.class, ThreadContext.class, String.class));</span>
+
+<span class="fc" id="L179">        adapter.invokestatic(p(RubySymbol.class), &quot;newSymbol&quot;, sig(RubySymbol.class, Ruby.class, String.class, Encoding.class));</span>
+<span class="fc" id="L180">    }</span>
+
+    public void loadRuntime() {
+<span class="fc" id="L183">        loadContext();</span>
+<span class="fc" id="L184">        adapter.getfield(p(ThreadContext.class), &quot;runtime&quot;, ci(Ruby.class));</span>
+<span class="fc" id="L185">    }</span>
+
+    public void pushEncoding(Encoding encoding) {
+<span class="fc" id="L188">        loadContext();</span>
+<span class="fc" id="L189">        adapter.ldc(encoding.toString());</span>
+<span class="fc" id="L190">        invokeIRHelper(&quot;retrieveEncoding&quot;, sig(RubyEncoding.class, ThreadContext.class, String.class));</span>
+<span class="fc" id="L191">    }</span>
+
+    public void invokeOther(String name, int arity, boolean hasClosure) {
+<span class="pc bpc" id="L194" title="1 of 2 branches missed.">        if (arity &gt; MAX_ARGUMENTS) throw new NotCompilableException(&quot;call to `&quot; + name + &quot;' has more than &quot; + MAX_ARGUMENTS + &quot; arguments&quot;);</span>
+
+        SkinnyMethodAdapter adapter2;
+        String incomingSig;
+        String outgoingSig;
+
+<span class="fc bfc" id="L200" title="All 2 branches covered.">        if (hasClosure) {</span>
+<span class="pc bpc" id="L201" title="1 of 3 branches missed.">            switch (arity) {</span>
+                case -1:
+<span class="fc" id="L203">                    incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, JVM.OBJECT_ARRAY, Block.class));</span>
+<span class="fc" id="L204">                    outgoingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, JVM.OBJECT_ARRAY, Block.class));</span>
+<span class="fc" id="L205">                    break;</span>
+                case 0:
+                case 1:
+                case 2:
+                case 3:
+<span class="fc" id="L210">                    incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, JVM.OBJECT, arity, Block.class));</span>
+<span class="fc" id="L211">                    outgoingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, JVM.OBJECT, arity, Block.class));</span>
+<span class="fc" id="L212">                    break;</span>
+                default:
+<span class="nc" id="L214">                    incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, JVM.OBJECT, arity, Block.class));</span>
+<span class="nc" id="L215">                    outgoingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, JVM.OBJECT_ARRAY, Block.class));</span>
+<span class="nc" id="L216">                    break;</span>
+            }
+        } else {
+<span class="fc bfc" id="L219" title="All 3 branches covered.">            switch (arity) {</span>
+                case -1:
+<span class="fc" id="L221">                    incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, JVM.OBJECT_ARRAY));</span>
+<span class="fc" id="L222">                    outgoingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, JVM.OBJECT_ARRAY));</span>
+<span class="fc" id="L223">                    break;</span>
+                case 0:
+                case 1:
+                case 2:
+                case 3:
+<span class="fc" id="L228">                    incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, JVM.OBJECT, arity));</span>
+<span class="fc" id="L229">                    outgoingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, JVM.OBJECT, arity));</span>
+<span class="fc" id="L230">                    break;</span>
+                default:
+<span class="fc" id="L232">                    incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, JVM.OBJECT, arity));</span>
+<span class="fc" id="L233">                    outgoingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, JVM.OBJECT_ARRAY));</span>
+                    break;
+            }
+        }
+
+<span class="fc" id="L238">        String methodName = &quot;invokeOther&quot; + getClassData().callSiteCount.getAndIncrement() + &quot;:&quot; + JavaNameMangler.mangleMethodName(name);</span>
+
+<span class="fc" id="L240">        adapter2 = new SkinnyMethodAdapter(</span>
+<span class="fc" id="L241">                adapter.getClassVisitor(),</span>
+                Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                methodName,
+                incomingSig,
+                null,
+                null);
+
+        // call site object field
+<span class="fc" id="L249">        adapter.getClassVisitor().visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC, methodName, ci(CachingCallSite.class), null, null).visitEnd();</span>
+
+        // lazily construct it
+<span class="fc" id="L252">        adapter2.getstatic(getClassData().clsName, methodName, ci(CachingCallSite.class));</span>
+<span class="fc" id="L253">        adapter2.dup();</span>
+<span class="fc" id="L254">        Label doCall = new Label();</span>
+<span class="fc" id="L255">        adapter2.ifnonnull(doCall);</span>
+<span class="fc" id="L256">        adapter2.pop();</span>
+<span class="fc" id="L257">        adapter2.ldc(name);</span>
+<span class="fc" id="L258">        adapter2.invokestatic(p(IRRuntimeHelpers.class), &quot;newFunctionalCachingCallSite&quot;, sig(FunctionalCachingCallSite.class, String.class));</span>
+<span class="fc" id="L259">        adapter2.dup();</span>
+<span class="fc" id="L260">        adapter2.putstatic(getClassData().clsName, methodName, ci(CachingCallSite.class));</span>
+
+        // use call site to invoke
+<span class="fc" id="L263">        adapter2.label(doCall);</span>
+<span class="fc" id="L264">        adapter2.aload(0); // context</span>
+<span class="fc" id="L265">        adapter2.aload(1); // caller</span>
+<span class="fc" id="L266">        adapter2.aload(2); // self</span>
+
+<span class="fc bfc" id="L268" title="All 5 branches covered.">        switch (arity) {</span>
+            case -1:
+            case 1:
+<span class="fc" id="L271">                adapter2.aload(3);</span>
+<span class="fc bfc" id="L272" title="All 2 branches covered.">                if (hasClosure) adapter2.aload(4);</span>
+                break;
+            case 0:
+<span class="fc bfc" id="L275" title="All 2 branches covered.">                if (hasClosure) adapter2.aload(3);</span>
+                break;
+            case 2:
+<span class="fc" id="L278">                adapter2.aload(3);</span>
+<span class="fc" id="L279">                adapter2.aload(4);</span>
+<span class="fc bfc" id="L280" title="All 2 branches covered.">                if (hasClosure) adapter2.aload(5);</span>
+                break;
+            case 3:
+<span class="fc" id="L283">                adapter2.aload(3);</span>
+<span class="fc" id="L284">                adapter2.aload(4);</span>
+<span class="fc" id="L285">                adapter2.aload(5);</span>
+<span class="pc bpc" id="L286" title="1 of 2 branches missed.">                if (hasClosure) adapter2.aload(6);</span>
+                break;
+            default:
+<span class="fc" id="L289">                buildArrayFromLocals(adapter2, 3, arity);</span>
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">                if (hasClosure) adapter2.aload(3 + arity);</span>
+                break;
+        }
+
+<span class="fc" id="L294">        adapter2.invokevirtual(p(CachingCallSite.class), &quot;call&quot;, outgoingSig);</span>
+<span class="fc" id="L295">        adapter2.areturn();</span>
+<span class="fc" id="L296">        adapter2.end();</span>
+
+        // now call it
+<span class="fc" id="L299">        adapter.invokestatic(getClassData().clsName, methodName, incomingSig);</span>
+<span class="fc" id="L300">    }</span>
+
+    public static void buildArrayFromLocals(SkinnyMethodAdapter adapter2, int base, int arity) {
+<span class="fc bfc" id="L303" title="All 2 branches covered.">        if (arity == 0) {</span>
+<span class="fc" id="L304">            adapter2.getstatic(p(IRubyObject.class), &quot;NULL_ARRAY&quot;, ci(IRubyObject[].class));</span>
+<span class="fc" id="L305">            return;</span>
+        }
+
+<span class="fc" id="L308">        adapter2.pushInt(arity);</span>
+<span class="fc" id="L309">        adapter2.invokestatic(p(Helpers.class), &quot;anewarrayIRubyObjects&quot;, sig(IRubyObject[].class, int.class));</span>
+
+<span class="fc bfc" id="L311" title="All 2 branches covered.">        for (int i = 0; i &lt; arity;) {</span>
+<span class="fc" id="L312">            int j = 0;</span>
+<span class="pc bpc" id="L313" title="1 of 4 branches missed.">            while (i + j &lt; arity &amp;&amp; j &lt; Helpers.MAX_SPECIFIC_ARITY_OBJECT_ARRAY) {</span>
+<span class="fc" id="L314">                adapter2.aload(base + i + j);</span>
+<span class="fc" id="L315">                j++;</span>
+            }
+<span class="fc" id="L317">            adapter2.pushInt(i);</span>
+<span class="fc" id="L318">            adapter2.invokestatic(p(Helpers.class), &quot;aastoreIRubyObjects&quot;, sig(IRubyObject[].class, params(IRubyObject[].class, IRubyObject.class, j, int.class)));</span>
+<span class="fc" id="L319">            i += j;</span>
+<span class="fc" id="L320">        }</span>
+<span class="fc" id="L321">    }</span>
+
+    public void invokeOtherOneFixnum(String name, long fixnum) {
+        SkinnyMethodAdapter adapter2;
+<span class="fc" id="L325">        String incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT));</span>
+<span class="fc" id="L326">        String outgoingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, long.class));</span>
+
+<span class="fc" id="L328">        String methodName = &quot;invokeOtherOneFixnum&quot; + getClassData().callSiteCount.getAndIncrement() + &quot;:&quot; + JavaNameMangler.mangleMethodName(name);</span>
+
+<span class="fc" id="L330">        adapter2 = new SkinnyMethodAdapter(</span>
+<span class="fc" id="L331">                adapter.getClassVisitor(),</span>
+                Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                methodName,
+                incomingSig,
+                null,
+                null);
+
+        // call site object field
+<span class="fc" id="L339">        adapter.getClassVisitor().visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC, methodName, ci(CachingCallSite.class), null, null).visitEnd();</span>
+
+        // lazily construct it
+<span class="fc" id="L342">        adapter2.getstatic(getClassData().clsName, methodName, ci(CachingCallSite.class));</span>
+<span class="fc" id="L343">        adapter2.dup();</span>
+<span class="fc" id="L344">        Label doCall = new Label();</span>
+<span class="fc" id="L345">        adapter2.ifnonnull(doCall);</span>
+<span class="fc" id="L346">        adapter2.pop();</span>
+<span class="fc" id="L347">        adapter2.ldc(name);</span>
+<span class="fc" id="L348">        adapter2.invokestatic(p(IRRuntimeHelpers.class), &quot;newFunctionalCachingCallSite&quot;, sig(FunctionalCachingCallSite.class, String.class));</span>
+<span class="fc" id="L349">        adapter2.dup();</span>
+<span class="fc" id="L350">        adapter2.putstatic(getClassData().clsName, methodName, ci(CachingCallSite.class));</span>
+
+        // use call site to invoke
+<span class="fc" id="L353">        adapter2.label(doCall);</span>
+<span class="fc" id="L354">        adapter2.aload(0); // context</span>
+<span class="fc" id="L355">        adapter2.aload(1); // caller</span>
+<span class="fc" id="L356">        adapter2.aload(2); // target</span>
+<span class="fc" id="L357">        adapter2.ldc(fixnum); // fixnum</span>
+
+<span class="fc" id="L359">        adapter2.invokevirtual(p(CachingCallSite.class), &quot;call&quot;, outgoingSig);</span>
+<span class="fc" id="L360">        adapter2.areturn();</span>
+<span class="fc" id="L361">        adapter2.end();</span>
+
+        // now call it
+<span class="fc" id="L364">        adapter.invokestatic(getClassData().clsName, methodName, incomingSig);</span>
+<span class="fc" id="L365">    }</span>
+
+    public void invokeOtherOneFloat(String name, double flote) {
+        SkinnyMethodAdapter adapter2;
+<span class="nc" id="L369">        String incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT));</span>
+<span class="nc" id="L370">        String outgoingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, double.class));</span>
+
+<span class="nc" id="L372">        String methodName = &quot;invokeOtherOneFloat&quot; + getClassData().callSiteCount.getAndIncrement() + &quot;:&quot; + JavaNameMangler.mangleMethodName(name);</span>
+
+<span class="nc" id="L374">        adapter2 = new SkinnyMethodAdapter(</span>
+<span class="nc" id="L375">                adapter.getClassVisitor(),</span>
+                Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                methodName,
+                incomingSig,
+                null,
+                null);
+
+        // call site object field
+<span class="nc" id="L383">        adapter.getClassVisitor().visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC, methodName, ci(CachingCallSite.class), null, null).visitEnd();</span>
+
+        // lazily construct it
+<span class="nc" id="L386">        adapter2.getstatic(getClassData().clsName, methodName, ci(CachingCallSite.class));</span>
+<span class="nc" id="L387">        adapter2.dup();</span>
+<span class="nc" id="L388">        Label doCall = new Label();</span>
+<span class="nc" id="L389">        adapter2.ifnonnull(doCall);</span>
+<span class="nc" id="L390">        adapter2.pop();</span>
+<span class="nc" id="L391">        adapter2.ldc(name);</span>
+<span class="nc" id="L392">        adapter2.invokestatic(p(IRRuntimeHelpers.class), &quot;newFunctionalCachingCallSite&quot;, sig(FunctionalCachingCallSite.class, String.class));</span>
+<span class="nc" id="L393">        adapter2.dup();</span>
+<span class="nc" id="L394">        adapter2.putstatic(getClassData().clsName, methodName, ci(CachingCallSite.class));</span>
+
+        // use call site to invoke
+<span class="nc" id="L397">        adapter2.label(doCall);</span>
+<span class="nc" id="L398">        adapter2.aload(0); // context</span>
+<span class="nc" id="L399">        adapter2.aload(1); // caller</span>
+<span class="nc" id="L400">        adapter2.aload(2); // target</span>
+<span class="nc" id="L401">        adapter2.ldc(flote); // float</span>
+
+<span class="nc" id="L403">        adapter2.invokevirtual(p(CachingCallSite.class), &quot;call&quot;, outgoingSig);</span>
+<span class="nc" id="L404">        adapter2.areturn();</span>
+<span class="nc" id="L405">        adapter2.end();</span>
+
+        // now call it
+<span class="nc" id="L408">        adapter.invokestatic(getClassData().clsName, methodName, incomingSig);</span>
+<span class="nc" id="L409">    }</span>
+
+    public void invokeSelf(String name, int arity, boolean hasClosure) {
+<span class="pc bpc" id="L412" title="1 of 2 branches missed.">        if (arity &gt; MAX_ARGUMENTS) throw new NotCompilableException(&quot;call to `&quot; + name + &quot;' has more than &quot; + MAX_ARGUMENTS + &quot; arguments&quot;);</span>
+
+<span class="fc" id="L414">        invokeOther(name, arity, hasClosure);</span>
+<span class="fc" id="L415">    }</span>
+
+    public void invokeInstanceSuper(String name, int arity, boolean hasClosure, boolean[] splatmap) {
+<span class="pc bpc" id="L418" title="1 of 2 branches missed.">        if (arity &gt; MAX_ARGUMENTS) throw new NotCompilableException(&quot;call to instance super has more than &quot; + MAX_ARGUMENTS + &quot; arguments&quot;);</span>
+
+<span class="fc" id="L420">        performSuper(name, arity, hasClosure, splatmap, &quot;instanceSuperSplatArgs&quot;, false);</span>
+<span class="fc" id="L421">    }</span>
+
+    public void invokeClassSuper(String name, int arity, boolean hasClosure, boolean[] splatmap) {
+<span class="pc bpc" id="L424" title="1 of 2 branches missed.">        if (arity &gt; MAX_ARGUMENTS) throw new NotCompilableException(&quot;call to class super has more than &quot; + MAX_ARGUMENTS + &quot; arguments&quot;);</span>
+
+<span class="fc" id="L426">        performSuper(name, arity, hasClosure, splatmap, &quot;classSuperSplatArgs&quot;, false);</span>
+<span class="fc" id="L427">    }</span>
+
+    public void invokeUnresolvedSuper(String name, int arity, boolean hasClosure, boolean[] splatmap) {
+<span class="nc bnc" id="L430" title="All 2 branches missed.">        if (arity &gt; MAX_ARGUMENTS) throw new NotCompilableException(&quot;call to unresolved super has more than &quot; + MAX_ARGUMENTS + &quot; arguments&quot;);</span>
+
+<span class="nc" id="L432">        performSuper(name, arity, hasClosure, splatmap, &quot;unresolvedSuperSplatArgs&quot;, true);</span>
+<span class="nc" id="L433">    }</span>
+
+    public void invokeZSuper(String name, int arity, boolean hasClosure, boolean[] splatmap) {
+<span class="nc bnc" id="L436" title="All 2 branches missed.">        if (arity &gt; MAX_ARGUMENTS) throw new NotCompilableException(&quot;call to zsuper has more than &quot; + MAX_ARGUMENTS + &quot; arguments&quot;);</span>
+
+<span class="nc" id="L438">        performSuper(name, arity, hasClosure, splatmap, &quot;zSuperSplatArgs&quot;, true);</span>
+<span class="nc" id="L439">    }</span>
+
+    private void performSuper(String name, int arity, boolean hasClosure, boolean[] splatmap, String helperName, boolean unresolved) {
+        SkinnyMethodAdapter adapter2;
+        String incomingSig;
+        String outgoingSig;
+
+<span class="pc bpc" id="L446" title="1 of 2 branches missed.">        if (hasClosure) {</span>
+<span class="fc" id="L447">            incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, RubyClass.class, JVM.OBJECT, arity, Block.class));</span>
+<span class="pc bpc" id="L448" title="1 of 2 branches missed.">            outgoingSig = unresolved ?</span>
+<span class="pc" id="L449">                    sig(JVM.OBJECT, params(ThreadContext.class, IRubyObject.class, JVM.OBJECT_ARRAY, Block.class, boolean[].class)) :</span>
+<span class="fc" id="L450">                    sig(JVM.OBJECT, params(ThreadContext.class, IRubyObject.class, String.class, RubyModule.class, JVM.OBJECT_ARRAY, Block.class, boolean[].class));</span>
+        } else {
+<span class="nc" id="L452">            incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, RubyClass.class, JVM.OBJECT, arity));</span>
+<span class="nc bnc" id="L453" title="All 2 branches missed.">            outgoingSig = unresolved ?</span>
+<span class="nc" id="L454">                    sig(JVM.OBJECT, params(ThreadContext.class, IRubyObject.class, JVM.OBJECT_ARRAY, Block.class, boolean[].class)) :</span>
+<span class="nc" id="L455">                    sig(JVM.OBJECT, params(ThreadContext.class, IRubyObject.class, String.class, RubyModule.class, JVM.OBJECT_ARRAY, Block.class, boolean[].class));</span>
+        }
+
+<span class="fc" id="L458">        String methodName = &quot;invokeSuper&quot; + getClassData().callSiteCount.getAndIncrement() + &quot;:&quot; + JavaNameMangler.mangleMethodName(name);</span>
+<span class="fc" id="L459">        adapter2 = new SkinnyMethodAdapter(</span>
+<span class="fc" id="L460">                adapter.getClassVisitor(),</span>
+                Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                methodName,
+                incomingSig,
+                null,
+                null);
+
+        // CON FIXME: make these offsets programmatically determined
+<span class="fc" id="L468">        adapter2.aload(0);</span>
+<span class="fc" id="L469">        adapter2.aload(2);</span>
+<span class="pc bpc" id="L470" title="1 of 2 branches missed.">        if (!unresolved) adapter2.ldc(name);</span>
+<span class="pc bpc" id="L471" title="1 of 2 branches missed.">        if (!unresolved) adapter2.aload(3);</span>
+
+<span class="fc" id="L473">        buildArrayFromLocals(adapter2, 4, arity);</span>
+
+<span class="pc bpc" id="L475" title="1 of 2 branches missed.">        if (hasClosure) {</span>
+<span class="fc" id="L476">            adapter2.aload(4 + arity);</span>
+        } else {
+<span class="nc" id="L478">            adapter2.getstatic(p(Block.class), &quot;NULL_BLOCK&quot;, ci(Block.class));</span>
+        }
+
+<span class="pc bpc" id="L481" title="5 of 6 branches missed.">        if (splatmap != null || splatmap.length &gt; 0 || anyTrue(splatmap)) {</span>
+<span class="fc" id="L482">            String splatmapString = IRRuntimeHelpers.encodeSplatmap(splatmap);</span>
+<span class="fc" id="L483">            adapter2.ldc(splatmapString);</span>
+<span class="fc" id="L484">            adapter2.invokestatic(p(IRRuntimeHelpers.class), &quot;decodeSplatmap&quot;, sig(boolean[].class, String.class));</span>
+<span class="fc" id="L485">        } else {</span>
+<span class="nc" id="L486">            adapter2.getstatic(p(IRRuntimeHelpers.class), &quot;EMPTY_BOOLEAN_ARRAY&quot;, ci(boolean[].class));</span>
+        }
+
+<span class="fc" id="L489">        adapter2.invokestatic(p(IRRuntimeHelpers.class), helperName, outgoingSig);</span>
+<span class="fc" id="L490">        adapter2.areturn();</span>
+<span class="fc" id="L491">        adapter2.end();</span>
+
+        // now call it
+<span class="fc" id="L494">        adapter.invokestatic(getClassData().clsName, methodName, incomingSig);</span>
+<span class="fc" id="L495">    }</span>
+
+    private static boolean anyTrue(boolean[] booleans) {
+<span class="nc bnc" id="L498" title="All 4 branches missed.">        for (boolean b : booleans) if (b) return true;</span>
+<span class="nc" id="L499">        return false;</span>
+    }
+
+    public void searchConst(String name, boolean noPrivateConsts) {
+<span class="fc" id="L503">        adapter.ldc(name);</span>
+<span class="fc" id="L504">        adapter.ldc(noPrivateConsts);</span>
+<span class="fc" id="L505">        invokeIRHelper(&quot;searchConst&quot;, sig(IRubyObject.class, ThreadContext.class, StaticScope.class, String.class, boolean.class));</span>
+<span class="fc" id="L506">    }</span>
+
+    public void inheritanceSearchConst(String name, boolean noPrivateConsts) {
+<span class="fc" id="L509">        adapter.ldc(name);</span>
+<span class="fc" id="L510">        adapter.ldc(noPrivateConsts);</span>
+<span class="fc" id="L511">        invokeIRHelper(&quot;inheritedSearchConst&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject.class, String.class, boolean.class));</span>
+<span class="fc" id="L512">    }</span>
+
+    public void lexicalSearchConst(String name) {
+<span class="fc" id="L515">        adapter.ldc(name);</span>
+<span class="fc" id="L516">        invokeIRHelper(&quot;lexicalSearchConst&quot;, sig(IRubyObject.class, ThreadContext.class, StaticScope.class, String.class));}</span>
+
+    public void pushNil() {
+<span class="fc" id="L519">        loadContext();</span>
+<span class="fc" id="L520">        adapter.getfield(p(ThreadContext.class), &quot;nil&quot;, ci(IRubyObject.class));</span>
+<span class="fc" id="L521">    }</span>
+
+    public void pushBoolean(boolean b) {
+<span class="fc" id="L524">        loadRuntime();</span>
+<span class="fc bfc" id="L525" title="All 2 branches covered.">        adapter.invokevirtual(p(Ruby.class), b ? &quot;getTrue&quot; : &quot;getFalse&quot;, sig(RubyBoolean.class));</span>
+<span class="fc" id="L526">    }</span>
+
+    public void pushBignum(BigInteger bigint) {
+<span class="fc" id="L529">        String bigintStr = bigint.toString();</span>
+
+<span class="fc" id="L531">        loadRuntime();</span>
+<span class="fc" id="L532">        adapter.ldc(bigintStr);</span>
+<span class="fc" id="L533">        adapter.invokestatic(p(RubyBignum.class), &quot;newBignum&quot;, sig(RubyBignum.class, Ruby.class, String.class));</span>
+<span class="fc" id="L534">    }</span>
+
+    public void putField(String name) {
+<span class="fc" id="L537">        adapter.ldc(name);</span>
+<span class="fc" id="L538">        invokeIRHelper(&quot;setInstanceVariable&quot;, sig(IRubyObject.class, IRubyObject.class, IRubyObject.class, String.class));</span>
+<span class="fc" id="L539">        adapter.pop();</span>
+<span class="fc" id="L540">    }</span>
+
+    public void getField(String name) {
+<span class="fc" id="L543">        loadRuntime();</span>
+<span class="fc" id="L544">        adapter.ldc(name);</span>
+<span class="fc" id="L545">        invokeHelper(&quot;getInstanceVariable&quot;, sig(IRubyObject.class, IRubyObject.class, Ruby.class, String.class));</span>
+<span class="fc" id="L546">    }</span>
+
+    public void array(int length) {
+<span class="pc bpc" id="L549" title="1 of 2 branches missed.">        if (length &gt; MAX_ARGUMENTS) throw new NotCompilableException(&quot;literal array has more than &quot; + MAX_ARGUMENTS + &quot; elements&quot;);</span>
+
+        SkinnyMethodAdapter adapter2;
+<span class="fc" id="L552">        String incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, length));</span>
+
+<span class="fc bfc" id="L554" title="All 2 branches covered.">        if (!getClassData().arrayMethodsDefined.contains(length)) {</span>
+<span class="fc" id="L555">            adapter2 = new SkinnyMethodAdapter(</span>
+<span class="fc" id="L556">                    adapter.getClassVisitor(),</span>
+                    Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                    &quot;array:&quot; + length,
+                    incomingSig,
+                    null,
+                    null);
+
+<span class="fc" id="L563">            adapter2.aload(0);</span>
+<span class="fc" id="L564">            adapter2.getfield(p(ThreadContext.class), &quot;runtime&quot;, ci(Ruby.class));</span>
+<span class="fc" id="L565">            buildArrayFromLocals(adapter2, 1, length);</span>
+
+<span class="fc" id="L567">            adapter2.invokevirtual(p(Ruby.class), &quot;newArrayNoCopy&quot;, sig(RubyArray.class, IRubyObject[].class));</span>
+<span class="fc" id="L568">            adapter2.areturn();</span>
+<span class="fc" id="L569">            adapter2.end();</span>
+
+<span class="fc" id="L571">            getClassData().arrayMethodsDefined.add(length);</span>
+        }
+
+        // now call it
+<span class="fc" id="L575">        adapter.invokestatic(getClassData().clsName, &quot;array:&quot; + length, incomingSig);</span>
+<span class="fc" id="L576">    }</span>
+
+    public void hash(int length) {
+<span class="pc bpc" id="L579" title="1 of 2 branches missed.">        if (length &gt; MAX_ARGUMENTS / 2) throw new NotCompilableException(&quot;literal hash has more than &quot; + (MAX_ARGUMENTS / 2) + &quot; pairs&quot;);</span>
+
+        SkinnyMethodAdapter adapter2;
+<span class="fc" id="L582">        String incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, length * 2));</span>
+
+<span class="fc bfc" id="L584" title="All 2 branches covered.">        if (!getClassData().hashMethodsDefined.contains(length)) {</span>
+<span class="fc" id="L585">            adapter2 = new SkinnyMethodAdapter(</span>
+<span class="fc" id="L586">                    adapter.getClassVisitor(),</span>
+                    Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                    &quot;hash:&quot; + length,
+                    incomingSig,
+                    null,
+                    null);
+
+<span class="fc" id="L593">            adapter2.aload(0);</span>
+<span class="fc" id="L594">            adapter2.getfield(p(ThreadContext.class), &quot;runtime&quot;, ci(Ruby.class));</span>
+<span class="fc" id="L595">            buildArrayFromLocals(adapter2, 1, length * 2);</span>
+
+<span class="fc" id="L597">            adapter2.invokestatic(p(IRRuntimeHelpers.class), &quot;constructHashFromArray&quot;, sig(RubyHash.class, Ruby.class, IRubyObject[].class));</span>
+<span class="fc" id="L598">            adapter2.areturn();</span>
+<span class="fc" id="L599">            adapter2.end();</span>
+
+<span class="fc" id="L601">            getClassData().hashMethodsDefined.add(length);</span>
+        }
+
+        // now call it
+<span class="fc" id="L605">        adapter.invokestatic(getClassData().clsName, &quot;hash:&quot; + length, incomingSig);</span>
+<span class="fc" id="L606">    }</span>
+
+    public void kwargsHash(int length) {
+<span class="nc bnc" id="L609" title="All 2 branches missed.">        if (length &gt; MAX_ARGUMENTS / 2) throw new NotCompilableException(&quot;kwargs hash has more than &quot; + (MAX_ARGUMENTS / 2) + &quot; pairs&quot;);</span>
+
+        SkinnyMethodAdapter adapter2;
+<span class="nc" id="L612">        String incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, RubyHash.class, IRubyObject.class, length * 2));</span>
+
+<span class="nc bnc" id="L614" title="All 2 branches missed.">        if (!getClassData().kwargsHashMethodsDefined.contains(length)) {</span>
+<span class="nc" id="L615">            adapter2 = new SkinnyMethodAdapter(</span>
+<span class="nc" id="L616">                    adapter.getClassVisitor(),</span>
+                    Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                    &quot;kwargsHash:&quot; + length,
+                    incomingSig,
+                    null,
+                    null);
+
+<span class="nc" id="L623">            adapter2.aload(0);</span>
+<span class="nc" id="L624">            adapter2.aload(1);</span>
+<span class="nc" id="L625">            buildArrayFromLocals(adapter2, 2, length * 2);</span>
+
+<span class="nc" id="L627">            adapter2.invokestatic(p(IRRuntimeHelpers.class), &quot;dupKwargsHashAndPopulateFromArray&quot;, sig(RubyHash.class, ThreadContext.class, RubyHash.class, IRubyObject[].class));</span>
+<span class="nc" id="L628">            adapter2.areturn();</span>
+<span class="nc" id="L629">            adapter2.end();</span>
+
+<span class="nc" id="L631">            getClassData().hashMethodsDefined.add(length);</span>
+        }
+
+        // now call it
+<span class="nc" id="L635">        adapter.invokestatic(getClassData().clsName, &quot;kwargsHash:&quot; + length, incomingSig);</span>
+<span class="nc" id="L636">    }</span>
+
+    public void checkpoint() {
+<span class="fc" id="L639">        loadContext();</span>
+<span class="fc" id="L640">        adapter.invokevirtual(</span>
+<span class="fc" id="L641">                p(ThreadContext.class),</span>
+                &quot;callThreadPoll&quot;,
+<span class="fc" id="L643">                sig(void.class));</span>
+<span class="fc" id="L644">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

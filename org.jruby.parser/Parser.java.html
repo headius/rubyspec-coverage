@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Parser.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.parser</a> &gt; <span class="el_source">Parser.java</span></div><h1>Parser.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2002-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.parser;
+
+import java.io.IOException;
+import java.io.InputStream;
+
+import org.jruby.*;
+import org.jruby.ast.Node;
+import org.jruby.lexer.yacc.*;
+import org.jruby.runtime.DynamicScope;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.load.LoadServiceResourceInputStream;
+import org.jruby.util.ByteList;
+
+/**
+ * Serves as a simple facade for all the parsing magic.
+ */
+public class Parser {
+    private final Ruby runtime;
+    private volatile long totalTime;
+    private volatile int totalBytes;
+
+<span class="fc" id="L54">    public Parser(Ruby runtime) {</span>
+<span class="fc" id="L55">        this.runtime = runtime;</span>
+<span class="fc" id="L56">    }</span>
+
+    public long getTotalTime() {
+<span class="nc" id="L59">        return totalTime;</span>
+    }
+
+    public int getTotalBytes() {
+<span class="nc" id="L63">        return totalBytes;</span>
+    }
+    
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public Node parse(String file, ByteList content, DynamicScope blockScope,
+            ParserConfiguration configuration) {
+<span class="fc" id="L69">        configuration.setDefaultEncoding(content.getEncoding());</span>
+<span class="fc" id="L70">        return parse(file, content.bytes(), blockScope, configuration);</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public Node parse(String file, byte[] content, DynamicScope blockScope,
+            ParserConfiguration configuration) {
+<span class="fc" id="L76">        RubyArray list = getLines(configuration, runtime, file);</span>
+<span class="fc" id="L77">        LexerSource lexerSource = LexerSource.getSource(file, content, list, configuration);</span>
+<span class="fc" id="L78">        return parse(file, lexerSource, blockScope, configuration);</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public Node parse(String file, InputStream content, DynamicScope blockScope,
+            ParserConfiguration configuration) {
+<span class="fc" id="L84">        RubyArray list = getLines(configuration, runtime, file);</span>
+<span class="fc bfc" id="L85" title="All 2 branches covered.">        if (content instanceof LoadServiceResourceInputStream) {</span>
+<span class="fc" id="L86">            return parse(file, ((LoadServiceResourceInputStream) content).getBytes(), blockScope, configuration);</span>
+        } else {
+<span class="fc" id="L88">            LexerSource lexerSource = LexerSource.getSource(file, content, list, configuration);</span>
+<span class="fc" id="L89">            return parse(file, lexerSource, blockScope, configuration);</span>
+        }
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public Node parse(String file, LexerSource lexerSource, DynamicScope blockScope,
+            ParserConfiguration configuration) {
+        // We only need to pass in current scope if we are evaluating as a block (which
+        // is only done for evals).  We need to pass this in so that we can appropriately scope
+        // down to captured scopes when we are parsing.
+<span class="fc bfc" id="L99" title="All 2 branches covered.">        if (blockScope != null) {</span>
+<span class="fc" id="L100">            configuration.parseAsBlock(blockScope);</span>
+        }
+
+<span class="fc" id="L103">        long startTime = System.nanoTime();</span>
+<span class="fc" id="L104">        RubyParser parser = new RubyParser();</span>
+<span class="fc" id="L105">        RubyParserResult result = null;</span>
+<span class="fc" id="L106">        parser.setWarnings(runtime.getWarnings());</span>
+        try {
+<span class="fc" id="L108">            result = parser.parse(configuration, lexerSource);</span>
+<span class="pc bpc" id="L109" title="1 of 4 branches missed.">            if (result.getEndOffset() &gt;= 0 &amp;&amp; configuration.isSaveData()) {</span>
+<span class="nc" id="L110">                IRubyObject verbose = runtime.getVerbose();</span>
+<span class="nc" id="L111">                runtime.setVerbose(runtime.getNil());</span>
+                try {
+<span class="nc" id="L113">                    runtime.defineGlobalConstant(&quot;DATA&quot;, new RubyFile(runtime, file, lexerSource.getRemainingAsStream()));</span>
+<span class="nc" id="L114">                } catch (IOException e) { // Not sure how to handle suddenly closed IO here?</span>
+<span class="nc" id="L115">                    runtime.defineGlobalConstant(&quot;DATA&quot;, runtime.getNil());</span>
+<span class="nc" id="L116">                }</span>
+<span class="nc" id="L117">                runtime.setVerbose(verbose);</span>
+<span class="nc" id="L118">            	result.setEndOffset(-1);</span>
+            }
+<span class="nc" id="L120">        } catch (IOException e) {</span>
+            // Enebo: We may want to change this error to be more specific,
+            // but I am not sure which conditions leads to this...so lame message.
+<span class="nc" id="L123">            throw runtime.newSyntaxError(&quot;Problem reading source: &quot; + e);</span>
+<span class="fc" id="L124">        } catch (SyntaxException e) {</span>
+<span class="pc bpc" id="L125" title="1 of 2 branches missed.">            switch (e.getPid()) {</span>
+                case UNKNOWN_ENCODING:
+                case NOT_ASCII_COMPATIBLE:
+<span class="nc" id="L128">                    throw runtime.newArgumentError(e.getMessage());</span>
+                default:
+<span class="fc" id="L130">                    StringBuilder buffer = new StringBuilder(100);</span>
+<span class="fc" id="L131">                    buffer.append(e.getPosition().getFile()).append(':');</span>
+<span class="fc" id="L132">                    buffer.append(e.getPosition().getLine() + 1).append(&quot;: &quot;);</span>
+<span class="fc" id="L133">                    buffer.append(e.getMessage());</span>
+
+<span class="fc" id="L135">                    throw runtime.newSyntaxError(buffer.toString());</span>
+            }
+<span class="fc" id="L137">        } </span>
+        
+        // If variables were added then we may need to grow the dynamic scope to match the static
+        // one.
+        // FIXME: Make this so we only need to check this for blockScope != null.  We cannot
+        // currently since we create the DynamicScope for a LocalStaticScope before parse begins.
+        // Refactoring should make this fixable.
+<span class="pc bpc" id="L144" title="1 of 2 branches missed.">        if (result.getScope() != null) {</span>
+<span class="fc" id="L145">            result.getScope().growIfNeeded();</span>
+        }
+
+<span class="fc" id="L148">        Node ast = result.getAST();</span>
+        
+<span class="fc" id="L150">        totalTime += System.nanoTime() - startTime;</span>
+<span class="fc" id="L151">        totalBytes += lexerSource.getOffset();</span>
+
+        // set coverage baseline into coverage data
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">        if (runtime.getCoverageData().isCoverageEnabled()) {</span>
+<span class="nc" id="L155">            runtime.getCoverageData().prepareCoverage(file, configuration.getCoverage());</span>
+        }
+
+<span class="fc" id="L158">        return ast;</span>
+    }
+
+    private RubyArray getLines(ParserConfiguration configuration, Ruby runtime, String file) {
+<span class="fc" id="L162">        RubyArray list = null;</span>
+<span class="fc" id="L163">        IRubyObject scriptLines = runtime.getObject().getConstantAt(&quot;SCRIPT_LINES__&quot;);</span>
+<span class="pc bpc" id="L164" title="1 of 4 branches missed.">        if (!configuration.isEvalParse() &amp;&amp; scriptLines != null) {</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">            if (scriptLines instanceof RubyHash) {</span>
+<span class="nc" id="L166">                RubyString filename = runtime.newString(file);</span>
+<span class="nc" id="L167">                ThreadContext context = runtime.getCurrentContext();</span>
+<span class="nc" id="L168">                IRubyObject object = ((RubyHash) scriptLines).op_aref(context, filename);</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">                list = (RubyArray) (object instanceof RubyArray ? object : runtime.newArray());</span>
+<span class="nc" id="L170">                ((RubyHash) scriptLines).op_aset(context, filename, list);</span>
+            }
+        }
+<span class="fc" id="L173">        return list;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

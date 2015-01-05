@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SafepointManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.runtime.subsystems</a> &gt; <span class="el_source">SafepointManager.java</span></div><h1>SafepointManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2014 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.runtime.subsystems;
+
+import com.oracle.truffle.api.Assumption;
+import com.oracle.truffle.api.CompilerAsserts;
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.Truffle;
+import com.oracle.truffle.api.nodes.InvalidAssumptionException;
+import org.jruby.truffle.runtime.RubyContext;
+import org.jruby.truffle.runtime.core.RubyThread;
+import org.jruby.truffle.runtime.util.Consumer;
+
+import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+
+public class SafepointManager {
+
+    private final RubyContext context;
+
+<span class="nc" id="L30">    private final Lock lock = new ReentrantLock();</span>
+<span class="nc" id="L31">    @CompilerDirectives.CompilationFinal private Assumption assumption = Truffle.getRuntime().createAssumption();</span>
+    private CyclicBarrier barrier;
+<span class="nc" id="L33">    private int liveThreads = 1;</span>
+    private Consumer&lt;Boolean&gt; action;
+
+<span class="nc" id="L36">    public SafepointManager(RubyContext context) {</span>
+<span class="nc" id="L37">        this.context = context;</span>
+<span class="nc" id="L38">    }</span>
+
+    public void enterThread() {
+<span class="nc" id="L41">        CompilerAsserts.neverPartOfCompilation();</span>
+
+        try {
+<span class="nc" id="L44">            lock.lock();</span>
+<span class="nc" id="L45">            liveThreads++;</span>
+        } finally {
+<span class="nc" id="L47">            lock.unlock();</span>
+<span class="nc" id="L48">        }</span>
+<span class="nc" id="L49">    }</span>
+
+    public void leaveThread() {
+<span class="nc" id="L52">        CompilerAsserts.neverPartOfCompilation();</span>
+
+        try {
+<span class="nc" id="L55">            lock.lock();</span>
+
+<span class="nc" id="L57">            poll();</span>
+
+<span class="nc" id="L59">            liveThreads--;</span>
+        } finally {
+<span class="nc" id="L61">            lock.unlock();</span>
+<span class="nc" id="L62">        }</span>
+<span class="nc" id="L63">    }</span>
+
+    public void poll() {
+        try {
+<span class="nc" id="L67">            assumption.check();</span>
+<span class="nc" id="L68">        } catch (InvalidAssumptionException e) {</span>
+<span class="nc" id="L69">            waitOnBarrier();</span>
+
+            try {
+<span class="nc" id="L72">                action.accept(false);</span>
+            } finally {
+<span class="nc" id="L74">                waitOnBarrier();</span>
+<span class="nc" id="L75">            }</span>
+<span class="nc" id="L76">        }</span>
+<span class="nc" id="L77">    }</span>
+
+    public void pauseAllThreadsAndExecute(final Consumer&lt;Boolean&gt; action) {
+<span class="nc" id="L80">        CompilerDirectives.transferToInterpreter();</span>
+
+        try {
+<span class="nc" id="L83">            lock.lock();</span>
+
+<span class="nc" id="L85">            SafepointManager.this.action = action;</span>
+
+<span class="nc" id="L87">            barrier = new CyclicBarrier(liveThreads);</span>
+
+<span class="nc" id="L89">            assumption.invalidate();</span>
+
+<span class="nc" id="L91">            waitOnBarrier();</span>
+
+<span class="nc" id="L93">            assumption = Truffle.getRuntime().createAssumption();</span>
+
+            try {
+<span class="nc" id="L96">                action.accept(true);</span>
+            } finally {
+<span class="nc" id="L98">                waitOnBarrier();</span>
+<span class="nc" id="L99">            }</span>
+        } finally {
+<span class="nc" id="L101">            lock.unlock();</span>
+<span class="nc" id="L102">        }</span>
+<span class="nc" id="L103">    }</span>
+
+    private void waitOnBarrier() {
+<span class="nc" id="L106">        final RubyThread runningThread = context.getThreadManager().leaveGlobalLock();</span>
+
+        try {
+            while (true) {
+                try {
+<span class="nc" id="L111">                    barrier.await();</span>
+<span class="nc" id="L112">                    break;</span>
+<span class="nc" id="L113">                } catch (BrokenBarrierException e) {</span>
+<span class="nc" id="L114">                    throw new RuntimeException(e);</span>
+<span class="nc" id="L115">                } catch (InterruptedException e) {</span>
+<span class="nc" id="L116">                }</span>
+            }
+        } finally {
+<span class="nc" id="L119">            context.getThreadManager().enterGlobalLock(runningThread);</span>
+<span class="nc" id="L120">        }</span>
+<span class="nc" id="L121">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

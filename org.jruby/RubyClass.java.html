@@ -1,0 +1,1967 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyClass.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyClass.java</span></div><h1>RubyClass.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2001-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2004-2005 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import org.jruby.runtime.Arity;
+import org.jruby.runtime.ivars.VariableAccessor;
+import static org.jruby.util.CodegenUtils.ci;
+import static org.jruby.util.CodegenUtils.p;
+import static org.jruby.util.CodegenUtils.sig;
+import static org.objectweb.asm.Opcodes.ACC_PRIVATE;
+import static org.objectweb.asm.Opcodes.ACC_PUBLIC;
+import static org.objectweb.asm.Opcodes.ACC_STATIC;
+import static org.objectweb.asm.Opcodes.ACC_SUPER;
+import static org.objectweb.asm.Opcodes.ACC_VARARGS;
+
+import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Hashtable;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.compiler.impl.SkinnyMethodAdapter;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.java.codegen.RealClassGenerator;
+import org.jruby.java.codegen.Reified;
+import org.jruby.javasupport.Java;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.CallSite;
+import org.jruby.runtime.CallType;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.MethodIndex;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ObjectMarshal;
+import org.jruby.runtime.ThreadContext;
+import static org.jruby.runtime.Visibility.*;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.callsite.CacheEntry;
+import org.jruby.runtime.ivars.VariableAccessorField;
+import org.jruby.runtime.ivars.VariableTableManager;
+import org.jruby.runtime.marshal.MarshalStream;
+import org.jruby.runtime.marshal.UnmarshalStream;
+import org.jruby.runtime.opto.Invalidator;
+import org.jruby.util.OneShotClassLoader;
+import org.jruby.util.ClassDefiningClassLoader;
+import org.jruby.util.CodegenUtils;
+import org.jruby.util.JavaNameMangler;
+import org.jruby.util.collections.WeakHashSet;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+import org.objectweb.asm.AnnotationVisitor;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.FieldVisitor;
+
+/**
+ *
+ * @author  jpetersen
+ */
+<span class="pc bpc" id="L100" title="1 of 2 branches missed.">@JRubyClass(name=&quot;Class&quot;, parent=&quot;Module&quot;)</span>
+public class RubyClass extends RubyModule {
+
+<span class="fc" id="L103">    private static final Logger LOG = LoggerFactory.getLogger(&quot;RubyClass&quot;);</span>
+
+    public static void createClassClass(Ruby runtime, RubyClass classClass) {
+<span class="fc" id="L106">        classClass.setClassIndex(ClassIndex.CLASS);</span>
+<span class="fc" id="L107">        classClass.setReifiedClass(RubyClass.class);</span>
+<span class="fc" id="L108">        classClass.kindOf = new RubyModule.JavaClassKindOf(RubyClass.class);</span>
+        
+<span class="fc" id="L110">        classClass.undefineMethod(&quot;module_function&quot;);</span>
+<span class="fc" id="L111">        classClass.undefineMethod(&quot;append_features&quot;);</span>
+<span class="fc" id="L112">        classClass.undefineMethod(&quot;prepend_features&quot;);</span>
+<span class="fc" id="L113">        classClass.undefineMethod(&quot;extend_object&quot;);</span>
+        
+<span class="fc" id="L115">        classClass.defineAnnotatedMethods(RubyClass.class);</span>
+<span class="fc" id="L116">    }</span>
+    
+<span class="fc" id="L118">    public static final ObjectAllocator CLASS_ALLOCATOR = new ObjectAllocator() {</span>
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L120">            RubyClass clazz = new RubyClass(runtime);</span>
+<span class="fc" id="L121">            clazz.allocator = ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR; // Class.allocate object is not allocatable before it is initialized</span>
+<span class="fc" id="L122">            return clazz;</span>
+        }
+    };
+
+    public ObjectAllocator getAllocator() {
+<span class="fc" id="L127">        return allocator;</span>
+    }
+
+    public void setAllocator(ObjectAllocator allocator) {
+<span class="fc" id="L131">        this.allocator = allocator;</span>
+<span class="fc" id="L132">    }</span>
+
+    /**
+     * Set a reflective allocator that calls a no-arg constructor on the given
+     * class.
+     *
+     * @param cls The class on which to call the default constructor to allocate
+     */
+    public void setClassAllocator(final Class cls) {
+<span class="nc" id="L141">        this.allocator = new ObjectAllocator() {</span>
+            public IRubyObject allocate(Ruby runtime, RubyClass klazz) {
+                try {
+<span class="nc" id="L144">                    RubyBasicObject object = (RubyBasicObject)cls.newInstance();</span>
+<span class="nc" id="L145">                    object.setMetaClass(klazz);</span>
+<span class="nc" id="L146">                    return object;</span>
+<span class="nc" id="L147">                } catch (InstantiationException ie) {</span>
+<span class="nc" id="L148">                    throw runtime.newTypeError(&quot;could not allocate &quot; + cls + &quot; with default constructor:\n&quot; + ie);</span>
+<span class="nc" id="L149">                } catch (IllegalAccessException iae) {</span>
+<span class="nc" id="L150">                    throw runtime.newSecurityError(&quot;could not allocate &quot; + cls + &quot; due to inaccessible default constructor:\n&quot; + iae);</span>
+                }
+            }
+        };
+        
+<span class="nc" id="L155">        this.reifiedClass = cls;</span>
+<span class="nc" id="L156">    }</span>
+
+    /**
+     * Set a reflective allocator that calls the &quot;standard&quot; Ruby object
+     * constructor (Ruby, RubyClass) on the given class.
+     *
+     * @param cls The class from which to grab a standard Ruby constructor
+     */
+    public void setRubyClassAllocator(final Class cls) {
+        try {
+<span class="nc" id="L166">            final Constructor constructor = cls.getConstructor(Ruby.class, RubyClass.class);</span>
+            
+<span class="nc" id="L168">            this.allocator = new ObjectAllocator() {</span>
+                public IRubyObject allocate(Ruby runtime, RubyClass klazz) {
+                    try {
+<span class="nc" id="L171">                        return (IRubyObject)constructor.newInstance(runtime, klazz);</span>
+<span class="nc" id="L172">                    } catch (InvocationTargetException ite) {</span>
+<span class="nc" id="L173">                        throw runtime.newTypeError(&quot;could not allocate &quot; + cls + &quot; with (Ruby, RubyClass) constructor:\n&quot; + ite);</span>
+<span class="nc" id="L174">                    } catch (InstantiationException ie) {</span>
+<span class="nc" id="L175">                        throw runtime.newTypeError(&quot;could not allocate &quot; + cls + &quot; with (Ruby, RubyClass) constructor:\n&quot; + ie);</span>
+<span class="nc" id="L176">                    } catch (IllegalAccessException iae) {</span>
+<span class="nc" id="L177">                        throw runtime.newSecurityError(&quot;could not allocate &quot; + cls + &quot; due to inaccessible (Ruby, RubyClass) constructor:\n&quot; + iae);</span>
+                    }
+                }
+            };
+
+<span class="nc" id="L182">            this.reifiedClass = cls;</span>
+<span class="nc" id="L183">        } catch (NoSuchMethodException nsme) {</span>
+<span class="nc" id="L184">            throw new RuntimeException(nsme);</span>
+<span class="nc" id="L185">        }</span>
+<span class="nc" id="L186">    }</span>
+
+    /**
+     * Set a reflective allocator that calls the &quot;standard&quot; Ruby object
+     * constructor (Ruby, RubyClass) on the given class via a static
+     * __allocate__ method intermediate.
+     *
+     * @param cls The class from which to grab a standard Ruby __allocate__
+     *            method.
+     */
+    public void setRubyStaticAllocator(final Class cls) {
+        try {
+<span class="nc" id="L198">            final Method method = cls.getDeclaredMethod(&quot;__allocate__&quot;, Ruby.class, RubyClass.class);</span>
+
+<span class="nc" id="L200">            this.allocator = new ObjectAllocator() {</span>
+                public IRubyObject allocate(Ruby runtime, RubyClass klazz) {
+                    try {
+<span class="nc" id="L203">                        return (IRubyObject)method.invoke(null, runtime, klazz);</span>
+<span class="nc" id="L204">                    } catch (InvocationTargetException ite) {</span>
+<span class="nc" id="L205">                        throw runtime.newTypeError(&quot;could not allocate &quot; + cls + &quot; with (Ruby, RubyClass) constructor:\n&quot; + ite);</span>
+<span class="nc" id="L206">                    } catch (IllegalAccessException iae) {</span>
+<span class="nc" id="L207">                        throw runtime.newSecurityError(&quot;could not allocate &quot; + cls + &quot; due to inaccessible (Ruby, RubyClass) constructor:\n&quot; + iae);</span>
+                    }
+                }
+            };
+
+<span class="nc" id="L212">            this.reifiedClass = cls;</span>
+<span class="nc" id="L213">        } catch (NoSuchMethodException nsme) {</span>
+<span class="nc" id="L214">            throw new RuntimeException(nsme);</span>
+<span class="nc" id="L215">        }</span>
+<span class="nc" id="L216">    }</span>
+
+    @JRubyMethod(name = &quot;allocate&quot;)
+    public IRubyObject allocate() {
+<span class="fc bfc" id="L220" title="All 2 branches covered.">        if (superClass == null) {</span>
+<span class="fc bfc" id="L221" title="All 2 branches covered.">            if(this != runtime.getBasicObject()) {</span>
+<span class="fc" id="L222">                throw runtime.newTypeError(&quot;can't instantiate uninitialized class&quot;);</span>
+            }
+        }
+<span class="fc" id="L225">        IRubyObject obj = allocator.allocate(runtime, this);</span>
+<span class="pc bpc" id="L226" title="1 of 2 branches missed.">        if (obj.getMetaClass().getRealClass() != getRealClass()) {</span>
+<span class="nc" id="L227">            throw runtime.newTypeError(&quot;wrong instance allocation&quot;);</span>
+        }
+<span class="fc" id="L229">        return obj;</span>
+    }
+
+    public CallSite getBaseCallSite(int idx) {
+<span class="fc" id="L233">        return baseCallSites[idx];</span>
+    }
+
+    public CallSite[] getBaseCallSites() {
+<span class="nc" id="L237">        return baseCallSites;</span>
+    }
+    
+    public CallSite[] getExtraCallSites() {
+<span class="nc" id="L241">        return extraCallSites;</span>
+    }
+    
+    public VariableTableManager getVariableTableManager() {
+<span class="fc" id="L245">        return variableTableManager;</span>
+    }
+    
+    public boolean hasObjectID() {
+<span class="nc" id="L249">        return variableTableManager.hasObjectID();</span>
+    }
+
+    public Map&lt;String, VariableAccessor&gt; getVariableAccessorsForRead() {
+<span class="fc" id="L253">        return variableTableManager.getVariableAccessorsForRead();</span>
+    }
+
+    public VariableAccessor getVariableAccessorForWrite(String name) {
+<span class="fc" id="L257">        return variableTableManager.getVariableAccessorForWrite(name);</span>
+    }
+
+    public VariableAccessor getVariableAccessorForRead(String name) {
+<span class="fc" id="L261">        VariableAccessor accessor = getVariableAccessorsForRead().get(name);</span>
+<span class="fc bfc" id="L262" title="All 2 branches covered.">        if (accessor == null) accessor = VariableAccessor.DUMMY_ACCESSOR;</span>
+<span class="fc" id="L263">        return accessor;</span>
+    }
+
+    public VariableAccessorField getObjectIdAccessorField() {
+<span class="fc" id="L267">        return variableTableManager.getObjectIdAccessorField();</span>
+    }
+
+    public VariableAccessorField getFFIHandleAccessorField() {
+<span class="nc" id="L271">        return variableTableManager.getFFIHandleAccessorField();</span>
+    }
+
+    public VariableAccessor getFFIHandleAccessorForRead() {
+<span class="nc" id="L275">        return variableTableManager.getFFIHandleAccessorForRead();</span>
+    }
+
+    public VariableAccessor getFFIHandleAccessorForWrite() {
+<span class="nc" id="L279">        return variableTableManager.getFFIHandleAccessorForWrite();</span>
+    }
+
+    public VariableAccessorField getObjectGroupAccessorField() {
+<span class="nc" id="L283">        return variableTableManager.getObjectGroupAccessorField();</span>
+    }
+
+    public VariableAccessor getObjectGroupAccessorForRead() {
+<span class="nc" id="L287">        return variableTableManager.getObjectGroupAccessorForRead();</span>
+    }
+
+    public VariableAccessor getObjectGroupAccessorForWrite() {
+<span class="nc" id="L291">        return variableTableManager.getObjectGroupAccessorForWrite();</span>
+    }
+
+    public int getVariableTableSize() {
+<span class="nc" id="L295">        return variableTableManager.getVariableTableSize();</span>
+    }
+
+    public int getVariableTableSizeWithExtras() {
+<span class="fc" id="L299">        return variableTableManager.getVariableTableSizeWithExtras();</span>
+    }
+
+    /**
+     * Get an array of all the known instance variable names. The offset into
+     * the array indicates the offset of the variable's value in the per-object
+     * variable array.
+     *
+     * @return a copy of the array of known instance variable names
+     */
+    public String[] getVariableNames() {
+<span class="nc" id="L310">        return variableTableManager.getVariableNames();</span>
+    }
+
+    public Map&lt;String, VariableAccessor&gt; getVariableTableCopy() {
+<span class="nc" id="L314">        return new HashMap&lt;String, VariableAccessor&gt;(getVariableAccessorsForRead());</span>
+    }
+
+    @Override
+    public ClassIndex getNativeClassIndex() {
+<span class="fc" id="L319">        return ClassIndex.CLASS;</span>
+    }
+    
+    @Override
+    public boolean isModule() {
+<span class="fc" id="L324">        return false;</span>
+    }
+
+    @Override
+    public boolean isClass() {
+<span class="fc" id="L329">        return true;</span>
+    }
+
+    @Override
+    public boolean isSingleton() {
+<span class="fc" id="L334">        return false;</span>
+    }
+
+    /** boot_defclass
+     * Create an initial Object meta class before Module and Kernel dependencies have
+     * squirreled themselves together.
+     * 
+     * @param runtime we need it
+     * @return a half-baked meta class for object
+     */
+    public static RubyClass createBootstrapClass(Ruby runtime, String name, RubyClass superClass, ObjectAllocator allocator) {
+        RubyClass obj;
+
+<span class="fc bfc" id="L347" title="All 2 branches covered.">        if (superClass == null ) {  // boot the Object class </span>
+<span class="fc" id="L348">            obj = new RubyClass(runtime);</span>
+<span class="fc" id="L349">            obj.marshal = DEFAULT_OBJECT_MARSHAL;</span>
+        } else {                    // boot the Module and Class classes
+<span class="fc" id="L351">            obj = new RubyClass(runtime, superClass);</span>
+        }
+<span class="fc" id="L353">        obj.setAllocator(allocator);</span>
+<span class="fc" id="L354">        obj.setBaseName(name);</span>
+<span class="fc" id="L355">        return obj;</span>
+    }
+
+    /** separate path for MetaClass and IncludedModuleWrapper construction
+     *  (rb_class_boot version for MetaClasses)
+     *  no marshal, allocator initialization and addSubclass(this) here!
+     */
+    protected RubyClass(Ruby runtime, RubyClass superClass, boolean objectSpace) {
+<span class="fc" id="L363">        super(runtime, runtime.getClassClass(), objectSpace);</span>
+<span class="fc" id="L364">        this.runtime = runtime;</span>
+        
+        // Since this path is for included wrappers and singletons, use parent
+        // class's realClass and varTableMgr. If the latter is null, create a
+        // dummy, since we won't be using it anyway (we're above BasicObject
+        // so variable requests won't reach us).
+<span class="fc bfc" id="L370" title="All 2 branches covered.">        if (superClass == null) {</span>
+<span class="fc" id="L371">            this.realClass = null;</span>
+<span class="fc" id="L372">            this.variableTableManager = new VariableTableManager(this);</span>
+        } else {
+<span class="fc" id="L374">            this.realClass = superClass.realClass;</span>
+<span class="fc bfc" id="L375" title="All 2 branches covered.">            if (realClass != null) {</span>
+<span class="fc" id="L376">                this.variableTableManager = realClass.variableTableManager;</span>
+            } else {
+<span class="fc" id="L378">                this.variableTableManager = new VariableTableManager(this);</span>
+            }
+        }
+        
+<span class="fc" id="L382">        setSuperClass(superClass); // this is the only case it might be null here (in MetaClass construction)</span>
+<span class="fc" id="L383">    }</span>
+    
+    /** used by CLASS_ALLOCATOR (any Class' class will be a Class!)
+     *  also used to bootstrap Object class
+     */
+    protected RubyClass(Ruby runtime) {
+<span class="fc" id="L389">        super(runtime, runtime.getClassClass());</span>
+<span class="fc" id="L390">        this.runtime = runtime;</span>
+<span class="fc" id="L391">        this.realClass = this;</span>
+<span class="fc" id="L392">        this.variableTableManager = new VariableTableManager(this);</span>
+<span class="fc" id="L393">        setClassIndex(ClassIndex.CLASS);</span>
+<span class="fc" id="L394">    }</span>
+    
+    /** rb_class_boot (for plain Classes)
+     *  also used to bootstrap Module and Class classes 
+     */
+    protected RubyClass(Ruby runtime, RubyClass superClazz) {
+<span class="fc" id="L400">        this(runtime);</span>
+<span class="fc" id="L401">        setSuperClass(superClazz);</span>
+<span class="fc" id="L402">        marshal = superClazz.marshal; // use parent's marshal</span>
+<span class="fc" id="L403">        superClazz.addSubclass(this);</span>
+<span class="fc" id="L404">        allocator = superClazz.allocator;</span>
+        
+<span class="fc" id="L406">        infectBy(superClass);        </span>
+<span class="fc" id="L407">    }</span>
+    
+    /** 
+     * A constructor which allows passing in an array of supplementary call sites.
+     */
+    protected RubyClass(Ruby runtime, RubyClass superClazz, CallSite[] extraCallSites) {
+<span class="fc" id="L413">        this(runtime);</span>
+<span class="fc" id="L414">        setSuperClass(superClazz);</span>
+<span class="fc" id="L415">        this.marshal = superClazz.marshal; // use parent's marshal</span>
+<span class="fc" id="L416">        superClazz.addSubclass(this);</span>
+        
+<span class="fc" id="L418">        this.extraCallSites = extraCallSites;</span>
+        
+<span class="fc" id="L420">        infectBy(superClass);        </span>
+<span class="fc" id="L421">    }</span>
+
+    /** 
+     * Construct a new class with the given name scoped under Object (global)
+     * and with Object as its immediate superclass.
+     * Corresponds to rb_class_new in MRI.
+     */
+    public static RubyClass newClass(Ruby runtime, RubyClass superClass) {
+<span class="pc bpc" id="L429" title="1 of 2 branches missed.">        if (superClass == runtime.getClassClass()) throw runtime.newTypeError(&quot;can't make subclass of Class&quot;);</span>
+<span class="pc bpc" id="L430" title="1 of 2 branches missed.">        if (superClass.isSingleton()) throw runtime.newTypeError(&quot;can't make subclass of virtual class&quot;);</span>
+<span class="fc" id="L431">        return new RubyClass(runtime, superClass);        </span>
+    }
+
+    /** 
+     * A variation on newClass that allow passing in an array of supplementary
+     * call sites to improve dynamic invocation.
+     */
+    public static RubyClass newClass(Ruby runtime, RubyClass superClass, CallSite[] extraCallSites) {
+<span class="pc bpc" id="L439" title="1 of 2 branches missed.">        if (superClass == runtime.getClassClass()) throw runtime.newTypeError(&quot;can't make subclass of Class&quot;);</span>
+<span class="pc bpc" id="L440" title="1 of 2 branches missed.">        if (superClass.isSingleton()) throw runtime.newTypeError(&quot;can't make subclass of virtual class&quot;);</span>
+<span class="fc" id="L441">        return new RubyClass(runtime, superClass, extraCallSites);        </span>
+    }
+
+    /** 
+     * Construct a new class with the given name, allocator, parent class,
+     * and containing class. If setParent is true, the class's parent will be
+     * explicitly set to the provided parent (rather than the new class just
+     * being assigned to a constant in that parent).
+     * Corresponds to rb_class_new/rb_define_class_id/rb_name_class/rb_set_class_path
+     * in MRI.
+     */
+    public static RubyClass newClass(Ruby runtime, RubyClass superClass, String name, ObjectAllocator allocator, RubyModule parent, boolean setParent) {
+<span class="fc" id="L453">        RubyClass clazz = newClass(runtime, superClass);</span>
+<span class="fc" id="L454">        clazz.setBaseName(name);</span>
+<span class="fc" id="L455">        clazz.setAllocator(allocator);</span>
+<span class="fc" id="L456">        clazz.makeMetaClass(superClass.getMetaClass());</span>
+<span class="pc bpc" id="L457" title="1 of 2 branches missed.">        if (setParent) clazz.setParent(parent);</span>
+<span class="fc" id="L458">        parent.setConstant(name, clazz);</span>
+<span class="fc" id="L459">        clazz.inherit(superClass);</span>
+<span class="fc" id="L460">        return clazz;</span>
+    }
+
+    /** 
+     * A variation on newClass that allows passing in an array of supplementary
+     * call sites to improve dynamic invocation performance.
+     */
+    public static RubyClass newClass(Ruby runtime, RubyClass superClass, String name, ObjectAllocator allocator, RubyModule parent, boolean setParent, CallSite[] extraCallSites) {
+<span class="fc" id="L468">        RubyClass clazz = newClass(runtime, superClass, extraCallSites);</span>
+<span class="fc" id="L469">        clazz.setBaseName(name);</span>
+<span class="fc" id="L470">        clazz.setAllocator(allocator);</span>
+<span class="fc" id="L471">        clazz.makeMetaClass(superClass.getMetaClass());</span>
+<span class="fc bfc" id="L472" title="All 2 branches covered.">        if (setParent) clazz.setParent(parent);</span>
+<span class="fc" id="L473">        parent.setConstant(name, clazz);</span>
+<span class="fc" id="L474">        clazz.inherit(superClass);</span>
+<span class="fc" id="L475">        return clazz;</span>
+    }
+
+    /** rb_make_metaclass
+     *
+     */
+    @Override
+    public RubyClass makeMetaClass(RubyClass superClass) {
+<span class="fc bfc" id="L483" title="All 2 branches covered.">        if (isSingleton()) { // could be pulled down to RubyClass in future</span>
+<span class="fc" id="L484">            MetaClass klass = new MetaClass(runtime, superClass, this); // rb_class_boot</span>
+<span class="fc" id="L485">            setMetaClass(klass);</span>
+
+<span class="fc" id="L487">            klass.setMetaClass(klass);</span>
+<span class="fc" id="L488">            klass.setSuperClass(getSuperClass().getRealClass().getMetaClass());</span>
+            
+<span class="fc" id="L490">            return klass;</span>
+        } else {
+<span class="fc" id="L492">            return super.makeMetaClass(superClass);</span>
+        }
+    }
+    
+    @Deprecated
+    public IRubyObject invoke(ThreadContext context, IRubyObject self, int methodIndex, String name, IRubyObject[] args, CallType callType, Block block) {
+<span class="nc" id="L498">        return invoke(context, self, name, args, callType, block);</span>
+    }
+    
+    public boolean notVisibleAndNotMethodMissing(DynamicMethod method, String name, IRubyObject caller, CallType callType) {
+<span class="pc bpc" id="L502" title="1 of 4 branches missed.">        return !method.isCallableFrom(caller, callType) &amp;&amp; !name.equals(&quot;method_missing&quot;);</span>
+    }
+    
+    public IRubyObject invoke(ThreadContext context, IRubyObject self, String name,
+            CallType callType, Block block) {
+<span class="nc" id="L507">        DynamicMethod method = searchMethod(name);</span>
+<span class="nc" id="L508">        IRubyObject caller = context.getFrameSelf();</span>
+<span class="nc bnc" id="L509" title="All 2 branches missed.">        if (shouldCallMethodMissing(method, name, caller, callType)) {</span>
+<span class="nc" id="L510">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, callType, block);</span>
+        }
+<span class="nc" id="L512">        return method.call(context, self, this, name, block);</span>
+    }
+    
+    public IRubyObject finvoke(ThreadContext context, IRubyObject self, String name, Block block) {
+<span class="fc" id="L516">        DynamicMethod method = searchMethod(name);</span>
+<span class="pc bpc" id="L517" title="1 of 2 branches missed.">        if (shouldCallMethodMissing(method)) {</span>
+<span class="nc" id="L518">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, CallType.FUNCTIONAL, block);</span>
+        }
+<span class="fc" id="L520">        return method.call(context, self, this, name, block);</span>
+    }
+    
+    public IRubyObject invoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject[] args, CallType callType, Block block) {
+<span class="pc bpc" id="L525" title="3 of 4 branches missed.">        assert args != null;</span>
+<span class="fc" id="L526">        DynamicMethod method = searchMethod(name);</span>
+<span class="fc" id="L527">        IRubyObject caller = context.getFrameSelf();</span>
+<span class="pc bpc" id="L528" title="1 of 2 branches missed.">        if (shouldCallMethodMissing(method, name, caller, callType)) {</span>
+<span class="nc" id="L529">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, callType, args, block);</span>
+        }
+<span class="fc" id="L531">        return method.call(context, self, this, name, args, block);</span>
+    }
+    
+    public IRubyObject finvoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject[] args, Block block) {
+<span class="pc bpc" id="L536" title="3 of 4 branches missed.">        assert args != null;</span>
+<span class="fc" id="L537">        DynamicMethod method = searchMethod(name);</span>
+<span class="fc bfc" id="L538" title="All 2 branches covered.">        if (shouldCallMethodMissing(method)) {</span>
+<span class="fc" id="L539">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, CallType.FUNCTIONAL, args, block);</span>
+        }
+<span class="fc" id="L541">        return method.call(context, self, this, name, args, block);</span>
+    }
+    
+    public IRubyObject invoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject arg, CallType callType, Block block) {
+<span class="fc" id="L546">        DynamicMethod method = searchMethod(name);</span>
+<span class="fc" id="L547">        IRubyObject caller = context.getFrameSelf();</span>
+<span class="pc bpc" id="L548" title="1 of 2 branches missed.">        if (shouldCallMethodMissing(method, name, caller, callType)) {</span>
+<span class="nc" id="L549">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, callType, arg, block);</span>
+        }
+<span class="fc" id="L551">        return method.call(context, self, this, name, arg, block);</span>
+    }
+    
+    public IRubyObject finvoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject arg, Block block) {
+<span class="fc" id="L556">        DynamicMethod method = searchMethod(name);</span>
+<span class="pc bpc" id="L557" title="1 of 2 branches missed.">        if (shouldCallMethodMissing(method)) {</span>
+<span class="nc" id="L558">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, CallType.FUNCTIONAL, arg, block);</span>
+        }
+<span class="fc" id="L560">        return method.call(context, self, this, name, arg, block);</span>
+    }
+    
+    public IRubyObject invoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject arg0, IRubyObject arg1, CallType callType, Block block) {
+<span class="nc" id="L565">        DynamicMethod method = searchMethod(name);</span>
+<span class="nc" id="L566">        IRubyObject caller = context.getFrameSelf();</span>
+<span class="nc bnc" id="L567" title="All 2 branches missed.">        if (shouldCallMethodMissing(method, name, caller, callType)) {</span>
+<span class="nc" id="L568">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, callType, arg0, arg1, block);</span>
+        }
+<span class="nc" id="L570">        return method.call(context, self, this, name, arg0, arg1, block);</span>
+    }
+    
+    public IRubyObject finvoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject arg0, IRubyObject arg1, Block block) {
+<span class="fc" id="L575">        DynamicMethod method = searchMethod(name);</span>
+<span class="pc bpc" id="L576" title="1 of 2 branches missed.">        if (shouldCallMethodMissing(method)) {</span>
+<span class="nc" id="L577">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, CallType.FUNCTIONAL, arg0, arg1, block);</span>
+        }
+<span class="fc" id="L579">        return method.call(context, self, this, name, arg0, arg1, block);</span>
+    }
+    
+    public IRubyObject invoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, CallType callType, Block block) {
+<span class="nc" id="L584">        DynamicMethod method = searchMethod(name);</span>
+<span class="nc" id="L585">        IRubyObject caller = context.getFrameSelf();</span>
+<span class="nc bnc" id="L586" title="All 2 branches missed.">        if (shouldCallMethodMissing(method, name, caller, callType)) {</span>
+<span class="nc" id="L587">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, callType, arg0, arg1, arg2, block);</span>
+        }
+<span class="nc" id="L589">        return method.call(context, self, this, name, arg0, arg1, arg2, block);</span>
+    }
+    
+    public IRubyObject finvoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="fc" id="L594">        DynamicMethod method = searchMethod(name);</span>
+<span class="pc bpc" id="L595" title="1 of 2 branches missed.">        if (shouldCallMethodMissing(method)) {</span>
+<span class="nc" id="L596">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, CallType.FUNCTIONAL, arg0, arg1, arg2, block);</span>
+        }
+<span class="fc" id="L598">        return method.call(context, self, this, name, arg0, arg1, arg2, block);</span>
+    }
+    
+    public IRubyObject invoke(ThreadContext context, IRubyObject self, String name,
+            CallType callType) {
+<span class="nc" id="L603">        DynamicMethod method = searchMethod(name);</span>
+<span class="nc" id="L604">        IRubyObject caller = context.getFrameSelf();</span>
+<span class="nc bnc" id="L605" title="All 2 branches missed.">        if (shouldCallMethodMissing(method, name, caller, callType)) {</span>
+<span class="nc" id="L606">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, callType, Block.NULL_BLOCK);</span>
+        }
+<span class="nc" id="L608">        return method.call(context, self, this, name);</span>
+    }
+    
+    public IRubyObject finvoke(ThreadContext context, IRubyObject self, String name) {
+<span class="fc" id="L612">        DynamicMethod method = searchMethod(name);</span>
+<span class="fc bfc" id="L613" title="All 2 branches covered.">        if (shouldCallMethodMissing(method)) {</span>
+<span class="fc" id="L614">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, CallType.FUNCTIONAL, Block.NULL_BLOCK);</span>
+        }
+<span class="fc" id="L616">        return method.call(context, self, this, name);</span>
+    }
+
+    public IRubyObject finvokeChecked(ThreadContext context, IRubyObject self, String name) {
+<span class="fc" id="L620">        RubyClass klass = self.getMetaClass();</span>
+        DynamicMethod me;
+<span class="pc bpc" id="L622" title="1 of 2 branches missed.">        if (!checkFuncallRespondTo(context, self.getMetaClass(), self, name))</span>
+<span class="nc" id="L623">            return null;</span>
+
+<span class="fc" id="L625">        me = searchMethod(name);</span>
+<span class="fc bfc" id="L626" title="All 2 branches covered.">        if (!checkFuncallCallable(context, me, CallType.FUNCTIONAL, self)) {</span>
+<span class="fc" id="L627">            return checkFuncallMissing(context, klass, self, name);</span>
+        }
+<span class="fc" id="L629">        return me.call(context, self, klass, name);</span>
+    }
+
+    // MRI: check_funcall_exec
+    private static IRubyObject checkFuncallExec(ThreadContext context, IRubyObject self, String name, IRubyObject... args) {
+<span class="fc" id="L634">        IRubyObject[] newArgs = new IRubyObject[args.length + 1];</span>
+<span class="fc" id="L635">        System.arraycopy(args, 0, newArgs, 1, args.length);</span>
+<span class="fc" id="L636">        newArgs[0] = context.runtime.newSymbol(name);</span>
+<span class="fc" id="L637">        return self.callMethod(context, &quot;method_missing&quot;, newArgs);</span>
+    }
+
+    // MRI: check_funcall_failed
+    private static IRubyObject checkFuncallFailed(ThreadContext context, IRubyObject self, String name, RubyClass expClass, IRubyObject... args) {
+<span class="pc bpc" id="L642" title="1 of 2 branches missed.">        if (self.respondsTo(name)) {</span>
+<span class="nc" id="L643">            throw context.runtime.newRaiseException(expClass, name);</span>
+        }
+<span class="fc" id="L645">        return null;</span>
+    }
+
+    // MRI: check_funcall_respond_to
+    private static boolean checkFuncallRespondTo(ThreadContext context, RubyClass klass, IRubyObject recv, String mid) {
+<span class="fc" id="L650">        Ruby runtime = context.runtime;</span>
+        RubyClass defined_class;
+<span class="fc" id="L652">        DynamicMethod me = klass.searchMethod(&quot;respond_to?&quot;);</span>
+
+        // NOTE: isBuiltin here would be NOEX_BASIC in MRI, a flag only added to respond_to?, method_missing, and
+        //       respond_to_missing? Same effect, I believe.
+<span class="pc bpc" id="L656" title="2 of 6 branches missed.">        if (me != null &amp;&amp; !me.isUndefined() &amp;&amp; !me.isBuiltin()) {</span>
+<span class="fc" id="L657">            Arity arity = me.getArity();</span>
+
+<span class="pc bpc" id="L659" title="1 of 2 branches missed.">            if (arity.getValue() &gt; 2)</span>
+<span class="nc" id="L660">                throw runtime.newArgumentError(&quot;respond_to? must accept 1 or 2 arguments (requires &quot; + arity + &quot;)&quot;);</span>
+
+<span class="fc" id="L662">            IRubyObject result = me.call(context, recv, klass, &quot;respond_to?&quot;, runtime.newString(mid), runtime.getTrue());</span>
+<span class="pc bpc" id="L663" title="1 of 2 branches missed.">            if (!result.isTrue()) {</span>
+<span class="nc" id="L664">                return false;</span>
+            }
+        }
+<span class="fc" id="L667">        return true;</span>
+    }
+
+    // MRI: check_funcall_callable
+    public static boolean checkFuncallCallable(ThreadContext context, DynamicMethod method, CallType callType, IRubyObject self) {
+<span class="fc" id="L672">        return rbMethodCallStatus(context, method, callType, self);</span>
+    }
+
+    // MRI: rb_method_call_status
+    // FIXME: Partial impl because we don't have these &quot;NOEX&quot; flags
+    public static boolean rbMethodCallStatus(ThreadContext context, DynamicMethod method, CallType callType, IRubyObject self) {
+<span class="pc bpc" id="L678" title="2 of 6 branches missed.">        return method != null &amp;&amp; !method.isUndefined() &amp;&amp; method.isCallableFrom(self, callType);</span>
+    }
+
+    private static IRubyObject checkFuncallMissing(ThreadContext context, RubyClass klass, IRubyObject self, String method, IRubyObject... args) {
+<span class="fc" id="L682">        Ruby runtime = context.runtime;</span>
+<span class="fc bfc" id="L683" title="All 2 branches covered.">        if (klass.isMethodBuiltin(&quot;method_missing&quot;)) {</span>
+<span class="fc" id="L684">            return null;</span>
+        }
+        else {
+            try {
+<span class="fc" id="L688">                return checkFuncallExec(context, self, method, args);</span>
+<span class="fc" id="L689">            } catch (RaiseException e) {</span>
+                // clear $!
+<span class="fc" id="L691">                context.setErrorInfo(context.nil);</span>
+<span class="fc" id="L692">                return checkFuncallFailed(context, self, method, runtime.getNoMethodError(), args);</span>
+            }
+        }
+    }
+    
+    public IRubyObject invoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject[] args, CallType callType) {
+<span class="nc bnc" id="L699" title="All 4 branches missed.">        assert args != null;</span>
+<span class="nc" id="L700">        DynamicMethod method = searchMethod(name);</span>
+<span class="nc" id="L701">        IRubyObject caller = context.getFrameSelf();</span>
+<span class="nc bnc" id="L702" title="All 2 branches missed.">        if (shouldCallMethodMissing(method, name, caller, callType)) {</span>
+<span class="nc" id="L703">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, callType, args, Block.NULL_BLOCK);</span>
+        }
+<span class="nc" id="L705">        return method.call(context, self, this, name, args);</span>
+    }
+    
+    public IRubyObject finvoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject[] args) {
+<span class="pc bpc" id="L710" title="3 of 4 branches missed.">        assert args != null;</span>
+<span class="fc" id="L711">        DynamicMethod method = searchMethod(name);</span>
+<span class="pc bpc" id="L712" title="1 of 2 branches missed.">        if (shouldCallMethodMissing(method)) {</span>
+<span class="nc" id="L713">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, CallType.FUNCTIONAL, args, Block.NULL_BLOCK);</span>
+        }
+<span class="fc" id="L715">        return method.call(context, self, this, name, args);</span>
+    }
+    
+    public IRubyObject invoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject arg, CallType callType) {
+<span class="nc" id="L720">        DynamicMethod method = searchMethod(name);</span>
+<span class="nc" id="L721">        IRubyObject caller = context.getFrameSelf();</span>
+<span class="nc bnc" id="L722" title="All 2 branches missed.">        if (shouldCallMethodMissing(method, name, caller, callType)) {</span>
+<span class="nc" id="L723">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, callType, arg, Block.NULL_BLOCK);</span>
+        }
+<span class="nc" id="L725">        return method.call(context, self, this, name, arg);</span>
+    }
+    
+    public IRubyObject finvoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject arg) {
+<span class="fc" id="L730">        DynamicMethod method = searchMethod(name);</span>
+<span class="pc bpc" id="L731" title="1 of 2 branches missed.">        if (shouldCallMethodMissing(method)) {</span>
+<span class="nc" id="L732">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, CallType.FUNCTIONAL, arg, Block.NULL_BLOCK);</span>
+        }
+<span class="fc" id="L734">        return method.call(context, self, this, name, arg);</span>
+    }
+    
+    public IRubyObject invoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject arg0, IRubyObject arg1, CallType callType) {
+<span class="nc" id="L739">        DynamicMethod method = searchMethod(name);</span>
+<span class="nc" id="L740">        IRubyObject caller = context.getFrameSelf();</span>
+<span class="nc bnc" id="L741" title="All 2 branches missed.">        if (shouldCallMethodMissing(method, name, caller, callType)) {</span>
+<span class="nc" id="L742">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, callType, arg0, arg1, Block.NULL_BLOCK);</span>
+        }
+<span class="nc" id="L744">        return method.call(context, self, this, name, arg0, arg1);</span>
+    }
+    
+    public IRubyObject finvoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject arg0, IRubyObject arg1) {
+<span class="fc" id="L749">        DynamicMethod method = searchMethod(name);</span>
+<span class="pc bpc" id="L750" title="1 of 2 branches missed.">        if (shouldCallMethodMissing(method)) {</span>
+<span class="nc" id="L751">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, CallType.FUNCTIONAL, arg0, arg1, Block.NULL_BLOCK);</span>
+        }
+<span class="fc" id="L753">        return method.call(context, self, this, name, arg0, arg1);</span>
+    }
+    
+    public IRubyObject invoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, CallType callType) {
+<span class="nc" id="L758">        DynamicMethod method = searchMethod(name);</span>
+<span class="nc" id="L759">        IRubyObject caller = context.getFrameSelf();</span>
+<span class="nc bnc" id="L760" title="All 2 branches missed.">        if (shouldCallMethodMissing(method, name, caller, callType)) {</span>
+<span class="nc" id="L761">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, callType, arg0, arg1, arg2, Block.NULL_BLOCK);</span>
+        }
+<span class="nc" id="L763">        return method.call(context, self, this, name, arg0, arg1, arg2);</span>
+    }
+    
+    public IRubyObject finvoke(ThreadContext context, IRubyObject self, String name,
+            IRubyObject arg0, IRubyObject arg1, IRubyObject arg2) {
+<span class="nc" id="L768">        DynamicMethod method = searchMethod(name);</span>
+<span class="nc bnc" id="L769" title="All 2 branches missed.">        if (shouldCallMethodMissing(method)) {</span>
+<span class="nc" id="L770">            return Helpers.callMethodMissing(context, self, method.getVisibility(), name, CallType.FUNCTIONAL, arg0, arg1, arg2, Block.NULL_BLOCK);</span>
+        }
+<span class="nc" id="L772">        return method.call(context, self, this, name, arg0, arg1, arg2);</span>
+    }
+
+    private void dumpReifiedClass(String dumpDir, String javaPath, byte[] classBytes) {
+<span class="nc bnc" id="L776" title="All 2 branches missed.">        if (dumpDir != null) {</span>
+<span class="nc bnc" id="L777" title="All 2 branches missed.">            if (dumpDir.equals(&quot;&quot;)) {</span>
+<span class="nc" id="L778">                dumpDir = &quot;.&quot;;</span>
+            }
+<span class="nc" id="L780">            java.io.FileOutputStream classStream = null;</span>
+            try {
+<span class="nc" id="L782">                java.io.File classFile = new java.io.File(dumpDir, javaPath + &quot;.class&quot;);</span>
+<span class="nc" id="L783">                classFile.getParentFile().mkdirs();</span>
+<span class="nc" id="L784">                classStream = new java.io.FileOutputStream(classFile);</span>
+<span class="nc" id="L785">                classStream.write(classBytes);</span>
+<span class="nc" id="L786">            } catch (IOException io) {</span>
+<span class="nc" id="L787">                getRuntime().getWarnings().warn(&quot;unable to dump class file: &quot; + io.getMessage());</span>
+            } finally {
+<span class="nc bnc" id="L789" title="All 6 branches missed.">                if (classStream != null) {</span>
+                    try {
+<span class="nc" id="L791">                        classStream.close();</span>
+<span class="nc" id="L792">                    } catch (IOException ignored) {</span>
+<span class="nc" id="L793">                    }</span>
+                }
+            }
+        }
+<span class="nc" id="L797">    }</span>
+
+    private void generateMethodAnnotations(Map&lt;Class, Map&lt;String, Object&gt;&gt; methodAnnos, SkinnyMethodAdapter m, List&lt;Map&lt;Class, Map&lt;String, Object&gt;&gt;&gt; parameterAnnos) {
+<span class="nc bnc" id="L800" title="All 4 branches missed.">        if (methodAnnos != null &amp;&amp; methodAnnos.size() != 0) {</span>
+<span class="nc bnc" id="L801" title="All 2 branches missed.">            for (Map.Entry&lt;Class, Map&lt;String, Object&gt;&gt; entry : methodAnnos.entrySet()) {</span>
+<span class="nc" id="L802">                m.visitAnnotationWithFields(ci(entry.getKey()), true, entry.getValue());</span>
+<span class="nc" id="L803">            }</span>
+        }
+<span class="nc bnc" id="L805" title="All 4 branches missed.">        if (parameterAnnos != null &amp;&amp; parameterAnnos.size() != 0) {</span>
+<span class="nc bnc" id="L806" title="All 2 branches missed.">            for (int i = 0; i &lt; parameterAnnos.size(); i++) {</span>
+<span class="nc" id="L807">                Map&lt;Class, Map&lt;String, Object&gt;&gt; annos = parameterAnnos.get(i);</span>
+<span class="nc bnc" id="L808" title="All 4 branches missed.">                if (annos != null &amp;&amp; annos.size() != 0) {</span>
+<span class="nc bnc" id="L809" title="All 2 branches missed.">                    for (Iterator&lt;Map.Entry&lt;Class, Map&lt;String, Object&gt;&gt;&gt; it = annos.entrySet().iterator(); it.hasNext();) {</span>
+<span class="nc" id="L810">                        Map.Entry&lt;Class, Map&lt;String, Object&gt;&gt; entry = it.next();</span>
+<span class="nc" id="L811">                        m.visitParameterAnnotationWithFields(i, ci(entry.getKey()), true, entry.getValue());</span>
+<span class="nc" id="L812">                    }</span>
+                }
+            }
+        }
+<span class="nc" id="L816">    }</span>
+    
+    private boolean shouldCallMethodMissing(DynamicMethod method) {
+<span class="fc" id="L819">        return method.isUndefined();</span>
+    }
+    private boolean shouldCallMethodMissing(DynamicMethod method, String name, IRubyObject caller, CallType callType) {
+<span class="pc bpc" id="L822" title="1 of 4 branches missed.">        return method.isUndefined() || notVisibleAndNotMethodMissing(method, name, caller, callType);</span>
+    }
+    
+    public IRubyObject invokeInherited(ThreadContext context, IRubyObject self, IRubyObject subclass) {
+<span class="fc" id="L826">        DynamicMethod method = getMetaClass().searchMethod(&quot;inherited&quot;);</span>
+
+<span class="pc bpc" id="L828" title="1 of 2 branches missed.">        if (method.isUndefined()) {</span>
+<span class="nc" id="L829">            return Helpers.callMethodMissing(context, self, method.getVisibility(), &quot;inherited&quot;, CallType.FUNCTIONAL, Block.NULL_BLOCK);</span>
+        }
+
+<span class="fc" id="L832">        return method.call(context, self, getMetaClass(), &quot;inherited&quot;, subclass, Block.NULL_BLOCK);</span>
+    }
+
+    /** rb_class_new_instance
+    *
+    */
+    @JRubyMethod(name = &quot;new&quot;, omit = true)
+    public IRubyObject newInstance(ThreadContext context, Block block) {
+<span class="fc" id="L840">        IRubyObject obj = allocate();</span>
+<span class="fc" id="L841">        baseCallSites[CS_IDX_INITIALIZE].call(context, obj, obj, block);</span>
+<span class="fc" id="L842">        return obj;</span>
+    }
+
+    @JRubyMethod(name = &quot;new&quot;, omit = true)
+    public IRubyObject newInstance(ThreadContext context, IRubyObject arg0, Block block) {
+<span class="fc" id="L847">        IRubyObject obj = allocate();</span>
+<span class="fc" id="L848">        baseCallSites[CS_IDX_INITIALIZE].call(context, obj, obj, arg0, block);</span>
+<span class="fc" id="L849">        return obj;</span>
+    }
+
+    @JRubyMethod(name = &quot;new&quot;, omit = true)
+    public IRubyObject newInstance(ThreadContext context, IRubyObject arg0, IRubyObject arg1, Block block) {
+<span class="fc" id="L854">        IRubyObject obj = allocate();</span>
+<span class="fc" id="L855">        baseCallSites[CS_IDX_INITIALIZE].call(context, obj, obj, arg0, arg1, block);</span>
+<span class="fc" id="L856">        return obj;</span>
+    }
+
+    @JRubyMethod(name = &quot;new&quot;, omit = true)
+    public IRubyObject newInstance(ThreadContext context, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="fc" id="L861">        IRubyObject obj = allocate();</span>
+<span class="fc" id="L862">        baseCallSites[CS_IDX_INITIALIZE].call(context, obj, obj, arg0, arg1, arg2, block);</span>
+<span class="fc" id="L863">        return obj;</span>
+    }
+
+    @JRubyMethod(name = &quot;new&quot;, rest = true, omit = true)
+    public IRubyObject newInstance(ThreadContext context, IRubyObject[] args, Block block) {
+<span class="fc" id="L868">        IRubyObject obj = allocate();</span>
+<span class="fc" id="L869">        baseCallSites[CS_IDX_INITIALIZE].call(context, obj, obj, args, block);</span>
+<span class="fc" id="L870">        return obj;</span>
+    }
+
+    /** rb_class_initialize
+     * 
+     */
+    @Override
+    public IRubyObject initialize(ThreadContext context, Block block) {
+<span class="nc" id="L878">        return initialize19(context, block);</span>
+    }
+        
+    public IRubyObject initialize(ThreadContext context, IRubyObject superObject, Block block) {
+<span class="nc" id="L882">        return initialize19(context, superObject, block);</span>
+    }
+        
+    @JRubyMethod(name = &quot;initialize&quot;, visibility = PRIVATE)
+    public IRubyObject initialize19(ThreadContext context, Block block) {
+<span class="fc" id="L887">        checkNotInitialized();</span>
+<span class="fc" id="L888">        return initializeCommon(context, runtime.getObject(), block, true);</span>
+    }
+        
+    @JRubyMethod(name = &quot;initialize&quot;, visibility = PRIVATE)
+    public IRubyObject initialize19(ThreadContext context, IRubyObject superObject, Block block) {
+<span class="fc" id="L893">        checkNotInitialized();</span>
+<span class="fc" id="L894">        checkInheritable(superObject);</span>
+<span class="fc" id="L895">        return initializeCommon(context, (RubyClass)superObject, block, true);</span>
+    }
+
+    private IRubyObject initializeCommon(ThreadContext context, RubyClass superClazz, Block block, boolean ruby1_9 /*callInheritBeforeSuper*/) {
+<span class="fc" id="L899">        setSuperClass(superClazz);</span>
+<span class="fc" id="L900">        allocator = superClazz.allocator;</span>
+<span class="fc" id="L901">        makeMetaClass(superClazz.getMetaClass());</span>
+
+<span class="fc" id="L903">        marshal = superClazz.marshal;</span>
+
+<span class="fc" id="L905">        superClazz.addSubclass(this);</span>
+
+<span class="pc bpc" id="L907" title="1 of 2 branches missed.">        if (ruby1_9) {</span>
+<span class="fc" id="L908">            inherit(superClazz);</span>
+<span class="fc" id="L909">            super.initialize(context, block);</span>
+        } else {
+<span class="nc" id="L911">            super.initialize(context, block);</span>
+<span class="nc" id="L912">            inherit(superClazz);</span>
+        }
+
+<span class="fc" id="L915">        return this;</span>
+    }
+
+    /** rb_class_init_copy
+     * 
+     */
+    @JRubyMethod(name = &quot;initialize_copy&quot;, required = 1, visibility = PRIVATE)
+    @Override
+    public IRubyObject initialize_copy(IRubyObject original){
+<span class="fc" id="L924">        checkNotInitialized();</span>
+<span class="pc bpc" id="L925" title="1 of 2 branches missed.">        if (original instanceof MetaClass) throw runtime.newTypeError(&quot;can't copy singleton class&quot;);        </span>
+        
+<span class="fc" id="L927">        super.initialize_copy(original);</span>
+<span class="fc" id="L928">        allocator = ((RubyClass)original).allocator; </span>
+<span class="fc" id="L929">        return this;        </span>
+    }
+
+    protected void setModuleSuperClass(RubyClass superClass) {
+        // remove us from old superclass's child classes
+<span class="nc bnc" id="L934" title="All 2 branches missed.">        if (this.superClass != null) this.superClass.removeSubclass(this);</span>
+        // add us to new superclass's child classes
+<span class="nc" id="L936">        superClass.addSubclass(this);</span>
+        // update superclass reference
+<span class="nc" id="L938">        setSuperClass(superClass);</span>
+<span class="nc" id="L939">    }</span>
+    
+    public Collection&lt;RubyClass&gt; subclasses(boolean includeDescendants) {
+<span class="nc" id="L942">        Set&lt;RubyClass&gt; mySubclasses = subclasses;</span>
+<span class="nc bnc" id="L943" title="All 2 branches missed.">        if (mySubclasses != null) {</span>
+<span class="nc" id="L944">            Collection&lt;RubyClass&gt; mine = new ArrayList&lt;RubyClass&gt;(mySubclasses);</span>
+<span class="nc bnc" id="L945" title="All 2 branches missed.">            if (includeDescendants) {</span>
+<span class="nc bnc" id="L946" title="All 2 branches missed.">                for (RubyClass i: mySubclasses) {</span>
+<span class="nc" id="L947">                    mine.addAll(i.subclasses(includeDescendants));</span>
+<span class="nc" id="L948">                }</span>
+            }
+
+<span class="nc" id="L951">            return mine;</span>
+        } else {
+<span class="nc" id="L953">            return Collections.EMPTY_LIST;</span>
+        }
+    }
+
+    /**
+     * Add a new subclass to the weak set of subclasses.
+     *
+     * This version always constructs a new set to avoid having to synchronize
+     * against the set when iterating it for invalidation in
+     * invalidateCacheDescendants.
+     *
+     * @param subclass The subclass to add
+     */
+    public synchronized void addSubclass(RubyClass subclass) {
+<span class="fc" id="L967">        synchronized (runtime.getHierarchyLock()) {</span>
+<span class="fc" id="L968">            Set&lt;RubyClass&gt; oldSubclasses = subclasses;</span>
+<span class="fc bfc" id="L969" title="All 2 branches covered.">            if (oldSubclasses == null) subclasses = oldSubclasses = new WeakHashSet&lt;RubyClass&gt;(4);</span>
+<span class="fc" id="L970">            oldSubclasses.add(subclass);</span>
+<span class="pc" id="L971">        }</span>
+<span class="fc" id="L972">    }</span>
+    
+    /**
+     * Remove a subclass from the weak set of subclasses.
+     *
+     * @param subclass The subclass to remove
+     */
+    public synchronized void removeSubclass(RubyClass subclass) {
+<span class="nc" id="L980">        synchronized (runtime.getHierarchyLock()) {</span>
+<span class="nc" id="L981">            Set&lt;RubyClass&gt; oldSubclasses = subclasses;</span>
+<span class="nc bnc" id="L982" title="All 2 branches missed.">            if (oldSubclasses == null) return;</span>
+
+<span class="nc" id="L984">            oldSubclasses.remove(subclass);</span>
+<span class="nc" id="L985">        }</span>
+<span class="nc" id="L986">    }</span>
+
+    /**
+     * Replace an existing subclass with a new one.
+     *
+     * @param subclass The subclass to remove
+     * @param newSubclass The subclass to replace it with
+     */
+    public synchronized void replaceSubclass(RubyClass subclass, RubyClass newSubclass) {
+<span class="fc" id="L995">        synchronized (runtime.getHierarchyLock()) {</span>
+<span class="fc" id="L996">            Set&lt;RubyClass&gt; oldSubclasses = subclasses;</span>
+<span class="pc bpc" id="L997" title="1 of 2 branches missed.">            if (oldSubclasses == null) return;</span>
+
+<span class="fc" id="L999">            oldSubclasses.remove(subclass);</span>
+<span class="fc" id="L1000">            oldSubclasses.add(newSubclass);</span>
+<span class="pc" id="L1001">        }</span>
+<span class="fc" id="L1002">    }</span>
+
+    @Override
+    public void becomeSynchronized() {
+        // make this class and all subclasses sync
+<span class="nc" id="L1007">        synchronized (getRuntime().getHierarchyLock()) {</span>
+<span class="nc" id="L1008">            super.becomeSynchronized();</span>
+<span class="nc" id="L1009">            Set&lt;RubyClass&gt; mySubclasses = subclasses;</span>
+<span class="nc bnc" id="L1010" title="All 4 branches missed.">            if (mySubclasses != null) for (RubyClass subclass : mySubclasses) {</span>
+<span class="nc" id="L1011">                subclass.becomeSynchronized();</span>
+<span class="nc" id="L1012">            }</span>
+<span class="nc" id="L1013">        }</span>
+<span class="nc" id="L1014">    }</span>
+
+    /**
+     * Invalidate all subclasses of this class by walking the set of all
+     * subclasses and asking them to invalidate themselves.
+     *
+     * Note that this version works against a reference to the current set of
+     * subclasses, which could be replaced by the time this iteration is
+     * complete. In theory, there may be a path by which invalidation would
+     * miss a class added during the invalidation process, but the exposure is
+     * minimal if it exists at all. The only way to prevent it would be to
+     * synchronize both invalidation and subclass set modification against a
+     * global lock, which we would like to avoid.
+     */
+    @Override
+    public void invalidateCacheDescendants() {
+<span class="fc" id="L1030">        super.invalidateCacheDescendants();</span>
+
+<span class="fc" id="L1032">        synchronized (runtime.getHierarchyLock()) {</span>
+<span class="fc" id="L1033">            Set&lt;RubyClass&gt; mySubclasses = subclasses;</span>
+<span class="fc bfc" id="L1034" title="All 4 branches covered.">            if (mySubclasses != null) for (RubyClass subclass : mySubclasses) {</span>
+<span class="fc" id="L1035">                subclass.invalidateCacheDescendants();</span>
+<span class="fc" id="L1036">            }</span>
+<span class="pc" id="L1037">        }</span>
+<span class="fc" id="L1038">    }</span>
+    
+    public void addInvalidatorsAndFlush(List&lt;Invalidator&gt; invalidators) {
+        // add this class's invalidators to the aggregate
+<span class="fc" id="L1042">        invalidators.add(methodInvalidator);</span>
+        
+        // if we're not at boot time, don't bother fully clearing caches
+<span class="fc bfc" id="L1045" title="All 2 branches covered.">        if (!runtime.isBootingCore()) cachedMethods.clear();</span>
+
+        // no subclasses, don't bother with lock and iteration
+<span class="fc bfc" id="L1048" title="All 4 branches covered.">        if (subclasses == null || subclasses.isEmpty()) return;</span>
+        
+        // cascade into subclasses
+<span class="fc" id="L1051">        synchronized (runtime.getHierarchyLock()) {</span>
+<span class="fc" id="L1052">            Set&lt;RubyClass&gt; mySubclasses = subclasses;</span>
+<span class="pc bpc" id="L1053" title="1 of 4 branches missed.">            if (mySubclasses != null) for (RubyClass subclass : mySubclasses) {</span>
+<span class="fc" id="L1054">                subclass.addInvalidatorsAndFlush(invalidators);</span>
+<span class="fc" id="L1055">            }</span>
+<span class="pc" id="L1056">        }</span>
+<span class="fc" id="L1057">    }</span>
+    
+    public Ruby getClassRuntime() {
+<span class="fc" id="L1060">        return runtime;</span>
+    }
+
+    public final RubyClass getRealClass() {
+<span class="fc" id="L1064">        return realClass;</span>
+    }    
+
+    @JRubyMethod(name = &quot;inherited&quot;, required = 1, visibility = PRIVATE)
+    public IRubyObject inherited(ThreadContext context, IRubyObject arg) {
+<span class="fc" id="L1069">        return runtime.getNil();</span>
+    }
+
+    /** rb_class_inherited (reversed semantics!)
+     * 
+     */
+    public void inherit(RubyClass superClazz) {
+<span class="pc bpc" id="L1076" title="1 of 2 branches missed.">        if (superClazz == null) superClazz = runtime.getObject();</span>
+
+<span class="fc bfc" id="L1078" title="All 2 branches covered.">        if (getRuntime().getNil() != null) {</span>
+<span class="fc" id="L1079">            superClazz.invokeInherited(runtime.getCurrentContext(), superClazz, this);</span>
+        }
+<span class="fc" id="L1081">    }</span>
+
+    /** Return the real super class of this class.
+     * 
+     * rb_class_superclass
+     *
+     */    
+    @JRubyMethod(name = &quot;superclass&quot;)
+    public IRubyObject superclass(ThreadContext context) {
+<span class="fc" id="L1090">        RubyClass superClazz = superClass;</span>
+        
+<span class="fc bfc" id="L1092" title="All 2 branches covered.">        if (superClazz == null) {</span>
+<span class="fc bfc" id="L1093" title="All 2 branches covered.">            if (metaClass == runtime.getBasicObject().getMetaClass()) return runtime.getNil();</span>
+<span class="fc" id="L1094">            throw runtime.newTypeError(&quot;uninitialized class&quot;);</span>
+        }
+
+<span class="pc bpc" id="L1097" title="1 of 4 branches missed.">        while (superClazz != null &amp;&amp; superClazz.isIncluded()) superClazz = superClazz.superClass;</span>
+
+<span class="pc bpc" id="L1099" title="1 of 2 branches missed.">        return superClazz != null ? superClazz : runtime.getNil();</span>
+    }
+
+    private void checkNotInitialized() {
+<span class="fc bfc" id="L1103" title="All 4 branches covered.">        if (superClass != null || this == runtime.getBasicObject()) {</span>
+<span class="fc" id="L1104">            throw runtime.newTypeError(&quot;already initialized class&quot;);</span>
+        }
+<span class="fc" id="L1106">    }</span>
+    /** rb_check_inheritable
+     * 
+     */
+    public static void checkInheritable(IRubyObject superClass) {
+<span class="fc bfc" id="L1111" title="All 2 branches covered.">        if (!(superClass instanceof RubyClass)) {</span>
+<span class="fc" id="L1112">            throw superClass.getRuntime().newTypeError(&quot;superclass must be a Class (&quot; + superClass.getMetaClass() + &quot; given)&quot;); </span>
+        }
+<span class="fc bfc" id="L1114" title="All 2 branches covered.">        if (((RubyClass)superClass).isSingleton()) {</span>
+<span class="fc" id="L1115">            throw superClass.getRuntime().newTypeError(&quot;can't make subclass of virtual class&quot;);</span>
+        }        
+<span class="fc" id="L1117">    }</span>
+
+    public final ObjectMarshal getMarshal() {
+<span class="fc" id="L1120">        return marshal;</span>
+    }
+    
+    public final void setMarshal(ObjectMarshal marshal) {
+<span class="fc" id="L1124">        this.marshal = marshal;</span>
+<span class="fc" id="L1125">    }</span>
+    
+    public final void marshal(Object obj, MarshalStream marshalStream) throws IOException {
+<span class="fc" id="L1128">        getMarshal().marshalTo(runtime, obj, this, marshalStream);</span>
+<span class="fc" id="L1129">    }</span>
+    
+    public final Object unmarshal(UnmarshalStream unmarshalStream) throws IOException {
+<span class="fc" id="L1132">        return getMarshal().unmarshalFrom(runtime, this, unmarshalStream);</span>
+    }
+    
+    public static void marshalTo(RubyClass clazz, MarshalStream output) throws java.io.IOException {
+<span class="fc" id="L1136">        output.registerLinkTarget(clazz);</span>
+<span class="fc" id="L1137">        output.writeString(MarshalStream.getPathFromClass(clazz));</span>
+<span class="fc" id="L1138">    }</span>
+
+    public static RubyClass unmarshalFrom(UnmarshalStream input) throws java.io.IOException {
+<span class="fc" id="L1141">        String name = RubyString.byteListToString(input.unmarshalString());</span>
+<span class="fc" id="L1142">        RubyClass result = UnmarshalStream.getClassFromPath(input.getRuntime(), name);</span>
+<span class="fc" id="L1143">        input.registerLinkTarget(result);</span>
+<span class="fc" id="L1144">        return result;</span>
+    }
+
+<span class="fc" id="L1147">    protected static final ObjectMarshal DEFAULT_OBJECT_MARSHAL = new ObjectMarshal() {</span>
+        @Override
+        public void marshalTo(Ruby runtime, Object obj, RubyClass type,
+                              MarshalStream marshalStream) throws IOException {
+<span class="fc" id="L1151">            IRubyObject object = (IRubyObject)obj;</span>
+            
+<span class="fc" id="L1153">            marshalStream.registerLinkTarget(object);</span>
+<span class="fc" id="L1154">            marshalStream.dumpVariables(object.getVariableList());</span>
+<span class="fc" id="L1155">        }</span>
+
+        @Override
+        public Object unmarshalFrom(Ruby runtime, RubyClass type,
+                                    UnmarshalStream unmarshalStream) throws IOException {
+<span class="fc" id="L1160">            IRubyObject result = type.allocate();</span>
+            
+<span class="fc" id="L1162">            unmarshalStream.registerLinkTarget(result);</span>
+
+<span class="fc" id="L1164">            unmarshalStream.defaultVariablesUnmarshal(result);</span>
+
+<span class="fc" id="L1166">            return result;</span>
+        }
+    };
+
+    /**
+     * Whether this class can be reified into a Java class. Currently only objects
+     * that descend from Object (or descend from Ruby-based classes that descend
+     * from Object) can be reified.
+     *
+     * @return true if the class can be reified, false otherwise
+     */
+    public boolean isReifiable() {
+<span class="nc" id="L1178">        RubyClass realSuper = null;</span>
+
+        // already reified is not reifiable
+<span class="nc bnc" id="L1181" title="All 2 branches missed.">        if (reifiedClass != null) return false;</span>
+
+        // root classes are not reifiable
+<span class="nc bnc" id="L1184" title="All 4 branches missed.">        if (superClass == null || (realSuper = superClass.getRealClass()) == null) return false;</span>
+
+<span class="nc" id="L1186">        Class reifiedSuper = realSuper.reifiedClass;</span>
+        
+        // if super has been reified or is a native class
+<span class="nc bnc" id="L1189" title="All 2 branches missed.">        if (reifiedSuper != null) {</span>
+            
+            // super must be Object, BasicObject, or a reified user class
+<span class="nc bnc" id="L1192" title="All 4 branches missed.">            return reifiedSuper == RubyObject.class ||</span>
+                    reifiedSuper == RubyBasicObject.class ||
+<span class="nc bnc" id="L1194" title="All 2 branches missed.">                    Reified.class.isAssignableFrom(reifiedSuper);</span>
+        } else {
+            // non-native, non-reified super; recurse
+<span class="nc" id="L1197">            return realSuper.isReifiable();</span>
+        }
+    }
+    
+    public void reifyWithAncestors() {
+<span class="nc" id="L1202">        reifyWithAncestors(null, true);</span>
+<span class="nc" id="L1203">    }</span>
+    public void reifyWithAncestors(String classDumpDir) {
+<span class="nc" id="L1205">        reifyWithAncestors(classDumpDir, true);</span>
+<span class="nc" id="L1206">    }</span>
+    public void reifyWithAncestors(boolean useChildLoader) {
+<span class="nc" id="L1208">        reifyWithAncestors(null, useChildLoader);</span>
+<span class="nc" id="L1209">    }</span>
+    
+    /**
+     * Reify this class, first reifying all its ancestors. This causes the
+     * reified class and all ancestors' reified classes to come into existence,
+     * so any future changes will not be reflected.
+     *
+     * This form also accepts a string argument indicating a path in which to dump
+     * the intermediate reified class bytes.
+     *
+     * @param classDumpDir the path in which to dump reified class bytes
+     * @param useChildLoader whether to load the class into its own child classloader
+     */
+    public void reifyWithAncestors(String classDumpDir, boolean useChildLoader) {
+<span class="nc bnc" id="L1223" title="All 2 branches missed.">        if (isReifiable()) {</span>
+<span class="nc" id="L1224">            RubyClass realSuper = getSuperClass().getRealClass();</span>
+
+<span class="nc bnc" id="L1226" title="All 2 branches missed.">            if (realSuper.reifiedClass == null) realSuper.reifyWithAncestors(classDumpDir, useChildLoader);</span>
+<span class="nc" id="L1227">            reify(classDumpDir, useChildLoader);</span>
+        }
+<span class="nc" id="L1229">    }</span>
+
+    private static final boolean DEBUG_REIFY = false;
+
+    public synchronized void reify() {
+<span class="nc" id="L1234">        reify(null, true);</span>
+<span class="nc" id="L1235">    }</span>
+    public synchronized void reify(String classDumpDir) {
+<span class="nc" id="L1237">        reify(classDumpDir, true);</span>
+<span class="nc" id="L1238">    }</span>
+    public synchronized void reify(boolean useChildLoader) {
+<span class="nc" id="L1240">        reify(null, useChildLoader);</span>
+<span class="nc" id="L1241">    }</span>
+
+    /**
+     * Stand up a real Java class for the backing store of this object
+     * @param classDumpDir Directory to save reified java class
+     */
+    public synchronized void reify(String classDumpDir, boolean useChildLoader) {
+        // re-check reifiable in case another reify call has jumped in ahead of us
+<span class="nc bnc" id="L1249" title="All 2 branches missed.">        if (!isReifiable()) return;</span>
+        
+<span class="nc" id="L1251">        Class reifiedParent = RubyObject.class;</span>
+
+        // calculate an appropriate name, using &quot;Anonymous####&quot; if none is present
+        String name;
+<span class="nc bnc" id="L1255" title="All 2 branches missed.">        if (getBaseName() == null) {</span>
+<span class="nc" id="L1256">            name = &quot;AnonymousRubyClass__&quot; + id;</span>
+        } else {
+<span class="nc" id="L1258">            name = getName();</span>
+        }
+        
+<span class="nc" id="L1261">        String javaName = &quot;rubyobj.&quot; + name.replaceAll(&quot;::&quot;, &quot;.&quot;);</span>
+<span class="nc" id="L1262">        String javaPath = &quot;rubyobj/&quot; + name.replaceAll(&quot;::&quot;, &quot;/&quot;);</span>
+        ClassDefiningClassLoader parentCL;
+<span class="nc" id="L1264">        Class parentReified = superClass.getRealClass().getReifiedClass();</span>
+<span class="nc bnc" id="L1265" title="All 2 branches missed.">        if (parentReified == null) {</span>
+<span class="nc" id="L1266">            throw getClassRuntime().newTypeError(&quot;class &quot; + getName() + &quot; parent class is not yet reified&quot;);</span>
+        }
+        
+<span class="nc bnc" id="L1269" title="All 2 branches missed.">        if (parentReified.getClassLoader() instanceof OneShotClassLoader) {</span>
+<span class="nc" id="L1270">            parentCL = (OneShotClassLoader)superClass.getRealClass().getReifiedClass().getClassLoader();</span>
+        } else {
+<span class="nc bnc" id="L1272" title="All 2 branches missed.">            if (useChildLoader) {</span>
+<span class="nc" id="L1273">                parentCL = new OneShotClassLoader(runtime.getJRubyClassLoader());</span>
+            } else {
+<span class="nc" id="L1275">                parentCL = runtime.getJRubyClassLoader();</span>
+            }
+        }
+
+<span class="nc bnc" id="L1279" title="All 2 branches missed.">        if (superClass.reifiedClass != null) {</span>
+<span class="nc" id="L1280">            reifiedParent = superClass.reifiedClass;</span>
+        }
+
+<span class="nc" id="L1283">        Class[] interfaces = Java.getInterfacesFromRubyClass(this);</span>
+<span class="nc" id="L1284">        String[] interfaceNames = new String[interfaces.length + 1];</span>
+        
+        // mark this as a Reified class
+<span class="nc" id="L1287">        interfaceNames[0] = p(Reified.class);</span>
+
+        // add the other user-specified interfaces
+<span class="nc bnc" id="L1290" title="All 2 branches missed.">        for (int i = 0; i &lt; interfaces.length; i++) {</span>
+<span class="nc" id="L1291">            interfaceNames[i + 1] = p(interfaces[i]);</span>
+        }
+
+<span class="nc" id="L1294">        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);</span>
+<span class="nc" id="L1295">        cw.visit(RubyInstanceConfig.JAVA_VERSION, ACC_PUBLIC + ACC_SUPER, javaPath, null, p(reifiedParent),</span>
+                interfaceNames);
+
+<span class="nc bnc" id="L1298" title="All 4 branches missed.">        if (classAnnotations != null &amp;&amp; !classAnnotations.isEmpty()) {</span>
+<span class="nc bnc" id="L1299" title="All 2 branches missed.">            for (Map.Entry&lt;Class,Map&lt;String,Object&gt;&gt; entry : classAnnotations.entrySet()) {</span>
+<span class="nc" id="L1300">                Class annoType = entry.getKey();</span>
+<span class="nc" id="L1301">                Map&lt;String,Object&gt; fields = entry.getValue();</span>
+
+<span class="nc" id="L1303">                AnnotationVisitor av = cw.visitAnnotation(ci(annoType), true);</span>
+<span class="nc" id="L1304">                CodegenUtils.visitAnnotationFields(av, fields);</span>
+<span class="nc" id="L1305">                av.visitEnd();</span>
+<span class="nc" id="L1306">            }</span>
+        }
+
+        // fields to hold Ruby and RubyClass references
+<span class="nc" id="L1310">        cw.visitField(ACC_STATIC | ACC_PRIVATE, &quot;ruby&quot;, ci(Ruby.class), null, null);</span>
+<span class="nc" id="L1311">        cw.visitField(ACC_STATIC | ACC_PRIVATE, &quot;rubyClass&quot;, ci(RubyClass.class), null, null);</span>
+
+        // static initializing method
+<span class="nc" id="L1314">        SkinnyMethodAdapter m = new SkinnyMethodAdapter(cw, ACC_PUBLIC | ACC_STATIC, &quot;clinit&quot;, sig(void.class, Ruby.class, RubyClass.class), null, null);</span>
+<span class="nc" id="L1315">        m.start();</span>
+<span class="nc" id="L1316">        m.aload(0);</span>
+<span class="nc" id="L1317">        m.putstatic(javaPath, &quot;ruby&quot;, ci(Ruby.class));</span>
+<span class="nc" id="L1318">        m.aload(1);</span>
+<span class="nc" id="L1319">        m.putstatic(javaPath, &quot;rubyClass&quot;, ci(RubyClass.class));</span>
+<span class="nc" id="L1320">        m.voidreturn();</span>
+<span class="nc" id="L1321">        m.end();</span>
+
+        // standard constructor that accepts Ruby, RubyClass
+<span class="nc" id="L1324">        m = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;&lt;init&gt;&quot;, sig(void.class, Ruby.class, RubyClass.class), null, null);</span>
+<span class="nc" id="L1325">        m.aload(0);</span>
+<span class="nc" id="L1326">        m.aload(1);</span>
+<span class="nc" id="L1327">        m.aload(2);</span>
+<span class="nc" id="L1328">        m.invokespecial(p(reifiedParent), &quot;&lt;init&gt;&quot;, sig(void.class, Ruby.class, RubyClass.class));</span>
+<span class="nc" id="L1329">        m.voidreturn();</span>
+<span class="nc" id="L1330">        m.end();</span>
+
+        // no-arg constructor using static references to Ruby and RubyClass
+<span class="nc" id="L1333">        m = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;&lt;init&gt;&quot;, CodegenUtils.sig(void.class), null, null);</span>
+<span class="nc" id="L1334">        m.aload(0);</span>
+<span class="nc" id="L1335">        m.getstatic(javaPath, &quot;ruby&quot;, ci(Ruby.class));</span>
+<span class="nc" id="L1336">        m.getstatic(javaPath, &quot;rubyClass&quot;, ci(RubyClass.class));</span>
+<span class="nc" id="L1337">        m.invokespecial(p(reifiedParent), &quot;&lt;init&gt;&quot;, sig(void.class, Ruby.class, RubyClass.class));</span>
+<span class="nc" id="L1338">        m.voidreturn();</span>
+<span class="nc" id="L1339">        m.end();</span>
+
+        // define fields
+<span class="nc bnc" id="L1342" title="All 2 branches missed.">        for (Map.Entry&lt;String, Class&gt; fieldSignature : getFieldSignatures().entrySet()) {</span>
+<span class="nc" id="L1343">            String fieldName = fieldSignature.getKey();</span>
+<span class="nc" id="L1344">            Class type = fieldSignature.getValue();</span>
+<span class="nc" id="L1345">            Map&lt;Class, Map&lt;String, Object&gt;&gt; fieldAnnos = getFieldAnnotations().get(fieldName);</span>
+
+<span class="nc" id="L1347">            FieldVisitor fieldVisitor = cw.visitField(ACC_PUBLIC, fieldName, ci(type), null, null);</span>
+
+<span class="nc bnc" id="L1349" title="All 2 branches missed.">            if (fieldAnnos == null) {</span>
+<span class="nc" id="L1350">              continue;</span>
+            }
+
+<span class="nc bnc" id="L1353" title="All 2 branches missed.">            for (Map.Entry&lt;Class, Map&lt;String, Object&gt;&gt; fieldAnno : fieldAnnos.entrySet()) {</span>
+<span class="nc" id="L1354">                Class annoType = fieldAnno.getKey();</span>
+<span class="nc" id="L1355">                AnnotationVisitor av = fieldVisitor.visitAnnotation(ci(annoType), true);</span>
+<span class="nc" id="L1356">                CodegenUtils.visitAnnotationFields(av, fieldAnno.getValue());</span>
+<span class="nc" id="L1357">            }</span>
+<span class="nc" id="L1358">            fieldVisitor.visitEnd();</span>
+<span class="nc" id="L1359">        }</span>
+
+        // gather a list of instance methods, so we don't accidentally make static ones that conflict
+<span class="nc" id="L1362">        Set&lt;String&gt; instanceMethods = new HashSet&lt;String&gt;();</span>
+
+        // define instance methods
+<span class="nc bnc" id="L1365" title="All 2 branches missed.">        for (Map.Entry&lt;String,DynamicMethod&gt; methodEntry : getMethods().entrySet()) {</span>
+<span class="nc" id="L1366">            String methodName = methodEntry.getKey();</span>
+
+<span class="nc bnc" id="L1368" title="All 2 branches missed.">            if (!JavaNameMangler.willMethodMangleOk(methodName)) continue;</span>
+
+<span class="nc" id="L1370">            String javaMethodName = JavaNameMangler.mangleMethodName(methodName);</span>
+
+<span class="nc" id="L1372">            Map&lt;Class,Map&lt;String,Object&gt;&gt; methodAnnos = getMethodAnnotations().get(methodName);</span>
+<span class="nc" id="L1373">            List&lt;Map&lt;Class,Map&lt;String,Object&gt;&gt;&gt; parameterAnnos = getParameterAnnotations().get(methodName);</span>
+<span class="nc" id="L1374">            Class[] methodSignature = getMethodSignatures().get(methodName);</span>
+
+            String signature;
+<span class="nc bnc" id="L1377" title="All 2 branches missed.">            if (methodSignature == null) {</span>
+                // non-signature signature with just IRubyObject
+<span class="nc bnc" id="L1379" title="All 2 branches missed.">                switch (methodEntry.getValue().getArity().getValue()) {</span>
+                case 0:
+<span class="nc" id="L1381">                    signature = sig(IRubyObject.class);</span>
+<span class="nc" id="L1382">                    m = new SkinnyMethodAdapter(cw, ACC_PUBLIC | ACC_VARARGS, javaMethodName, signature, null, null);</span>
+<span class="nc" id="L1383">                    generateMethodAnnotations(methodAnnos, m, parameterAnnos);</span>
+
+<span class="nc" id="L1385">                    m.aload(0);</span>
+<span class="nc" id="L1386">                    m.ldc(methodName);</span>
+<span class="nc" id="L1387">                    m.invokevirtual(javaPath, &quot;callMethod&quot;, sig(IRubyObject.class, String.class));</span>
+<span class="nc" id="L1388">                    break;</span>
+                default:
+<span class="nc" id="L1390">                    signature = sig(IRubyObject.class, IRubyObject[].class);</span>
+<span class="nc" id="L1391">                    m = new SkinnyMethodAdapter(cw, ACC_PUBLIC | ACC_VARARGS, javaMethodName, signature, null, null);</span>
+<span class="nc" id="L1392">                    generateMethodAnnotations(methodAnnos, m, parameterAnnos);</span>
+
+<span class="nc" id="L1394">                    m.aload(0);</span>
+<span class="nc" id="L1395">                    m.ldc(methodName);</span>
+<span class="nc" id="L1396">                    m.aload(1);</span>
+<span class="nc" id="L1397">                    m.invokevirtual(javaPath, &quot;callMethod&quot;, sig(IRubyObject.class, String.class, IRubyObject[].class));</span>
+                }
+<span class="nc" id="L1399">                m.areturn();</span>
+            } else {
+                // generate a real method signature for the method, with to/from coercions
+
+                // indices for temp values
+<span class="nc" id="L1404">                Class[] params = new Class[methodSignature.length - 1];</span>
+<span class="nc" id="L1405">                System.arraycopy(methodSignature, 1, params, 0, params.length);</span>
+<span class="nc" id="L1406">                int baseIndex = 1;</span>
+<span class="nc bnc" id="L1407" title="All 2 branches missed.">                for (Class paramType : params) {</span>
+<span class="nc bnc" id="L1408" title="All 4 branches missed.">                    if (paramType == double.class || paramType == long.class) {</span>
+<span class="nc" id="L1409">                        baseIndex += 2;</span>
+                    } else {
+<span class="nc" id="L1411">                        baseIndex += 1;</span>
+                    }
+                }
+<span class="nc" id="L1414">                int rubyIndex = baseIndex;</span>
+
+<span class="nc" id="L1416">                signature = sig(methodSignature[0], params);</span>
+<span class="nc" id="L1417">                m = new SkinnyMethodAdapter(cw, ACC_PUBLIC | ACC_VARARGS, javaMethodName, signature, null, null);</span>
+<span class="nc" id="L1418">                generateMethodAnnotations(methodAnnos, m, parameterAnnos);</span>
+
+<span class="nc" id="L1420">                m.getstatic(javaPath, &quot;ruby&quot;, ci(Ruby.class));</span>
+<span class="nc" id="L1421">                m.astore(rubyIndex);</span>
+
+<span class="nc" id="L1423">                m.aload(0); // self</span>
+<span class="nc" id="L1424">                m.ldc(methodName); // method name</span>
+<span class="nc" id="L1425">                RealClassGenerator.coerceArgumentsToRuby(m, params, rubyIndex);</span>
+<span class="nc" id="L1426">                m.invokevirtual(javaPath, &quot;callMethod&quot;, sig(IRubyObject.class, String.class, IRubyObject[].class));</span>
+
+<span class="nc" id="L1428">                RealClassGenerator.coerceResultAndReturn(m, methodSignature[0]);</span>
+            }
+
+            if (DEBUG_REIFY) LOG.debug(&quot;defining {}#{} as {}#{}&quot;, getName(), methodName, javaName, javaMethodName + signature);
+
+<span class="nc" id="L1433">            instanceMethods.add(javaMethodName + signature);</span>
+
+<span class="nc" id="L1435">            m.end();</span>
+<span class="nc" id="L1436">        }</span>
+
+        // define class/static methods
+<span class="nc bnc" id="L1439" title="All 2 branches missed.">        for (Map.Entry&lt;String,DynamicMethod&gt; methodEntry : getMetaClass().getMethods().entrySet()) {</span>
+<span class="nc" id="L1440">            String methodName = methodEntry.getKey();</span>
+
+<span class="nc bnc" id="L1442" title="All 2 branches missed.">            if (!JavaNameMangler.willMethodMangleOk(methodName)) continue;</span>
+
+<span class="nc" id="L1444">            String javaMethodName = JavaNameMangler.mangleMethodName(methodName);</span>
+
+<span class="nc" id="L1446">            Map&lt;Class,Map&lt;String,Object&gt;&gt; methodAnnos = getMetaClass().getMethodAnnotations().get(methodName);</span>
+<span class="nc" id="L1447">            List&lt;Map&lt;Class,Map&lt;String,Object&gt;&gt;&gt; parameterAnnos = getMetaClass().getParameterAnnotations().get(methodName);</span>
+<span class="nc" id="L1448">            Class[] methodSignature = getMetaClass().getMethodSignatures().get(methodName);</span>
+
+            String signature;
+<span class="nc bnc" id="L1451" title="All 2 branches missed.">            if (methodSignature == null) {</span>
+                // non-signature signature with just IRubyObject
+<span class="nc bnc" id="L1453" title="All 2 branches missed.">                switch (methodEntry.getValue().getArity().getValue()) {</span>
+                case 0:
+<span class="nc" id="L1455">                    signature = sig(IRubyObject.class);</span>
+<span class="nc bnc" id="L1456" title="All 2 branches missed.">                    if (instanceMethods.contains(javaMethodName + signature)) continue;</span>
+<span class="nc" id="L1457">                    m = new SkinnyMethodAdapter(cw, ACC_PUBLIC | ACC_VARARGS | ACC_STATIC, javaMethodName, signature, null, null);</span>
+<span class="nc" id="L1458">                    generateMethodAnnotations(methodAnnos, m, parameterAnnos);</span>
+
+<span class="nc" id="L1460">                    m.getstatic(javaPath, &quot;rubyClass&quot;, ci(RubyClass.class));</span>
+                    //m.invokevirtual(&quot;org/jruby/RubyClass&quot;, &quot;getMetaClass&quot;, sig(RubyClass.class) );
+<span class="nc" id="L1462">                    m.ldc(methodName); // Method name</span>
+<span class="nc" id="L1463">                    m.invokevirtual(&quot;org/jruby/RubyClass&quot;, &quot;callMethod&quot;, sig(IRubyObject.class, String.class) );</span>
+<span class="nc" id="L1464">                    break;</span>
+                default:
+<span class="nc" id="L1466">                    signature = sig(IRubyObject.class, IRubyObject[].class);</span>
+<span class="nc bnc" id="L1467" title="All 2 branches missed.">                    if (instanceMethods.contains(javaMethodName + signature)) continue;</span>
+<span class="nc" id="L1468">                    m = new SkinnyMethodAdapter(cw, ACC_PUBLIC | ACC_VARARGS | ACC_STATIC, javaMethodName, signature, null, null);</span>
+<span class="nc" id="L1469">                    generateMethodAnnotations(methodAnnos, m, parameterAnnos);</span>
+
+<span class="nc" id="L1471">                    m.getstatic(javaPath, &quot;rubyClass&quot;, ci(RubyClass.class));</span>
+<span class="nc" id="L1472">                    m.ldc(methodName); // Method name</span>
+<span class="nc" id="L1473">                    m.aload(0);</span>
+<span class="nc" id="L1474">                    m.invokevirtual(&quot;org/jruby/RubyClass&quot;, &quot;callMethod&quot;, sig(IRubyObject.class, String.class, IRubyObject[].class) );</span>
+                }
+<span class="nc" id="L1476">                m.areturn();</span>
+            } else {
+                // generate a real method signature for the method, with to/from coercions
+
+                // indices for temp values
+<span class="nc" id="L1481">                Class[] params = new Class[methodSignature.length - 1];</span>
+<span class="nc" id="L1482">                System.arraycopy(methodSignature, 1, params, 0, params.length);</span>
+<span class="nc" id="L1483">                int baseIndex = 0;</span>
+<span class="nc bnc" id="L1484" title="All 2 branches missed.">                for (Class paramType : params) {</span>
+<span class="nc bnc" id="L1485" title="All 4 branches missed.">                    if (paramType == double.class || paramType == long.class) {</span>
+<span class="nc" id="L1486">                        baseIndex += 2;</span>
+                    } else {
+<span class="nc" id="L1488">                        baseIndex += 1;</span>
+                    }
+                }
+<span class="nc" id="L1491">                int rubyIndex = baseIndex;</span>
+
+<span class="nc" id="L1493">                signature = sig(methodSignature[0], params);</span>
+<span class="nc bnc" id="L1494" title="All 2 branches missed.">                if (instanceMethods.contains(javaMethodName + signature)) continue;</span>
+<span class="nc" id="L1495">                m = new SkinnyMethodAdapter(cw, ACC_PUBLIC | ACC_VARARGS | ACC_STATIC, javaMethodName, signature, null, null);</span>
+<span class="nc" id="L1496">                generateMethodAnnotations(methodAnnos, m, parameterAnnos);</span>
+
+<span class="nc" id="L1498">                m.getstatic(javaPath, &quot;ruby&quot;, ci(Ruby.class));</span>
+<span class="nc" id="L1499">                m.astore(rubyIndex);</span>
+
+<span class="nc" id="L1501">                m.getstatic(javaPath, &quot;rubyClass&quot;, ci(RubyClass.class));</span>
+                
+<span class="nc" id="L1503">                m.ldc(methodName); // method name</span>
+<span class="nc" id="L1504">                RealClassGenerator.coerceArgumentsToRuby(m, params, rubyIndex);</span>
+<span class="nc" id="L1505">                m.invokevirtual(&quot;org/jruby/RubyClass&quot;, &quot;callMethod&quot;, sig(IRubyObject.class, String.class, IRubyObject[].class));</span>
+
+<span class="nc" id="L1507">                RealClassGenerator.coerceResultAndReturn(m, methodSignature[0]);</span>
+            }
+
+            if (DEBUG_REIFY) LOG.debug(&quot;defining {}.{} as {}.{}&quot;, getName(), methodName, javaName, javaMethodName + signature);
+
+<span class="nc" id="L1512">            m.end();</span>
+<span class="nc" id="L1513">        }</span>
+
+
+<span class="nc" id="L1516">        cw.visitEnd();</span>
+<span class="nc" id="L1517">        byte[] classBytes = cw.toByteArray();</span>
+
+
+
+        // Attempt to load the name we plan to use; skip reification if it exists already (see #1229).
+<span class="nc" id="L1522">        Throwable failure = null;</span>
+        try {
+<span class="nc" id="L1524">            Class result = parentCL.defineClass(javaName, classBytes);</span>
+<span class="nc" id="L1525">            dumpReifiedClass(classDumpDir, javaPath, classBytes);</span>
+
+<span class="nc" id="L1527">            java.lang.reflect.Method clinit = result.getDeclaredMethod(&quot;clinit&quot;, Ruby.class, RubyClass.class);</span>
+<span class="nc" id="L1528">            clinit.invoke(null, runtime, this);</span>
+
+<span class="nc" id="L1530">            setClassAllocator(result);</span>
+<span class="nc" id="L1531">            reifiedClass = result;</span>
+
+<span class="nc" id="L1533">            return; // success</span>
+<span class="nc" id="L1534">        } catch (LinkageError le) {</span>
+            // fall through to failure path
+<span class="nc" id="L1536">            failure = le;</span>
+<span class="nc" id="L1537">        } catch (Exception e) {</span>
+<span class="nc" id="L1538">            failure = e;</span>
+<span class="nc" id="L1539">        }</span>
+
+        // If we get here, there's some other class in this classloader hierarchy with the same name. In order to
+        // avoid a naming conflict, we set reified class to parent and skip reification.
+<span class="nc bnc" id="L1543" title="All 2 branches missed.">        if (RubyInstanceConfig.REIFY_LOG_ERRORS) {</span>
+<span class="nc" id="L1544">            LOG.error(&quot;failed to reify class &quot; + getName() + &quot; due to:&quot;);</span>
+<span class="nc" id="L1545">            LOG.error(failure);</span>
+        }
+
+<span class="nc bnc" id="L1548" title="All 2 branches missed.">        if (superClass.reifiedClass != null) {</span>
+<span class="nc" id="L1549">            reifiedClass = superClass.reifiedClass;</span>
+<span class="nc" id="L1550">            allocator = superClass.allocator;</span>
+        }
+<span class="nc" id="L1552">    }</span>
+
+    public void setReifiedClass(Class newReifiedClass) {
+<span class="fc" id="L1555">        this.reifiedClass = newReifiedClass;</span>
+<span class="fc" id="L1556">    }</span>
+
+    public Class getReifiedClass() {
+<span class="nc" id="L1559">        return reifiedClass;</span>
+    }
+
+    public Map&lt;String, List&lt;Map&lt;Class, Map&lt;String,Object&gt;&gt;&gt;&gt; getParameterAnnotations() {
+<span class="nc bnc" id="L1563" title="All 2 branches missed.">        if (parameterAnnotations == null) return Collections.EMPTY_MAP;</span>
+<span class="nc" id="L1564">        return parameterAnnotations;</span>
+    }
+
+    public synchronized void addParameterAnnotation(String method, int i, Class annoClass, Map&lt;String,Object&gt; value) {
+<span class="nc bnc" id="L1568" title="All 2 branches missed.">        if (parameterAnnotations == null) parameterAnnotations = new Hashtable&lt;String,List&lt;Map&lt;Class,Map&lt;String,Object&gt;&gt;&gt;&gt;();</span>
+<span class="nc" id="L1569">        List&lt;Map&lt;Class,Map&lt;String,Object&gt;&gt;&gt; paramList = parameterAnnotations.get(method);</span>
+<span class="nc bnc" id="L1570" title="All 2 branches missed.">        if (paramList == null) {</span>
+<span class="nc" id="L1571">            paramList = new ArrayList&lt;Map&lt;Class,Map&lt;String,Object&gt;&gt;&gt;(i + 1);</span>
+<span class="nc" id="L1572">            parameterAnnotations.put(method, paramList);</span>
+        }
+<span class="nc bnc" id="L1574" title="All 2 branches missed.">        if (paramList.size() &lt; i + 1) {</span>
+<span class="nc bnc" id="L1575" title="All 2 branches missed.">            for (int j = paramList.size(); j &lt; i + 1; j++) {</span>
+<span class="nc" id="L1576">                paramList.add(null);</span>
+            }
+        }
+<span class="nc bnc" id="L1579" title="All 4 branches missed.">        if (annoClass != null &amp;&amp; value != null) {</span>
+<span class="nc" id="L1580">            Map&lt;Class, Map&lt;String, Object&gt;&gt; annos = paramList.get(i);</span>
+<span class="nc bnc" id="L1581" title="All 2 branches missed.">            if (annos == null) {</span>
+<span class="nc" id="L1582">                annos = new HashMap&lt;Class, Map&lt;String, Object&gt;&gt;();</span>
+<span class="nc" id="L1583">                paramList.set(i, annos);</span>
+            }
+<span class="nc" id="L1585">            annos.put(annoClass, value);</span>
+<span class="nc" id="L1586">        } else {</span>
+<span class="nc" id="L1587">            paramList.set(i, null);</span>
+        }
+<span class="nc" id="L1589">    }</span>
+
+    public Map&lt;String,Map&lt;Class,Map&lt;String,Object&gt;&gt;&gt; getMethodAnnotations() {
+<span class="nc bnc" id="L1592" title="All 2 branches missed.">        if (methodAnnotations == null) return Collections.EMPTY_MAP;</span>
+
+<span class="nc" id="L1594">        return methodAnnotations;</span>
+    }
+
+    public Map&lt;String,Map&lt;Class,Map&lt;String,Object&gt;&gt;&gt; getFieldAnnotations() {
+<span class="nc bnc" id="L1598" title="All 2 branches missed.">        if (fieldAnnotations == null) return Collections.EMPTY_MAP;</span>
+
+<span class="nc" id="L1600">        return fieldAnnotations;</span>
+    }
+
+    public synchronized void addMethodAnnotation(String methodName, Class annotation, Map fields) {
+<span class="nc bnc" id="L1604" title="All 2 branches missed.">        if (methodAnnotations == null) methodAnnotations = new Hashtable&lt;String,Map&lt;Class,Map&lt;String,Object&gt;&gt;&gt;();</span>
+
+<span class="nc" id="L1606">        Map&lt;Class,Map&lt;String,Object&gt;&gt; annos = methodAnnotations.get(methodName);</span>
+<span class="nc bnc" id="L1607" title="All 2 branches missed.">        if (annos == null) {</span>
+<span class="nc" id="L1608">            annos = new Hashtable&lt;Class,Map&lt;String,Object&gt;&gt;();</span>
+<span class="nc" id="L1609">            methodAnnotations.put(methodName, annos);</span>
+        }
+
+<span class="nc" id="L1612">        annos.put(annotation, fields);</span>
+<span class="nc" id="L1613">    }</span>
+
+    public synchronized void addFieldAnnotation(String fieldName, Class annotation, Map fields) {
+<span class="nc bnc" id="L1616" title="All 2 branches missed.">        if (fieldAnnotations == null) fieldAnnotations = new Hashtable&lt;String,Map&lt;Class,Map&lt;String,Object&gt;&gt;&gt;();</span>
+
+<span class="nc" id="L1618">        Map&lt;Class,Map&lt;String,Object&gt;&gt; annos = fieldAnnotations.get(fieldName);</span>
+<span class="nc bnc" id="L1619" title="All 2 branches missed.">        if (annos == null) {</span>
+<span class="nc" id="L1620">            annos = new Hashtable&lt;Class,Map&lt;String,Object&gt;&gt;();</span>
+<span class="nc" id="L1621">            fieldAnnotations.put(fieldName, annos);</span>
+        }
+
+<span class="nc" id="L1624">        annos.put(annotation, fields);</span>
+<span class="nc" id="L1625">    }</span>
+
+
+    public Map&lt;String,Class[]&gt; getMethodSignatures() {
+<span class="nc bnc" id="L1629" title="All 2 branches missed.">        if (methodSignatures == null) return Collections.EMPTY_MAP;</span>
+
+<span class="nc" id="L1631">        return methodSignatures;</span>
+    }
+
+    public Map&lt;String, Class&gt; getFieldSignatures() {
+<span class="nc bnc" id="L1635" title="All 2 branches missed.">        if (fieldSignatures == null) return Collections.EMPTY_MAP;</span>
+
+<span class="nc" id="L1637">        return fieldSignatures;</span>
+    }
+
+    public synchronized void addMethodSignature(String methodName, Class[] types) {
+<span class="nc bnc" id="L1641" title="All 2 branches missed.">        if (methodSignatures == null) methodSignatures = new Hashtable&lt;String,Class[]&gt;();</span>
+
+<span class="nc" id="L1643">        methodSignatures.put(methodName, types);</span>
+<span class="nc" id="L1644">    }</span>
+
+    public synchronized void addFieldSignature(String fieldName, Class type) {
+<span class="nc bnc" id="L1647" title="All 2 branches missed.">        if (fieldSignatures == null) fieldSignatures = new LinkedHashMap&lt;String, Class&gt;();</span>
+
+<span class="nc" id="L1649">        fieldSignatures.put(fieldName, type);</span>
+<span class="nc" id="L1650">    }</span>
+
+    public Map&lt;Class,Map&lt;String,Object&gt;&gt; getClassAnnotations() {
+<span class="nc bnc" id="L1653" title="All 2 branches missed.">        if (classAnnotations == null) return Collections.EMPTY_MAP;</span>
+
+<span class="nc" id="L1655">        return classAnnotations;</span>
+    }
+
+    public synchronized void addClassAnnotation(Class annotation, Map fields) {
+<span class="nc bnc" id="L1659" title="All 2 branches missed.">        if (classAnnotations == null) classAnnotations = new Hashtable&lt;Class,Map&lt;String,Object&gt;&gt;();</span>
+
+<span class="nc" id="L1661">        classAnnotations.put(annotation, fields);</span>
+<span class="nc" id="L1662">    }</span>
+
+    @Override
+    public Object toJava(Class klass) {
+<span class="fc" id="L1666">        Class returnClass = null;</span>
+
+<span class="fc bfc" id="L1668" title="All 2 branches covered.">        if (klass == Class.class) {</span>
+            // Class requested; try java_class or else return nearest reified class
+<span class="pc bpc" id="L1670" title="1 of 2 branches missed.">            if (respondsTo(&quot;java_class&quot;)) {</span>
+<span class="fc" id="L1671">                return callMethod(&quot;java_class&quot;).toJava(klass);</span>
+            } else {
+<span class="nc bnc" id="L1673" title="All 2 branches missed.">                for (RubyClass current = this; current != null; current = current.getSuperClass()) {</span>
+<span class="nc" id="L1674">                    returnClass = current.getReifiedClass();</span>
+<span class="nc bnc" id="L1675" title="All 2 branches missed.">                    if (returnClass != null) return returnClass;</span>
+                }
+            }
+            // should never fall through, since RubyObject has a reified class
+        }
+
+<span class="pc bpc" id="L1681" title="1 of 2 branches missed.">        if (klass.isAssignableFrom(RubyClass.class)) {</span>
+            // they're asking for something RubyClass extends, give them that
+<span class="fc" id="L1683">            return this;</span>
+        }
+
+<span class="nc" id="L1686">        return super.toJava(klass);</span>
+    }
+
+    /**
+     * An enum defining the type of marshaling a given class's objects employ.
+     */
+<span class="pc" id="L1692">    private static enum MarshalType {</span>
+<span class="fc" id="L1693">        DEFAULT, NEW_USER, OLD_USER, DEFAULT_SLOW, NEW_USER_SLOW, USER_SLOW</span>
+    }
+
+    /**
+     * A tuple representing the mechanism by which objects should be marshaled.
+     *
+     * This tuple caches the type of marshaling to perform (from @MarshalType),
+     * the method to be used for marshaling data (either marshal_load/dump or
+     * _load/_dump), and the generation of the class at the time this tuple was
+     * created. When &quot;dump&quot; or &quot;load&quot; are invoked, they either call the default
+     * marshaling logic (@MarshalType.DEFAULT) or they further invoke the cached
+     * marshal_dump/load or _dump/_load methods to marshal the data.
+     *
+     * It is expected that code outside MarshalTuple will validate that the
+     * generation number still matches before invoking load or dump.
+     */
+    private static class MarshalTuple {
+        /**
+         * Construct a new MarshalTuple with the given values.
+         *
+         * @param method The method to invoke, or null in the case of default
+         * marshaling.
+         * @param type The type of marshaling to perform, from @MarshalType
+         * @param generation The generation of the associated class at the time
+         * of creation.
+         */
+<span class="fc" id="L1719">        public MarshalTuple(DynamicMethod method, MarshalType type, int generation) {</span>
+<span class="fc" id="L1720">            this.method = method;</span>
+<span class="fc" id="L1721">            this.type = type;</span>
+<span class="fc" id="L1722">            this.generation = generation;</span>
+<span class="fc" id="L1723">        }</span>
+
+        /**
+         * Dump the given object to the given stream, using the appropriate
+         * marshaling method.
+         *
+         * @param stream The stream to which to dump
+         * @param object The object to dump
+         * @throws IOException If there is an IO error during dumping
+         */
+        public void dump(MarshalStream stream, IRubyObject object) throws IOException {
+<span class="pc bpc" id="L1734" title="1 of 5 branches missed.">            switch (type) {</span>
+                case DEFAULT:
+<span class="fc" id="L1736">                    stream.writeDirectly(object);</span>
+<span class="fc" id="L1737">                    return;</span>
+                case NEW_USER:
+<span class="fc" id="L1739">                    stream.userNewMarshal(object, method);</span>
+<span class="fc" id="L1740">                    return;</span>
+                case OLD_USER:
+<span class="fc" id="L1742">                    stream.userMarshal(object, method);</span>
+<span class="fc" id="L1743">                    return;</span>
+                case DEFAULT_SLOW:
+<span class="pc bpc" id="L1745" title="1 of 2 branches missed.">                    if (object.respondsTo(&quot;marshal_dump&quot;)) {</span>
+<span class="nc" id="L1746">                        stream.userNewMarshal(object);</span>
+<span class="pc bpc" id="L1747" title="1 of 2 branches missed.">                    } else if (object.respondsTo(&quot;_dump&quot;)) {</span>
+<span class="nc" id="L1748">                        stream.userMarshal(object);</span>
+                    } else {
+<span class="fc" id="L1750">                        stream.writeDirectly(object);</span>
+                    }
+<span class="fc" id="L1752">                    return;</span>
+            }
+<span class="nc" id="L1754">        }</span>
+
+        /** A &quot;null&quot; tuple, used as the default value for caches. */
+<span class="fc" id="L1757">        public static final MarshalTuple NULL_TUPLE = new MarshalTuple(null, null, 0);</span>
+        /** The method associated with this tuple. */
+        public final DynamicMethod method;
+        /** The type of marshaling that will be performed */
+        public final MarshalType type;
+        /** The generation of the associated class at the time of creation */
+        public final int generation;
+    }
+
+    /**
+     * Marshal the given object to the marshaling stream, being &quot;smart&quot; and
+     * caching how to do that marshaling.
+     *
+     * If the class defines a custom &quot;respond_to?&quot; method, then the behavior of
+     * dumping could vary without our class structure knowing it. As a result,
+     * we do only the slow-path classic behavior.
+     *
+     * If the class defines a real &quot;marshal_dump&quot; method, we cache and use that.
+     *
+     * If the class defines a real &quot;_dump&quot; method, we cache and use that.
+     *
+     * If the class neither defines none of the above methods, we use a fast
+     * path directly to the default dumping logic.
+     *
+     * @param stream The stream to which to marshal the data
+     * @param target The object whose data should be marshaled
+     * @throws IOException If there is an IO exception while writing to the
+     * stream.
+     */
+    public void smartDump(MarshalStream stream, IRubyObject target) throws IOException {
+        MarshalTuple tuple;
+<span class="fc bfc" id="L1788" title="All 2 branches covered.">        if ((tuple = cachedDumpMarshal).generation == generation) {</span>
+        } else {
+            // recache
+<span class="fc" id="L1791">            DynamicMethod method = searchMethod(&quot;respond_to?&quot;);</span>
+<span class="pc bpc" id="L1792" title="1 of 4 branches missed.">            if (!method.equals(runtime.getRespondToMethod()) &amp;&amp; !method.isUndefined()) {</span>
+
+                // custom respond_to?, always do slow default marshaling
+<span class="fc" id="L1795">                tuple = (cachedDumpMarshal = new MarshalTuple(null, MarshalType.DEFAULT_SLOW, generation));</span>
+
+<span class="fc bfc" id="L1797" title="All 2 branches covered.">            } else if (!(method = searchMethod(&quot;marshal_dump&quot;)).isUndefined()) {</span>
+
+                // object really has 'marshal_dump', cache &quot;new&quot; user marshaling
+<span class="fc" id="L1800">                tuple = (cachedDumpMarshal = new MarshalTuple(method, MarshalType.NEW_USER, generation));</span>
+
+<span class="fc bfc" id="L1802" title="All 2 branches covered.">            } else if (!(method = searchMethod(&quot;_dump&quot;)).isUndefined()) {</span>
+
+                // object really has '_dump', cache &quot;old&quot; user marshaling
+<span class="fc" id="L1805">                tuple = (cachedDumpMarshal = new MarshalTuple(method, MarshalType.OLD_USER, generation));</span>
+
+            } else {
+
+                // no respond_to?, marshal_dump, or _dump, so cache default marshaling
+<span class="fc" id="L1810">                tuple = (cachedDumpMarshal = new MarshalTuple(null, MarshalType.DEFAULT, generation));</span>
+            }
+        }
+
+<span class="fc" id="L1814">        tuple.dump(stream, target);</span>
+<span class="fc" id="L1815">    }</span>
+
+    /**
+     * Load marshaled data into a blank target object using marshal_load, being
+     * &quot;smart&quot; and caching the mechanism for invoking marshal_load.
+     *
+     * If the class implements a custom respond_to?, cache nothing and go slow
+     * path invocation of respond_to? and marshal_load every time. Raise error
+     * if respond_to? :marshal_load returns true and no :marshal_load is
+     * defined.
+     *
+     * If the class implements marshal_load, cache and use that.
+     *
+     * Otherwise, error, since marshal_load is not present.
+     *
+     * @param target The blank target object into which marshal_load will
+     * deserialize the given data
+     * @param data The marshaled data
+     * @return The fully-populated target object
+     */
+    public IRubyObject smartLoadNewUser(IRubyObject target, IRubyObject data) {
+<span class="fc" id="L1836">        ThreadContext context = runtime.getCurrentContext();</span>
+        CacheEntry cache;
+<span class="fc bfc" id="L1838" title="All 2 branches covered.">        if ((cache = cachedLoad).token == generation) {</span>
+<span class="fc" id="L1839">            cache.method.call(context, target, this, &quot;marshal_load&quot;, data);</span>
+<span class="fc" id="L1840">            return target;</span>
+        } else {
+<span class="fc" id="L1842">            DynamicMethod method = searchMethod(&quot;respond_to?&quot;);</span>
+<span class="pc bpc" id="L1843" title="3 of 4 branches missed.">            if (!method.equals(runtime.getRespondToMethod()) &amp;&amp; !method.isUndefined()) {</span>
+
+                // custom respond_to?, cache nothing and use slow path
+<span class="nc bnc" id="L1846" title="All 2 branches missed.">                if (method.call(context, target, this, &quot;respond_to?&quot;, runtime.newSymbol(&quot;marshal_load&quot;)).isTrue()) {</span>
+<span class="nc" id="L1847">                    target.callMethod(context, &quot;marshal_load&quot;, data);</span>
+<span class="nc" id="L1848">                    return target;</span>
+                } else {
+<span class="nc" id="L1850">                    throw runtime.newTypeError(&quot;class &quot; + getName() + &quot; needs to have method `marshal_load'&quot;);</span>
+                }
+
+<span class="pc bpc" id="L1853" title="1 of 2 branches missed.">            } else if (!(cache = searchWithCache(&quot;marshal_load&quot;)).method.isUndefined()) {</span>
+
+                // real marshal_load defined, cache and call it
+<span class="fc" id="L1856">                cachedLoad = cache;</span>
+<span class="fc" id="L1857">                cache.method.call(context, target, this, &quot;marshal_load&quot;, data);</span>
+<span class="fc" id="L1858">                return target;</span>
+
+            } else {
+
+                // go ahead and call, method_missing might handle it
+<span class="nc" id="L1863">                target.callMethod(context, &quot;marshal_load&quot;, data);</span>
+<span class="nc" id="L1864">                return target;</span>
+                
+            }
+        }
+    }
+
+
+    /**
+     * Load marshaled data into a blank target object using _load, being
+     * &quot;smart&quot; and caching the mechanism for invoking _load.
+     *
+     * If the metaclass implements custom respond_to?, cache nothing and go slow
+     * path invocation of respond_to? and _load every time. Raise error if
+     * respond_to? :_load returns true and no :_load is defined.
+     *
+     * If the metaclass implements _load, cache and use that.
+     *
+     * Otherwise, error, since _load is not present.
+     *
+     * @param data The marshaled data, to be reconstituted into an object by
+     * _load
+     * @return The fully-populated target object
+     */
+    public IRubyObject smartLoadOldUser(IRubyObject data) {
+<span class="fc" id="L1888">        ThreadContext context = runtime.getCurrentContext();</span>
+        CacheEntry cache;
+<span class="fc bfc" id="L1890" title="All 2 branches covered.">        if ((cache = getSingletonClass().cachedLoad).token == getSingletonClass().generation) {</span>
+<span class="fc" id="L1891">            return cache.method.call(context, this, getSingletonClass(), &quot;_load&quot;, data);</span>
+        } else {
+<span class="fc" id="L1893">            DynamicMethod method = getSingletonClass().searchMethod(&quot;respond_to?&quot;);</span>
+<span class="pc bpc" id="L1894" title="3 of 4 branches missed.">            if (!method.equals(runtime.getRespondToMethod()) &amp;&amp; !method.isUndefined()) {</span>
+
+                // custom respond_to?, cache nothing and use slow path
+<span class="nc bnc" id="L1897" title="All 2 branches missed.">                if (method.call(context, this, getSingletonClass(), &quot;respond_to?&quot;, runtime.newSymbol(&quot;_load&quot;)).isTrue()) {</span>
+<span class="nc" id="L1898">                    return callMethod(context, &quot;_load&quot;, data);</span>
+                } else {
+<span class="nc" id="L1900">                    throw runtime.newTypeError(&quot;class &quot; + getName() + &quot; needs to have method `_load'&quot;);</span>
+                }
+
+<span class="pc bpc" id="L1903" title="1 of 2 branches missed.">            } else if (!(cache = getSingletonClass().searchWithCache(&quot;_load&quot;)).method.isUndefined()) {</span>
+
+                // real _load defined, cache and call it
+<span class="fc" id="L1906">                getSingletonClass().cachedLoad = cache;</span>
+<span class="fc" id="L1907">                return cache.method.call(context, this, getSingletonClass(), &quot;_load&quot;, data);</span>
+
+            } else {
+
+                // provide an error, since it doesn't exist
+<span class="nc" id="L1912">                throw runtime.newTypeError(&quot;class &quot; + getName() + &quot; needs to have method `_load'&quot;);</span>
+
+            }
+        }
+    }
+
+    protected final Ruby runtime;
+    private ObjectAllocator allocator; // the default allocator
+    protected ObjectMarshal marshal;
+    private Set&lt;RubyClass&gt; subclasses;
+    public static final int CS_IDX_INITIALIZE = 0;
+<span class="pc" id="L1923">    public enum CS_NAMES {</span>
+<span class="fc" id="L1924">        INITIALIZE(&quot;initialize&quot;);</span>
+
+<span class="fc" id="L1926">        private CS_NAMES(String id) {</span>
+<span class="fc" id="L1927">            this.id = id;</span>
+<span class="fc" id="L1928">        }</span>
+
+        public final String id;
+    };
+<span class="fc" id="L1932">    private final CallSite[] baseCallSites = new CallSite[CS_NAMES.values().length];</span>
+    {
+<span class="fc bfc" id="L1934" title="All 4 branches covered.">        for(int i = 0; i &lt; baseCallSites.length; i++) {</span>
+<span class="fc" id="L1935">            baseCallSites[i] = MethodIndex.getFunctionalCallSite(CS_NAMES.values()[i].id);</span>
+        }
+    }
+
+    private CallSite[] extraCallSites;
+
+    private Class reifiedClass;
+
+    private Map&lt;String, List&lt;Map&lt;Class, Map&lt;String,Object&gt;&gt;&gt;&gt; parameterAnnotations;
+
+    private Map&lt;String, Map&lt;Class, Map&lt;String,Object&gt;&gt;&gt; methodAnnotations;
+
+    private Map&lt;String, Map&lt;Class, Map&lt;String,Object&gt;&gt;&gt; fieldAnnotations;
+
+    private Map&lt;String, Class[]&gt; methodSignatures;
+
+    private Map&lt;String, Class&gt; fieldSignatures;
+
+    private Map&lt;Class, Map&lt;String,Object&gt;&gt; classAnnotations;
+
+    /** A cached tuple of method, type, and generation for dumping */
+<span class="fc" id="L1956">    private MarshalTuple cachedDumpMarshal = MarshalTuple.NULL_TUPLE;</span>
+
+    /** A cached tuple of method and generation for marshal loading */
+<span class="fc" id="L1959">    private CacheEntry cachedLoad = CacheEntry.NULL_CACHE;</span>
+
+    /** The &quot;real&quot; class, used by includes and singletons to locate the actual type of the object */
+    private final RubyClass realClass;
+    
+    /** Variable table manager for this class */
+    private final VariableTableManager variableTableManager;
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

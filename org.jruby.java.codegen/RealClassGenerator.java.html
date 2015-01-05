@@ -1,0 +1,588 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RealClassGenerator.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.java.codegen</a> &gt; <span class="el_source">RealClassGenerator.java</span></div><h1>RealClassGenerator.java</h1><pre class="source lang-java linenums">/*
+ * To change this template, choose Tools | Templates
+ * and open the template in the editor.
+ */
+package org.jruby.java.codegen;
+
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import org.jruby.Ruby;
+import org.jruby.RubyBasicObject;
+import org.jruby.RubyClass;
+import org.jruby.RubyModule;
+import org.jruby.ast.executable.RuntimeCache;
+import org.jruby.compiler.impl.SkinnyMethodAdapter;
+import org.jruby.compiler.util.BasicObjectStubGenerator;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.internal.runtime.methods.UndefinedMethod;
+import org.jruby.javasupport.JavaUtil;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.callsite.CacheEntry;
+import org.jruby.util.ClassDefiningClassLoader;
+import org.jruby.util.ClassDefininngJRubyClassLoader;
+import static org.jruby.util.CodegenUtils.*;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Type;
+import static org.objectweb.asm.Opcodes.*;
+
+/**
+ *
+ * @author headius
+ */
+<span class="nc" id="L41">public class RealClassGenerator {</span>
+    private static final boolean DEBUG = false;
+
+    private static Map&lt;String, List&lt;Method&gt;&gt; buildSimpleToAllMap(Class[] interfaces, String[] superTypeNames) throws SecurityException {
+<span class="nc" id="L45">        Map&lt;String, List&lt;Method&gt;&gt; simpleToAll = new HashMap&lt;String, List&lt;Method&gt;&gt;();</span>
+<span class="nc bnc" id="L46" title="All 2 branches missed.">        for (int i = 0; i &lt; interfaces.length; i++) {</span>
+<span class="nc" id="L47">            superTypeNames[i] = p(interfaces[i]);</span>
+<span class="nc bnc" id="L48" title="All 2 branches missed.">            for (Method method : interfaces[i].getMethods()) {</span>
+<span class="nc" id="L49">                List&lt;Method&gt; methods = simpleToAll.get(method.getName());</span>
+<span class="nc bnc" id="L50" title="All 2 branches missed.">                if (methods == null) {</span>
+<span class="nc" id="L51">                    simpleToAll.put(method.getName(), methods = new ArrayList&lt;Method&gt;());</span>
+                }
+<span class="nc" id="L53">                methods.add(method);</span>
+            }
+        }
+<span class="nc" id="L56">        return simpleToAll;</span>
+    }
+
+    public static Class createOldStyleImplClass(Class[] superTypes, RubyClass rubyClass, Ruby ruby, String name, ClassDefiningClassLoader classLoader) {
+<span class="nc" id="L60">        String[] superTypeNames = new String[superTypes.length];</span>
+<span class="nc" id="L61">        Map&lt;String, List&lt;Method&gt;&gt; simpleToAll = buildSimpleToAllMap(superTypes, superTypeNames);</span>
+        
+<span class="nc" id="L63">        Class newClass = defineOldStyleImplClass(ruby, name, superTypeNames, simpleToAll, classLoader);</span>
+        
+<span class="nc" id="L65">        return newClass;</span>
+    }
+
+    public static Class createRealImplClass(Class superClass, Class[] interfaces, RubyClass rubyClass, Ruby ruby, String name) {
+<span class="nc" id="L69">        String[] superTypeNames = new String[interfaces.length];</span>
+<span class="nc" id="L70">        Map&lt;String, List&lt;Method&gt;&gt; simpleToAll = buildSimpleToAllMap(interfaces, superTypeNames);</span>
+
+<span class="nc" id="L72">        Class newClass = defineRealImplClass(ruby, name, superClass, superTypeNames, simpleToAll);</span>
+
+<span class="nc" id="L74">        return newClass;</span>
+    }
+    
+    /**
+     * This variation on defineImplClass uses all the classic type coercion logic
+     * for passing args and returning results.
+     * 
+     * @param ruby
+     * @param name
+     * @param superTypeNames
+     * @param simpleToAll
+     * @return
+     */
+    public static Class defineOldStyleImplClass(Ruby ruby, String name, String[] superTypeNames, Map&lt;String, List&lt;Method&gt;&gt; simpleToAll, ClassDefiningClassLoader classLoader) {
+        Class newClass;
+        byte[] bytes;
+
+<span class="nc" id="L91">        synchronized (classLoader) {</span>
+            // try to load the specified name; only if that fails, try to define the class
+            try {
+<span class="nc" id="L94">                newClass = classLoader.loadClass(name);</span>
+<span class="nc" id="L95">            } catch (ClassNotFoundException cnfe) {</span>
+<span class="nc" id="L96">                ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);</span>
+<span class="nc" id="L97">                String pathName = name.replace('.', '/');</span>
+
+                // construct the class, implementing all supertypes
+<span class="nc" id="L100">                cw.visit(V1_5, ACC_PUBLIC | ACC_SUPER, pathName, null, p(Object.class), superTypeNames);</span>
+<span class="nc" id="L101">                cw.visitSource(pathName + &quot;.gen&quot;, null);</span>
+
+                // fields needed for dispatch and such
+<span class="nc" id="L104">                cw.visitField(ACC_STATIC | ACC_FINAL | ACC_PRIVATE, &quot;$runtimeCache&quot;, ci(RuntimeCache.class), null, null).visitEnd();</span>
+<span class="nc" id="L105">                cw.visitField(ACC_PRIVATE | ACC_FINAL, &quot;$self&quot;, ci(IRubyObject.class), null, null).visitEnd();</span>
+
+                // create static init
+<span class="nc" id="L108">                SkinnyMethodAdapter clinitMethod = new SkinnyMethodAdapter(cw, ACC_PUBLIC | ACC_STATIC, &quot;&lt;clinit&gt;&quot;, sig(void.class), null, null);</span>
+
+                // create constructor
+<span class="nc" id="L111">                SkinnyMethodAdapter initMethod = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;&lt;init&gt;&quot;, sig(void.class, IRubyObject.class), null, null);</span>
+<span class="nc" id="L112">                initMethod.aload(0);</span>
+<span class="nc" id="L113">                initMethod.invokespecial(p(Object.class), &quot;&lt;init&gt;&quot;, sig(void.class));</span>
+
+                // store the wrapper
+<span class="nc" id="L116">                initMethod.aload(0);</span>
+<span class="nc" id="L117">                initMethod.aload(1);</span>
+<span class="nc" id="L118">                initMethod.putfield(pathName, &quot;$self&quot;, ci(IRubyObject.class));</span>
+
+                // end constructor
+<span class="nc" id="L121">                initMethod.voidreturn();</span>
+<span class="nc" id="L122">                initMethod.end();</span>
+
+<span class="nc" id="L124">                int cacheSize = 0;</span>
+
+                // for each simple method name, implement the complex methods, calling the simple version
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                for (Map.Entry&lt;String, List&lt;Method&gt;&gt; entry : simpleToAll.entrySet()) {</span>
+<span class="nc" id="L128">                    String simpleName = entry.getKey();</span>
+<span class="nc" id="L129">                    Set&lt;String&gt; nameSet = JavaUtil.getRubyNamesForJavaName(simpleName, entry.getValue());</span>
+
+<span class="nc" id="L131">                    Set&lt;String&gt; implementedNames = new HashSet&lt;String&gt;();</span>
+
+<span class="nc bnc" id="L133" title="All 2 branches missed.">                    for (Method method : entry.getValue()) {</span>
+<span class="nc" id="L134">                        Class[] paramTypes = method.getParameterTypes();</span>
+<span class="nc" id="L135">                        Class returnType = method.getReturnType();</span>
+
+<span class="nc" id="L137">                        String fullName = simpleName + prettyParams(paramTypes);</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">                        if (implementedNames.contains(fullName)) continue;</span>
+<span class="nc" id="L139">                        implementedNames.add(fullName);</span>
+
+                        // indices for temp values
+<span class="nc" id="L142">                        int baseIndex = 1;</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">                        for (Class paramType : paramTypes) {</span>
+<span class="nc bnc" id="L144" title="All 4 branches missed.">                            if (paramType == double.class || paramType == long.class) {</span>
+<span class="nc" id="L145">                                baseIndex += 2;</span>
+                            } else {
+<span class="nc" id="L147">                                baseIndex += 1;</span>
+                            }
+                        }
+<span class="nc" id="L150">                        int selfIndex = baseIndex;</span>
+<span class="nc" id="L151">                        int rubyIndex = selfIndex + 1;</span>
+
+<span class="nc" id="L153">                        SkinnyMethodAdapter mv = new SkinnyMethodAdapter(</span>
+<span class="nc" id="L154">                                cw, ACC_PUBLIC, simpleName, sig(returnType, paramTypes), null, null);</span>
+<span class="nc" id="L155">                        mv.start();</span>
+<span class="nc" id="L156">                        mv.line(1);</span>
+
+                        // TODO: this code should really check if a Ruby equals method is implemented or not.
+<span class="nc bnc" id="L159" title="All 8 branches missed.">                        if (simpleName.equals(&quot;equals&quot;) &amp;&amp; paramTypes.length == 1 &amp;&amp; paramTypes[0] == Object.class &amp;&amp; returnType == Boolean.TYPE) {</span>
+<span class="nc" id="L160">                            mv.line(2);</span>
+<span class="nc" id="L161">                            mv.aload(0);</span>
+<span class="nc" id="L162">                            mv.aload(1);</span>
+<span class="nc" id="L163">                            mv.invokespecial(p(Object.class), &quot;equals&quot;, sig(Boolean.TYPE, params(Object.class)));</span>
+<span class="nc" id="L164">                            mv.ireturn();</span>
+<span class="nc bnc" id="L165" title="All 6 branches missed.">                        } else if (simpleName.equals(&quot;hashCode&quot;) &amp;&amp; paramTypes.length == 0 &amp;&amp; returnType == Integer.TYPE) {</span>
+<span class="nc" id="L166">                            mv.line(3);</span>
+<span class="nc" id="L167">                            mv.aload(0);</span>
+<span class="nc" id="L168">                            mv.invokespecial(p(Object.class), &quot;hashCode&quot;, sig(Integer.TYPE));</span>
+<span class="nc" id="L169">                            mv.ireturn();</span>
+<span class="nc bnc" id="L170" title="All 6 branches missed.">                        } else if (simpleName.equals(&quot;toString&quot;) &amp;&amp; paramTypes.length == 0 &amp;&amp; returnType == String.class) {</span>
+<span class="nc" id="L171">                            mv.line(4);</span>
+<span class="nc" id="L172">                            mv.aload(0);</span>
+<span class="nc" id="L173">                            mv.invokespecial(p(Object.class), &quot;toString&quot;, sig(String.class));</span>
+<span class="nc" id="L174">                            mv.areturn();</span>
+<span class="nc bnc" id="L175" title="All 6 branches missed.">                        } else if (simpleName.equals(&quot;__ruby_object&quot;) &amp;&amp; paramTypes.length == 0 &amp;&amp; returnType == IRubyObject.class) {</span>
+<span class="nc" id="L176">                            mv.aload(0);</span>
+<span class="nc" id="L177">                            mv.getfield(pathName, &quot;$self&quot;, ci(IRubyObject.class));</span>
+<span class="nc" id="L178">                            mv.areturn();</span>
+                        } else {
+<span class="nc" id="L180">                            mv.line(5);</span>
+
+<span class="nc" id="L182">                            int cacheIndex = cacheSize++;</span>
+
+                            // prepare temp locals
+<span class="nc" id="L185">                            mv.aload(0);</span>
+<span class="nc" id="L186">                            mv.getfield(pathName, &quot;$self&quot;, ci(IRubyObject.class));</span>
+<span class="nc" id="L187">                            mv.astore(selfIndex);</span>
+<span class="nc" id="L188">                            mv.aload(selfIndex);</span>
+<span class="nc" id="L189">                            mv.invokeinterface(p(IRubyObject.class), &quot;getRuntime&quot;, sig(Ruby.class));</span>
+<span class="nc" id="L190">                            mv.astore(rubyIndex);</span>
+
+                            // get method from cache
+<span class="nc" id="L193">                            mv.getstatic(pathName, &quot;$runtimeCache&quot;, ci(RuntimeCache.class));</span>
+<span class="nc" id="L194">                            mv.aload(selfIndex);</span>
+<span class="nc" id="L195">                            mv.ldc(cacheIndex);</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">                            for (String eachName : nameSet) {</span>
+<span class="nc" id="L197">                                mv.ldc(eachName);</span>
+<span class="nc" id="L198">                            }</span>
+<span class="nc" id="L199">                            mv.invokevirtual(p(RuntimeCache.class), &quot;searchWithCache&quot;,</span>
+<span class="nc" id="L200">                                    sig(DynamicMethod.class, params(IRubyObject.class, int.class, String.class, nameSet.size())));</span>
+
+                            // get current context
+<span class="nc" id="L203">                            mv.aload(rubyIndex);</span>
+<span class="nc" id="L204">                            mv.invokevirtual(p(Ruby.class), &quot;getCurrentContext&quot;, sig(ThreadContext.class));</span>
+
+                            // load self, class, and name
+<span class="nc" id="L207">                            mv.aloadMany(selfIndex, selfIndex);</span>
+<span class="nc" id="L208">                            mv.invokeinterface(p(IRubyObject.class), &quot;getMetaClass&quot;, sig(RubyClass.class));</span>
+<span class="nc" id="L209">                            mv.ldc(simpleName);</span>
+
+                            // coerce arguments
+<span class="nc" id="L212">                            coerceArgumentsToRuby(mv, paramTypes, rubyIndex);</span>
+
+                            // load null block
+<span class="nc" id="L215">                            mv.getstatic(p(Block.class), &quot;NULL_BLOCK&quot;, ci(Block.class));</span>
+
+                            // invoke method
+<span class="nc" id="L218">                            mv.line(13);</span>
+<span class="nc" id="L219">                            mv.invokevirtual(p(DynamicMethod.class), &quot;call&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject.class, RubyModule.class, String.class, IRubyObject[].class, Block.class));</span>
+
+<span class="nc" id="L221">                            coerceResultAndReturn(mv, returnType);</span>
+                        }
+<span class="nc" id="L223">                        mv.end();</span>
+<span class="nc" id="L224">                    }</span>
+<span class="nc" id="L225">                }</span>
+
+                // end setup method
+<span class="nc" id="L228">                clinitMethod.newobj(p(RuntimeCache.class));</span>
+<span class="nc" id="L229">                clinitMethod.dup();</span>
+<span class="nc" id="L230">                clinitMethod.invokespecial(p(RuntimeCache.class), &quot;&lt;init&gt;&quot;, sig(void.class));</span>
+<span class="nc" id="L231">                clinitMethod.dup();</span>
+<span class="nc" id="L232">                clinitMethod.ldc(cacheSize);</span>
+<span class="nc" id="L233">                clinitMethod.invokevirtual(p(RuntimeCache.class), &quot;initMethodCache&quot;, sig(void.class, int.class));</span>
+<span class="nc" id="L234">                clinitMethod.putstatic(pathName, &quot;$runtimeCache&quot;, ci(RuntimeCache.class));</span>
+<span class="nc" id="L235">                clinitMethod.voidreturn();</span>
+<span class="nc" id="L236">                clinitMethod.end();</span>
+
+                // end class
+<span class="nc" id="L239">                cw.visitEnd();</span>
+
+                // create the class
+<span class="nc" id="L242">                bytes = cw.toByteArray();</span>
+
+<span class="nc" id="L244">                newClass = classLoader.defineClass(name, cw.toByteArray());</span>
+<span class="nc" id="L245">            }</span>
+<span class="nc" id="L246">        }</span>
+
+        if (DEBUG) {
+            FileOutputStream fos = null;
+            try {
+                fos = new FileOutputStream(name + &quot;.class&quot;);
+                fos.write(bytes);
+            } catch (IOException ioe) {
+                ioe.printStackTrace();
+            } finally {
+                try {fos.close();} catch (Exception e) {}
+            }
+        }
+        
+<span class="nc" id="L260">        return newClass;</span>
+    }
+
+    /**
+     * This variation on defineImplClass uses all the classic type coercion logic
+     * for passing args and returning results.
+     *
+     * @param ruby
+     * @param name
+     * @param superTypeNames
+     * @param simpleToAll
+     * @return
+     */
+    public static Class defineRealImplClass(Ruby ruby, String name, Class superClass, String[] superTypeNames, Map&lt;String, List&lt;Method&gt;&gt; simpleToAll) {
+<span class="nc" id="L274">        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);</span>
+<span class="nc" id="L275">        String pathName = name.replace('.', '/');</span>
+
+<span class="nc" id="L277">        boolean isRubyHierarchy = RubyBasicObject.class.isAssignableFrom(superClass);</span>
+
+        // construct the class, implementing all supertypes
+<span class="nc bnc" id="L280" title="All 2 branches missed.">        if (isRubyHierarchy) {</span>
+            // Ruby hierarchy...just extend it
+<span class="nc" id="L282">            cw.visit(V1_5, ACC_PUBLIC | ACC_SUPER, pathName, null, p(superClass), superTypeNames);</span>
+        } else {
+            // Non-Ruby hierarchy; add IRubyObject
+<span class="nc" id="L285">            String[] plusIRubyObject = new String[superTypeNames.length + 1];</span>
+<span class="nc" id="L286">            plusIRubyObject[0] = p(IRubyObject.class);</span>
+<span class="nc" id="L287">            System.arraycopy(superTypeNames, 0, plusIRubyObject, 1, superTypeNames.length);</span>
+            
+<span class="nc" id="L289">            cw.visit(V1_5, ACC_PUBLIC | ACC_SUPER, pathName, null, p(superClass), plusIRubyObject);</span>
+        }
+<span class="nc" id="L291">        cw.visitSource(pathName + &quot;.gen&quot;, null);</span>
+
+        // fields needed for dispatch and such
+<span class="nc" id="L294">        cw.visitField(ACC_STATIC | ACC_FINAL | ACC_PRIVATE, &quot;$runtimeCache&quot;, ci(RuntimeCache.class), null, null).visitEnd();</span>
+
+        // create static init
+<span class="nc" id="L297">        SkinnyMethodAdapter clinitMethod = new SkinnyMethodAdapter(cw, ACC_PUBLIC | ACC_STATIC, &quot;&lt;clinit&gt;&quot;, sig(void.class), null, null);</span>
+
+        // create constructor
+<span class="nc" id="L300">        SkinnyMethodAdapter initMethod = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;&lt;init&gt;&quot;, sig(void.class, Ruby.class, RubyClass.class), null, null);</span>
+
+<span class="nc bnc" id="L302" title="All 2 branches missed.">        if (isRubyHierarchy) {</span>
+            // superclass is in the Ruby object hierarchy; invoke typical Ruby superclass constructor
+<span class="nc" id="L304">            initMethod.aloadMany(0, 1, 2);</span>
+<span class="nc" id="L305">            initMethod.invokespecial(p(superClass), &quot;&lt;init&gt;&quot;, sig(void.class, Ruby.class, RubyClass.class));</span>
+        } else {
+            // superclass is not in Ruby hierarchy; store objects and call no-arg super constructor
+<span class="nc" id="L308">            cw.visitField(ACC_FINAL | ACC_PRIVATE, &quot;$ruby&quot;, ci(Ruby.class), null, null).visitEnd();</span>
+<span class="nc" id="L309">            cw.visitField(ACC_FINAL | ACC_PRIVATE, &quot;$rubyClass&quot;, ci(RubyClass.class), null, null).visitEnd();</span>
+
+<span class="nc" id="L311">            initMethod.aloadMany(0, 1);</span>
+<span class="nc" id="L312">            initMethod.putfield(pathName, &quot;$ruby&quot;, ci(Ruby.class));</span>
+<span class="nc" id="L313">            initMethod.aloadMany(0, 2);</span>
+<span class="nc" id="L314">            initMethod.putfield(pathName, &quot;$rubyClass&quot;, ci(RubyClass.class));</span>
+
+            // only no-arg super constructor supported right now
+<span class="nc" id="L317">            initMethod.aload(0);</span>
+<span class="nc" id="L318">            initMethod.invokespecial(p(superClass), &quot;&lt;init&gt;&quot;, sig(void.class));</span>
+        }
+<span class="nc" id="L320">        initMethod.voidreturn();</span>
+<span class="nc" id="L321">        initMethod.end();</span>
+
+<span class="nc bnc" id="L323" title="All 2 branches missed.">        if (isRubyHierarchy) {</span>
+            // override toJava
+<span class="nc" id="L325">            SkinnyMethodAdapter toJavaMethod = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;toJava&quot;, sig(Object.class, Class.class), null, null);</span>
+<span class="nc" id="L326">            toJavaMethod.aload(0);</span>
+<span class="nc" id="L327">            toJavaMethod.areturn();</span>
+<span class="nc" id="L328">            toJavaMethod.end();</span>
+<span class="nc" id="L329">        } else {</span>
+            // decorate with stubbed IRubyObject methods
+<span class="nc" id="L331">            BasicObjectStubGenerator.addBasicObjectStubsToClass(cw);</span>
+
+            // add getRuntime and getMetaClass impls based on captured fields
+<span class="nc" id="L334">            SkinnyMethodAdapter getRuntimeMethod = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;getRuntime&quot;, sig(Ruby.class), null, null);</span>
+<span class="nc" id="L335">            getRuntimeMethod.aload(0);</span>
+<span class="nc" id="L336">            getRuntimeMethod.getfield(pathName, &quot;$ruby&quot;, ci(Ruby.class));</span>
+<span class="nc" id="L337">            getRuntimeMethod.areturn();</span>
+<span class="nc" id="L338">            getRuntimeMethod.end();</span>
+
+<span class="nc" id="L340">            SkinnyMethodAdapter getMetaClassMethod = new SkinnyMethodAdapter(cw, ACC_PUBLIC, &quot;getMetaClass&quot;, sig(RubyClass.class), null, null);</span>
+<span class="nc" id="L341">            getMetaClassMethod.aload(0);</span>
+<span class="nc" id="L342">            getMetaClassMethod.getfield(pathName, &quot;$rubyClass&quot;, ci(RubyClass.class));</span>
+<span class="nc" id="L343">            getMetaClassMethod.areturn();</span>
+<span class="nc" id="L344">            getMetaClassMethod.end();</span>
+        }
+
+<span class="nc" id="L347">        int cacheSize = 0;</span>
+        
+        // for each simple method name, implement the complex methods, calling the simple version
+<span class="nc bnc" id="L350" title="All 2 branches missed.">        for (Map.Entry&lt;String, List&lt;Method&gt;&gt; entry : simpleToAll.entrySet()) {</span>
+<span class="nc" id="L351">            String simpleName = entry.getKey();</span>
+<span class="nc" id="L352">            Set&lt;String&gt; nameSet = JavaUtil.getRubyNamesForJavaName(simpleName, entry.getValue());</span>
+
+<span class="nc" id="L354">            Set&lt;String&gt; implementedNames = new HashSet&lt;String&gt;();</span>
+
+<span class="nc bnc" id="L356" title="All 2 branches missed.">            for (Method method : entry.getValue()) {</span>
+<span class="nc" id="L357">                Class[] paramTypes = method.getParameterTypes();</span>
+<span class="nc" id="L358">                Class returnType = method.getReturnType();</span>
+
+<span class="nc" id="L360">                String fullName = simpleName + prettyParams(paramTypes);</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">                if (implementedNames.contains(fullName)) continue;</span>
+<span class="nc" id="L362">                implementedNames.add(fullName);</span>
+
+                // indices for temp values
+<span class="nc" id="L365">                int baseIndex = 1;</span>
+<span class="nc bnc" id="L366" title="All 2 branches missed.">                for (Class paramType : paramTypes) {</span>
+<span class="nc bnc" id="L367" title="All 4 branches missed.">                    if (paramType == double.class || paramType == long.class) {</span>
+<span class="nc" id="L368">                        baseIndex += 2;</span>
+                    } else {
+<span class="nc" id="L370">                        baseIndex += 1;</span>
+                    }
+                }
+<span class="nc" id="L373">                int rubyIndex = baseIndex + 1;</span>
+
+<span class="nc" id="L375">                SkinnyMethodAdapter mv = new SkinnyMethodAdapter(</span>
+<span class="nc" id="L376">                        cw, ACC_PUBLIC, simpleName, sig(returnType, paramTypes), null, null);</span>
+<span class="nc" id="L377">                mv.start();</span>
+<span class="nc" id="L378">                mv.line(1);</span>
+
+                // TODO: this code should really check if a Ruby equals method is implemented or not.
+<span class="nc bnc" id="L381" title="All 8 branches missed.">                if(simpleName.equals(&quot;equals&quot;) &amp;&amp; paramTypes.length == 1 &amp;&amp; paramTypes[0] == Object.class &amp;&amp; returnType == Boolean.TYPE) {</span>
+<span class="nc" id="L382">                    mv.line(2);</span>
+<span class="nc" id="L383">                    mv.aload(0);</span>
+<span class="nc" id="L384">                    mv.aload(1);</span>
+<span class="nc" id="L385">                    mv.invokespecial(p(Object.class), &quot;equals&quot;, sig(Boolean.TYPE, params(Object.class)));</span>
+<span class="nc" id="L386">                    mv.ireturn();</span>
+<span class="nc bnc" id="L387" title="All 6 branches missed.">                } else if(simpleName.equals(&quot;hashCode&quot;) &amp;&amp; paramTypes.length == 0 &amp;&amp; returnType == Integer.TYPE) {</span>
+<span class="nc" id="L388">                    mv.line(3);</span>
+<span class="nc" id="L389">                    mv.aload(0);</span>
+<span class="nc" id="L390">                    mv.invokespecial(p(Object.class), &quot;hashCode&quot;, sig(Integer.TYPE));</span>
+<span class="nc" id="L391">                    mv.ireturn();</span>
+<span class="nc bnc" id="L392" title="All 6 branches missed.">                } else if(simpleName.equals(&quot;toString&quot;) &amp;&amp; paramTypes.length == 0 &amp;&amp; returnType == String.class) {</span>
+<span class="nc" id="L393">                    mv.line(4);</span>
+<span class="nc" id="L394">                    mv.aload(0);</span>
+<span class="nc" id="L395">                    mv.invokespecial(p(Object.class), &quot;toString&quot;, sig(String.class));</span>
+<span class="nc" id="L396">                    mv.areturn();</span>
+                } else {
+<span class="nc" id="L398">                    mv.line(5);</span>
+
+<span class="nc" id="L400">                    int cacheIndex = cacheSize++;</span>
+                    
+                    // prepare temp locals
+<span class="nc" id="L403">                    mv.aload(0);</span>
+<span class="nc" id="L404">                    mv.invokeinterface(p(IRubyObject.class), &quot;getRuntime&quot;, sig(Ruby.class));</span>
+<span class="nc" id="L405">                    mv.astore(rubyIndex);</span>
+
+                    // get method from cache
+<span class="nc" id="L408">                    mv.getstatic(pathName, &quot;$runtimeCache&quot;, ci(RuntimeCache.class));</span>
+<span class="nc" id="L409">                    mv.aload(0);</span>
+<span class="nc" id="L410">                    mv.ldc(cacheIndex);</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">                    for (String eachName : nameSet) {</span>
+<span class="nc" id="L412">                        mv.ldc(eachName);</span>
+<span class="nc" id="L413">                    }</span>
+<span class="nc" id="L414">                    mv.invokevirtual(p(RuntimeCache.class), &quot;searchWithCache&quot;,</span>
+<span class="nc" id="L415">                            sig(DynamicMethod.class, params(IRubyObject.class, int.class, String.class, nameSet.size())));</span>
+                    
+                    // get current context
+<span class="nc" id="L418">                    mv.aload(rubyIndex);</span>
+<span class="nc" id="L419">                    mv.invokevirtual(p(Ruby.class), &quot;getCurrentContext&quot;, sig(ThreadContext.class));</span>
+
+                    // load self, class, and name
+<span class="nc" id="L422">                    mv.aloadMany(0, 0);</span>
+<span class="nc" id="L423">                    mv.invokeinterface(p(IRubyObject.class), &quot;getMetaClass&quot;, sig(RubyClass.class));</span>
+<span class="nc" id="L424">                    mv.ldc(simpleName);</span>
+
+                    // coerce arguments
+<span class="nc" id="L427">                    coerceArgumentsToRuby(mv, paramTypes, rubyIndex);</span>
+
+                    // load null block
+<span class="nc" id="L430">                    mv.getstatic(p(Block.class), &quot;NULL_BLOCK&quot;, ci(Block.class));</span>
+
+                    // invoke method
+<span class="nc" id="L433">                    mv.line(13);</span>
+<span class="nc" id="L434">                    mv.invokevirtual(p(DynamicMethod.class), &quot;call&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject.class, RubyModule.class, String.class, IRubyObject[].class, Block.class));</span>
+
+<span class="nc" id="L436">                    coerceResultAndReturn(mv, returnType);</span>
+                }
+<span class="nc" id="L438">                mv.end();</span>
+<span class="nc" id="L439">            }</span>
+<span class="nc" id="L440">        }</span>
+
+        // end setup method
+<span class="nc" id="L443">        clinitMethod.newobj(p(RuntimeCache.class));</span>
+<span class="nc" id="L444">        clinitMethod.dup();</span>
+<span class="nc" id="L445">        clinitMethod.invokespecial(p(RuntimeCache.class), &quot;&lt;init&gt;&quot;, sig(void.class));</span>
+<span class="nc" id="L446">        clinitMethod.dup();</span>
+<span class="nc" id="L447">        clinitMethod.ldc(cacheSize);</span>
+<span class="nc" id="L448">        clinitMethod.invokevirtual(p(RuntimeCache.class), &quot;initMethodCache&quot;, sig(void.class, int.class));</span>
+<span class="nc" id="L449">        clinitMethod.putstatic(pathName, &quot;$runtimeCache&quot;, ci(RuntimeCache.class));</span>
+<span class="nc" id="L450">        clinitMethod.voidreturn();</span>
+<span class="nc" id="L451">        clinitMethod.end();</span>
+
+        // end class
+<span class="nc" id="L454">        cw.visitEnd();</span>
+
+        // create the class
+<span class="nc" id="L457">        byte[] bytes = cw.toByteArray();</span>
+        Class newClass;
+        ClassDefininngJRubyClassLoader loader;
+<span class="nc bnc" id="L460" title="All 2 branches missed.">        if (superClass.getClassLoader() instanceof ClassDefininngJRubyClassLoader) {</span>
+<span class="nc" id="L461">            loader = new ClassDefininngJRubyClassLoader(superClass.getClassLoader());</span>
+        } else {
+<span class="nc" id="L463">            loader = new ClassDefininngJRubyClassLoader(ruby.getJRubyClassLoader());</span>
+        }
+        try {
+<span class="nc" id="L466">            newClass = loader.loadClass(name);</span>
+<span class="nc" id="L467">        } catch (ClassNotFoundException cnfe) {</span>
+<span class="nc" id="L468">            newClass = loader.defineClass(name, cw.toByteArray());</span>
+<span class="nc" id="L469">        }</span>
+
+        if (DEBUG) {
+            FileOutputStream fos = null;
+            try {
+                fos = new FileOutputStream(name + &quot;.class&quot;);
+                fos.write(bytes);
+            } catch (IOException ioe) {
+                ioe.printStackTrace();
+            } finally {
+                try {fos.close();} catch (Exception e) {}
+            }
+        }
+
+<span class="nc" id="L483">        return newClass;</span>
+    }
+
+    public static void coerceArgumentsToRuby(SkinnyMethodAdapter mv, Class[] paramTypes, int rubyIndex) {
+        // load arguments into IRubyObject[] for dispatch
+<span class="nc bnc" id="L488" title="All 2 branches missed.">        if (paramTypes.length != 0) {</span>
+<span class="nc" id="L489">            mv.pushInt(paramTypes.length);</span>
+<span class="nc" id="L490">            mv.anewarray(p(IRubyObject.class));</span>
+
+            // TODO: make this do specific-arity calling
+<span class="nc bnc" id="L493" title="All 2 branches missed.">            for (int i = 0, argIndex = 1; i &lt; paramTypes.length; i++) {</span>
+<span class="nc" id="L494">                Class paramType = paramTypes[i];</span>
+<span class="nc" id="L495">                mv.dup();</span>
+<span class="nc" id="L496">                mv.pushInt(i);</span>
+                // convert to IRubyObject
+<span class="nc" id="L498">                mv.aload(rubyIndex);</span>
+<span class="nc bnc" id="L499" title="All 2 branches missed.">                if (paramTypes[i].isPrimitive()) {</span>
+<span class="nc bnc" id="L500" title="All 8 branches missed.">                    if (paramType == byte.class || paramType == short.class || paramType == char.class || paramType == int.class) {</span>
+<span class="nc" id="L501">                        mv.iload(argIndex++);</span>
+<span class="nc" id="L502">                        mv.invokestatic(p(JavaUtil.class), &quot;convertJavaToRuby&quot;, sig(IRubyObject.class, Ruby.class, int.class));</span>
+<span class="nc bnc" id="L503" title="All 2 branches missed.">                    } else if (paramType == long.class) {</span>
+<span class="nc" id="L504">                        mv.lload(argIndex);</span>
+<span class="nc" id="L505">                        argIndex += 2; // up two slots, for long's two halves</span>
+<span class="nc" id="L506">                        mv.invokestatic(p(JavaUtil.class), &quot;convertJavaToRuby&quot;, sig(IRubyObject.class, Ruby.class, long.class));</span>
+<span class="nc bnc" id="L507" title="All 2 branches missed.">                    } else if (paramType == float.class) {</span>
+<span class="nc" id="L508">                        mv.fload(argIndex++);</span>
+<span class="nc" id="L509">                        mv.invokestatic(p(JavaUtil.class), &quot;convertJavaToRuby&quot;, sig(IRubyObject.class, Ruby.class, float.class));</span>
+<span class="nc bnc" id="L510" title="All 2 branches missed.">                    } else if (paramType == double.class) {</span>
+<span class="nc" id="L511">                        mv.dload(argIndex);</span>
+<span class="nc" id="L512">                        argIndex += 2; // up two slots, for long's two halves</span>
+<span class="nc" id="L513">                        mv.invokestatic(p(JavaUtil.class), &quot;convertJavaToRuby&quot;, sig(IRubyObject.class, Ruby.class, double.class));</span>
+<span class="nc bnc" id="L514" title="All 2 branches missed.">                    } else if (paramType == boolean.class) {</span>
+<span class="nc" id="L515">                        mv.iload(argIndex++);</span>
+<span class="nc" id="L516">                        mv.invokestatic(p(JavaUtil.class), &quot;convertJavaToRuby&quot;, sig(IRubyObject.class, Ruby.class, boolean.class));</span>
+                    }
+                } else {
+<span class="nc" id="L519">                    mv.aload(argIndex++);</span>
+<span class="nc" id="L520">                    mv.invokestatic(p(JavaUtil.class), &quot;convertJavaToUsableRubyObject&quot;, sig(IRubyObject.class, Ruby.class, Object.class));</span>
+                }
+<span class="nc" id="L522">                mv.aastore();</span>
+            }
+        } else {
+<span class="nc" id="L525">            mv.getstatic(p(IRubyObject.class), &quot;NULL_ARRAY&quot;, ci(IRubyObject[].class));</span>
+        }
+<span class="nc" id="L527">    }</span>
+
+    public static void coerceResultAndReturn(SkinnyMethodAdapter mv, Class returnType) {
+        // if we expect a return value, unwrap it
+<span class="nc bnc" id="L531" title="All 2 branches missed.">        if (returnType != void.class) {</span>
+            // TODO: move the bulk of this logic to utility methods
+<span class="nc bnc" id="L533" title="All 2 branches missed.">            if (returnType.isPrimitive()) {</span>
+<span class="nc bnc" id="L534" title="All 2 branches missed.">                if (returnType == boolean.class) {</span>
+<span class="nc" id="L535">                    mv.getstatic(p(Boolean.class), &quot;TYPE&quot;, ci(Class.class));</span>
+<span class="nc" id="L536">                    mv.invokeinterface(p(IRubyObject.class), &quot;toJava&quot;, sig(Object.class, Class.class));</span>
+<span class="nc" id="L537">                    mv.checkcast(p(Boolean.class));</span>
+<span class="nc" id="L538">                    mv.invokevirtual(p(Boolean.class), &quot;booleanValue&quot;, sig(boolean.class));</span>
+<span class="nc" id="L539">                    mv.ireturn();</span>
+                } else {
+<span class="nc" id="L541">                    mv.getstatic(p(getBoxType(returnType)), &quot;TYPE&quot;, ci(Class.class));</span>
+<span class="nc" id="L542">                    mv.invokeinterface(p(IRubyObject.class), &quot;toJava&quot;, sig(Object.class, Class.class));</span>
+<span class="nc bnc" id="L543" title="All 2 branches missed.">                    if (returnType == byte.class) {</span>
+<span class="nc" id="L544">                        mv.checkcast(p(Number.class));</span>
+<span class="nc" id="L545">                        mv.invokevirtual(p(Number.class), &quot;byteValue&quot;, sig(byte.class));</span>
+<span class="nc" id="L546">                        mv.ireturn();</span>
+<span class="nc bnc" id="L547" title="All 2 branches missed.">                    } else if (returnType == short.class) {</span>
+<span class="nc" id="L548">                        mv.checkcast(p(Number.class));</span>
+<span class="nc" id="L549">                        mv.invokevirtual(p(Number.class), &quot;shortValue&quot;, sig(short.class));</span>
+<span class="nc" id="L550">                        mv.ireturn();</span>
+<span class="nc bnc" id="L551" title="All 2 branches missed.">                    } else if (returnType == char.class) {</span>
+<span class="nc" id="L552">                        mv.checkcast(p(Character.class));</span>
+<span class="nc" id="L553">                        mv.invokevirtual(p(Character.class), &quot;charValue&quot;, sig(char.class));</span>
+<span class="nc" id="L554">                        mv.ireturn();</span>
+<span class="nc bnc" id="L555" title="All 2 branches missed.">                    } else if (returnType == int.class) {</span>
+<span class="nc" id="L556">                        mv.checkcast(p(Number.class));</span>
+<span class="nc" id="L557">                        mv.invokevirtual(p(Number.class), &quot;intValue&quot;, sig(int.class));</span>
+<span class="nc" id="L558">                        mv.ireturn();</span>
+<span class="nc bnc" id="L559" title="All 2 branches missed.">                    } else if (returnType == long.class) {</span>
+<span class="nc" id="L560">                        mv.checkcast(p(Number.class));</span>
+<span class="nc" id="L561">                        mv.invokevirtual(p(Number.class), &quot;longValue&quot;, sig(long.class));</span>
+<span class="nc" id="L562">                        mv.lreturn();</span>
+<span class="nc bnc" id="L563" title="All 2 branches missed.">                    } else if (returnType == float.class) {</span>
+<span class="nc" id="L564">                        mv.checkcast(p(Number.class));</span>
+<span class="nc" id="L565">                        mv.invokevirtual(p(Number.class), &quot;floatValue&quot;, sig(float.class));</span>
+<span class="nc" id="L566">                        mv.freturn();</span>
+<span class="nc bnc" id="L567" title="All 2 branches missed.">                    } else if (returnType == double.class) {</span>
+<span class="nc" id="L568">                        mv.checkcast(p(Number.class));</span>
+<span class="nc" id="L569">                        mv.invokevirtual(p(Number.class), &quot;doubleValue&quot;, sig(double.class));</span>
+<span class="nc" id="L570">                        mv.dreturn();</span>
+                    }
+                }
+            } else {
+<span class="nc" id="L574">                mv.ldc(Type.getType(returnType));</span>
+<span class="nc" id="L575">                mv.invokeinterface(p(IRubyObject.class), &quot;toJava&quot;, sig(Object.class, Class.class));</span>
+<span class="nc" id="L576">                mv.checkcast(p(returnType));</span>
+<span class="nc" id="L577">                mv.areturn();</span>
+            }
+        } else {
+<span class="nc" id="L580">            mv.voidreturn();</span>
+        }
+<span class="nc" id="L582">    }</span>
+
+    public static boolean isCacheOk(CacheEntry entry, IRubyObject self) {
+<span class="nc bnc" id="L585" title="All 4 branches missed.">        return CacheEntry.typeOk(entry, self.getMetaClass()) &amp;&amp; entry.method != UndefinedMethod.INSTANCE;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

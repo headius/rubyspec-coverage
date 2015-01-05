@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JarResource.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util</a> &gt; <span class="el_source">JarResource.java</span></div><h1>JarResource.java</h1><pre class="source lang-java linenums">package org.jruby.util;
+
+import jnr.posix.FileStat;
+
+import java.io.UnsupportedEncodingException;
+import java.net.URLDecoder;
+import java.util.jar.JarEntry;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+abstract class JarResource extends AbstractFileResource {
+<span class="fc" id="L12">    private static Pattern PREFIX_MATCH = Pattern.compile(&quot;^(?:jar:)?(?:file:)?(.*)$&quot;);</span>
+
+<span class="fc" id="L14">    private static final JarCache jarCache = new JarCache();</span>
+
+    public static JarResource create(String pathname) {
+<span class="pc bpc" id="L17" title="1 of 2 branches missed.">        if (!pathname.contains(&quot;!&quot;)) return null;  // Optimization: no ! no jar!</span>
+
+<span class="nc" id="L19">        Matcher matcher = PREFIX_MATCH.matcher(pathname);</span>
+<span class="nc bnc" id="L20" title="All 2 branches missed.">        String sanitized = matcher.matches() ? matcher.group(1) : pathname;</span>
+
+        try {
+            // since pathname is actually an uri we need to decode any url decoded characters like %20
+            // which happens when directory names contain spaces
+<span class="nc" id="L25">            sanitized = URLDecoder.decode(sanitized, &quot;UTF-8&quot;);</span>
+<span class="nc" id="L26">        } catch (IllegalArgumentException iae) {</span>
+            // something in the path did not decode, so it's probably not a URI
+            // See jruby/jruby#2264.
+<span class="nc" id="L29">            return null;</span>
+<span class="nc" id="L30">        } catch (UnsupportedEncodingException e) {</span>
+<span class="nc" id="L31">            throw new RuntimeException( &quot;hmm - system does not know UTF-8 string encoding :(&quot; );</span>
+<span class="nc" id="L32">        }</span>
+
+<span class="nc" id="L34">        int bang = sanitized.indexOf('!');</span>
+<span class="nc" id="L35">        String jarPath = sanitized.substring(0, bang);</span>
+<span class="nc" id="L36">        String entryPath = sanitized.substring(bang + 1);</span>
+        // normalize path -- issue #2017
+<span class="nc bnc" id="L38" title="All 2 branches missed.">        if (entryPath.startsWith(&quot;//&quot;)) entryPath = entryPath.substring(1);</span>
+
+        // TODO: Do we really need to support both test.jar!foo/bar.rb and test.jar!/foo/bar.rb cases?
+<span class="nc" id="L41">        JarResource resource = createJarResource(jarPath, entryPath, false);</span>
+
+<span class="nc bnc" id="L43" title="All 4 branches missed.">        if (resource == null &amp;&amp; entryPath.startsWith(&quot;/&quot;)) {</span>
+<span class="nc" id="L44">            resource = createJarResource(jarPath, entryPath.substring(1), true);</span>
+        }
+
+<span class="nc" id="L47">        return resource;</span>
+    }
+
+    private static JarResource createJarResource(String jarPath, String entryPath, boolean rootSlashPrefix) {
+<span class="nc" id="L51">        JarCache.JarIndex index = jarCache.getIndex(jarPath);</span>
+
+<span class="nc bnc" id="L53" title="All 2 branches missed.">        if (index == null) {</span>
+            // Jar doesn't exist
+<span class="nc" id="L55">            return null;</span>
+        }
+
+        // Try it as directory first, because jars tend to have foo/ entries
+        // and it's not really possible disambiguate between files and directories.
+<span class="nc" id="L60">        String[] entries = index.getDirEntries(entryPath);</span>
+<span class="nc bnc" id="L61" title="All 2 branches missed.">        if (entries != null) {</span>
+<span class="nc" id="L62">            return new JarDirectoryResource(jarPath, rootSlashPrefix, entryPath, entries);</span>
+        }
+
+<span class="nc" id="L65">        JarEntry jarEntry = index.getJarEntry(entryPath);</span>
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        if (jarEntry != null) {</span>
+<span class="nc" id="L67">            return new JarFileResource(jarPath, rootSlashPrefix, index, jarEntry);</span>
+        }
+
+<span class="nc" id="L70">        return null;</span>
+    }
+
+    private final String jarPrefix;
+    private final JarFileStat fileStat;
+
+<span class="nc" id="L76">    protected JarResource(String jarPath, boolean rootSlashPrefix) {</span>
+<span class="nc bnc" id="L77" title="All 2 branches missed.">        this.jarPrefix = rootSlashPrefix ? jarPath + &quot;!/&quot; : jarPath + &quot;!&quot;;</span>
+<span class="nc" id="L78">        this.fileStat = new JarFileStat(this);</span>
+<span class="nc" id="L79">    }</span>
+
+    @Override
+    public String absolutePath() {
+<span class="nc" id="L83">        return jarPrefix + entryName();</span>
+    }
+
+    @Override
+    public String canonicalPath() {
+<span class="nc" id="L88">        return absolutePath();</span>
+    }
+
+    @Override
+    public boolean exists() {
+        // If a jar resource got created, then it always corresponds to some kind of resource
+<span class="nc" id="L94">        return true;</span>
+    }
+
+    @Override
+    public boolean canRead() {
+        // Can always read from a jar
+<span class="nc" id="L100">        return true;</span>
+    }
+
+    @Override
+    public boolean canWrite() {
+<span class="nc" id="L105">        return false;</span>
+    }
+
+    @Override
+    public boolean isSymLink() {
+        // Jar archives shouldn't contain symbolic links, or it would break portability. `jar`
+        // command behavior seems to comform to that (it unwraps syumbolic links when creating a jar
+        // and replaces symbolic links with regular file when extracting from a zip that contains
+        // symbolic links). Also see:
+        // http://www.linuxquestions.org/questions/linux-general-1/how-to-create-jar-files-with-symbolic-links-639381/
+<span class="nc" id="L115">        return false;</span>
+    }
+
+    @Override
+    public FileStat stat() {
+<span class="nc" id="L120">        return fileStat;</span>
+    }
+
+    @Override
+    public FileStat lstat() {
+<span class="nc" id="L125">      return stat(); // jars don't have symbolic links, so lstat == stat</span>
+    }
+
+    @Override
+    public JRubyFile hackyGetJRubyFile() {
+<span class="nc" id="L130">      return JRubyNonExistentFile.NOT_EXIST;</span>
+    }
+
+    abstract protected String entryName();
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

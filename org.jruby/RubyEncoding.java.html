@@ -1,0 +1,523 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyEncoding.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyEncoding.java</span></div><h1>RubyEncoding.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import java.lang.ref.SoftReference;
+import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.Charset;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CharsetEncoder;
+import java.nio.charset.CodingErrorAction;
+
+import org.jcodings.Encoding;
+import org.jcodings.EncodingDB.Entry;
+import org.jcodings.specific.USASCIIEncoding;
+import org.jcodings.util.CaseInsensitiveBytesHash;
+import org.jcodings.util.Hash.HashEntryIterator;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.compiler.Constantizable;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.encoding.EncodingCapable;
+import org.jruby.runtime.encoding.EncodingService;
+import org.jruby.runtime.opto.OptoFactory;
+import org.jruby.util.ByteList;
+import org.jruby.util.StringSupport;
+import org.jruby.util.io.EncodingUtils;
+import org.jruby.util.unsafe.UnsafeHolder;
+
+@JRubyClass(name=&quot;Encoding&quot;)
+public class RubyEncoding extends RubyObject implements Constantizable {
+<span class="fc" id="L59">    public static final Charset UTF8 = Charset.forName(&quot;UTF-8&quot;);</span>
+<span class="fc" id="L60">    public static final Charset UTF16 = Charset.forName(&quot;UTF-16&quot;);</span>
+<span class="fc" id="L61">    public static final Charset ISO = Charset.forName(&quot;ISO-8859-1&quot;);</span>
+<span class="fc" id="L62">    public static final ByteList LOCALE = ByteList.create(&quot;locale&quot;);</span>
+<span class="fc" id="L63">    public static final ByteList EXTERNAL = ByteList.create(&quot;external&quot;);</span>
+<span class="fc" id="L64">    public static final ByteList FILESYSTEM = ByteList.create(&quot;filesystem&quot;);</span>
+<span class="fc" id="L65">    public static final ByteList INTERNAL = ByteList.create(&quot;internal&quot;);</span>
+
+    public static RubyClass createEncodingClass(Ruby runtime) {
+<span class="fc" id="L68">        RubyClass encodingc = runtime.defineClass(&quot;Encoding&quot;, runtime.getObject(), ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);</span>
+<span class="fc" id="L69">        runtime.setEncoding(encodingc);</span>
+<span class="fc" id="L70">        encodingc.setClassIndex(ClassIndex.ENCODING);</span>
+<span class="fc" id="L71">        encodingc.setReifiedClass(RubyEncoding.class);</span>
+<span class="fc" id="L72">        encodingc.kindOf = new RubyModule.JavaClassKindOf(RubyEncoding.class);</span>
+
+<span class="fc" id="L74">        encodingc.getSingletonClass().undefineMethod(&quot;allocate&quot;);</span>
+<span class="fc" id="L75">        encodingc.defineAnnotatedMethods(RubyEncoding.class);</span>
+
+<span class="fc" id="L77">        return encodingc;</span>
+    }
+
+    private Encoding encoding;
+    private final ByteList name;
+    private final boolean isDummy;
+    private final Object constant;
+
+    private RubyEncoding(Ruby runtime, byte[] name, int p, int end, boolean isDummy) {
+<span class="fc" id="L86">        this(runtime, new ByteList(name, p, end), null, isDummy);</span>
+<span class="fc" id="L87">    }</span>
+
+    private RubyEncoding(Ruby runtime, byte[] name, Encoding encoding, boolean isDummy) {
+<span class="fc" id="L90">        this(runtime, new ByteList(name), encoding, isDummy);</span>
+<span class="fc" id="L91">    }</span>
+
+    private RubyEncoding(Ruby runtime, ByteList name, Encoding encoding, boolean isDummy) {
+<span class="fc" id="L94">        super(runtime, runtime.getEncoding());</span>
+<span class="fc" id="L95">        this.name = name;</span>
+<span class="fc" id="L96">        this.isDummy = isDummy;</span>
+<span class="fc" id="L97">        this.encoding = encoding;</span>
+
+<span class="fc" id="L99">        this.constant = OptoFactory.newConstantWrapper(RubyEncoding.class, this);</span>
+<span class="fc" id="L100">    }</span>
+
+    /**
+     * @see org.jruby.compiler.Constantizable
+     */
+    @Override
+    public Object constant() {
+<span class="nc" id="L107">        return constant;</span>
+    }
+
+    public static RubyEncoding newEncoding(Ruby runtime, byte[] name, int p, int end, boolean isDummy) {
+<span class="fc" id="L111">        return new RubyEncoding(runtime, name, p, end, isDummy);</span>
+    }
+
+    public final Encoding getEncoding() {
+        // TODO: make threadsafe
+<span class="fc bfc" id="L116" title="All 2 branches covered.">        if (encoding == null) encoding = getRuntime().getEncodingService().loadEncoding(name);</span>
+<span class="fc" id="L117">        return encoding;</span>
+    }
+    
+    private static Encoding extractEncodingFromObject(IRubyObject obj) {
+<span class="fc bfc" id="L121" title="All 2 branches covered.">        if (obj instanceof RubyEncoding) return ((RubyEncoding) obj).getEncoding();</span>
+<span class="fc bfc" id="L122" title="All 2 branches covered.">        if (obj instanceof RubySymbol) return ((RubySymbol) obj).asString().getEncoding();</span>
+<span class="fc bfc" id="L123" title="All 2 branches covered.">        if (obj instanceof EncodingCapable) return ((EncodingCapable) obj).getEncoding();</span>
+        
+<span class="fc" id="L125">        return null;</span>
+    }
+
+    public static Encoding areCompatible(IRubyObject obj1, IRubyObject obj2) {
+<span class="fc" id="L129">        Encoding enc1 = extractEncodingFromObject(obj1);</span>
+<span class="fc" id="L130">        Encoding enc2 = extractEncodingFromObject(obj2);</span>
+        
+<span class="fc bfc" id="L132" title="All 4 branches covered.">        if (enc1 == null || enc2 == null) return null;</span>
+<span class="fc bfc" id="L133" title="All 2 branches covered.">        if (enc1 == enc2) return enc1;</span>
+
+<span class="pc bpc" id="L135" title="1 of 4 branches missed.">        if (obj2 instanceof RubyString &amp;&amp; ((RubyString) obj2).getByteList().getRealSize() == 0) return enc1;</span>
+<span class="pc bpc" id="L136" title="1 of 4 branches missed.">        if (obj1 instanceof RubyString &amp;&amp; ((RubyString) obj1).getByteList().getRealSize() == 0) {</span>
+<span class="nc bnc" id="L137" title="All 4 branches missed.">            return enc1.isAsciiCompatible() &amp;&amp; obj2 instanceof RubyString &amp;&amp; </span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">                    ((RubyString) obj2).isAsciiOnly() ? enc1 : enc2;</span>
+        }
+        
+<span class="fc bfc" id="L141" title="All 4 branches covered.">        if (!enc1.isAsciiCompatible() || !enc2.isAsciiCompatible()) return null;</span>
+
+<span class="fc bfc" id="L143" title="All 4 branches covered.">        if (!(obj2 instanceof RubyString) &amp;&amp; enc2 instanceof USASCIIEncoding) return enc1;</span>
+<span class="fc bfc" id="L144" title="All 4 branches covered.">        if (!(obj1 instanceof RubyString) &amp;&amp; enc1 instanceof USASCIIEncoding) return enc2;</span>
+
+<span class="fc bfc" id="L146" title="All 2 branches covered.">        if (!(obj1 instanceof RubyString)) {</span>
+<span class="fc" id="L147">            IRubyObject objTmp = obj1; // swap1 obj1 &amp; obj2</span>
+<span class="fc" id="L148">            obj1 = obj2;</span>
+<span class="fc" id="L149">            obj2 = objTmp;</span>
+
+<span class="fc" id="L151">            Encoding encTmp = enc1;  // swap their encodings</span>
+<span class="fc" id="L152">            enc1 = enc2;</span>
+<span class="fc" id="L153">            enc2 = encTmp;</span>
+        }
+
+<span class="fc bfc" id="L156" title="All 2 branches covered.">        if (obj1 instanceof RubyString) {</span>
+<span class="fc" id="L157">            int cr1 = ((RubyString)obj1).scanForCodeRange();</span>
+<span class="pc bpc" id="L158" title="1 of 2 branches missed.">            if (obj2 instanceof RubyString) {</span>
+<span class="fc" id="L159">                int cr2 = ((RubyString)obj2).scanForCodeRange();</span>
+<span class="fc" id="L160">                return areCompatible(enc1, cr1, enc2, cr2);</span>
+            }
+<span class="nc bnc" id="L162" title="All 2 branches missed.">            if (cr1 == StringSupport.CR_7BIT) return enc2;</span>
+        }
+
+<span class="fc" id="L165">        return null;</span>
+    }
+
+    // last block in rb_enc_compatible
+    static Encoding areCompatible(Encoding enc1, int cr1, Encoding enc2, int cr2) {
+<span class="fc bfc" id="L170" title="All 2 branches covered.">        if (cr1 != cr2) {</span>
+            /* may need to handle ENC_CODERANGE_BROKEN */
+<span class="fc bfc" id="L172" title="All 2 branches covered.">            if (cr1 == StringSupport.CR_7BIT) return enc2;</span>
+<span class="fc bfc" id="L173" title="All 2 branches covered.">            if (cr2 == StringSupport.CR_7BIT) return enc1;</span>
+        }
+<span class="fc bfc" id="L175" title="All 2 branches covered.">        if (cr2 == StringSupport.CR_7BIT) return enc1;</span>
+<span class="pc bpc" id="L176" title="1 of 2 branches missed.">        if (cr1 == StringSupport.CR_7BIT) return enc2;</span>
+<span class="fc" id="L177">        return null;</span>
+    }
+
+    public static byte[] encodeUTF8(CharSequence cs) {
+<span class="fc" id="L181">        return getUTF8Coder().encode(cs);</span>
+    }
+
+    public static byte[] encodeUTF8(String str) {
+<span class="fc" id="L185">        return getUTF8Coder().encode(str);</span>
+    }
+
+    private static final int CHAR_ARRAY_BASE;
+    private static final int BYTE_ARRAY_BASE;
+    private static final Field VALUE_FIELD;
+    private static final long VALUE_FIELD_OFFSET;
+    static {
+<span class="fc" id="L193">        Field valueField = null;</span>
+        try {
+<span class="fc" id="L195">            valueField = String.class.getDeclaredField(&quot;value&quot;);</span>
+<span class="nc" id="L196">        } catch (Exception e) {</span>
+<span class="fc" id="L197">        }</span>
+<span class="fc" id="L198">        VALUE_FIELD = valueField;</span>
+<span class="fc" id="L199">        long valueFieldOffset = -1;</span>
+        try {
+<span class="fc" id="L201">            valueFieldOffset = UnsafeHolder.U.objectFieldOffset(VALUE_FIELD);</span>
+<span class="nc" id="L202">        } catch (Exception e) {</span>
+<span class="fc" id="L203">        }</span>
+<span class="fc" id="L204">        VALUE_FIELD_OFFSET = valueFieldOffset;</span>
+<span class="fc" id="L205">        int charArrayBase = -1;</span>
+        try {
+<span class="fc" id="L207">            charArrayBase = UnsafeHolder.U.arrayBaseOffset(char[].class);</span>
+<span class="nc" id="L208">        } catch (Exception e) {</span>
+<span class="fc" id="L209">        }</span>
+<span class="fc" id="L210">        CHAR_ARRAY_BASE = charArrayBase;</span>
+<span class="fc" id="L211">        int byteArrayBase = -1;</span>
+        try {
+<span class="fc" id="L213">            byteArrayBase = UnsafeHolder.U.arrayBaseOffset(byte[].class);</span>
+<span class="nc" id="L214">        } catch (Exception e) {</span>
+<span class="fc" id="L215">        }</span>
+<span class="fc" id="L216">        BYTE_ARRAY_BASE = byteArrayBase;</span>
+    }
+
+    public static byte[] encodeUTF16(String str) {
+<span class="nc bnc" id="L220" title="All 2 branches missed.">        if (VALUE_FIELD_OFFSET == -1) return encode(str, UTF16);</span>
+<span class="nc" id="L221">        char[] chars = (char[]) UnsafeHolder.U.getObject(str, VALUE_FIELD_OFFSET);</span>
+<span class="nc" id="L222">        int length = chars.length * 2;</span>
+<span class="nc" id="L223">        byte[] bytes = new byte[length];</span>
+<span class="nc" id="L224">        UnsafeHolder.U.copyMemory(chars, CHAR_ARRAY_BASE, bytes, BYTE_ARRAY_BASE, length);</span>
+<span class="nc" id="L225">        return bytes;</span>
+    }
+
+    public static byte[] encodeUTF16(CharSequence str) {
+<span class="nc" id="L229">        return encodeUTF16(str.toString());</span>
+    }
+
+    public static byte[] encode(CharSequence cs, Charset charset) {
+<span class="fc" id="L233">        ByteBuffer buffer = charset.encode(cs.toString());</span>
+<span class="fc" id="L234">        byte[] bytes = new byte[buffer.limit()];</span>
+<span class="fc" id="L235">        buffer.get(bytes);</span>
+<span class="fc" id="L236">        return bytes;</span>
+    }
+
+    public static byte[] encode(String str, Charset charset) {
+<span class="nc" id="L240">        ByteBuffer buffer = charset.encode(str);</span>
+<span class="nc" id="L241">        byte[] bytes = new byte[buffer.limit()];</span>
+<span class="nc" id="L242">        buffer.get(bytes);</span>
+<span class="nc" id="L243">        return bytes;</span>
+    }
+
+    public static String decodeUTF8(byte[] bytes, int start, int length) {
+<span class="fc" id="L247">        return getUTF8Coder().decode(bytes, start, length);</span>
+    }
+
+    public static String decodeUTF8(byte[] bytes) {
+<span class="fc" id="L251">        return getUTF8Coder().decode(bytes);</span>
+    }
+
+    public static String decode(byte[] bytes, int start, int length, Charset charset) {
+<span class="fc" id="L255">        return charset.decode(ByteBuffer.wrap(bytes, start, length)).toString();</span>
+    }
+
+    public static String decode(byte[] bytes, Charset charset) {
+<span class="nc" id="L259">        return charset.decode(ByteBuffer.wrap(bytes)).toString();</span>
+    }
+    
+    private static class UTF8Coder {
+<span class="fc" id="L263">        private final CharsetEncoder encoder = UTF8.newEncoder();</span>
+<span class="fc" id="L264">        private final CharsetDecoder decoder = UTF8.newDecoder();</span>
+        /** The maximum number of characters we can encode/decode in our cached buffers */
+        private static final int CHAR_THRESHOLD = 1024;
+        /** The resulting encode/decode buffer sized by the max number of
+         * characters (using 4 bytes per char possible for utf-8) */
+        private static final int BUF_SIZE = CHAR_THRESHOLD * 4;
+<span class="fc" id="L270">        private final ByteBuffer byteBuffer = ByteBuffer.allocate(BUF_SIZE);</span>
+<span class="fc" id="L271">        private final CharBuffer charBuffer = CharBuffer.allocate(BUF_SIZE);</span>
+
+<span class="fc" id="L273">        public UTF8Coder() {</span>
+<span class="fc" id="L274">            decoder.onMalformedInput(CodingErrorAction.REPLACE);</span>
+<span class="fc" id="L275">            decoder.onUnmappableCharacter(CodingErrorAction.REPLACE);</span>
+<span class="fc" id="L276">        }</span>
+
+        public byte[] encode(CharSequence cs) {
+            ByteBuffer buffer;
+<span class="pc bpc" id="L280" title="1 of 2 branches missed.">            if (cs.length() &gt; CHAR_THRESHOLD) {</span>
+<span class="nc" id="L281">                buffer = UTF8.encode(cs.toString());</span>
+            } else {
+<span class="fc" id="L283">                buffer = byteBuffer;</span>
+<span class="fc" id="L284">                CharBuffer cbuffer = charBuffer;</span>
+<span class="fc" id="L285">                buffer.clear();</span>
+<span class="fc" id="L286">                cbuffer.clear();</span>
+<span class="fc" id="L287">                cbuffer.put(cs.toString());</span>
+<span class="fc" id="L288">                cbuffer.flip();</span>
+<span class="fc" id="L289">                encoder.encode(cbuffer, buffer, true);</span>
+<span class="fc" id="L290">                buffer.flip();</span>
+            }
+            
+<span class="fc" id="L293">            byte[] bytes = new byte[buffer.limit()];</span>
+<span class="fc" id="L294">            buffer.get(bytes);</span>
+<span class="fc" id="L295">            return bytes;</span>
+        }
+        
+        public String decode(byte[] bytes, int start, int length) {
+            CharBuffer cbuffer;
+<span class="pc bpc" id="L300" title="1 of 2 branches missed.">            if (length &gt; CHAR_THRESHOLD) {</span>
+<span class="nc" id="L301">                cbuffer = UTF8.decode(ByteBuffer.wrap(bytes, start, length));</span>
+            } else {
+<span class="fc" id="L303">                cbuffer = charBuffer;</span>
+<span class="fc" id="L304">                ByteBuffer buffer = byteBuffer;</span>
+<span class="fc" id="L305">                cbuffer.clear();</span>
+<span class="fc" id="L306">                buffer.clear();</span>
+<span class="fc" id="L307">                buffer.put(bytes, start, length);</span>
+<span class="fc" id="L308">                buffer.flip();</span>
+<span class="fc" id="L309">                decoder.decode(buffer, cbuffer, true);</span>
+<span class="fc" id="L310">                cbuffer.flip();</span>
+            }
+            
+<span class="fc" id="L313">            return cbuffer.toString();</span>
+        }
+        
+        public String decode(byte[] bytes) {
+<span class="fc" id="L317">            return decode(bytes, 0, bytes.length);</span>
+        }
+    }
+
+    /**
+     * UTF8Coder wrapped in a SoftReference to avoid possible ClassLoader leak.
+     * See JRUBY-6522
+     */
+<span class="fc" id="L325">    private static final ThreadLocal&lt;SoftReference&lt;UTF8Coder&gt;&gt; UTF8_CODER =</span>
+        new ThreadLocal&lt;SoftReference&lt;UTF8Coder&gt;&gt;();
+
+    private static UTF8Coder getUTF8Coder() {
+        UTF8Coder coder;
+<span class="fc" id="L330">        SoftReference&lt;UTF8Coder&gt; ref = UTF8_CODER.get();</span>
+<span class="pc bpc" id="L331" title="1 of 4 branches missed.">        if (ref == null || (coder = ref.get()) == null) {</span>
+<span class="fc" id="L332">            coder = new UTF8Coder();</span>
+<span class="fc" id="L333">            ref = new SoftReference&lt;UTF8Coder&gt;(coder);</span>
+<span class="fc" id="L334">            UTF8_CODER.set(ref);</span>
+        }
+        
+<span class="fc" id="L337">        return coder;</span>
+    }
+
+    @JRubyMethod(name = &quot;list&quot;, meta = true)
+    public static IRubyObject list(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L342">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L343">        return RubyArray.newArrayNoCopy(runtime, runtime.getEncodingService().getEncodingList(), 0);</span>
+    }
+
+    @JRubyMethod(name = &quot;locale_charmap&quot;, meta = true)
+    public static IRubyObject locale_charmap(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L348">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L349">        EncodingService service = runtime.getEncodingService();</span>
+<span class="fc" id="L350">        ByteList name = new ByteList(service.getLocaleEncoding().getName());</span>
+        
+<span class="fc" id="L352">        return RubyString.newUsAsciiStringNoCopy(runtime, name);</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    @JRubyMethod(name = &quot;name_list&quot;, meta = true)
+    public static IRubyObject name_list(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L358">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L359">        EncodingService service = runtime.getEncodingService();</span>
+        
+<span class="fc" id="L361">        RubyArray result = runtime.newArray(service.getEncodings().size() + service.getAliases().size());</span>
+        HashEntryIterator i;
+<span class="fc" id="L363">        i = service.getEncodings().entryIterator();</span>
+<span class="fc bfc" id="L364" title="All 2 branches covered.">        while (i.hasNext()) {</span>
+<span class="fc" id="L365">            CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt; e = </span>
+<span class="fc" id="L366">                ((CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt;)i.next());</span>
+<span class="fc" id="L367">            result.append(RubyString.newUsAsciiStringShared(runtime, e.bytes, e.p, e.end - e.p).freeze(context));</span>
+<span class="fc" id="L368">        }</span>
+<span class="fc" id="L369">        i = service.getAliases().entryIterator();        </span>
+<span class="fc bfc" id="L370" title="All 2 branches covered.">        while (i.hasNext()) {</span>
+<span class="fc" id="L371">            CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt; e = </span>
+<span class="fc" id="L372">                ((CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt;)i.next());</span>
+<span class="fc" id="L373">            result.append(RubyString.newUsAsciiStringShared(runtime, e.bytes, e.p, e.end - e.p).freeze(context));</span>
+<span class="fc" id="L374">        }</span>
+
+<span class="fc" id="L376">        result.append(runtime.newString(EXTERNAL));</span>
+<span class="fc" id="L377">        result.append(runtime.newString(LOCALE));</span>
+        
+<span class="fc" id="L379">        return result;</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    @JRubyMethod(name = &quot;aliases&quot;, meta = true)
+    public static IRubyObject aliases(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L385">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L386">        EncodingService service = runtime.getEncodingService();</span>
+
+<span class="fc" id="L388">        IRubyObject list[] = service.getEncodingList();</span>
+<span class="fc" id="L389">        HashEntryIterator i = service.getAliases().entryIterator();</span>
+<span class="fc" id="L390">        RubyHash result = RubyHash.newHash(runtime);</span>
+
+<span class="fc bfc" id="L392" title="All 2 branches covered.">        while (i.hasNext()) {</span>
+<span class="fc" id="L393">            CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt; e = </span>
+<span class="fc" id="L394">                ((CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt;)i.next());</span>
+<span class="fc" id="L395">            IRubyObject alias = RubyString.newUsAsciiStringShared(runtime, e.bytes, e.p, e.end - e.p).freeze(context);</span>
+<span class="fc" id="L396">            IRubyObject name = RubyString.newUsAsciiStringShared(runtime, </span>
+<span class="fc" id="L397">                                ((RubyEncoding)list[e.value.getIndex()]).name).freeze(context);</span>
+<span class="fc" id="L398">            result.fastASet(alias, name);</span>
+<span class="fc" id="L399">        }</span>
+
+<span class="fc" id="L401">        result.fastASet(runtime.newString(EXTERNAL),</span>
+<span class="fc" id="L402">                runtime.newString(new ByteList(runtime.getDefaultExternalEncoding().getName())));</span>
+<span class="fc" id="L403">        result.fastASet(runtime.newString(LOCALE),</span>
+<span class="fc" id="L404">                runtime.newString(new ByteList(service.getLocaleEncoding().getName())));</span>
+
+<span class="fc" id="L406">        return result;</span>
+    }
+
+    @JRubyMethod(name = &quot;find&quot;, meta = true)
+    public static IRubyObject find(ThreadContext context, IRubyObject recv, IRubyObject str) {
+<span class="fc" id="L411">        Ruby runtime = context.runtime;</span>
+
+        // Wacky but true...return arg if it is an encoding looking for itself
+<span class="fc bfc" id="L414" title="All 2 branches covered.">        if (str instanceof RubyEncoding) return str;</span>
+
+<span class="fc" id="L416">        return runtime.getEncodingService().rubyEncodingFromObject(str);</span>
+    }
+
+    @JRubyMethod(name = &quot;replicate&quot;)
+    public IRubyObject replicate(ThreadContext context, IRubyObject arg) {
+<span class="fc" id="L421">        return new RubyEncoding(context.runtime, arg.convertToString().getBytes(), getEncoding(), isDummy);</span>
+    }
+
+    @JRubyMethod(name = &quot;_dump&quot;)
+    public IRubyObject _dump(ThreadContext context, IRubyObject arg) {
+<span class="nc" id="L426">        return to_s(context);</span>
+    }
+
+    @JRubyMethod(name = &quot;_load&quot;, meta = true)
+    public static IRubyObject _load(ThreadContext context, IRubyObject recv, IRubyObject str) {
+<span class="nc" id="L431">        return find(context, recv, str);</span>
+    }
+
+    @JRubyMethod(name = &quot;ascii_compatible?&quot;)
+    public IRubyObject asciiCompatible_p(ThreadContext context) {
+<span class="fc" id="L436">        return context.runtime.newBoolean(getEncoding().isAsciiCompatible());</span>
+    }
+
+    @JRubyMethod(name = {&quot;to_s&quot;, &quot;name&quot;})
+    public IRubyObject to_s(ThreadContext context) {
+        // TODO: rb_usascii_str_new2
+<span class="fc" id="L442">        return RubyString.newUsAsciiStringShared(context.runtime, name);</span>
+    }
+
+    @JRubyMethod(name = &quot;inspect&quot;)
+    public IRubyObject inspect(ThreadContext context) {
+<span class="fc" id="L447">        ByteList bytes = new ByteList();</span>
+<span class="fc" id="L448">        bytes.append(&quot;#&lt;Encoding:&quot;.getBytes());</span>
+<span class="fc" id="L449">        bytes.append(name);</span>
+<span class="fc bfc" id="L450" title="All 2 branches covered.">        if (isDummy) bytes.append(&quot; (dummy)&quot;.getBytes());</span>
+<span class="fc" id="L451">        bytes.append('&gt;');</span>
+<span class="fc" id="L452">        return RubyString.newUsAsciiStringNoCopy(context.runtime, bytes);</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    @JRubyMethod(name = &quot;names&quot;)
+    public IRubyObject names(ThreadContext context) {
+<span class="fc" id="L458">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L459">        EncodingService service = runtime.getEncodingService();</span>
+<span class="fc" id="L460">        Entry entry = service.findEncodingOrAliasEntry(name);</span>
+
+<span class="fc" id="L462">        RubyArray result = runtime.newArray();</span>
+        HashEntryIterator i;
+<span class="fc" id="L464">        i = service.getEncodings().entryIterator();</span>
+<span class="fc bfc" id="L465" title="All 2 branches covered.">        while (i.hasNext()) {</span>
+<span class="fc" id="L466">            CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt; e = </span>
+<span class="fc" id="L467">                ((CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt;)i.next());</span>
+<span class="fc bfc" id="L468" title="All 2 branches covered.">            if (e.value == entry) {</span>
+<span class="fc" id="L469">                result.append(RubyString.newUsAsciiStringShared(runtime, e.bytes, e.p, e.end - e.p).freeze(context));</span>
+            }
+<span class="fc" id="L471">        }</span>
+<span class="fc" id="L472">        i = service.getAliases().entryIterator();        </span>
+<span class="fc bfc" id="L473" title="All 2 branches covered.">        while (i.hasNext()) {</span>
+<span class="fc" id="L474">            CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt; e = </span>
+<span class="fc" id="L475">                ((CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt;)i.next());</span>
+<span class="fc bfc" id="L476" title="All 2 branches covered.">            if (e.value == entry) {</span>
+<span class="fc" id="L477">                result.append(RubyString.newUsAsciiStringShared(runtime, e.bytes, e.p, e.end - e.p).freeze(context));</span>
+            }
+<span class="fc" id="L479">        }</span>
+<span class="fc" id="L480">        result.append(runtime.newString(EXTERNAL));</span>
+<span class="fc" id="L481">        result.append(runtime.newString(LOCALE));</span>
+        
+<span class="fc" id="L483">        return result;</span>
+    }
+
+    @JRubyMethod(name = &quot;dummy?&quot;)
+    public IRubyObject dummy_p(ThreadContext context) {
+<span class="fc" id="L488">        return context.runtime.newBoolean(isDummy);</span>
+    }
+
+    @JRubyMethod(name = &quot;compatible?&quot;, meta = true)
+    public static IRubyObject compatible_p(ThreadContext context, IRubyObject self, IRubyObject first, IRubyObject second) {
+<span class="fc" id="L493">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L494">        Encoding enc = areCompatible(first, second);</span>
+
+<span class="fc bfc" id="L496" title="All 2 branches covered.">        return enc == null ? runtime.getNil() : runtime.getEncodingService().getEncoding(enc);</span>
+    }
+
+    @JRubyMethod(name = &quot;default_external&quot;, meta = true)
+    public static IRubyObject getDefaultExternal(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L501">        return context.runtime.getEncodingService().getDefaultExternal();</span>
+    }
+
+    @JRubyMethod(name = &quot;default_external=&quot;, meta = true)
+    public static IRubyObject setDefaultExternal(ThreadContext context, IRubyObject recv, IRubyObject encoding) {
+<span class="pc bpc" id="L506" title="1 of 2 branches missed.">        if (context.runtime.isVerbose()) context.runtime.getWarnings().warning(&quot;setting Encoding.default_external&quot;);</span>
+<span class="fc" id="L507">        EncodingUtils.rbEncSetDefaultExternal(context, encoding);</span>
+<span class="fc" id="L508">        return encoding;</span>
+    }
+
+    @JRubyMethod(name = &quot;default_internal&quot;, meta = true)
+    public static IRubyObject getDefaultInternal(ThreadContext context, IRubyObject recv) {
+<span class="fc" id="L513">        return context.runtime.getEncodingService().getDefaultInternal();</span>
+    }
+
+    @JRubyMethod(name = &quot;default_internal=&quot;, required = 1, meta = true)
+    public static IRubyObject setDefaultInternal(ThreadContext context, IRubyObject recv, IRubyObject encoding) {
+<span class="pc bpc" id="L518" title="1 of 2 branches missed.">        if (context.runtime.isVerbose()) context.runtime.getWarnings().warning(&quot;setting Encoding.default_internal&quot;);</span>
+<span class="fc" id="L519">        EncodingUtils.rbEncSetDefaultInternal(context, encoding);</span>
+<span class="fc" id="L520">        return encoding;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

@@ -1,0 +1,526 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyUDPSocket.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.socket</a> &gt; <span class="el_source">RubyUDPSocket.java</span></div><h1>RubyUDPSocket.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2007 Damian Steer &lt;pldms@mac.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.ext.socket;
+
+import java.io.IOException;
+import java.net.ConnectException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.PortUnreachableException;
+import java.net.SocketException;
+import java.net.MulticastSocket;
+import java.net.UnknownHostException;
+import java.net.DatagramPacket;
+import java.nio.ByteBuffer;
+import java.nio.channels.Channel;
+import java.nio.channels.DatagramChannel;
+import java.nio.channels.IllegalBlockingModeException;
+import java.nio.channels.NotYetConnectedException;
+
+import jnr.netdb.Service;
+import org.jruby.Ruby;
+import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyModule;
+import org.jruby.RubyNumeric;
+import org.jruby.RubyString;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.Visibility;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
+
+/**
+ * @author &lt;a href=&quot;mailto:pldms@mac.com&quot;&gt;Damian Steer&lt;/a&gt;
+ */
+@JRubyClass(name=&quot;UDPSocket&quot;, parent=&quot;IPSocket&quot;)
+public class RubyUDPSocket extends RubyIPSocket {
+
+    static void createUDPSocket(Ruby runtime) {
+<span class="fc" id="L68">        RubyClass rb_cUDPSocket = runtime.defineClass(&quot;UDPSocket&quot;, runtime.getClass(&quot;IPSocket&quot;), UDPSOCKET_ALLOCATOR);</span>
+        
+<span class="fc" id="L70">        rb_cUDPSocket.includeModule(runtime.getClass(&quot;Socket&quot;).getConstant(&quot;Constants&quot;));</span>
+
+<span class="fc" id="L72">        rb_cUDPSocket.defineAnnotatedMethods(RubyUDPSocket.class);</span>
+
+<span class="fc" id="L74">        runtime.getObject().setConstant(&quot;UDPsocket&quot;, rb_cUDPSocket);</span>
+<span class="fc" id="L75">    }</span>
+
+<span class="fc" id="L77">    private static ObjectAllocator UDPSOCKET_ALLOCATOR = new ObjectAllocator() {</span>
+
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L80">            return new RubyUDPSocket(runtime, klass);</span>
+        }
+    };
+
+    public RubyUDPSocket(Ruby runtime, RubyClass type) {
+<span class="nc" id="L85">        super(runtime, type);</span>
+<span class="nc" id="L86">    }</span>
+
+    @JRubyMethod(visibility = Visibility.PRIVATE)
+    public IRubyObject initialize(ThreadContext context) {
+<span class="nc" id="L90">        Ruby runtime = context.runtime;</span>
+
+        try {
+<span class="nc" id="L93">            DatagramChannel channel = DatagramChannel.open();</span>
+<span class="nc" id="L94">            initSocket(newChannelFD(runtime, channel));</span>
+
+<span class="nc" id="L96">        } catch (ConnectException e) {</span>
+<span class="nc" id="L97">            throw runtime.newErrnoECONNREFUSEDError();</span>
+
+<span class="nc" id="L99">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L100">            throw SocketUtils.sockerr(runtime, &quot;initialize: name or service not known&quot;);</span>
+
+<span class="nc" id="L102">        } catch (IOException e) {</span>
+<span class="nc" id="L103">            throw SocketUtils.sockerr(runtime, &quot;initialize: name or service not known&quot;);</span>
+<span class="nc" id="L104">        }</span>
+
+<span class="nc" id="L106">        return this;</span>
+    }
+
+    @JRubyMethod(visibility = Visibility.PRIVATE)
+    public IRubyObject initialize(ThreadContext context, IRubyObject protocol) {
+        // we basically ignore protocol. let someone report it...
+<span class="nc" id="L112">        return initialize(context);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject bind(ThreadContext context, IRubyObject host, IRubyObject _port) {
+<span class="nc" id="L117">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L118">        InetSocketAddress addr = null;</span>
+
+        try {
+<span class="nc" id="L121">            Channel channel = getChannel();</span>
+<span class="nc" id="L122">            int port = SocketUtils.portToInt(_port);</span>
+
+<span class="nc bnc" id="L124" title="All 4 branches missed.">            if (host.isNil()</span>
+                || ((host instanceof RubyString)
+<span class="nc bnc" id="L126" title="All 2 branches missed.">                &amp;&amp; ((RubyString) host).isEmpty())) {</span>
+
+                // host is nil or the empty string, bind to INADDR_ANY
+<span class="nc" id="L129">                addr = new InetSocketAddress(port);</span>
+
+<span class="nc bnc" id="L131" title="All 2 branches missed.">            } else if (host instanceof RubyFixnum) {</span>
+
+                // passing in something like INADDR_ANY
+<span class="nc" id="L134">                int intAddr = RubyNumeric.fix2int(host);</span>
+<span class="nc" id="L135">                RubyModule socketMod = runtime.getModule(&quot;Socket&quot;);</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">                if (intAddr == RubyNumeric.fix2int(socketMod.getConstant(&quot;INADDR_ANY&quot;))) {</span>
+<span class="nc" id="L137">                    addr = new InetSocketAddress(InetAddress.getByName(&quot;0.0.0.0&quot;), port);</span>
+                }
+
+<span class="nc" id="L140">            } else {</span>
+                // passing in something like INADDR_ANY
+<span class="nc" id="L142">                addr = new InetSocketAddress(InetAddress.getByName(host.convertToString().toString()), port);</span>
+            }
+
+<span class="nc bnc" id="L145" title="All 2 branches missed.">            if (multicastStateManager == null) {</span>
+<span class="nc" id="L146">                ((DatagramChannel) channel).socket().bind(addr);</span>
+            } else {
+<span class="nc" id="L148">                multicastStateManager.rebindToPort(port);</span>
+            }
+
+<span class="nc" id="L151">            return RubyFixnum.zero(runtime);</span>
+
+<span class="nc" id="L153">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L154">            throw SocketUtils.sockerr(runtime, &quot;bind: name or service not known&quot;);</span>
+
+<span class="nc" id="L156">        } catch (SocketException e) {</span>
+<span class="nc" id="L157">            throw SocketUtils.sockerr(runtime, &quot;bind: name or service not known&quot;);</span>
+
+<span class="nc" id="L159">        } catch (IOException e) {</span>
+<span class="nc" id="L160">            throw SocketUtils.sockerr(runtime, &quot;bind: name or service not known&quot;);</span>
+
+<span class="nc" id="L162">        } catch (Error e) {</span>
+
+            // Workaround for a bug in Sun's JDK 1.5.x, see
+            // http://bugs.sun.com/bugdatabase/view_bug.do?bug_id=6303753
+<span class="nc bnc" id="L166" title="All 2 branches missed.">            if (e.getCause() instanceof SocketException) {</span>
+<span class="nc" id="L167">                throw SocketUtils.sockerr(runtime, &quot;bind: name or service not known&quot;);</span>
+            } else {
+<span class="nc" id="L169">                throw e;</span>
+            }
+
+        }
+    }
+
+    @JRubyMethod
+    public IRubyObject connect(ThreadContext context, IRubyObject host, IRubyObject port) {
+<span class="nc" id="L177">        Ruby runtime = context.runtime;</span>
+
+        try {
+<span class="nc" id="L180">            InetSocketAddress addr = new InetSocketAddress(InetAddress.getByName(host.convertToString().toString()), SocketUtils.portToInt(port));</span>
+
+<span class="nc" id="L182">            ((DatagramChannel) this.getChannel()).connect(addr);</span>
+
+<span class="nc" id="L184">            return RubyFixnum.zero(runtime);</span>
+
+<span class="nc" id="L186">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L187">            throw SocketUtils.sockerr(runtime, &quot;connect: name or service not known&quot;);</span>
+            
+<span class="nc" id="L189">        } catch (IOException e) {</span>
+<span class="nc" id="L190">            throw SocketUtils.sockerr(runtime, &quot;connect: name or service not known&quot;);</span>
+        }
+    }
+
+    @JRubyMethod
+    public IRubyObject recvfrom_nonblock(ThreadContext context, IRubyObject _length) {
+<span class="nc" id="L196">        Ruby runtime = context.runtime;</span>
+
+        try {
+<span class="nc" id="L199">            int length = RubyNumeric.fix2int(_length);</span>
+
+<span class="nc" id="L201">            ReceiveTuple tuple = doReceiveNonblockTuple(runtime, length);</span>
+
+<span class="nc" id="L203">            IRubyObject addressArray = addrFor(context, tuple.sender, false);</span>
+
+<span class="nc" id="L205">            return runtime.newArray(tuple.result, addressArray);</span>
+
+<span class="nc" id="L207">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L208">            throw SocketUtils.sockerr(runtime, &quot;recvfrom: name or service not known&quot;);</span>
+
+<span class="nc" id="L210">        } catch (PortUnreachableException e) {</span>
+<span class="nc" id="L211">            throw runtime.newErrnoECONNREFUSEDError();</span>
+
+<span class="nc" id="L213">        } catch (IOException e) {</span>
+<span class="nc" id="L214">            throw SocketUtils.sockerr(runtime, &quot;recvfrom: name or service not known&quot;);</span>
+        }
+    }
+
+    @JRubyMethod
+    public IRubyObject recvfrom_nonblock(ThreadContext context, IRubyObject _length, IRubyObject _flags) {
+        // TODO: handle flags
+<span class="nc" id="L221">        return recvfrom_nonblock(context, _length);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject send(ThreadContext context, IRubyObject _mesg, IRubyObject _flags) {
+        // TODO: implement flags
+<span class="nc" id="L227">        Ruby runtime = context.runtime;</span>
+
+        try {
+            int written;
+
+<span class="nc" id="L232">            RubyString data = _mesg.convertToString();</span>
+<span class="nc" id="L233">            ByteBuffer buf = ByteBuffer.wrap(data.getBytes());</span>
+
+<span class="nc" id="L235">            written = ((DatagramChannel) this.getChannel()).write(buf);</span>
+
+<span class="nc" id="L237">            return runtime.newFixnum(written);</span>
+
+<span class="nc" id="L239">        } catch (NotYetConnectedException nyce) {</span>
+<span class="nc" id="L240">            throw runtime.newErrnoEDESTADDRREQError(&quot;send(2)&quot;);</span>
+
+<span class="nc" id="L242">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L243">            throw SocketUtils.sockerr(runtime, &quot;send: name or service not known&quot;);</span>
+
+<span class="nc" id="L245">        } catch (IOException e) {</span>
+<span class="nc" id="L246">            throw SocketUtils.sockerr(runtime, &quot;send: name or service not known&quot;);</span>
+        }
+    }
+
+    @JRubyMethod
+    public IRubyObject send(ThreadContext context, IRubyObject _mesg, IRubyObject _flags, IRubyObject _to) {
+<span class="nc" id="L252">        return send(context, _mesg, _flags);</span>
+    }
+
+    @JRubyMethod(required = 2, optional = 2)
+    public IRubyObject send(ThreadContext context, IRubyObject[] args) {
+        // TODO: implement flags
+<span class="nc" id="L258">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L259">        IRubyObject _mesg = args[0];</span>
+<span class="nc" id="L260">        IRubyObject _flags = args[1];</span>
+
+        try {
+            int written;
+
+<span class="nc bnc" id="L265" title="All 4 branches missed.">            if (args.length == 2 || args.length == 3) {</span>
+<span class="nc" id="L266">                return send(context, _mesg, _flags);</span>
+            }
+            
+<span class="nc" id="L269">            IRubyObject _host = args[2];</span>
+<span class="nc" id="L270">            IRubyObject _port = args[3];</span>
+
+<span class="nc" id="L272">            RubyString nameStr = _host.convertToString();</span>
+<span class="nc" id="L273">            RubyString data = _mesg.convertToString();</span>
+<span class="nc" id="L274">            ByteBuffer buf = ByteBuffer.wrap(data.getBytes());</span>
+
+<span class="nc" id="L276">            byte[] buf2 = data.getBytes();</span>
+<span class="nc" id="L277">            DatagramPacket sendDP = null;</span>
+
+            int port;
+<span class="nc bnc" id="L280" title="All 2 branches missed.">            if (_port instanceof RubyString) {</span>
+
+<span class="nc" id="L282">                Service service = Service.getServiceByName(_port.asJavaString(), &quot;udp&quot;);</span>
+
+<span class="nc bnc" id="L284" title="All 2 branches missed.">                if (service != null) {</span>
+<span class="nc" id="L285">                    port = service.getPort();</span>
+                } else {
+<span class="nc" id="L287">                    port = (int)_port.convertToInteger(&quot;to_i&quot;).getLongValue();</span>
+                }
+
+<span class="nc" id="L290">            } else {</span>
+<span class="nc" id="L291">                port = (int)_port.convertToInteger().getLongValue();</span>
+            }
+
+<span class="nc" id="L294">            InetAddress address = SocketUtils.getRubyInetAddress(nameStr.getByteList());</span>
+<span class="nc" id="L295">            InetSocketAddress addr = new InetSocketAddress(address, port);</span>
+
+<span class="nc bnc" id="L297" title="All 2 branches missed.">            if (this.multicastStateManager == null) {</span>
+<span class="nc" id="L298">                written = ((DatagramChannel) this.getChannel()).send(buf, addr);</span>
+
+            } else {
+<span class="nc" id="L301">                sendDP = new DatagramPacket(buf2, buf2.length, address, port);</span>
+<span class="nc" id="L302">                multicastStateManager.rebindToPort(port);</span>
+<span class="nc" id="L303">                MulticastSocket ms = this.multicastStateManager.getMulticastSocket();</span>
+
+<span class="nc" id="L305">                ms.send(sendDP);</span>
+<span class="nc" id="L306">                written = sendDP.getLength();</span>
+            }
+
+<span class="nc" id="L309">            return runtime.newFixnum(written);</span>
+
+<span class="nc" id="L311">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L312">            throw SocketUtils.sockerr(runtime, &quot;send: name or service not known&quot;);</span>
+
+<span class="nc" id="L314">        } catch (IOException e) {</span>
+<span class="nc" id="L315">            throw SocketUtils.sockerr(runtime, &quot;send: name or service not known&quot;);</span>
+        }
+    }
+
+    @JRubyMethod(rest = true, meta = true)
+    public static IRubyObject open(ThreadContext context, IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="nc" id="L321">        RubyUDPSocket sock = (RubyUDPSocket) recv.callMethod(context, &quot;new&quot;, args);</span>
+
+<span class="nc bnc" id="L323" title="All 2 branches missed.">        if (!block.isGiven()) {</span>
+<span class="nc" id="L324">            return sock;</span>
+        }
+
+        try {
+<span class="nc" id="L328">            return block.yield(context, sock);</span>
+
+        } finally {
+<span class="nc bnc" id="L331" title="All 4 branches missed.">            if (sock.openFile.isOpen()) {</span>
+<span class="nc" id="L332">                sock.close();</span>
+            }
+        }
+    }
+
+    /**
+     * Overrides IPSocket#recvfrom
+     */
+    @Override
+    public IRubyObject recvfrom(ThreadContext context, IRubyObject _length) {
+<span class="nc" id="L342">        Ruby runtime = context.runtime;</span>
+
+        try {
+<span class="nc" id="L345">            int length = RubyNumeric.fix2int(_length);</span>
+
+<span class="nc" id="L347">            ReceiveTuple tuple = doReceiveTuple(runtime, length);</span>
+
+<span class="nc" id="L349">            IRubyObject addressArray = addrFor(context, tuple.sender, false);</span>
+
+<span class="nc" id="L351">            return runtime.newArray(tuple.result, addressArray);</span>
+
+<span class="nc" id="L353">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L354">            throw SocketUtils.sockerr(runtime, &quot;recvfrom: name or service not known&quot;);</span>
+
+<span class="nc" id="L356">        } catch (PortUnreachableException e) {</span>
+<span class="nc" id="L357">            throw runtime.newErrnoECONNREFUSEDError();</span>
+
+<span class="nc" id="L359">        } catch (IOException e) {</span>
+<span class="nc" id="L360">            throw SocketUtils.sockerr(runtime, &quot;recvfrom: name or service not known&quot;);</span>
+        }
+    }
+
+    /**
+     * Overrides IPSocket#recvfrom
+     */
+    @Override
+    public IRubyObject recvfrom(ThreadContext context, IRubyObject _length, IRubyObject _flags) {
+        // TODO: handle flags
+<span class="nc" id="L370">        return recvfrom(context, _length);</span>
+    }
+
+    /**
+     * Overrides BasicSocket#recv
+     */
+    @Override
+    public IRubyObject recv(ThreadContext context, IRubyObject _length) {
+<span class="nc" id="L378">        Ruby runtime = context.runtime;</span>
+
+        try {
+<span class="nc" id="L381">            return doReceive(runtime, RubyNumeric.fix2int(_length));</span>
+
+<span class="nc" id="L383">        } catch (IOException e) {</span>
+<span class="nc" id="L384">            throw SocketUtils.sockerr(runtime, &quot;recv: name or service not known&quot;);</span>
+
+        }
+    }
+
+    /**
+     * Overrides BasicSocket#recv
+     */
+    @Override
+    public IRubyObject recv(ThreadContext context, IRubyObject _length, IRubyObject _flags) {
+        // TODO: implement flags
+<span class="nc" id="L395">        return recv(context, _length);</span>
+    }
+
+    private ReceiveTuple doReceiveTuple(Ruby runtime, int length) throws IOException {
+<span class="nc" id="L399">        ReceiveTuple tuple = new ReceiveTuple();</span>
+
+<span class="nc bnc" id="L401" title="All 2 branches missed.">        if (this.multicastStateManager == null) {</span>
+<span class="nc" id="L402">            doReceive(runtime, length, tuple);</span>
+        } else {
+<span class="nc" id="L404">            doReceiveMulticast(runtime, length, tuple);</span>
+        }
+
+<span class="nc" id="L407">        return tuple;</span>
+    }
+
+    private ReceiveTuple doReceiveNonblockTuple(Ruby runtime, int length) throws IOException {
+<span class="nc" id="L411">        DatagramChannel channel = (DatagramChannel)getChannel();</span>
+
+<span class="nc" id="L413">        synchronized (channel.blockingLock()) {</span>
+<span class="nc" id="L414">            boolean oldBlocking = channel.isBlocking();</span>
+
+<span class="nc" id="L416">            channel.configureBlocking(false);</span>
+
+            try {
+<span class="nc" id="L419">                return doReceiveTuple(runtime, length);</span>
+
+            } finally {
+<span class="nc" id="L422">                channel.configureBlocking(oldBlocking);</span>
+            }
+<span class="nc" id="L424">        }</span>
+    }
+
+    private static class ReceiveTuple {
+<span class="nc" id="L428">        ReceiveTuple() {}</span>
+<span class="nc" id="L429">        ReceiveTuple(RubyString result, InetSocketAddress sender) {</span>
+<span class="nc" id="L430">            this.result = result;</span>
+<span class="nc" id="L431">            this.sender = sender;</span>
+<span class="nc" id="L432">        }</span>
+
+        RubyString result;
+        InetSocketAddress sender;
+    }
+
+    private IRubyObject doReceive(Ruby runtime, int length) throws IOException {
+<span class="nc" id="L439">        return doReceive(runtime, length, null);</span>
+    }
+
+    private IRubyObject doReceive(Ruby runtime, int length, ReceiveTuple tuple) throws IOException {
+<span class="nc" id="L443">        DatagramChannel channel = (DatagramChannel)getChannel();</span>
+
+<span class="nc" id="L445">        ByteBuffer buf = ByteBuffer.allocate(length);</span>
+
+<span class="nc" id="L447">        InetSocketAddress sender = (InetSocketAddress)channel.receive(buf);</span>
+
+<span class="nc bnc" id="L449" title="All 2 branches missed.">        if (sender == null) {</span>
+            // noblocking receive
+<span class="nc" id="L451">            throw runtime.newErrnoEAGAINReadableError(&quot;recvfrom(2) would block&quot;);</span>
+        }
+
+        // see JRUBY-4678
+<span class="nc bnc" id="L455" title="All 2 branches missed.">        if (sender == null) {</span>
+<span class="nc" id="L456">            throw runtime.newErrnoECONNRESETError();</span>
+        }
+
+<span class="nc" id="L459">        RubyString result = runtime.newString(new ByteList(buf.array(), 0, buf.position()));</span>
+
+<span class="nc bnc" id="L461" title="All 2 branches missed.">        if (tuple != null) {</span>
+<span class="nc" id="L462">            tuple.result = result;</span>
+<span class="nc" id="L463">            tuple.sender = sender;</span>
+        }
+
+<span class="nc" id="L466">        return result;</span>
+    }
+
+    private IRubyObject doReceiveMulticast(Ruby runtime, int length, ReceiveTuple tuple) throws IOException {
+<span class="nc" id="L470">        byte[] buf2 = new byte[length];</span>
+<span class="nc" id="L471">        DatagramPacket recv = new DatagramPacket(buf2, buf2.length);</span>
+
+<span class="nc" id="L473">        MulticastSocket ms = this.multicastStateManager.getMulticastSocket();</span>
+
+        try {
+<span class="nc" id="L476">            ms.receive(recv);</span>
+<span class="nc" id="L477">        } catch (IllegalBlockingModeException ibme) {</span>
+            // MulticastSocket does not support nonblocking
+            // TODO: Use Java 7 NIO.2 DatagramChannel to do multicast
+<span class="nc" id="L480">            throw runtime.newErrnoEAGAINReadableError(&quot;multicast UDP does not support nonblocking&quot;);</span>
+<span class="nc" id="L481">        }</span>
+
+<span class="nc" id="L483">        InetSocketAddress sender = (InetSocketAddress) recv.getSocketAddress();</span>
+
+        // see JRUBY-4678
+<span class="nc bnc" id="L486" title="All 2 branches missed.">        if (sender == null) {</span>
+<span class="nc" id="L487">            throw runtime.newErrnoECONNRESETError();</span>
+        }
+
+<span class="nc" id="L490">        RubyString result = runtime.newString(new ByteList(recv.getData(), 0, recv.getLength()));</span>
+
+<span class="nc bnc" id="L492" title="All 2 branches missed.">        if (tuple != null) {</span>
+<span class="nc" id="L493">            tuple.result = result;</span>
+<span class="nc" id="L494">            tuple.sender = sender;</span>
+        }
+
+<span class="nc" id="L497">        return result;</span>
+    }
+
+    @Deprecated
+    public IRubyObject bind(IRubyObject host, IRubyObject port) {
+<span class="nc" id="L502">        return bind(getRuntime().getCurrentContext(), host, port);</span>
+    }
+
+    @Deprecated
+    public IRubyObject connect(IRubyObject host, IRubyObject port) {
+<span class="nc" id="L507">        return connect(getRuntime().getCurrentContext(), host, port);</span>
+    }
+
+    @Deprecated
+    public IRubyObject recvfrom(IRubyObject[] args) {
+<span class="nc" id="L512">        return recvfrom(getRuntime().getCurrentContext(), args);</span>
+    }
+
+    @Deprecated
+    public IRubyObject send(IRubyObject[] args) {
+<span class="nc" id="L517">        return send(getRuntime().getCurrentContext(), args);</span>
+    }
+
+    @Deprecated
+    public static IRubyObject open(IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="nc" id="L522">        return open(recv.getRuntime().getCurrentContext(), recv, args, block);</span>
+    }
+}// RubyUDPSocket
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

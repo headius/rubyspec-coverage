@@ -1,0 +1,682 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyConverter.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyConverter.java</span></div><h1>RubyConverter.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import org.jcodings.Encoding;
+import org.jcodings.EncodingDB;
+import org.jcodings.Ptr;
+import org.jcodings.specific.UTF16BEEncoding;
+import org.jcodings.specific.UTF16LEEncoding;
+import org.jcodings.specific.UTF32BEEncoding;
+import org.jcodings.specific.UTF32LEEncoding;
+import org.jcodings.specific.UTF8Encoding;
+import org.jcodings.transcode.EConv;
+import org.jcodings.transcode.EConvFlags;
+import org.jcodings.transcode.EConvResult;
+import org.jcodings.transcode.Transcoder;
+import org.jcodings.transcode.TranscoderDB;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyConstant;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.encoding.EncodingService;
+import org.jruby.util.ByteList;
+import org.jruby.util.TypeConverter;
+import org.jruby.util.io.EncodingUtils;
+
+import java.util.HashMap;
+import java.util.Map;
+
+import static org.jruby.runtime.Visibility.PRIVATE;
+
+@JRubyClass(name=&quot;Converter&quot;)
+public class RubyConverter extends RubyObject {
+    private EConv ec;
+    
+    @JRubyConstant
+    public static final int INVALID_MASK = EConvFlags.INVALID_MASK;
+    @JRubyConstant
+    public static final int INVALID_REPLACE = EConvFlags.INVALID_REPLACE;
+    @JRubyConstant
+    public static final int UNDEF_MASK = EConvFlags.UNDEF_MASK;
+    @JRubyConstant
+    public static final int UNDEF_REPLACE = EConvFlags.UNDEF_REPLACE;
+    @JRubyConstant
+    public static final int UNDEF_HEX_CHARREF = EConvFlags.UNDEF_HEX_CHARREF;
+    @JRubyConstant
+    public static final int PARTIAL_INPUT = EConvFlags.PARTIAL_INPUT;
+    @JRubyConstant
+    public static final int AFTER_OUTPUT = EConvFlags.AFTER_OUTPUT;
+    @JRubyConstant
+    public static final int UNIVERSAL_NEWLINE_DECORATOR = EConvFlags.UNIVERSAL_NEWLINE_DECORATOR;
+    @JRubyConstant
+    public static final int CRLF_NEWLINE_DECORATOR = EConvFlags.CRLF_NEWLINE_DECORATOR;
+    @JRubyConstant
+    public static final int CR_NEWLINE_DECORATOR = EConvFlags.CR_NEWLINE_DECORATOR;
+    @JRubyConstant
+    public static final int XML_TEXT_DECORATOR = EConvFlags.XML_TEXT_DECORATOR;
+    @JRubyConstant
+    public static final int XML_ATTR_CONTENT_DECORATOR = EConvFlags.XML_ATTR_CONTENT_DECORATOR;
+    @JRubyConstant
+    public static final int XML_ATTR_QUOTE_DECORATOR = EConvFlags.XML_ATTR_QUOTE_DECORATOR;
+    
+    // TODO: This is a little ugly...we should have a table of these in jcodings.
+<span class="fc" id="L92">    public static final Map&lt;Encoding, Encoding&gt; NONASCII_TO_ASCII = new HashMap&lt;Encoding, Encoding&gt;();</span>
+    static {
+<span class="fc" id="L94">        NONASCII_TO_ASCII.put(UTF16BEEncoding.INSTANCE, UTF8Encoding.INSTANCE);</span>
+<span class="fc" id="L95">        NONASCII_TO_ASCII.put(UTF16LEEncoding.INSTANCE, UTF8Encoding.INSTANCE);</span>
+<span class="fc" id="L96">        NONASCII_TO_ASCII.put(UTF32BEEncoding.INSTANCE, UTF8Encoding.INSTANCE);</span>
+<span class="fc" id="L97">        NONASCII_TO_ASCII.put(UTF32LEEncoding.INSTANCE, UTF8Encoding.INSTANCE);</span>
+<span class="fc" id="L98">        NONASCII_TO_ASCII.put(</span>
+<span class="fc" id="L99">                EncodingDB.getEncodings().get(&quot;ISO-2022-JP&quot;.getBytes()).getEncoding(),</span>
+<span class="fc" id="L100">                EncodingDB.getEncodings().get(&quot;stateless-ISO-2022-JP&quot;.getBytes()).getEncoding());</span>
+    }
+
+    public static RubyClass createConverterClass(Ruby runtime) {
+<span class="fc" id="L104">        RubyClass converterc = runtime.defineClassUnder(&quot;Converter&quot;, runtime.getClass(&quot;Data&quot;), CONVERTER_ALLOCATOR, runtime.getEncoding());</span>
+<span class="fc" id="L105">        runtime.setConverter(converterc);</span>
+<span class="fc" id="L106">        converterc.setClassIndex(ClassIndex.CONVERTER);</span>
+<span class="fc" id="L107">        converterc.setReifiedClass(RubyConverter.class);</span>
+<span class="fc" id="L108">        converterc.kindOf = new RubyModule.JavaClassKindOf(RubyConverter.class);</span>
+
+<span class="fc" id="L110">        converterc.defineAnnotatedMethods(RubyConverter.class);</span>
+<span class="fc" id="L111">        converterc.defineAnnotatedConstants(RubyConverter.class);</span>
+<span class="fc" id="L112">        return converterc;</span>
+    }
+
+<span class="fc" id="L115">    private static ObjectAllocator CONVERTER_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L118">            return new RubyConverter(runtime, klass);</span>
+        }
+    };
+
+    public RubyConverter(Ruby runtime, RubyClass klass) {
+<span class="fc" id="L123">        super(runtime, klass);</span>
+<span class="fc" id="L124">    }</span>
+
+    public RubyConverter(Ruby runtime) {
+<span class="nc" id="L127">        super(runtime, runtime.getConverter());</span>
+<span class="nc" id="L128">    }</span>
+
+    @JRubyMethod(visibility = PRIVATE, required = 1, optional = 2)
+    public IRubyObject initialize(ThreadContext context, IRubyObject[] args) {
+<span class="fc" id="L132">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L133">        Encoding[] encs = {null, null};</span>
+<span class="fc" id="L134">        byte[][] encNames = {null, null};</span>
+<span class="fc" id="L135">        int[] ecflags = {0};</span>
+<span class="fc" id="L136">        IRubyObject[] ecopts = {context.nil};</span>
+
+        IRubyObject convpath;
+
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">        if (ec != null) {</span>
+<span class="nc" id="L141">            throw runtime.newTypeError(&quot;already initialized&quot;);</span>
+        }
+
+<span class="pc bpc" id="L144" title="3 of 4 branches missed.">        if (args.length == 1 &amp;&amp; !(convpath = args[0].checkArrayType()).isNil()) {</span>
+<span class="nc" id="L145">            ec = EncodingUtils.econvInitByConvpath(context, convpath, encNames, encs);</span>
+<span class="nc" id="L146">            ecflags[0] = 0;</span>
+<span class="nc" id="L147">            ecopts[0] = context.nil;</span>
+        } else {
+<span class="fc" id="L149">            EncodingUtils.econvArgs(context, args, encNames, encs, ecflags, ecopts);</span>
+<span class="fc" id="L150">            ec = EncodingUtils.econvOpenOpts(context, encNames[0], encNames[1], ecflags[0], ecopts[0]);</span>
+        }
+
+<span class="fc bfc" id="L153" title="All 2 branches covered.">        if (ec == null) {</span>
+<span class="fc" id="L154">            throw EncodingUtils.econvOpenExc(context, encNames[0], encNames[1], ecflags[0]);</span>
+        }
+
+<span class="pc bpc" id="L157" title="1 of 2 branches missed.">        if (!EncodingUtils.DECORATOR_P(encNames[0], encNames[1])) {</span>
+<span class="pc bpc" id="L158" title="1 of 2 branches missed.">            if (encs[0] == null) {</span>
+<span class="nc" id="L159">                encs[0] = EncodingDB.dummy(encNames[0]).getEncoding();</span>
+            }
+<span class="pc bpc" id="L161" title="1 of 2 branches missed.">            if (encs[1] == null) {</span>
+<span class="nc" id="L162">                encs[1] = EncodingDB.dummy(encNames[1]).getEncoding();</span>
+            }
+        }
+
+<span class="fc" id="L166">        ec.sourceEncoding = encs[0];</span>
+<span class="fc" id="L167">        ec.destinationEncoding = encs[1];</span>
+
+<span class="fc" id="L169">        return context.nil;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject inspect(ThreadContext context) {
+<span class="fc" id="L174">        return RubyString.newString(context.runtime, &quot;#&lt;Encoding::Converter: &quot; + ec.sourceEncoding + &quot; to &quot; + ec.destinationEncoding + &quot;&gt;&quot;);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject convpath(ThreadContext context) {
+<span class="fc" id="L179">        Ruby runtime = context.runtime;</span>
+
+<span class="fc" id="L181">        RubyArray result = runtime.newArray();</span>
+
+<span class="fc bfc" id="L183" title="All 2 branches covered.">        for (int i = 0; i &lt; ec.numTranscoders; i++) {</span>
+<span class="fc" id="L184">            Transcoder tr = ec.elements[i].transcoding.transcoder;</span>
+            IRubyObject v;
+<span class="fc bfc" id="L186" title="All 2 branches covered.">            if (EncodingUtils.DECORATOR_P(tr.getSource(), tr.getDestination())) {</span>
+<span class="fc" id="L187">                v = RubyString.newString(runtime, tr.getDestination());</span>
+            } else {
+<span class="fc" id="L189">                v = runtime.newArray(</span>
+<span class="fc" id="L190">                        runtime.getEncodingService().convertEncodingToRubyEncoding(runtime.getEncodingService().findEncodingOrAliasEntry(tr.getSource()).getEncoding()),</span>
+<span class="fc" id="L191">                        runtime.getEncodingService().convertEncodingToRubyEncoding(runtime.getEncodingService().findEncodingOrAliasEntry(tr.getDestination()).getEncoding()));</span>
+            }
+<span class="fc" id="L193">            result.push(v);</span>
+        }
+
+<span class="fc" id="L196">        return result;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject source_encoding(ThreadContext context) {
+<span class="pc bpc" id="L201" title="1 of 2 branches missed.">        if (ec.sourceEncoding == null) return context.nil;</span>
+        
+<span class="fc" id="L203">        return context.runtime.getEncodingService().convertEncodingToRubyEncoding(ec.sourceEncoding);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject destination_encoding(ThreadContext context) {
+<span class="pc bpc" id="L208" title="1 of 2 branches missed.">        if (ec.destinationEncoding == null) return context.nil;</span>
+        
+<span class="fc" id="L210">        return context.runtime.getEncodingService().convertEncodingToRubyEncoding(ec.destinationEncoding);</span>
+    }
+
+    // econv_primitive_convert
+    @JRubyMethod(required = 2, optional = 4)
+    public IRubyObject primitive_convert(ThreadContext context, IRubyObject[] args) {
+<span class="fc" id="L216">        Ruby runtime = context.runtime;</span>
+        
+<span class="fc" id="L218">        RubyString input = null;</span>
+        RubyString output;
+<span class="fc" id="L220">        IRubyObject outputByteOffsetObj = context.nil;</span>
+<span class="fc" id="L221">        IRubyObject outputBytesizeObj = context.nil;</span>
+<span class="fc" id="L222">        int outputByteoffset = -1;</span>
+<span class="fc" id="L223">        int outputBytesize = 0;</span>
+<span class="fc" id="L224">        int flags = 0;</span>
+        
+<span class="fc" id="L226">        int hashArg = -1;</span>
+        
+<span class="fc bfc" id="L228" title="All 4 branches covered.">        if (args.length &gt; 2 &amp;&amp; !args[2].isNil()) {</span>
+<span class="pc bpc" id="L229" title="1 of 4 branches missed.">            if (args.length == 3 &amp;&amp; args[2] instanceof RubyHash) {</span>
+<span class="nc" id="L230">                hashArg = 2;</span>
+            } else {
+<span class="fc" id="L232">                outputByteOffsetObj = args[2];</span>
+<span class="fc" id="L233">                outputByteoffset = (int)args[2].convertToInteger().getLongValue();</span>
+            }
+        }
+        
+<span class="fc bfc" id="L237" title="All 4 branches covered.">        if (args.length &gt; 3 &amp;&amp; !args[3].isNil()) {</span>
+<span class="pc bpc" id="L238" title="1 of 4 branches missed.">            if (args.length == 4 &amp;&amp; args[3] instanceof RubyHash) {</span>
+<span class="nc" id="L239">                hashArg = 3;</span>
+            } else {
+<span class="fc" id="L241">                outputBytesizeObj = args[3];</span>
+<span class="fc" id="L242">                outputBytesize = (int)args[3].convertToInteger().getLongValue();</span>
+            }
+        }
+        
+<span class="pc bpc" id="L246" title="1 of 4 branches missed.">        if (args.length &gt; 4 &amp;&amp; !args[4].isNil()) {</span>
+<span class="pc bpc" id="L247" title="3 of 4 branches missed.">            if (args.length &gt; 5 &amp;&amp; !args[5].isNil()) {</span>
+<span class="nc" id="L248">                throw runtime.newArgumentError(args.length, 5);</span>
+            }
+            
+<span class="fc bfc" id="L251" title="All 2 branches covered.">            if (args[4] instanceof RubyHash) {</span>
+<span class="fc" id="L252">                hashArg = 4;</span>
+            } else {
+<span class="fc" id="L254">                flags = (int)args[4].convertToInteger().getLongValue();</span>
+            }
+        }
+        
+        IRubyObject opt;
+<span class="fc bfc" id="L259" title="All 2 branches covered.">        if (hashArg != -1 &amp;&amp;</span>
+<span class="pc bpc" id="L260" title="1 of 2 branches missed.">                !(opt = TypeConverter.checkHashType(runtime, args[hashArg])).isNil()) {</span>
+<span class="fc" id="L261">            IRubyObject v = ((RubyHash)opt).op_aref(context, runtime.newSymbol(&quot;partial_input&quot;));</span>
+<span class="fc bfc" id="L262" title="All 2 branches covered.">            if (v.isTrue()) {</span>
+<span class="fc" id="L263">                flags |= EConvFlags.PARTIAL_INPUT;</span>
+            }
+<span class="fc" id="L265">            v = ((RubyHash)opt).op_aref(context, runtime.newSymbol(&quot;after_output&quot;));</span>
+<span class="fc bfc" id="L266" title="All 2 branches covered.">            if (v.isTrue()) {</span>
+<span class="fc" id="L267">                flags |= EConvFlags.AFTER_OUTPUT;</span>
+            }
+        }
+        
+        ByteList inBytes;
+        ByteList outBytes;
+        
+<span class="fc bfc" id="L274" title="All 2 branches covered.">        if (args[0].isNil()) {</span>
+<span class="fc" id="L275">            inBytes = new ByteList();</span>
+        } else {
+<span class="fc" id="L277">            input = args[0].convertToString();</span>
+<span class="fc" id="L278">            input.modify19();</span>
+<span class="fc" id="L279">            inBytes = input.getByteList();</span>
+        }
+        
+<span class="fc" id="L282">        output = args[1].convertToString();</span>
+<span class="fc" id="L283">        output.modify19();</span>
+<span class="fc" id="L284">        outBytes = output.getByteList();</span>
+
+<span class="fc" id="L286">        Ptr inPtr = new Ptr();</span>
+<span class="fc" id="L287">        Ptr outPtr = new Ptr();</span>
+
+<span class="fc bfc" id="L289" title="All 2 branches covered.">        if (outputBytesizeObj.isNil()) {</span>
+<span class="fc" id="L290">            outputBytesize = 16; // in MRI, this is RSTRING_EMBED_LEN_MAX</span>
+<span class="pc bpc" id="L291" title="1 of 4 branches missed.">            if (input != null &amp;&amp; outputBytesize &lt; input.getByteList().getRealSize()) {</span>
+<span class="nc" id="L292">                outputBytesize = input.getByteList().getRealSize();</span>
+            }
+        }
+
+        while (true) {
+<span class="fc bfc" id="L297" title="All 2 branches covered.">            if (outputByteOffsetObj.isNil()) {</span>
+<span class="fc" id="L298">                outputByteoffset = outBytes.getRealSize();</span>
+            }
+
+<span class="pc bpc" id="L301" title="1 of 2 branches missed.">            if (outputByteoffset &lt; 0) {</span>
+<span class="nc" id="L302">                throw runtime.newArgumentError(&quot;negative output offset&quot;);</span>
+            }
+
+<span class="fc bfc" id="L305" title="All 2 branches covered.">            if (outBytes.getRealSize() &lt; outputByteoffset) {</span>
+<span class="fc" id="L306">                throw runtime.newArgumentError(&quot;output offset too big&quot;);</span>
+            }
+
+<span class="pc bpc" id="L309" title="1 of 2 branches missed.">            if (outputBytesize &lt; 0) {</span>
+<span class="nc" id="L310">                throw runtime.newArgumentError(&quot;negative bytesize&quot;);</span>
+            }
+
+<span class="fc" id="L313">            long outputByteEnd = outputByteoffset + outputBytesize;</span>
+
+<span class="pc bpc" id="L315" title="1 of 2 branches missed.">            if (outputByteEnd &gt; Integer.MAX_VALUE) {</span>
+                // overflow check
+<span class="nc" id="L317">                throw runtime.newArgumentError(&quot;output offset + bytesize too big&quot;);</span>
+            }
+
+<span class="fc" id="L320">            outBytes.ensure((int)outputByteEnd);</span>
+
+<span class="fc" id="L322">            inPtr.p = inBytes.getBegin();</span>
+<span class="fc" id="L323">            outPtr.p = outBytes.getBegin() + outputByteoffset;</span>
+<span class="fc" id="L324">            int os = outPtr.p + outputBytesize;</span>
+<span class="fc" id="L325">            EConvResult res = ec.convert(inBytes.getUnsafeBytes(), inPtr, inBytes.getRealSize() + inPtr.p, outBytes.getUnsafeBytes(), outPtr, os, flags);</span>
+
+<span class="fc" id="L327">            outBytes.setRealSize(outPtr.p - outBytes.begin());</span>
+
+<span class="fc bfc" id="L329" title="All 2 branches covered.">            if (input != null) {</span>
+<span class="fc" id="L330">                input.getByteList().setRealSize(inBytes.getRealSize() - (inPtr.p - inBytes.getBegin()));</span>
+<span class="fc" id="L331">                input.getByteList().setBegin(inPtr.p);</span>
+            }
+
+<span class="pc bpc" id="L334" title="1 of 4 branches missed.">            if (outputBytesizeObj.isNil() &amp;&amp; res == EConvResult.DestinationBufferFull) {</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">                if (Integer.MAX_VALUE / 2 &lt; outputBytesize) {</span>
+<span class="nc" id="L336">                    throw runtime.newArgumentError(&quot;too long conversion result&quot;);</span>
+                }
+<span class="nc" id="L338">                outputBytesize *= 2;</span>
+<span class="nc" id="L339">                outputByteOffsetObj = context.nil;</span>
+<span class="nc" id="L340">                continue;</span>
+            }
+
+<span class="pc bpc" id="L343" title="1 of 2 branches missed.">            if (ec.destinationEncoding != null) {</span>
+<span class="fc" id="L344">                outBytes.setEncoding(ec.destinationEncoding);</span>
+            }
+
+<span class="fc" id="L347">            return runtime.newSymbol(res.symbolicName());</span>
+        }
+    }
+
+    @JRubyMethod
+    public IRubyObject convert(ThreadContext context, IRubyObject srcBuffer) {
+<span class="fc" id="L353">        Ruby runtime = context.runtime;</span>
+        IRubyObject dest;
+
+<span class="fc" id="L356">        IRubyObject[] newArgs = {</span>
+<span class="fc" id="L357">                srcBuffer.convertToString().dup(),</span>
+<span class="fc" id="L358">                dest = runtime.newString(),</span>
+                context.nil,
+                context.nil,
+<span class="fc" id="L361">                runtime.newFixnum(EConvFlags.PARTIAL_INPUT)</span>
+        };
+
+<span class="fc" id="L364">        IRubyObject ret = primitive_convert(context, newArgs);</span>
+
+<span class="pc bpc" id="L366" title="1 of 2 branches missed.">        if (ret instanceof RubySymbol) {</span>
+<span class="fc" id="L367">            RubySymbol retSym = (RubySymbol)ret;</span>
+<span class="fc" id="L368">            String retStr = retSym.toString();</span>
+
+<span class="fc bfc" id="L370" title="All 2 branches covered.">            if (retStr.equals(EConvResult.InvalidByteSequence.symbolicName()) ||</span>
+<span class="fc bfc" id="L371" title="All 2 branches covered.">                    retStr.equals(EConvResult.UndefinedConversion.symbolicName()) ||</span>
+<span class="pc bpc" id="L372" title="1 of 2 branches missed.">                    retStr.equals(EConvResult.IncompleteInput.symbolicName())) {</span>
+<span class="fc" id="L373">                throw EncodingUtils.makeEconvException(runtime, ec);</span>
+            }
+
+<span class="fc bfc" id="L376" title="All 2 branches covered.">            if (retStr.equals(EConvResult.Finished.symbolicName())) {</span>
+<span class="fc" id="L377">                throw runtime.newArgumentError(&quot;converter already finished&quot;);</span>
+            }
+
+<span class="pc bpc" id="L380" title="1 of 2 branches missed.">            if (!retStr.equals(EConvResult.SourceBufferEmpty.symbolicName())) {</span>
+<span class="nc" id="L381">                throw runtime.newRuntimeError(&quot;bug: unexpected result of primitive_convert: &quot; + retSym);</span>
+            }
+        }
+
+<span class="fc" id="L385">        return dest;</span>
+    }
+    
+    @JRubyMethod
+    public IRubyObject finish(ThreadContext context) {
+<span class="fc" id="L390">        Ruby runtime = context.runtime;</span>
+        IRubyObject dest;
+
+<span class="fc" id="L393">        IRubyObject[] newArgs = {</span>
+                context.nil,
+<span class="fc" id="L395">                dest = runtime.newString(),</span>
+                context.nil,
+                context.nil,
+<span class="fc" id="L398">                runtime.newFixnum(0)</span>
+        };
+
+<span class="fc" id="L401">        IRubyObject ret = primitive_convert(context, newArgs);</span>
+
+<span class="pc bpc" id="L403" title="1 of 2 branches missed.">        if (ret instanceof RubySymbol) {</span>
+<span class="fc" id="L404">            RubySymbol retSym = (RubySymbol)ret;</span>
+<span class="fc" id="L405">            String retStr = retSym.toString();</span>
+
+<span class="pc bpc" id="L407" title="1 of 2 branches missed.">            if (retStr.equals(EConvResult.InvalidByteSequence.symbolicName()) ||</span>
+<span class="pc bpc" id="L408" title="1 of 2 branches missed.">                    retStr.equals(EConvResult.UndefinedConversion.symbolicName()) ||</span>
+<span class="fc bfc" id="L409" title="All 2 branches covered.">                    retStr.equals(EConvResult.IncompleteInput.symbolicName())) {</span>
+<span class="fc" id="L410">                throw EncodingUtils.makeEconvException(runtime, ec);</span>
+            }
+
+<span class="pc bpc" id="L413" title="1 of 2 branches missed.">            if (!retStr.equals(EConvResult.Finished.symbolicName())) {</span>
+<span class="nc" id="L414">                throw runtime.newRuntimeError(&quot;bug: unexpected result of primitive_convert&quot;);</span>
+            }
+        }
+
+<span class="fc" id="L418">        return dest;</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject replacement(ThreadContext context) {
+<span class="fc" id="L423">        int ret = ec.makeReplacement();</span>
+
+<span class="pc bpc" id="L425" title="1 of 2 branches missed.">        if (ret == -1) {</span>
+<span class="nc" id="L426">            throw context.runtime.newUndefinedConversionError(&quot;replacement character setup failed&quot;);</span>
+        }
+
+<span class="fc" id="L429">        return context.runtime.newString(new ByteList(</span>
+                ec.replacementString,
+                0,
+                ec.replacementLength,
+<span class="fc" id="L433">                context.runtime.getEncodingService().findEncodingOrAliasEntry(ec.replacementEncoding).getEncoding(), true));</span>
+    }
+
+    @JRubyMethod(name = &quot;replacement=&quot;)
+    public IRubyObject replacement_set(ThreadContext context, IRubyObject arg) {
+<span class="fc" id="L438">        RubyString string = arg.convertToString();</span>
+<span class="fc" id="L439">        ByteList stringBytes = string.getByteList();</span>
+<span class="fc" id="L440">        Encoding enc = string.getEncoding();</span>
+
+<span class="fc" id="L442">        int ret = ec.setReplacement(stringBytes.getUnsafeBytes(), stringBytes.getBegin(), stringBytes.getRealSize(), enc.getName());</span>
+
+<span class="fc bfc" id="L444" title="All 2 branches covered.">        if (ret == -1) {</span>
+<span class="fc" id="L445">            throw context.runtime.newUndefinedConversionError(&quot;replacement character setup failed&quot;);</span>
+        }
+
+<span class="fc" id="L448">        return arg;</span>
+    }
+    
+    @JRubyMethod(meta = true)
+    public static IRubyObject asciicompat_encoding(ThreadContext context, IRubyObject self, IRubyObject strOrEnc) {
+<span class="fc" id="L453">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L454">        EncodingService encodingService = runtime.getEncodingService();</span>
+        
+<span class="fc" id="L456">        Encoding encoding = encodingService.getEncodingFromObjectNoError(strOrEnc);</span>
+        
+<span class="fc bfc" id="L458" title="All 2 branches covered.">        if (encoding == null) {</span>
+<span class="fc" id="L459">            return context.nil;</span>
+        }
+        
+<span class="fc bfc" id="L462" title="All 2 branches covered.">        if (encoding.isAsciiCompatible()) {</span>
+<span class="fc" id="L463">            return context.nil;</span>
+        }
+        
+<span class="fc" id="L466">        Encoding asciiCompat = NONASCII_TO_ASCII.get(encoding);</span>
+        
+<span class="pc bpc" id="L468" title="1 of 2 branches missed.">        if (asciiCompat == null) {</span>
+<span class="nc" id="L469">            throw runtime.newConverterNotFoundError(&quot;no ASCII compatible encoding found for &quot; + strOrEnc);</span>
+        }
+        
+<span class="fc" id="L472">        return encodingService.convertEncodingToRubyEncoding(asciiCompat);</span>
+    }
+    
+    @JRubyMethod
+    public IRubyObject last_error(ThreadContext context) {
+<span class="fc" id="L477">        RaiseException re = EncodingUtils.makeEconvException(context.runtime, ec);</span>
+
+<span class="fc bfc" id="L479" title="All 2 branches covered.">        if (re != null) return re.getException();</span>
+        
+<span class="fc" id="L481">        return context.nil;</span>
+    }
+    
+    @JRubyMethod
+    public IRubyObject primitive_errinfo(ThreadContext context) {
+<span class="fc" id="L486">        Ruby runtime = context.runtime;</span>
+
+<span class="fc" id="L488">        IRubyObject[] values = {</span>
+<span class="fc" id="L489">                runtime.newSymbol(ec.lastError.getResult().symbolicName()),</span>
+                context.nil,
+                context.nil,
+                context.nil,
+                context.nil
+        };
+
+<span class="fc bfc" id="L496" title="All 2 branches covered.">        if (ec.lastError.getSource() != null) {</span>
+<span class="fc" id="L497">            values[1] = RubyString.newString(runtime, ec.lastError.getSource());</span>
+        }
+
+<span class="fc bfc" id="L500" title="All 2 branches covered.">        if (ec.lastError.getDestination() != null) {</span>
+<span class="fc" id="L501">            values[2] = RubyString.newString(runtime, ec.lastError.getDestination());</span>
+        }
+
+<span class="fc bfc" id="L504" title="All 2 branches covered.">        if (ec.lastError.getErrorBytes() != null) {</span>
+<span class="fc" id="L505">            values[3] = RubyString.newString(runtime, ec.lastError.getErrorBytes(), ec.lastError.getErrorBytesP(), ec.lastError.getErrorBytesLength());</span>
+<span class="fc" id="L506">            values[4] = RubyString.newString(runtime, ec.lastError.getErrorBytes(), ec.lastError.getErrorBytesP() + ec.lastError.getErrorBytesLength(), ec.lastError.getReadAgainLength());</span>
+        }
+        
+<span class="fc" id="L509">        RubyArray ary = RubyArray.newArrayNoCopy(context.runtime, values);</span>
+
+<span class="fc" id="L511">        return ary;</span>
+    }
+
+    @JRubyMethod(meta = true, required = 2, optional = 1)
+    public static IRubyObject search_convpath(ThreadContext context, IRubyObject self, IRubyObject[] argv) {
+<span class="fc" id="L516">        final Ruby runtime = context.runtime;</span>
+<span class="fc" id="L517">        final IRubyObject nil = context.nil;</span>
+<span class="fc" id="L518">        final byte[][] encNames = {null, null};</span>
+<span class="fc" id="L519">        final Encoding[] encs = {null, null};</span>
+<span class="fc" id="L520">        final int[] ecflags_p = {0};</span>
+<span class="fc" id="L521">        final IRubyObject[] ecopts_p = {context.nil};</span>
+<span class="fc" id="L522">        final IRubyObject[] convpath = {nil};</span>
+
+<span class="fc" id="L524">        EncodingUtils.econvArgs(context, argv, encNames, encs, ecflags_p, ecopts_p);</span>
+
+<span class="fc" id="L526">        TranscoderDB.searchPath(encNames[0], encNames[1], new TranscoderDB.SearchPathCallback() {</span>
+<span class="fc" id="L527">            EncodingService es = runtime.getEncodingService();</span>
+
+            public void call(byte[] source, byte[] destination, int depth) {
+                IRubyObject v;
+
+<span class="fc bfc" id="L532" title="All 2 branches covered.">                if (convpath[0] == nil) {</span>
+<span class="fc" id="L533">                    convpath[0] = runtime.newArray();</span>
+                }
+
+<span class="pc bpc" id="L536" title="1 of 2 branches missed.">                if (EncodingUtils.DECORATOR_P(encNames[0], encNames[1])) {</span>
+<span class="nc" id="L537">                    v = RubyString.newString(runtime, encNames[2]);</span>
+                } else {
+<span class="fc" id="L539">                    v = runtime.newArray(</span>
+<span class="fc" id="L540">                            es.convertEncodingToRubyEncoding(es.findEncodingOrAliasEntry(source).getEncoding()),</span>
+<span class="fc" id="L541">                            es.convertEncodingToRubyEncoding(es.findEncodingOrAliasEntry(destination).getEncoding()));</span>
+                }
+
+<span class="fc" id="L544">                ((RubyArray)convpath[0]).store(depth, v);</span>
+<span class="fc" id="L545">            }</span>
+        });
+
+<span class="fc bfc" id="L548" title="All 2 branches covered.">        if (convpath[0].isNil()) {</span>
+<span class="fc" id="L549">            throw EncodingUtils.econvOpenExc(context, encNames[0], encNames[1], 0);</span>
+        }
+
+<span class="pc bpc" id="L552" title="1 of 2 branches missed.">        if (EncodingUtils.decorateConvpath(context, convpath[0], ecflags_p[0]) == -1) {</span>
+<span class="nc" id="L553">            throw EncodingUtils.econvOpenExc(context, encNames[0], encNames[1], ecflags_p[0]);</span>
+        }
+
+<span class="fc" id="L556">        return convpath[0];</span>
+    }
+
+    // econv_insert_output
+    @JRubyMethod
+    public IRubyObject insert_output(ThreadContext context, IRubyObject string) {
+<span class="nc" id="L562">        Ruby runtime = context.runtime;</span>
+        byte[] insertEnc;
+
+        int ret;
+
+<span class="nc" id="L567">        string = string.convertToString();</span>
+<span class="nc" id="L568">        insertEnc = ec.encodingToInsertOutput();</span>
+<span class="nc" id="L569">        string = EncodingUtils.rbStrEncode(</span>
+                context,
+                string,
+<span class="nc" id="L572">                runtime.getEncodingService().findEncodingObject(insertEnc),</span>
+                0,
+                context.nil);
+
+<span class="nc" id="L576">        ByteList stringBL = ((RubyString)string).getByteList();</span>
+<span class="nc" id="L577">        ret = ec.insertOutput(stringBL.getUnsafeBytes(), stringBL.getBegin(), stringBL.getRealSize(), insertEnc);</span>
+<span class="nc bnc" id="L578" title="All 2 branches missed.">        if (ret == -1) {</span>
+<span class="nc" id="L579">            throw runtime.newArgumentError(&quot;too big string&quot;);</span>
+        }
+
+<span class="nc" id="L582">        return context.nil;</span>
+    }
+
+    // econv_putback
+    @JRubyMethod(required = 0, optional = 1)
+    public IRubyObject putback(ThreadContext context, IRubyObject[] argv)
+    {
+<span class="fc" id="L589">        Ruby runtime = context.runtime;</span>
+        int n;
+        int putbackable;
+        IRubyObject str, max;
+
+<span class="fc bfc" id="L594" title="All 2 branches covered.">        if (argv.length == 0) {</span>
+<span class="fc" id="L595">            max = context.nil;</span>
+        } else {
+<span class="fc" id="L597">            max = argv[0];</span>
+        }
+
+<span class="fc bfc" id="L600" title="All 2 branches covered.">        if (max.isNil()) {</span>
+<span class="fc" id="L601">            n = ec.putbackable();</span>
+        } else {
+<span class="fc" id="L603">            n = (int)max.convertToInteger().getLongValue();</span>
+<span class="fc" id="L604">            putbackable = ec.putbackable();</span>
+<span class="pc bpc" id="L605" title="1 of 2 branches missed.">            if (putbackable &lt; n) {</span>
+<span class="nc" id="L606">                n = putbackable;</span>
+            }
+        }
+
+<span class="fc" id="L610">        str = RubyString.newStringLight(runtime, n);</span>
+<span class="fc" id="L611">        ByteList strBL = ((RubyString)str).getByteList();</span>
+<span class="fc" id="L612">        ec.putback(strBL.getUnsafeBytes(), strBL.getBegin(), n);</span>
+<span class="fc" id="L613">        strBL.setRealSize(n);</span>
+
+<span class="pc bpc" id="L615" title="1 of 2 branches missed.">        if (ec.sourceEncoding != null) {</span>
+<span class="fc" id="L616">            ((RubyString)str).setEncoding(ec.sourceEncoding);</span>
+        }
+
+<span class="fc" id="L619">        return str;</span>
+    }
+
+    // econv_equal
+    @JRubyMethod(name = &quot;==&quot;)
+    public IRubyObject op_equal(ThreadContext context, IRubyObject other) {
+<span class="nc" id="L625">        EConv ec1 = ec;</span>
+        EConv ec2;
+        int i;
+
+<span class="nc bnc" id="L629" title="All 2 branches missed.">        if (!(other instanceof RubyConverter)) return context.nil;</span>
+
+<span class="nc" id="L631">        ec2 = ((RubyConverter)other).ec;</span>
+
+<span class="nc" id="L633">        return context.runtime.newBoolean(ec1.equals(ec2));</span>
+    }
+    
+<span class="nc" id="L636">    public static class EncodingErrorMethods {</span>
+        @JRubyMethod
+        public static IRubyObject source_encoding(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L639">            return Helpers.getInstanceVariableNoWarn(self, context, &quot;source_encoding&quot;);</span>
+        }
+        
+        @JRubyMethod
+        public static IRubyObject source_encoding_name(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L644">            return Helpers.getInstanceVariableNoWarn(self, context, &quot;source_encoding_name&quot;);</span>
+        }
+        
+        @JRubyMethod
+        public static IRubyObject destination_encoding(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L649">            return Helpers.getInstanceVariableNoWarn(self, context, &quot;destination_encoding&quot;);</span>
+        }
+        
+        @JRubyMethod
+        public static IRubyObject destination_encoding_name(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L654">            return Helpers.getInstanceVariableNoWarn(self, context, &quot;destination_encoding_name&quot;);</span>
+        }
+    }
+
+<span class="nc" id="L658">    public static class UndefinedConversionErrorMethods {</span>
+        @JRubyMethod
+        public static IRubyObject error_char(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L661">            return Helpers.getInstanceVariableNoWarn(self, context, &quot;error_char&quot;);</span>
+        }
+    }
+
+<span class="nc" id="L665">    public static class InvalidByteSequenceErrorMethods {</span>
+        @JRubyMethod
+        public static IRubyObject readagain_bytes(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L668">            return Helpers.getInstanceVariableNoWarn(self, context, &quot;readagain_bytes&quot;);</span>
+        }
+
+        @JRubyMethod(name = &quot;incomplete_input?&quot;)
+        public static IRubyObject incomplete_input_p(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L673">            return Helpers.getInstanceVariableNoWarn(self, context, &quot;incomplete_input&quot;);</span>
+        }
+
+        @JRubyMethod
+        public static IRubyObject error_bytes(ThreadContext context, IRubyObject self) {
+<span class="fc" id="L678">            return Helpers.getInstanceVariableNoWarn(self, context, &quot;error_bytes&quot;);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

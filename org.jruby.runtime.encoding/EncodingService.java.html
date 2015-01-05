@@ -1,0 +1,566 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>EncodingService.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime.encoding</a> &gt; <span class="el_source">EncodingService.java</span></div><h1>EncodingService.java</h1><pre class="source lang-java linenums">package org.jruby.runtime.encoding;
+
+import org.jcodings.Encoding;
+import org.jcodings.EncodingDB;
+import org.jcodings.EncodingDB.Entry;
+import org.jcodings.ascii.AsciiTables;
+import org.jcodings.specific.ASCIIEncoding;
+import org.jcodings.specific.ISO8859_16Encoding;
+import org.jcodings.util.CaseInsensitiveBytesHash;
+import org.jcodings.util.Hash.HashEntryIterator;
+import org.jruby.Ruby;
+import org.jruby.RubyEncoding;
+import org.jruby.platform.Platform;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
+
+import java.io.Console;
+import java.lang.reflect.Field;
+import java.nio.charset.Charset;
+import java.nio.charset.UnsupportedCharsetException;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.jcodings.specific.USASCIIEncoding;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyString;
+import org.jruby.ext.nkf.RubyNKF;
+import org.jruby.util.encoding.ISO_8859_16;
+
+public final class EncodingService {
+    private final CaseInsensitiveBytesHash&lt;Entry&gt; encodings;
+    private final CaseInsensitiveBytesHash&lt;Entry&gt; aliases;
+
+    // for fast lookup: encoding entry =&gt; org.jruby.RubyEncoding
+    public final IRubyObject[] encodingList;
+    // for fast lookup: org.joni.encoding.Encoding =&gt; org.jruby.RubyEncoding
+<span class="fc" id="L37">    private RubyEncoding[] encodingIndex = new RubyEncoding[4];</span>
+    // the runtime
+    private final Ruby runtime;
+    
+    private final Encoding ascii8bit;
+    private final Encoding javaDefault;
+
+<span class="fc" id="L44">    private static final ByteList LOCALE_BL = ByteList.create(&quot;locale&quot;);</span>
+<span class="fc" id="L45">    private static final ByteList EXTERNAL_BL = ByteList.create(&quot;external&quot;);</span>
+<span class="fc" id="L46">    private static final ByteList INTERNAL_BL = ByteList.create(&quot;internal&quot;);</span>
+<span class="fc" id="L47">    private static final ByteList FILESYSTEM_BL = ByteList.create(&quot;filesystem&quot;);</span>
+
+<span class="fc" id="L49">    public EncodingService (Ruby runtime) {</span>
+<span class="fc" id="L50">        this.runtime = runtime;</span>
+<span class="fc" id="L51">        encodings = EncodingDB.getEncodings();</span>
+<span class="fc" id="L52">        aliases = EncodingDB.getAliases();</span>
+<span class="fc" id="L53">        ascii8bit = encodings.get(&quot;ASCII-8BIT&quot;.getBytes()).getEncoding();</span>
+
+<span class="fc" id="L55">        Charset javaDefaultCharset = Charset.defaultCharset();</span>
+<span class="fc" id="L56">        ByteList javaDefaultBL = new ByteList(javaDefaultCharset.name().getBytes());</span>
+<span class="fc" id="L57">        Entry javaDefaultEntry = findEncodingOrAliasEntry(javaDefaultBL);</span>
+<span class="pc bpc" id="L58" title="1 of 2 branches missed.">        javaDefault = javaDefaultEntry == null ? ascii8bit : javaDefaultEntry.getEncoding();</span>
+
+<span class="fc" id="L60">        encodingList = new IRubyObject[encodings.size()];</span>
+<span class="fc" id="L61">    }</span>
+
+    /**
+     * Since Java 1.6, class {@link java.io.Console} is available.
+     * But the encoding or codepage of the underlying connected
+     * console is currently private. Had to use Reflection to get it.
+     *
+     * @return console codepage
+     */
+    public Encoding getConsoleEncoding() {
+<span class="pc bpc" id="L71" title="1 of 2 branches missed.">        if (!Platform.IS_WINDOWS) return null;</span>
+
+<span class="nc" id="L73">        Encoding consoleEncoding = null;</span>
+        try {
+<span class="nc" id="L75">            Console console = System.console();</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">            if (console != null) {</span>
+<span class="nc" id="L77">                final String CONSOLE_CHARSET = &quot;cs&quot;;</span>
+<span class="nc" id="L78">                Field fcs = Console.class.getDeclaredField(CONSOLE_CHARSET);</span>
+<span class="nc" id="L79">                fcs.setAccessible(true);</span>
+<span class="nc" id="L80">                Charset cs = (Charset) fcs.get(console);</span>
+<span class="nc" id="L81">                consoleEncoding = loadEncoding(ByteList.create(cs.name()));</span>
+            }
+<span class="nc" id="L83">        } catch (Throwable e) { // to cover both Exceptions and Errors</span>
+            // just fall back on local encoding above
+<span class="nc" id="L85">        }</span>
+<span class="nc" id="L86">        return consoleEncoding;</span>
+    }
+    
+    // mri: rb_usascii_encoding
+    public Encoding getUSAsciiEncoding() {
+<span class="nc" id="L91">        return USASCIIEncoding.INSTANCE;</span>
+    }
+
+    // mri: rb_ascii8bit_encoding
+    public Encoding getAscii8bitEncoding() {
+<span class="fc" id="L96">        return ascii8bit;</span>
+    }
+    
+    // mri: rb_filesystem_encoding
+    public Encoding getFileSystemEncoding(Ruby runtime) {
+<span class="nc" id="L101">        return SpecialEncoding.FILESYSTEM.toEncoding(runtime);</span>
+    }
+    
+    public CaseInsensitiveBytesHash&lt;Entry&gt; getEncodings() {
+<span class="fc" id="L105">        return encodings;</span>
+    }
+
+    public CaseInsensitiveBytesHash&lt;Entry&gt; getAliases() {
+<span class="fc" id="L109">        return aliases;</span>
+    }
+
+    public Entry findEncodingEntry(ByteList bytes) {
+<span class="fc" id="L113">        return encodings.get(bytes.getUnsafeBytes(), bytes.getBegin(), bytes.getBegin() + bytes.getRealSize());</span>
+    }
+
+    public Entry findEncodingEntry(byte[] bytes) {
+<span class="fc" id="L117">        return encodings.get(bytes);</span>
+    }
+
+    public Entry findAliasEntry(ByteList bytes) {
+<span class="fc" id="L121">        return aliases.get(bytes.getUnsafeBytes(), bytes.getBegin(), bytes.getBegin() + bytes.getRealSize());</span>
+    }
+
+    public Entry findAliasEntry(byte[] bytes) {
+<span class="nc" id="L125">        return aliases.get(bytes);</span>
+    }
+
+    public Entry findEncodingOrAliasEntry(ByteList bytes) {
+<span class="fc" id="L129">        Entry e = findEncodingEntry(bytes);</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">        return e != null ? e : findAliasEntry(bytes);</span>
+    }
+
+    public Entry findEncodingOrAliasEntry(byte[] bytes) {
+<span class="fc" id="L134">        Entry e = findEncodingEntry(bytes);</span>
+<span class="pc bpc" id="L135" title="1 of 2 branches missed.">        return e != null ? e : findAliasEntry(bytes);</span>
+    }
+
+    // rb_locale_charmap...mostly
+    public Encoding getLocaleEncoding() {
+<span class="fc" id="L140">        Entry entry = findEncodingOrAliasEntry(new ByteList(Charset.defaultCharset().name().getBytes()));</span>
+<span class="pc bpc" id="L141" title="1 of 2 branches missed.">        return entry == null ? ASCIIEncoding.INSTANCE : entry.getEncoding();</span>
+    }
+
+    public IRubyObject[] getEncodingList() {
+<span class="fc" id="L145">        return encodingList;</span>
+    }
+
+    public Encoding loadEncoding(ByteList name) {
+<span class="fc" id="L149">        Entry entry = findEncodingOrAliasEntry(name);</span>
+<span class="pc bpc" id="L150" title="1 of 2 branches missed.">        if (entry == null) return null;</span>
+<span class="fc" id="L151">        Encoding enc = entry.getEncoding(); // load the encoding</span>
+<span class="fc" id="L152">        int index = enc.getIndex();</span>
+<span class="fc bfc" id="L153" title="All 2 branches covered.">        if (index &gt;= encodingIndex.length) {</span>
+<span class="fc" id="L154">            RubyEncoding tmp[] = new RubyEncoding[index + 4];</span>
+<span class="fc" id="L155">            System.arraycopy(encodingIndex, 0, tmp, 0, encodingIndex.length);</span>
+<span class="fc" id="L156">            encodingIndex = tmp;</span>
+        }
+<span class="fc" id="L158">        encodingIndex[index] = (RubyEncoding)encodingList[entry.getIndex()];</span>
+<span class="fc" id="L159">        return enc;</span>
+    }
+
+    public RubyEncoding getEncoding(Encoding enc) {
+<span class="fc" id="L163">        int index = enc.getIndex();</span>
+        RubyEncoding rubyEncoding;
+<span class="fc bfc" id="L165" title="All 4 branches covered.">        if (index &lt; encodingIndex.length &amp;&amp; (rubyEncoding = encodingIndex[index]) != null) {</span>
+<span class="fc" id="L166">            return rubyEncoding;</span>
+        }
+
+<span class="fc" id="L169">        enc = loadEncoding(new ByteList(enc.getName(), false));</span>
+<span class="fc" id="L170">        return encodingIndex[enc.getIndex()];</span>
+    }
+
+    public interface EncodingDefinitionVisitor {
+        public void defineEncoding(Entry encodingEntry, byte[] name, int p, int end);
+
+        public void defineConstant(int encodingListIndex, String constName);
+    }
+
+    public interface EncodingAliasVisitor {
+        public void defineAlias(int encodingListIndex, String constName);
+
+        public void defineConstant(int encodingListIndex, String constName);
+    }
+
+    public void defineEncodings() {
+<span class="fc" id="L186">        defineEncodings(new EncodingDefinitionVisitor() {</span>
+            @Override
+            public void defineEncoding(Entry encodingEntry, byte[] name, int p, int end) {
+<span class="fc" id="L189">                RubyEncoding encoding = RubyEncoding.newEncoding(runtime, name, p, end, encodingEntry.isDummy());</span>
+<span class="fc" id="L190">                encodingList[encodingEntry.getIndex()] = encoding;</span>
+<span class="fc" id="L191">            }</span>
+
+            @Override
+            public void defineConstant(int encodingListIndex, String constName) {
+<span class="fc" id="L195">                defineEncodingConstant(runtime, (RubyEncoding) encodingList[encodingListIndex], constName);</span>
+<span class="fc" id="L196">            }</span>
+        });
+<span class="fc" id="L198">    }</span>
+
+    public void defineEncodings(EncodingDefinitionVisitor visitor) {
+<span class="fc" id="L201">        HashEntryIterator hei = encodings.entryIterator();</span>
+<span class="fc bfc" id="L202" title="All 2 branches covered.">        while (hei.hasNext()) {</span>
+<span class="fc" id="L203">            CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt; e =</span>
+<span class="fc" id="L204">                    ((CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt;)hei.next());</span>
+<span class="fc" id="L205">            Entry ee = e.value;</span>
+
+<span class="fc" id="L207">            visitor.defineEncoding(ee, e.bytes, e.p, e.end);</span>
+
+<span class="fc bfc" id="L209" title="All 2 branches covered.">            for (String constName : encodingNames(e.bytes, e.p, e.end)) {</span>
+<span class="fc" id="L210">                visitor.defineConstant(ee.getIndex(), constName);</span>
+<span class="fc" id="L211">            }</span>
+<span class="fc" id="L212">        }</span>
+<span class="fc" id="L213">    }</span>
+
+    public void defineAliases() {
+<span class="fc" id="L216">        defineAliases(new EncodingAliasVisitor() {</span>
+            @Override
+<span class="fc" id="L218">            public void defineAlias(int encodingListIndex, String constName) { }</span>
+
+            @Override
+            public void defineConstant(int encodingListIndex, String constName) {
+<span class="fc" id="L222">                defineEncodingConstant(runtime, (RubyEncoding) encodingList[encodingListIndex], constName);</span>
+<span class="fc" id="L223">            }</span>
+        });
+<span class="fc" id="L225">    }</span>
+
+    public void defineAliases(EncodingAliasVisitor visitor) {
+<span class="fc" id="L228">        HashEntryIterator hei = aliases.entryIterator();</span>
+<span class="fc bfc" id="L229" title="All 2 branches covered.">        while (hei.hasNext()) {</span>
+<span class="fc" id="L230">            CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt; e =</span>
+<span class="fc" id="L231">                    ((CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt;)hei.next());</span>
+<span class="fc" id="L232">            Entry ee = e.value;</span>
+
+<span class="fc bfc" id="L234" title="All 2 branches covered.">            for (String constName : encodingNames(e.bytes, e.p, e.end)) {</span>
+<span class="fc" id="L235">                visitor.defineAlias(ee.getIndex(), constName);</span>
+<span class="fc" id="L236">                visitor.defineConstant(ee.getIndex(), constName);</span>
+<span class="fc" id="L237">            }</span>
+<span class="fc" id="L238">        }</span>
+<span class="fc" id="L239">    }</span>
+
+    private List&lt;String&gt; encodingNames(byte[] name, int p, int end) {
+<span class="fc" id="L242">        final List&lt;String&gt; names = new ArrayList&lt;String&gt;();</span>
+
+<span class="fc" id="L244">        Encoding enc = ASCIIEncoding.INSTANCE;</span>
+<span class="fc" id="L245">        int s = p;</span>
+
+<span class="fc" id="L247">        int code = name[s] &amp; 0xff;</span>
+<span class="fc bfc" id="L248" title="All 2 branches covered.">        if (enc.isDigit(code)) return names;</span>
+
+<span class="fc" id="L250">        boolean hasUpper = false;</span>
+<span class="fc" id="L251">        boolean hasLower = false;</span>
+<span class="fc bfc" id="L252" title="All 2 branches covered.">        if (enc.isUpper(code)) {</span>
+<span class="fc" id="L253">            hasUpper = true;</span>
+<span class="fc bfc" id="L254" title="All 6 branches covered.">            while (++s &lt; end &amp;&amp; (enc.isAlnum(name[s] &amp; 0xff) || name[s] == (byte)'_')) {</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">                if (enc.isLower(name[s] &amp; 0xff)) hasLower = true;</span>
+            }
+        }
+
+<span class="fc" id="L259">        boolean isValid = false;</span>
+<span class="fc bfc" id="L260" title="All 2 branches covered.">        if (s &gt;= end) {</span>
+<span class="fc" id="L261">            isValid = true;</span>
+<span class="fc" id="L262">            names.add(new String(name, p, end));</span>
+        }
+
+<span class="fc bfc" id="L265" title="All 4 branches covered.">        if (!isValid || hasLower) {</span>
+<span class="pc bpc" id="L266" title="1 of 4 branches missed.">            if (!hasLower || !hasUpper) {</span>
+                do {
+<span class="fc" id="L268">                    code = name[s] &amp; 0xff;</span>
+<span class="fc bfc" id="L269" title="All 2 branches covered.">                    if (enc.isLower(code)) hasLower = true;</span>
+<span class="fc bfc" id="L270" title="All 2 branches covered.">                    if (enc.isUpper(code)) hasUpper = true;</span>
+<span class="fc bfc" id="L271" title="All 6 branches covered.">                } while (++s &lt; end &amp;&amp; (!hasLower || !hasUpper));</span>
+            }
+
+<span class="fc" id="L274">            byte[]constName = new byte[end - p];</span>
+<span class="fc" id="L275">            System.arraycopy(name, p, constName, 0, end - p);</span>
+<span class="fc" id="L276">            s = 0;</span>
+<span class="fc" id="L277">            code = constName[s] &amp; 0xff;</span>
+
+<span class="fc bfc" id="L279" title="All 2 branches covered.">            if (!isValid) {</span>
+<span class="fc bfc" id="L280" title="All 2 branches covered.">                if (enc.isLower(code)) constName[s] = AsciiTables.ToUpperCaseTable[code];</span>
+<span class="fc bfc" id="L281" title="All 2 branches covered.">                for (; s &lt; constName.length; ++s) {</span>
+<span class="fc bfc" id="L282" title="All 2 branches covered.">                    if (!enc.isAlnum(constName[s] &amp; 0xff)) constName[s] = (byte)'_';</span>
+                }
+<span class="fc bfc" id="L284" title="All 2 branches covered.">                if (hasUpper) {</span>
+<span class="fc" id="L285">                    names.add(new String(constName, 0, constName.length));</span>
+                }
+            }
+<span class="fc bfc" id="L288" title="All 2 branches covered.">            if (hasLower) {</span>
+<span class="fc bfc" id="L289" title="All 2 branches covered.">                for (s = 0; s &lt; constName.length; ++s) {</span>
+<span class="fc" id="L290">                    code = constName[s] &amp; 0xff;</span>
+<span class="fc bfc" id="L291" title="All 2 branches covered.">                    if (enc.isLower(code)) constName[s] = AsciiTables.ToUpperCaseTable[code];</span>
+                }
+<span class="fc" id="L293">                names.add(new String(constName, 0, constName.length));</span>
+            }
+        }
+
+<span class="fc" id="L297">        return names;</span>
+    }
+
+    private void defineEncodingConstant(Ruby runtime, RubyEncoding encoding, String constName) {
+<span class="fc" id="L301">        runtime.getEncoding().defineConstant(constName, encoding);</span>
+<span class="fc" id="L302">    }</span>
+
+    public IRubyObject getDefaultExternal() {
+<span class="fc" id="L305">        IRubyObject defaultExternal = convertEncodingToRubyEncoding(runtime.getDefaultExternalEncoding());</span>
+
+<span class="pc bpc" id="L307" title="1 of 2 branches missed.">        if (defaultExternal.isNil()) {</span>
+            // TODO: MRI seems to default blindly to US-ASCII and we were using Charset default from Java...which is right?
+<span class="nc" id="L309">            ByteList encodingName = ByteList.create(&quot;US-ASCII&quot;);</span>
+<span class="nc" id="L310">            Encoding encoding = runtime.getEncodingService().loadEncoding(encodingName);</span>
+
+<span class="nc" id="L312">            runtime.setDefaultExternalEncoding(encoding);</span>
+<span class="nc" id="L313">            defaultExternal = convertEncodingToRubyEncoding(encoding);</span>
+        }
+
+<span class="fc" id="L316">        return defaultExternal;</span>
+    }
+
+    public IRubyObject getDefaultInternal() {
+<span class="fc" id="L320">        return convertEncodingToRubyEncoding(runtime.getDefaultInternalEncoding());</span>
+    }
+
+    public IRubyObject convertEncodingToRubyEncoding(Encoding defaultEncoding) {
+<span class="fc bfc" id="L324" title="All 2 branches covered.">        return defaultEncoding != null ? getEncoding(defaultEncoding) : runtime.getNil();</span>
+    }
+
+    public IRubyObject findEncodingObject(byte[] bytes) {
+<span class="nc" id="L328">        Entry entry = findEncodingEntry(bytes);</span>
+        Encoding enc;
+<span class="nc bnc" id="L330" title="All 2 branches missed.">        if (entry != null) {</span>
+<span class="nc" id="L331">            enc = entry.getEncoding();</span>
+        } else {
+<span class="nc" id="L333">            enc = ASCIIEncoding.INSTANCE;</span>
+        }
+<span class="nc" id="L335">        return convertEncodingToRubyEncoding(enc);</span>
+    }
+
+    public Encoding getJavaDefault() {
+<span class="fc" id="L339">        return javaDefault;</span>
+    }
+
+    public Encoding getEncodingFromObject(IRubyObject arg) {
+<span class="fc" id="L343">        return getEncodingFromObjectCommon(arg, true);</span>
+    }
+
+    // rb_to_encoding_index
+    public Encoding getEncodingFromObjectNoError(IRubyObject arg) {
+<span class="fc" id="L348">        return getEncodingFromObjectCommon(arg, false);</span>
+    }
+
+    private Encoding getEncodingFromObjectCommon(IRubyObject arg, boolean error) {
+<span class="pc bpc" id="L352" title="1 of 2 branches missed.">        if (arg == null) return null;</span>
+
+<span class="fc bfc" id="L354" title="All 2 branches covered.">        if (arg instanceof RubyEncoding) {</span>
+<span class="fc" id="L355">            return ((RubyEncoding) arg).getEncoding();</span>
+<span class="pc bpc" id="L356" title="3 of 4 branches missed.">        } else if (arg instanceof RubyFixnum &amp;&amp; RubyNKF.NKFCharsetMap.containsKey((int)arg.convertToInteger().getLongValue())) {</span>
+<span class="nc" id="L357">            return getEncodingFromNKFId(arg);</span>
+<span class="pc bpc" id="L358" title="1 of 2 branches missed.">        } else if ((arg = arg.checkStringType19()).isNil()) {</span>
+<span class="nc" id="L359">            return null;</span>
+<span class="pc bpc" id="L360" title="1 of 2 branches missed.">        } else if (!((RubyString)arg).getEncoding().isAsciiCompatible()) {</span>
+<span class="nc" id="L361">            return null;</span>
+        } else {
+<span class="fc bfc" id="L363" title="All 2 branches covered.">            if (error) {</span>
+<span class="fc" id="L364">                return findEncoding((RubyString)arg);</span>
+            } else {
+<span class="fc" id="L366">                return findEncodingNoError((RubyString)arg);</span>
+            }
+        }
+    }
+    
+    private Encoding getEncodingFromNKFId(IRubyObject id) {
+<span class="nc" id="L372">        String name = RubyNKF.NKFCharsetMap.get((int)id.convertToInteger().getLongValue());</span>
+<span class="nc" id="L373">        HashEntryIterator hei = encodings.entryIterator();</span>
+<span class="nc bnc" id="L374" title="All 2 branches missed.">        while (hei.hasNext()) {</span>
+<span class="nc" id="L375">            CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt; e = </span>
+<span class="nc" id="L376">                ((CaseInsensitiveBytesHash.CaseInsensitiveBytesHashEntry&lt;Entry&gt;)hei.next());</span>
+<span class="nc" id="L377">            EncodingDB.Entry ee = e.value;</span>
+<span class="nc" id="L378">            String className = ee.getEncodingClass();</span>
+<span class="nc bnc" id="L379" title="All 2 branches missed.">            if (className.equals(name)) {</span>
+<span class="nc" id="L380">                Encoding enc = ee.getEncoding();</span>
+<span class="nc" id="L381">                return enc;</span>
+            }
+<span class="nc" id="L383">        }</span>
+<span class="nc" id="L384">        return null;   </span>
+    }
+    
+    public Encoding getEncodingFromString(String string) {
+<span class="pc bpc" id="L388" title="1 of 2 branches missed.">        if (string == null) return null;</span>
+
+<span class="fc" id="L390">        ByteList name = new ByteList(ByteList.plain(string));</span>
+<span class="fc" id="L391">        checkAsciiEncodingName(name);</span>
+
+<span class="fc" id="L393">        SpecialEncoding special = SpecialEncoding.valueOf(name);</span>
+<span class="pc bpc" id="L394" title="1 of 2 branches missed.">        if (special != null) {</span>
+<span class="nc" id="L395">            return special.toEncoding(runtime);</span>
+        }
+
+<span class="fc" id="L398">        return findEncodingWithError(name);</span>
+    }
+
+    /**
+     * Find an encoding given a Ruby object, coercing it to a String in the process.
+     *
+     * @param str the object to coerce and use to look up encoding. The coerced String
+     * must be ASCII-compatible.
+     * @return the Encoding object found, nil (for internal), or raises ArgumentError
+     */
+    public Encoding findEncoding(IRubyObject str) {
+<span class="fc" id="L409">        return findEncodingCommon(str, true);</span>
+    }
+
+    /**
+     * Find an encoding given a Ruby object, coercing it to a String in the process.
+     * This version does not raise a Ruby error if it can't find the encoding,
+     * and simply returns null.
+     *
+     * @param str the object to coerce and use to look up encoding. The coerced String
+     * must be ASCII-compatible.
+     * @return the Encoding object found, nil (for internal), or raises ArgumentError
+     */
+    public Encoding findEncodingNoError(IRubyObject str) {
+<span class="fc" id="L422">        return findEncodingCommon(str, false);</span>
+    }
+    
+    private Encoding findEncodingCommon(IRubyObject str, boolean error) {
+<span class="fc" id="L426">        ByteList name = str.convertToString().getByteList();</span>
+<span class="fc" id="L427">        checkAsciiEncodingName(name);</span>
+
+<span class="fc" id="L429">        SpecialEncoding special = SpecialEncoding.valueOf(name);</span>
+<span class="fc bfc" id="L430" title="All 2 branches covered.">        if (special != null) {</span>
+<span class="fc" id="L431">            return special.toEncoding(runtime);</span>
+        }
+        
+<span class="fc bfc" id="L434" title="All 2 branches covered.">        if (error) return findEncodingWithError(name);</span>
+        
+<span class="fc" id="L436">        Entry e = findEncodingOrAliasEntry(name);</span>
+
+<span class="fc bfc" id="L438" title="All 2 branches covered.">        if (e == null) return null;</span>
+
+<span class="fc" id="L440">        return e.getEncoding();</span>
+    }
+
+    /**
+     * Find an encoding given a Ruby object, coercing it to a String in the process.
+     *
+     * @param str the object to coerce and use to look up encoding. The coerced String
+     * must be ASCII-compatible.
+     * @return the Encoding object found, nil (for internal), or raises ArgumentError
+     */
+    public Entry findEntry(IRubyObject str) {
+<span class="fc" id="L451">        ByteList name = str.convertToString().getByteList();</span>
+<span class="fc" id="L452">        checkAsciiEncodingName(name);</span>
+
+<span class="fc" id="L454">        SpecialEncoding special = SpecialEncoding.valueOf(name);</span>
+<span class="fc bfc" id="L455" title="All 2 branches covered.">        if (special != null) {</span>
+<span class="fc" id="L456">            return findEntryFromEncoding(special.toEncoding(runtime));</span>
+        }
+
+<span class="fc" id="L459">        return findEntryWithError(name);</span>
+    }
+    
+    public IRubyObject rubyEncodingFromObject(IRubyObject str) {
+<span class="pc bpc" id="L463" title="1 of 2 branches missed.">        if (str instanceof RubyEncoding) {</span>
+<span class="nc" id="L464">            return str;</span>
+        }
+        
+<span class="fc" id="L467">        Entry entry = findEntry(str);</span>
+<span class="fc bfc" id="L468" title="All 2 branches covered.">        if (entry == null) return runtime.getNil();</span>
+<span class="fc" id="L469">        return getEncodingList()[entry.getIndex()];</span>
+    }
+
+    /**
+     * Get a java.nio Charset for the given encoding, or null if impossible
+     * 
+     * @param encoding the encoding
+     * @return the charset
+     */
+    public Charset charsetForEncoding(Encoding encoding) {
+<span class="fc" id="L479">        Charset charset = encoding.getCharset();</span>
+
+<span class="fc bfc" id="L481" title="All 2 branches covered.">        if (encoding.toString().equals(&quot;ASCII-8BIT&quot;)) {</span>
+<span class="fc" id="L482">            return Charset.forName(&quot;ISO-8859-1&quot;);</span>
+        }
+
+<span class="pc bpc" id="L485" title="1 of 2 branches missed.">        if (encoding == ISO8859_16Encoding.INSTANCE) {</span>
+<span class="nc" id="L486">            return ISO_8859_16.INSTANCE;</span>
+        }
+
+        try {
+<span class="fc" id="L490">            return Charset.forName(encoding.toString());</span>
+<span class="nc" id="L491">        } catch (UnsupportedCharsetException uce) {</span>
+<span class="nc" id="L492">            throw runtime.newEncodingCompatibilityError(&quot;no java.nio.charset.Charset found for encoding `&quot; + encoding.toString() + &quot;'&quot;);</span>
+        }
+    }
+
+    private void checkAsciiEncodingName(ByteList name) {
+<span class="pc bpc" id="L497" title="1 of 2 branches missed.">        if (!name.getEncoding().isAsciiCompatible()) {</span>
+<span class="nc" id="L498">            throw runtime.newArgumentError(&quot;invalid name encoding (non ASCII)&quot;);</span>
+        }
+<span class="fc" id="L500">    }</span>
+
+    /**
+     * Represents one of the four &quot;special&quot; internal encoding names: internal,
+     * external, locale, or filesystem.
+     */
+<span class="pc" id="L506">    private enum SpecialEncoding {</span>
+<span class="fc" id="L507">        LOCALE, EXTERNAL, INTERNAL, FILESYSTEM;</span>
+        public static SpecialEncoding valueOf(ByteList name) {
+<span class="fc bfc" id="L509" title="All 2 branches covered.">            if (name.caseInsensitiveCmp(LOCALE_BL) == 0) {</span>
+<span class="fc" id="L510">                return LOCALE;</span>
+<span class="fc bfc" id="L511" title="All 2 branches covered.">            } else if (name.caseInsensitiveCmp(EXTERNAL_BL) == 0) {</span>
+<span class="fc" id="L512">                return EXTERNAL;</span>
+<span class="fc bfc" id="L513" title="All 2 branches covered.">            } else if (name.caseInsensitiveCmp(INTERNAL_BL) == 0) {</span>
+<span class="fc" id="L514">                return INTERNAL;</span>
+<span class="fc bfc" id="L515" title="All 2 branches covered.">            } else if (name.caseInsensitiveCmp(FILESYSTEM_BL) == 0) {</span>
+<span class="fc" id="L516">                return FILESYSTEM;</span>
+            }
+<span class="fc" id="L518">            return null;</span>
+        }
+
+        public Encoding toEncoding(Ruby runtime) {
+<span class="fc" id="L522">            EncodingService service = runtime.getEncodingService();</span>
+<span class="pc bpc" id="L523" title="1 of 5 branches missed.">            switch (this) {</span>
+<span class="fc" id="L524">            case LOCALE: return service.getLocaleEncoding();</span>
+<span class="fc" id="L525">            case EXTERNAL: return runtime.getDefaultExternalEncoding();</span>
+<span class="fc" id="L526">            case INTERNAL: return runtime.getDefaultInternalEncoding();</span>
+            case FILESYSTEM:
+                // This needs to do something different on Windows. See encoding.c,
+                // in the enc_set_filesystem_encoding function.
+<span class="fc" id="L530">                return runtime.getDefaultExternalEncoding();</span>
+            default:
+<span class="nc" id="L532">                throw new RuntimeException(&quot;invalid SpecialEncoding: &quot; + this);</span>
+            }
+        }
+    }
+
+    /**
+     * Find a non-special encoding, raising argument error if it does not exist.
+     *
+     * @param name the name of the encoding to look up
+     * @return the Encoding object found, or raises ArgumentError
+     */
+    public Encoding findEncodingWithError(ByteList name) {
+<span class="fc" id="L544">        return findEntryWithError(name).getEncoding();</span>
+    }
+
+    /**
+     * Find a non-special encoding Entry, raising argument error if it does not exist.
+     *
+     * @param name the name of the encoding to look up
+     * @return the EncodingDB.Entry object found, or raises ArgumentError
+     */
+    private Entry findEntryWithError(ByteList name) {
+<span class="fc" id="L554">        Entry e = findEncodingOrAliasEntry(name);</span>
+
+<span class="fc bfc" id="L556" title="All 2 branches covered.">        if (e == null) throw runtime.newArgumentError(&quot;unknown encoding name - &quot; + name);</span>
+
+<span class="fc" id="L558">        return e;</span>
+    }
+
+    private Entry findEntryFromEncoding(Encoding e) {
+<span class="fc bfc" id="L562" title="All 2 branches covered.">        if (e == null) return null;</span>
+<span class="fc" id="L563">        return findEncodingEntry(new ByteList(e.getName()));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

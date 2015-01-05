@@ -1,0 +1,496 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ObjectProxyCache.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.javasupport.util</a> &gt; <span class="el_source">ObjectProxyCache.java</span></div><h1>ObjectProxyCache.java</h1><pre class="source lang-java linenums">package org.jruby.javasupport.util;
+
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+
+import java.lang.ref.ReferenceQueue;
+import java.lang.ref.SoftReference;
+import java.lang.ref.WeakReference;
+
+import java.util.concurrent.locks.ReentrantLock;
+
+
+/**
+ * Maps Java objects to their proxies.  Combines elements of WeakHashMap and
+ * ConcurrentHashMap to permit unsynchronized reads.  May be configured to
+ * use either Weak (the default) or Soft references.&lt;p&gt;
+ * 
+ * Note that both Java objects and their proxies are held by weak/soft
+ * references; because proxies (currently) keep strong references to their
+ * Java objects, if we kept strong references to them the Java objects would
+ * never be gc'ed.  This presents a problem in the case where a user passes
+ * a Rubified Java object out to Java but keeps no reference in Ruby to the 
+ * proxy; if the object is returned to Ruby after its proxy has been gc'ed,
+ * a new (and possibly very wrong, in the case of JRuby-defined subclasses)
+ * proxy will be created.  Use of soft references may help reduce the
+ * likelihood of this occurring; users may be advised to keep Ruby-side
+ * references to prevent it occurring altogether.
+ * 
+ * @author &lt;a href=&quot;mailto:bill.dortch@gmail.com&quot;&gt;Bill Dortch&lt;/a&gt;
+ * 
+ */
+public abstract class ObjectProxyCache&lt;T,A&gt; {
+
+<span class="fc" id="L34">    private static final Logger LOG = LoggerFactory.getLogger(&quot;ObjectProxyCache&quot;);</span>
+    
+<span class="pc" id="L36">    public static enum ReferenceType { WEAK, SOFT }</span>
+    
+    private static final int DEFAULT_SEGMENTS = 16; // must be power of 2
+    private static final int DEFAULT_SEGMENT_SIZE = 8; // must be power of 2
+    private static final float DEFAULT_LOAD_FACTOR = 0.75f;
+    private static final int MAX_CAPACITY = 1 &lt;&lt; 30;
+    private static final int MAX_SEGMENTS = 1 &lt;&lt; 16;
+    private static final int VULTURE_RUN_FREQ_SECONDS = 5;
+    
+<span class="fc" id="L45">    private static int _nextId = 0;</span>
+    
+    private static synchronized int nextId() {
+<span class="fc" id="L48">        return ++_nextId;</span>
+    }
+
+    
+    private final ReferenceType referenceType;
+    private final Segment&lt;T,A&gt;[] segments;
+    private final int segmentShift;
+    private final int segmentMask;
+    private Thread vulture;
+    private final int id;
+    
+    public ObjectProxyCache() {
+<span class="nc" id="L60">        this(DEFAULT_SEGMENTS, DEFAULT_SEGMENT_SIZE, ReferenceType.WEAK);</span>
+<span class="nc" id="L61">    }</span>
+    
+    public ObjectProxyCache(ReferenceType refType) {
+<span class="fc" id="L64">        this(DEFAULT_SEGMENTS, DEFAULT_SEGMENT_SIZE, refType);</span>
+<span class="fc" id="L65">    }</span>
+    
+    
+<span class="fc" id="L68">    public ObjectProxyCache(int numSegments, int initialSegCapacity, ReferenceType refType) {</span>
+<span class="pc bpc" id="L69" title="3 of 6 branches missed.">        if (numSegments &lt;= 0 || initialSegCapacity &lt;= 0 || refType == null) {</span>
+<span class="nc" id="L70">            throw new IllegalArgumentException();</span>
+        }
+<span class="fc" id="L72">        this.id = nextId();</span>
+<span class="fc" id="L73">        this.referenceType = refType;</span>
+<span class="pc bpc" id="L74" title="1 of 2 branches missed.">        if (numSegments &gt; MAX_SEGMENTS) numSegments = MAX_SEGMENTS;</span>
+    
+        // Find power-of-two sizes best matching arguments
+<span class="fc" id="L77">        int sshift = 0;</span>
+<span class="fc" id="L78">        int ssize = 1;</span>
+<span class="fc bfc" id="L79" title="All 2 branches covered.">        while (ssize &lt; numSegments) {</span>
+<span class="fc" id="L80">            ++sshift;</span>
+<span class="fc" id="L81">            ssize &lt;&lt;= 1;</span>
+        }
+        // note segmentShift differs from ConcurrentHashMap's calculation due to
+        // issues with System.identityHashCode (upper n bits always 0, at least 
+        // under Java 1.6 / WinXP)
+<span class="fc" id="L86">        this.segmentShift = 24 - sshift;</span>
+<span class="fc" id="L87">        this.segmentMask = ssize - 1;</span>
+<span class="fc" id="L88">        this.segments = Segment.newArray(ssize);</span>
+    
+<span class="pc bpc" id="L90" title="1 of 2 branches missed.">        if (initialSegCapacity &gt; MAX_CAPACITY) {</span>
+<span class="nc" id="L91">            initialSegCapacity = MAX_CAPACITY;</span>
+        }
+<span class="fc" id="L93">        int cap = 1;</span>
+<span class="fc bfc" id="L94" title="All 2 branches covered.">        while (cap &lt; initialSegCapacity) cap &lt;&lt;= 1;</span>
+    
+<span class="fc bfc" id="L96" title="All 2 branches covered.">        for (int i = ssize; --i &gt;= 0; ) {</span>
+<span class="fc" id="L97">            segments[i] = new Segment&lt;T,A&gt;(cap, this);</span>
+        }
+        // vulture thread will periodically expunge dead
+        // entries.  entries are also expunged during 'put'
+        // operations; this is designed to cover the case where
+        // many objects are created initially, followed by limited
+        // put activity.
+        //
+        // FIXME: DISABLED (below) pending resolution of finalization issue
+        //
+        try {
+<span class="fc" id="L108">            this.vulture = new Thread(&quot;ObjectProxyCache &quot;+id+&quot; vulture&quot;) {</span>
+                    public void run() {
+                        for ( ;; ) {
+                            try {
+<span class="nc" id="L112">                                sleep(VULTURE_RUN_FREQ_SECONDS * 1000);</span>
+<span class="nc" id="L113">                            } catch (InterruptedException e) {}</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">                            boolean dump = size() &gt; 200;</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                            if (dump) {</span>
+<span class="nc" id="L116">                                LOG.debug(&quot;***Vulture {} waking, stats:&quot;, id);</span>
+<span class="nc" id="L117">                                LOG.debug(stats());</span>
+                            }
+<span class="nc bnc" id="L119" title="All 2 branches missed.">                            for (int i = segments.length; --i &gt;= 0; ) {</span>
+<span class="nc" id="L120">                                Segment&lt;T,A&gt; seg = segments[i];</span>
+<span class="nc" id="L121">                                seg.lock();</span>
+                                try {
+<span class="nc" id="L123">                                    seg.expunge();</span>
+                                } finally {
+<span class="nc" id="L125">                                    seg.unlock();</span>
+<span class="nc" id="L126">                                }</span>
+<span class="nc" id="L127">                                yield();</span>
+<span class="nc" id="L128">                            }</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">                            if (dump) {</span>
+<span class="nc" id="L130">                                LOG.debug(&quot;***Vulture {} sleeping, stats:&quot;, id);</span>
+<span class="nc" id="L131">                                LOG.debug(stats());</span>
+                            }
+<span class="nc" id="L133">                        }</span>
+                    }
+                };
+<span class="fc" id="L136">            vulture.setDaemon(true);</span>
+<span class="nc" id="L137">        } catch (SecurityException e) {</span>
+<span class="nc" id="L138">            this.vulture = null;</span>
+<span class="fc" id="L139">        }</span>
+
+        
+        // FIXME: vulture daemon thread prevents finalization,
+        // find alternative approach.
+        // vulture.start();
+
+//      System.err.println(&quot;***ObjectProxyCache &quot; + id + &quot; started at &quot;+ new java.util.Date());
+<span class="fc" id="L147">    }</span>
+    
+//    protected void finalize() throws Throwable {
+//        System.err.println(&quot;***ObjectProxyCache &quot; + id + &quot; finalized at &quot;+ new java.util.Date());
+//    }
+    
+    public abstract T allocateProxy(Object javaObject, A allocator);
+    
+    public T get(Object javaObject) {
+<span class="nc bnc" id="L156" title="All 2 branches missed.">        if (javaObject == null) return null;</span>
+<span class="nc" id="L157">        int hash = hash(javaObject);</span>
+<span class="nc" id="L158">        return segmentFor(hash).get(javaObject, hash);</span>
+    }
+    
+    public T getOrCreate(Object javaObject, A allocator) {
+<span class="nc bnc" id="L162" title="All 4 branches missed.">        if (javaObject == null || allocator == null) return null;</span>
+<span class="nc" id="L163">        int hash = hash(javaObject);</span>
+<span class="nc" id="L164">        return segmentFor(hash).getOrCreate(javaObject, hash, allocator);</span>
+    }
+    
+    public void put(Object javaObject, T proxy) {
+<span class="nc bnc" id="L168" title="All 4 branches missed.">        if (javaObject == null || proxy == null) return;</span>
+<span class="nc" id="L169">        int hash = hash(javaObject);</span>
+<span class="nc" id="L170">        segmentFor(hash).put(javaObject, hash, proxy);</span>
+<span class="nc" id="L171">    }</span>
+    
+    private static int hash(Object javaObject) {
+<span class="nc" id="L174">        int h = System.identityHashCode(javaObject);</span>
+<span class="nc" id="L175">        h ^= (h &gt;&gt;&gt; 20) ^ (h &gt;&gt;&gt; 12);</span>
+<span class="nc" id="L176">        return h ^ (h &gt;&gt;&gt; 7) ^ (h &gt;&gt;&gt; 4);</span>
+    }
+
+    private Segment&lt;T,A&gt; segmentFor(int hash) {
+<span class="nc" id="L180">        return segments[(hash &gt;&gt;&gt; segmentShift) &amp; segmentMask];</span>
+    }
+    
+    /**
+     * Returns the approximate size (elements in use) of the cache. The
+     * sizes of the segments are summed. No effort is made to synchronize
+     * across segments, so the value returned may differ from the actual
+     * size at any point in time.
+     * 
+     * @return
+     */
+    public int size() {
+<span class="nc" id="L192">       int size = 0;</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">       for (Segment&lt;T,A&gt; seg : segments) {</span>
+<span class="nc" id="L194">           size += seg.tableSize;</span>
+       }
+<span class="nc" id="L196">       return size;</span>
+    }
+    
+    public String stats() {
+<span class="nc" id="L200">        StringBuilder b = new StringBuilder();</span>
+<span class="nc" id="L201">        int n = 0;</span>
+<span class="nc" id="L202">        int size = 0;</span>
+<span class="nc" id="L203">        int alloc = 0;</span>
+<span class="nc" id="L204">        b.append(&quot;Segments: &quot;).append(segments.length).append(&quot;\n&quot;);</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">        for (Segment&lt;T,A&gt; seg : segments) {</span>
+<span class="nc" id="L206">            int ssize = 0;</span>
+<span class="nc" id="L207">            int salloc = 0;</span>
+<span class="nc" id="L208">            seg.lock();</span>
+            try {
+<span class="nc" id="L210">                ssize = seg.count();</span>
+<span class="nc" id="L211">                salloc = seg.entryTable.length;</span>
+            } finally {
+<span class="nc" id="L213">                seg.unlock();</span>
+<span class="nc" id="L214">            }</span>
+<span class="nc" id="L215">            size += ssize;</span>
+<span class="nc" id="L216">            alloc += salloc;</span>
+<span class="nc" id="L217">            b.append(&quot;seg[&quot;).append(n++).append(&quot;]:  size: &quot;).append(ssize)</span>
+<span class="nc" id="L218">                .append(&quot;  alloc: &quot;).append(salloc).append(&quot;\n&quot;);</span>
+        }
+<span class="nc" id="L220">        b.append(&quot;Total: size: &quot;).append(size)</span>
+<span class="nc" id="L221">            .append(&quot;  alloc: &quot;).append(alloc).append(&quot;\n&quot;);</span>
+<span class="nc" id="L222">        return b.toString();</span>
+    }
+    
+    // EntryRefs include hash with key to facilitate lookup by Segment#expunge
+    // after ref is removed from ReferenceQueue
+    private static interface EntryRef&lt;T&gt; {
+        T get();
+        int hash();
+    }
+
+    private static final class WeakEntryRef&lt;T&gt; extends WeakReference&lt;T&gt; implements EntryRef&lt;T&gt; {
+        final int hash;
+        WeakEntryRef(int hash, T rawObject, ReferenceQueue&lt;Object&gt; queue) {
+<span class="nc" id="L235">            super(rawObject, queue);</span>
+<span class="nc" id="L236">            this.hash = hash;</span>
+<span class="nc" id="L237">        }</span>
+        public int hash() {
+<span class="nc" id="L239">            return hash;</span>
+        }
+    }
+
+    private static final class SoftEntryRef&lt;T&gt; extends SoftReference&lt;T&gt; implements EntryRef&lt;T&gt; {
+        final int hash;
+        SoftEntryRef(int hash, T rawObject, ReferenceQueue&lt;Object&gt; queue) {
+<span class="nc" id="L246">            super(rawObject, queue);</span>
+<span class="nc" id="L247">            this.hash = hash;</span>
+<span class="nc" id="L248">        }</span>
+        public int hash() {
+<span class="nc" id="L250">            return hash;</span>
+        }
+    }
+
+    // Unlike WeakHashMap, our Entry does not subclass WeakReference, but rather
+    // makes it a final field.  The theory is that doing so should force a happens-before
+    // relationship WRT the WeakReference constructor, guaranteeing that the key will be
+    // visibile to other threads (unless it's been GC'ed).  See JLS 17.5 (final fields) and
+    // 17.4.5 (Happens-before order) to confirm or refute my reasoning here.
+    static class Entry&lt;T&gt; {
+        final EntryRef&lt;Object&gt; objectRef;
+        final int hash;
+        final EntryRef&lt;T&gt; proxyRef;
+        final Entry&lt;T&gt; next;
+        
+<span class="nc" id="L265">        Entry(Object object, int hash, T proxy, ReferenceType type, Entry&lt;T&gt; next, ReferenceQueue&lt;Object&gt; queue) {</span>
+<span class="nc" id="L266">            this.hash = hash;</span>
+<span class="nc" id="L267">            this.next = next;</span>
+            // references to the Java object and its proxy will either both be
+            // weak or both be soft, since the proxy contains a strong reference
+            // to the object, so it wouldn't make sense for the reference types
+            // to differ.
+<span class="nc bnc" id="L272" title="All 2 branches missed.">            if (type == ReferenceType.WEAK) {</span>
+<span class="nc" id="L273">                this.objectRef = new WeakEntryRef&lt;Object&gt;(hash, object, queue);</span>
+<span class="nc" id="L274">                this.proxyRef = new WeakEntryRef&lt;T&gt;(hash, proxy, queue);</span>
+            } else {
+<span class="nc" id="L276">                this.objectRef = new SoftEntryRef&lt;Object&gt;(hash, object, queue);</span>
+<span class="nc" id="L277">                this.proxyRef = new SoftEntryRef&lt;T&gt;(hash, proxy, queue);</span>
+            }
+<span class="nc" id="L279">        }</span>
+        
+        // ctor used by remove/rehash
+<span class="nc" id="L282">        Entry(EntryRef&lt;Object&gt; objectRef, int hash, EntryRef&lt;T&gt; proxyRef, Entry&lt;T&gt; next) {</span>
+<span class="nc" id="L283">            this.objectRef = objectRef;</span>
+<span class="nc" id="L284">            this.hash = hash;</span>
+<span class="nc" id="L285">            this.proxyRef = proxyRef;</span>
+<span class="nc" id="L286">            this.next = next;</span>
+<span class="nc" id="L287">        }</span>
+        
+        @SuppressWarnings(&quot;unchecked&quot;)
+        static final &lt;T&gt; Entry&lt;T&gt;[] newArray(int size) {
+<span class="fc" id="L291">            return new Entry[size];</span>
+        }
+     }
+    
+    // lame generics issues: making Segment class static and manually
+    // inserting cache reference to work around various problems generically
+    // referencing methods/vars across classes.
+<span class="pc bpc" id="L298" title="1 of 2 branches missed.">    static class Segment&lt;T,A&gt; extends ReentrantLock {</span>
+
+        final ObjectProxyCache&lt;T,A&gt; cache;
+<span class="fc" id="L301">        final ReferenceQueue&lt;Object&gt; referenceQueue = new ReferenceQueue&lt;Object&gt;();</span>
+        volatile Entry&lt;T&gt;[] entryTable;
+        int tableSize;
+        int threshold;
+
+<span class="fc" id="L306">        Segment(int capacity, ObjectProxyCache&lt;T,A&gt; cache) {</span>
+<span class="fc" id="L307">            threshold = (int)(capacity * DEFAULT_LOAD_FACTOR);</span>
+<span class="fc" id="L308">            entryTable = Entry.newArray(capacity);</span>
+<span class="fc" id="L309">            this.cache = cache;</span>
+<span class="fc" id="L310">        }</span>
+        
+        // must be called under lock
+        private void expunge() {
+<span class="nc" id="L314">            Entry&lt;T&gt;[] table = entryTable;</span>
+<span class="nc" id="L315">            ReferenceQueue&lt;Object&gt; queue = referenceQueue;</span>
+            EntryRef ref;
+            // note that we'll potentially see the refs for both the java object and
+            // proxy -- whichever we see first will cause the entry to be removed;
+            // the other will not match an entry and will be ignored.
+<span class="nc bnc" id="L320" title="All 2 branches missed.">            while ((ref = (EntryRef)queue.poll()) != null) {</span>
+                int hash;
+<span class="nc bnc" id="L322" title="All 2 branches missed.">                for (Entry&lt;T&gt; e = table[(hash = ref.hash()) &amp; (table.length - 1)]; e != null; e = e.next) {</span>
+<span class="nc bnc" id="L323" title="All 6 branches missed.">                    if (hash == e.hash &amp;&amp; (ref == e.objectRef || ref == e.proxyRef)) {</span>
+<span class="nc" id="L324">                        remove(table, hash, e);</span>
+<span class="nc" id="L325">                        break;</span>
+                    }
+                }
+<span class="nc" id="L328">            }</span>
+<span class="nc" id="L329">        }</span>
+        
+        // must be called under lock
+        private void remove(Entry&lt;T&gt;[] table, int hash, Entry&lt;T&gt; e) {
+<span class="nc" id="L333">            int index = hash &amp; (table.length - 1);</span>
+<span class="nc" id="L334">            Entry&lt;T&gt; first = table[index];</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">            for (Entry&lt;T&gt; n = first; n != null; n = n.next) {</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">                if (n == e) {</span>
+<span class="nc" id="L337">                    Entry&lt;T&gt; newFirst = n.next;</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">                    for (Entry&lt;T&gt; p = first; p != n; p = p.next) {</span>
+<span class="nc" id="L339">                        newFirst = new Entry&lt;T&gt;(p.objectRef, p.hash, p.proxyRef, newFirst);</span>
+                    }
+<span class="nc" id="L341">                    table[index] = newFirst;</span>
+<span class="nc" id="L342">                    tableSize--;</span>
+<span class="nc" id="L343">                    entryTable = table; // write-volatile</span>
+<span class="nc" id="L344">                    return;</span>
+                }
+            }
+<span class="nc" id="L347">        }</span>
+
+        // temp method to verify tableSize value
+        // must be called under lock
+        private int count() {
+<span class="nc" id="L352">            int count = 0;</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">            for (Entry&lt;T&gt; e : entryTable) {</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">                while (e != null) {</span>
+<span class="nc" id="L355">                    count++;</span>
+<span class="nc" id="L356">                    e = e.next;</span>
+                }
+            }
+<span class="nc" id="L359">            return count;</span>
+        }
+
+        // must be called under lock
+        private Entry&lt;T&gt;[] rehash() {
+<span class="nc bnc" id="L364" title="All 4 branches missed.">            assert tableSize == count() : &quot;tableSize &quot;+tableSize+&quot; != count() &quot;+count();</span>
+<span class="nc" id="L365">            Entry&lt;T&gt;[] oldTable = entryTable; // read-volatile</span>
+            int oldCapacity;
+<span class="nc bnc" id="L367" title="All 2 branches missed.">            if ((oldCapacity = oldTable.length) &gt;= MAX_CAPACITY) {</span>
+<span class="nc" id="L368">                return oldTable;</span>
+            }
+<span class="nc" id="L370">            int newCapacity = oldCapacity &lt;&lt; 1;</span>
+<span class="nc" id="L371">            int sizeMask = newCapacity - 1;</span>
+<span class="nc" id="L372">            threshold = (int)(newCapacity * DEFAULT_LOAD_FACTOR);</span>
+<span class="nc" id="L373">            Entry&lt;T&gt;[] newTable = Entry.newArray(newCapacity);</span>
+            Entry&lt;T&gt; e;
+<span class="nc bnc" id="L375" title="All 2 branches missed.">            for (int i = oldCapacity; --i &gt;= 0; ) {</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">                if ((e = oldTable[i]) != null) {</span>
+<span class="nc" id="L377">                    int idx = e.hash &amp; sizeMask;</span>
+                    Entry&lt;T&gt; next;
+<span class="nc bnc" id="L379" title="All 2 branches missed.">                    if ((next = e.next) == null) {</span>
+                        // Single node in list
+<span class="nc" id="L381">                        newTable[idx] = e;</span>
+                    } else {
+                        // Reuse trailing consecutive sequence at same slot
+<span class="nc" id="L384">                        int lastIdx = idx;</span>
+<span class="nc" id="L385">                        Entry&lt;T&gt; lastRun = e;</span>
+<span class="nc bnc" id="L386" title="All 2 branches missed.">                        for (Entry&lt;T&gt; last = next; last != null; last = last.next) {</span>
+                            int k;
+<span class="nc bnc" id="L388" title="All 2 branches missed.">                            if ((k = last.hash &amp; sizeMask) != lastIdx) {</span>
+<span class="nc" id="L389">                                lastIdx = k;</span>
+<span class="nc" id="L390">                                lastRun = last;</span>
+                            }
+                        }
+<span class="nc" id="L393">                        newTable[lastIdx] = lastRun;</span>
+                        // Clone all remaining nodes
+<span class="nc bnc" id="L395" title="All 2 branches missed.">                        for (Entry&lt;T&gt; p = e; p != lastRun; p = p.next) {</span>
+<span class="nc" id="L396">                            int k = p.hash &amp; sizeMask;</span>
+<span class="nc" id="L397">                            Entry&lt;T&gt; m = new Entry&lt;T&gt;(p.objectRef, p.hash, p.proxyRef, newTable[k]);</span>
+<span class="nc" id="L398">                            newTable[k] = m;</span>
+                        }
+                    }
+<span class="nc" id="L401">                }</span>
+            }
+<span class="nc" id="L403">            entryTable = newTable; // write-volatile</span>
+<span class="nc" id="L404">            return newTable;</span>
+        }
+
+        void put(Object object, int hash, T proxy) {
+<span class="nc" id="L408">            lock();</span>
+            try {
+<span class="nc" id="L410">                expunge();</span>
+                Entry&lt;T&gt;[] table;
+                int potentialNewSize;
+<span class="nc bnc" id="L413" title="All 2 branches missed.">                if ((potentialNewSize = tableSize + 1) &gt; threshold) {</span>
+<span class="nc" id="L414">                    table = rehash(); // indirect read-/write- volatile</span>
+                } else {
+<span class="nc" id="L416">                    table = entryTable; // read-volatile</span>
+                }
+                int index;
+                Entry&lt;T&gt; e;
+<span class="nc bnc" id="L420" title="All 2 branches missed.">                for (e = table[index = hash &amp; (table.length - 1)]; e != null; e = e.next) {</span>
+<span class="nc bnc" id="L421" title="All 4 branches missed.">                    if (hash == e.hash &amp;&amp; object == e.objectRef.get()) {</span>
+<span class="nc bnc" id="L422" title="All 2 branches missed.">                        if (proxy == e.proxyRef.get()) return;</span>
+                        // entry exists, proxy doesn't match. replace.
+                        // this could happen if old proxy was gc'ed
+                        // TODO: raise exception if stored proxy is non-null? (not gc'ed)
+<span class="nc" id="L426">                        remove(table, hash, e);</span>
+<span class="nc" id="L427">                        potentialNewSize--;</span>
+<span class="nc" id="L428">                        break;</span>
+                    }
+                }
+<span class="nc" id="L431">                e = new Entry&lt;T&gt;(object, hash, proxy, cache.referenceType, table[index], referenceQueue);</span>
+<span class="nc" id="L432">                table[index] = e;</span>
+<span class="nc" id="L433">                tableSize = potentialNewSize;</span>
+<span class="nc" id="L434">                entryTable = table; // write-volatile</span>
+            } finally {
+<span class="nc" id="L436">                unlock();</span>
+<span class="nc" id="L437">            }</span>
+<span class="nc" id="L438">        }</span>
+
+        T getOrCreate(Object object, int hash, A allocator) {
+            Entry&lt;T&gt;[] table;
+            T proxy;
+<span class="nc bnc" id="L443" title="All 2 branches missed.">            for (Entry&lt;T&gt; e = (table = entryTable)[hash &amp; table.length - 1]; e != null; e = e.next) {</span>
+<span class="nc bnc" id="L444" title="All 4 branches missed.">                if (hash == e.hash &amp;&amp; object == e.objectRef.get()) {</span>
+<span class="nc bnc" id="L445" title="All 2 branches missed.">                    if ((proxy = e.proxyRef.get()) != null) return proxy;</span>
+                    break;
+                }
+            }
+<span class="nc" id="L449">            lock();</span>
+            try {
+<span class="nc" id="L451">                expunge();</span>
+                int potentialNewSize;
+<span class="nc bnc" id="L453" title="All 2 branches missed.">                if ((potentialNewSize = tableSize + 1) &gt; threshold) {</span>
+<span class="nc" id="L454">                    table = rehash(); // indirect read-/write- volatile</span>
+                } else {
+<span class="nc" id="L456">                    table = entryTable; // read-volatile</span>
+                }
+                int index;
+                Entry&lt;T&gt; e;
+<span class="nc bnc" id="L460" title="All 2 branches missed.">                for (e = table[index = hash &amp; (table.length - 1)]; e != null; e = e.next) {</span>
+<span class="nc bnc" id="L461" title="All 4 branches missed.">                    if (hash == e.hash &amp;&amp; object == e.objectRef.get()) {</span>
+<span class="nc bnc" id="L462" title="All 2 branches missed.">                        if ((proxy = e.proxyRef.get()) != null) return proxy;</span>
+                        // entry exists, proxy has been gc'ed. replace entry.
+<span class="nc" id="L464">                        remove(table, hash, e);</span>
+<span class="nc" id="L465">                        potentialNewSize--;</span>
+<span class="nc" id="L466">                        break;</span>
+                    }
+                }
+<span class="nc" id="L469">                proxy = cache.allocateProxy(object, allocator);</span>
+<span class="nc" id="L470">                e = new Entry&lt;T&gt;(object, hash, proxy, cache.referenceType, table[index], referenceQueue);</span>
+<span class="nc" id="L471">                table[index] = e;</span>
+<span class="nc" id="L472">                tableSize = potentialNewSize;</span>
+<span class="nc" id="L473">                entryTable = table; // write-volatile</span>
+<span class="nc" id="L474">                return proxy;</span>
+            } finally {
+<span class="nc" id="L476">                unlock();</span>
+            }
+        }
+        
+        T get(Object object, int hash) {
+            Entry&lt;T&gt;[] table;
+<span class="nc bnc" id="L482" title="All 2 branches missed.">            for (Entry&lt;T&gt; e = (table = entryTable)[hash &amp; table.length - 1]; e != null; e = e.next) {</span>
+<span class="nc bnc" id="L483" title="All 4 branches missed.">                if (hash == e.hash &amp;&amp; object == e.objectRef.get()) {</span>
+<span class="nc" id="L484">                    return e.proxyRef.get();</span>
+                }
+            }
+<span class="nc" id="L487">            return null;</span>
+        }
+
+        @SuppressWarnings(&quot;unchecked&quot;)
+        static final &lt;T,A&gt; Segment&lt;T,A&gt;[] newArray(int size) {
+<span class="fc" id="L492">            return new Segment[size];</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

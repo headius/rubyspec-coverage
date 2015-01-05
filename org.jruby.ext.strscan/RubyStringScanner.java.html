@@ -1,0 +1,594 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyStringScanner.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.strscan</a> &gt; <span class="el_source">RubyStringScanner.java</span></div><h1>RubyStringScanner.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.ext.strscan;
+
+import org.jcodings.Encoding;
+import org.joni.Matcher;
+import org.joni.Option;
+import org.joni.Regex;
+import org.joni.Region;
+import org.jruby.Ruby;
+import org.jruby.RubyBoolean;
+import org.jruby.RubyClass;
+import org.jruby.RubyException;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyNumeric;
+import org.jruby.RubyObject;
+import org.jruby.RubyRegexp;
+import org.jruby.RubyString;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.common.IRubyWarnings.ID;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
+import org.jruby.util.StringSupport;
+
+import static org.jruby.runtime.Visibility.PRIVATE;
+
+/**
+ * @author kscott
+ *
+ */
+<span class="nc bnc" id="L60" title="All 2 branches missed.">@JRubyClass(name=&quot;StringScanner&quot;)</span>
+public class RubyStringScanner extends RubyObject {
+
+    private RubyString str;
+<span class="nc" id="L64">    private int pos = 0;</span>
+<span class="nc" id="L65">    private int lastPos = -1;</span>
+
+    private Region regs;
+<span class="nc" id="L68">    private int beg = -1;</span>
+<span class="nc" id="L69">    private int end = -1;</span>
+    // not to be confused with RubyObject's flags
+    private int scannerFlags;
+
+    private static final int MATCHED_STR_SCN_F = 1 &lt;&lt; 11;     
+    
+<span class="nc" id="L75">    private static ObjectAllocator STRINGSCANNER_ALLOCATOR = new ObjectAllocator() {</span>
+        @Override
+        public IRubyObject allocate(Ruby runtime, RubyClass klass) {
+<span class="nc" id="L78">            return new RubyStringScanner(runtime, klass);</span>
+        }
+    };
+
+    public static RubyClass createScannerClass(final Ruby runtime) {
+<span class="nc" id="L83">        RubyClass scannerClass = runtime.defineClass(&quot;StringScanner&quot;, runtime.getObject(), STRINGSCANNER_ALLOCATOR);</span>
+<span class="nc" id="L84">        scannerClass.defineAnnotatedMethods(RubyStringScanner.class);</span>
+<span class="nc" id="L85">        ThreadContext context = runtime.getCurrentContext();</span>
+<span class="nc" id="L86">        scannerClass.setConstant(&quot;Version&quot;, runtime.newString(&quot;0.7.0&quot;).freeze(context));</span>
+<span class="nc" id="L87">        scannerClass.setConstant(&quot;Id&quot;, runtime.newString(&quot;$Id: strscan.c 13506 2007-09-24 08:56:24Z nobu $&quot;).freeze(context));</span>
+
+<span class="nc" id="L89">        RubyClass standardError = runtime.getStandardError();</span>
+<span class="nc" id="L90">        RubyClass error = scannerClass.defineClassUnder(</span>
+<span class="nc" id="L91">                &quot;Error&quot;, standardError, standardError.getAllocator());</span>
+
+<span class="nc" id="L93">        RubyClass objClass = runtime.getObject();</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        if (!objClass.isConstantDefined(&quot;ScanError&quot;)) {</span>
+<span class="nc" id="L95">            objClass.defineConstant(&quot;ScanError&quot;, error);</span>
+        }
+
+<span class="nc" id="L98">        return scannerClass;</span>
+    }
+
+    private void clearMatched() {
+<span class="nc" id="L102">        scannerFlags &amp;= ~MATCHED_STR_SCN_F;</span>
+<span class="nc" id="L103">    }</span>
+
+    private void setMatched() {
+<span class="nc" id="L106">        scannerFlags |= MATCHED_STR_SCN_F;</span>
+<span class="nc" id="L107">    }</span>
+
+    private boolean isMatched() {
+<span class="nc bnc" id="L110" title="All 2 branches missed.">        return (scannerFlags &amp; MATCHED_STR_SCN_F) != 0;</span>
+    }
+    
+    private void check() {
+<span class="nc bnc" id="L114" title="All 2 branches missed.">        if (str == null) throw getRuntime().newArgumentError(&quot;uninitialized StringScanner object&quot;);</span>
+<span class="nc" id="L115">    }</span>
+
+    protected RubyStringScanner(Ruby runtime, RubyClass type) {
+<span class="nc" id="L118">        super(runtime, type);</span>
+<span class="nc" id="L119">    }</span>
+
+    // second argument is allowed, but ignored (MRI)
+    @JRubyMethod(required = 1, optional = 1, visibility = PRIVATE)
+    public IRubyObject initialize(IRubyObject[] args, Block unusedBlock) {
+<span class="nc" id="L124">        str = args[0].convertToString();        </span>
+<span class="nc" id="L125">        return this;</span>
+    }
+    
+    @JRubyMethod(visibility = PRIVATE)
+    @Override
+    public IRubyObject initialize_copy(IRubyObject other) {
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        if (this == other) return this;</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">        if (!(other instanceof RubyStringScanner)) {</span>
+<span class="nc" id="L133">            throw getRuntime().newTypeError(&quot;wrong argument type &quot;</span>
+<span class="nc" id="L134">                    + other.getMetaClass() + &quot; (expected StringScanner)&quot;);</span>
+        }
+
+<span class="nc" id="L137">        RubyStringScanner otherScanner = (RubyStringScanner)other;</span>
+<span class="nc" id="L138">        str = otherScanner.str;</span>
+<span class="nc" id="L139">        pos = otherScanner.pos;</span>
+<span class="nc" id="L140">        lastPos = otherScanner.lastPos;</span>
+<span class="nc" id="L141">        scannerFlags = otherScanner.scannerFlags;</span>
+
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        regs = otherScanner.regs != null ? otherScanner.regs.clone() : null;</span>
+<span class="nc" id="L144">        beg = otherScanner.beg;</span>
+<span class="nc" id="L145">        end = otherScanner.end;</span>
+
+<span class="nc" id="L147">        return this;</span>
+    }
+    
+    @JRubyMethod(name = &quot;reset&quot;)
+    public IRubyObject reset() {
+<span class="nc" id="L152">        check();</span>
+<span class="nc" id="L153">        pos = 0;</span>
+<span class="nc" id="L154">        clearMatched();</span>
+<span class="nc" id="L155">        return this;</span>
+    }
+    
+    @JRubyMethod(name = &quot;terminate&quot;)
+    public IRubyObject terminate() {
+<span class="nc" id="L160">        check();</span>
+<span class="nc" id="L161">        pos = str.getByteList().getRealSize();</span>
+<span class="nc" id="L162">        clearMatched();</span>
+<span class="nc" id="L163">        return this;</span>
+    }
+    
+    @JRubyMethod(name = &quot;clear&quot;)
+    public IRubyObject clear(ThreadContext context) {
+<span class="nc" id="L168">        check();</span>
+<span class="nc" id="L169">        Ruby runtime = context.runtime;</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        if (runtime.isVerbose()) {</span>
+<span class="nc" id="L171">            runtime.getWarnings().warning(ID.DEPRECATED_METHOD, &quot;StringScanner#clear is obsolete; use #terminate instead&quot;);</span>
+        }
+<span class="nc" id="L173">        return terminate();</span>
+    }
+    
+    @JRubyMethod(name = &quot;string&quot;)
+    public RubyString string() {
+<span class="nc" id="L178">        return str;</span>
+    }
+
+    @JRubyMethod(name = &quot;string=&quot;, required = 1)
+    public IRubyObject set_string(ThreadContext context, IRubyObject str) {
+<span class="nc" id="L183">        this.str = (RubyString) str.convertToString().strDup(context.runtime).freeze(context);</span>
+<span class="nc" id="L184">        pos = 0;</span>
+<span class="nc" id="L185">        clearMatched();</span>
+<span class="nc" id="L186">        return str;</span>
+    }
+
+    @JRubyMethod(name = {&quot;concat&quot;, &quot;&lt;&lt;&quot;}, required = 1)
+    public IRubyObject concat(IRubyObject obj) {
+<span class="nc" id="L191">        check();</span>
+<span class="nc" id="L192">        str.append(obj); // append will call convertToString()</span>
+<span class="nc" id="L193">        return this;</span>
+    }
+    
+    @JRubyMethod(name = {&quot;pos&quot;, &quot;pointer&quot;})
+    public RubyFixnum pos() {
+<span class="nc" id="L198">        check();</span>
+<span class="nc" id="L199">        return RubyFixnum.newFixnum(getRuntime(), pos);</span>
+    }
+
+    @JRubyMethod(name = {&quot;pos=&quot;, &quot;pointer=&quot;})
+    public IRubyObject set_pos(IRubyObject pos) {
+<span class="nc" id="L204">        check();</span>
+<span class="nc" id="L205">        int i = RubyNumeric.num2int(pos);</span>
+<span class="nc" id="L206">        int size = str.getByteList().getRealSize();</span>
+<span class="nc bnc" id="L207" title="All 2 branches missed.">        if (i &lt; 0) i += size;</span>
+<span class="nc bnc" id="L208" title="All 4 branches missed.">        if (i &lt; 0 || i &gt; size) throw getRuntime().newRangeError(&quot;index out of range.&quot;);</span>
+<span class="nc" id="L209">        this.pos = i;</span>
+<span class="nc" id="L210">        return RubyFixnum.newFixnum(getRuntime(), i);</span>
+    }
+
+    private IRubyObject extractRange(Ruby runtime, int beg, int end) {
+<span class="nc" id="L214">        int size = str.getByteList().getRealSize();</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">        if (beg &gt; size) return getRuntime().getNil();</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">        if (end &gt; size) end = size;</span>
+<span class="nc" id="L217">        return str.makeSharedString19(runtime, beg, end - beg);</span>
+    }
+    
+    private IRubyObject extractBegLen(Ruby runtime, int beg, int len) {
+<span class="nc bnc" id="L221" title="All 4 branches missed.">        assert len &gt;= 0;</span>
+<span class="nc" id="L222">        int size = str.getByteList().getRealSize();</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">        if (beg &gt; size) return getRuntime().getNil();</span>
+<span class="nc bnc" id="L224" title="All 2 branches missed.">        if (beg + len &gt; size) len = size - beg;</span>
+<span class="nc" id="L225">        return str.makeSharedString19(runtime, beg, len);</span>
+    }
+    
+    private IRubyObject scan(IRubyObject regex, boolean succptr, boolean getstr, boolean headonly) {
+<span class="nc" id="L229">        Ruby runtime = getRuntime();</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">        if (!(regex instanceof RubyRegexp)) throw runtime.newTypeError(&quot;wrong argument type &quot; + regex.getMetaClass() + &quot; (expected Regexp)&quot;);</span>
+<span class="nc" id="L231">        check();</span>
+        
+<span class="nc" id="L233">        Regex pattern = ((RubyRegexp)regex).preparePattern(str);</span>
+
+<span class="nc" id="L235">        clearMatched();</span>
+<span class="nc" id="L236">        int rest = str.getByteList().getRealSize() - pos;</span>
+<span class="nc bnc" id="L237" title="All 2 branches missed.">        if (rest &lt; 0) return getRuntime().getNil();</span>
+
+<span class="nc" id="L239">        ByteList value = str.getByteList();</span>
+<span class="nc" id="L240">        Matcher matcher = pattern.matcher(value.getUnsafeBytes(), value.getBegin() + pos, value.getBegin() + value.getRealSize());</span>
+
+        final int ret;
+<span class="nc bnc" id="L243" title="All 2 branches missed.">        if (headonly) {</span>
+<span class="nc" id="L244">            ret = RubyRegexp.matcherMatch(runtime, matcher, value.getBegin() + pos, value.getBegin() + value.getRealSize(), Option.NONE);</span>
+        } else {
+<span class="nc" id="L246">            ret = RubyRegexp.matcherSearch(runtime, matcher, value.getBegin() + pos, value.getBegin() + value.getRealSize(), Option.NONE);</span>
+        }
+
+<span class="nc" id="L249">        regs = matcher.getRegion(); </span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">        if (regs == null) {</span>
+<span class="nc" id="L251">            beg = matcher.getBegin();</span>
+<span class="nc" id="L252">            end = matcher.getEnd();</span>
+        } else {
+<span class="nc" id="L254">            beg = regs.beg[0];</span>
+<span class="nc" id="L255">            end = regs.end[0];</span>
+        }
+
+<span class="nc bnc" id="L258" title="All 2 branches missed.">        if (ret &lt; 0) return getRuntime().getNil();</span>
+<span class="nc" id="L259">        setMatched();</span>
+
+<span class="nc" id="L261">        lastPos = pos;</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">        if (succptr) pos += end;</span>
+<span class="nc bnc" id="L263" title="All 2 branches missed.">        return  getstr ? extractBegLen(getRuntime(), lastPos, end) : RubyFixnum.newFixnum(getRuntime(), end);</span>
+    }
+    
+    @JRubyMethod(name = &quot;scan&quot;, required = 1)
+    public IRubyObject scan(IRubyObject regex) {
+<span class="nc" id="L268">        return scan(regex, true, true, true);</span>
+    }
+    
+    @JRubyMethod(name = &quot;match?&quot;, required = 1)
+    public IRubyObject match_p(IRubyObject regex) {
+<span class="nc" id="L273">        return scan(regex, false, false, true);</span>
+    }
+    
+    @JRubyMethod(name = &quot;skip&quot;, required = 1)
+    public IRubyObject skip(IRubyObject regex) {
+<span class="nc" id="L278">        return scan(regex, true, false, true);</span>
+    }
+    
+    @JRubyMethod(name = &quot;check&quot;, required = 1)
+    public IRubyObject check(IRubyObject regex) {
+<span class="nc" id="L283">        return scan(regex, false, true, true);</span>
+    }
+    
+    @JRubyMethod(name = &quot;scan_full&quot;, required = 3)
+    public IRubyObject scan_full(IRubyObject regex, IRubyObject s, IRubyObject f) {
+<span class="nc" id="L288">        return scan(regex, s.isTrue(), f.isTrue(), true);</span>
+    }
+
+    @JRubyMethod(name = &quot;scan_until&quot;, required = 1)
+    public IRubyObject scan_until(IRubyObject regex) {
+<span class="nc" id="L293">        return scan(regex, true, true, false);</span>
+    }
+    
+    @JRubyMethod(name = &quot;exist?&quot;, required = 1)
+    public IRubyObject exist_p(IRubyObject regex) {
+<span class="nc" id="L298">        return scan(regex, false, false, false);        </span>
+    }
+    
+    @JRubyMethod(name = &quot;skip_until&quot;, required = 1)
+    public IRubyObject skip_until(IRubyObject regex) {
+<span class="nc" id="L303">        return scan(regex, true, false, false);</span>
+    }
+
+    @JRubyMethod(name = &quot;check_until&quot;, required = 1)
+    public IRubyObject check_until(IRubyObject regex) {
+<span class="nc" id="L308">        return scan(regex, false, true, false);        </span>
+    }
+    
+    @JRubyMethod(name = &quot;search_full&quot;, required = 3)
+    public IRubyObject search_full(IRubyObject regex, IRubyObject s, IRubyObject f) {
+<span class="nc" id="L313">        return scan(regex, s.isTrue(), f.isTrue(), false);</span>
+    }
+
+    private void adjustRegisters() {
+<span class="nc" id="L317">        beg = 0;</span>
+<span class="nc" id="L318">        end = pos - lastPos;</span>
+<span class="nc" id="L319">        regs = null;</span>
+<span class="nc" id="L320">    }</span>
+
+    public IRubyObject getch(ThreadContext context) {
+<span class="nc" id="L323">        return getch19(context);</span>
+    }
+
+    @JRubyMethod(name = &quot;getch&quot;)
+    public IRubyObject getch19(ThreadContext context) {
+<span class="nc" id="L328">        return getchCommon(context, true);</span>
+    }
+
+    public IRubyObject getchCommon(ThreadContext context, boolean is1_9) {
+<span class="nc" id="L332">        check();</span>
+<span class="nc" id="L333">        clearMatched();</span>
+
+<span class="nc" id="L335">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L336">        ByteList value = str.getByteList();</span>
+
+<span class="nc bnc" id="L338" title="All 2 branches missed.">        if (pos &gt;= value.getRealSize()) return runtime.getNil();</span>
+        int len;
+<span class="nc bnc" id="L340" title="All 2 branches missed.">        if (is1_9) {</span>
+<span class="nc" id="L341">            Encoding enc = str.getEncoding();</span>
+<span class="nc bnc" id="L342" title="All 2 branches missed.">            len = enc.isSingleByte() ? 1 : StringSupport.length(enc, value.getUnsafeBytes(), value.getBegin() + pos, value.getBegin() + value.getRealSize());</span>
+<span class="nc" id="L343">        } else {</span>
+<span class="nc" id="L344">            Encoding enc = runtime.getKCode().getEncoding();</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">            len = enc.isSingleByte() ? 1 : enc.length(value.getUnsafeBytes(), value.getBegin() + pos, value.getBegin() + value.getRealSize());</span>
+        }
+
+<span class="nc bnc" id="L348" title="All 2 branches missed.">        if (pos + len &gt; value.getRealSize()) len = value.getRealSize() - pos;</span>
+<span class="nc" id="L349">        lastPos = pos;</span>
+<span class="nc" id="L350">        pos += len;</span>
+
+<span class="nc" id="L352">        setMatched();</span>
+<span class="nc" id="L353">        adjustRegisters();</span>
+
+<span class="nc" id="L355">        return extractRange(runtime, lastPos + beg, lastPos + end);</span>
+    }
+    
+    @JRubyMethod(name = &quot;get_byte&quot;)
+    public IRubyObject get_byte(ThreadContext context) {
+<span class="nc" id="L360">        check();</span>
+<span class="nc" id="L361">        clearMatched();</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">        if (pos &gt;= str.getByteList().getRealSize()) return getRuntime().getNil();</span>
+        
+<span class="nc" id="L364">        lastPos = pos;</span>
+<span class="nc" id="L365">        pos++;</span>
+        
+<span class="nc" id="L367">        setMatched();</span>
+<span class="nc" id="L368">        adjustRegisters();</span>
+
+<span class="nc" id="L370">        return extractRange(context.runtime, lastPos + beg, lastPos + end);</span>
+    }
+    
+    @JRubyMethod(name = &quot;getbyte&quot;)
+    public IRubyObject getbyte(ThreadContext context) {
+<span class="nc" id="L375">        Ruby runtime = context.runtime;</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">        if (runtime.isVerbose()) { </span>
+<span class="nc" id="L377">            runtime.getWarnings().warning(ID.DEPRECATED_METHOD,</span>
+                    &quot;StringScanner#getbyte is obsolete; use #get_byte instead&quot;);
+        }
+<span class="nc" id="L380">        return get_byte(context);</span>
+    }
+
+    @JRubyMethod(name = &quot;peek&quot;, required = 1)
+    public IRubyObject peek(ThreadContext context, IRubyObject length) {
+<span class="nc" id="L385">        check();</span>
+
+<span class="nc" id="L387">        int len = RubyNumeric.num2int(length);</span>
+<span class="nc bnc" id="L388" title="All 2 branches missed.">        if (len &lt; 0) {</span>
+<span class="nc" id="L389">            throw context.runtime.newArgumentError(&quot;negative string size (or size too big)&quot;);</span>
+        }
+
+<span class="nc" id="L392">        ByteList value = str.getByteList();</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">        if (pos &gt;= value.getRealSize()) return RubyString.newEmptyString(getRuntime()).infectBy(str);</span>
+<span class="nc bnc" id="L394" title="All 2 branches missed.">        if (pos + len &gt; value.getRealSize()) len = value.getRealSize() - pos;</span>
+
+<span class="nc" id="L396">        return extractBegLen(context.runtime, pos, len);</span>
+    }
+
+    @JRubyMethod(name = &quot;peep&quot;, required = 1)
+    public IRubyObject peep(ThreadContext context, IRubyObject length) {
+<span class="nc" id="L401">        Ruby runtime = context.runtime;</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">        if (runtime.isVerbose()) {</span>
+<span class="nc" id="L403">            runtime.getWarnings().warning(</span>
+                    ID.DEPRECATED_METHOD, &quot;StringScanner#peep is obsolete; use #peek instead&quot;);
+        }
+<span class="nc" id="L406">        return peek(context, length);</span>
+    }
+    
+    @JRubyMethod(name = &quot;unscan&quot;)
+    public IRubyObject unscan() {
+<span class="nc" id="L411">        check();</span>
+<span class="nc" id="L412">        Ruby runtime = getRuntime();</span>
+
+<span class="nc bnc" id="L414" title="All 2 branches missed.">        if (!isMatched()) {</span>
+<span class="nc" id="L415">            RubyClass errorClass = runtime.getClass(&quot;StringScanner&quot;).getClass(&quot;Error&quot;);</span>
+<span class="nc" id="L416">            throw new RaiseException(RubyException.newException(</span>
+                    runtime, errorClass, &quot;unscan failed: previous match had failed&quot;));
+        }
+<span class="nc" id="L419">        pos = lastPos;</span>
+<span class="nc" id="L420">        clearMatched();</span>
+<span class="nc" id="L421">        return this;</span>
+    }
+    
+    @JRubyMethod(name = &quot;beginning_of_line?&quot;, alias = &quot;bol?&quot;)
+    public IRubyObject bol_p() {
+<span class="nc" id="L426">        check();</span>
+<span class="nc" id="L427">        ByteList value = str.getByteList();</span>
+<span class="nc bnc" id="L428" title="All 2 branches missed.">        if (pos &gt; value.getRealSize()) return getRuntime().getNil();</span>
+<span class="nc bnc" id="L429" title="All 2 branches missed.">        if (pos == 0) return getRuntime().getTrue();</span>
+<span class="nc bnc" id="L430" title="All 2 branches missed.">        return value.getUnsafeBytes()[(value.getBegin() + pos) - 1] == (byte)'\n' ? getRuntime().getTrue() : getRuntime().getFalse();</span>
+    }
+    
+    @JRubyMethod(name = &quot;eos?&quot;)
+    public RubyBoolean eos_p(ThreadContext context) {
+<span class="nc" id="L435">        check();</span>
+<span class="nc bnc" id="L436" title="All 2 branches missed.">        return pos &gt;= str.getByteList().getRealSize() ? context.runtime.getTrue() : context.runtime.getFalse();</span>
+    }
+    
+    @JRubyMethod(name = &quot;empty?&quot;)
+    public RubyBoolean empty_p(ThreadContext context) {
+<span class="nc" id="L441">        Ruby runtime = context.runtime;</span>
+<span class="nc bnc" id="L442" title="All 2 branches missed.">        if (runtime.isVerbose()) {</span>
+<span class="nc" id="L443">            runtime.getWarnings().warning(ID.DEPRECATED_METHOD, &quot;StringScanner#empty? is obsolete; use #eos? instead&quot;);</span>
+        }
+<span class="nc" id="L445">        return eos_p(context);</span>
+    }
+    
+    @JRubyMethod(name = &quot;rest?&quot;)
+    public RubyBoolean rest_p(ThreadContext context) {
+<span class="nc" id="L450">        check();</span>
+<span class="nc bnc" id="L451" title="All 2 branches missed.">        return pos &gt;= str.getByteList().getRealSize() ? context.runtime.getFalse() : context.runtime.getTrue();</span>
+    }
+
+    @JRubyMethod(name = &quot;matched?&quot;)
+    public RubyBoolean matched_p(ThreadContext context) {
+<span class="nc" id="L456">        check();</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">        return isMatched() ? context.runtime.getTrue() : context.runtime.getFalse();</span>
+    }
+
+    @JRubyMethod(name = &quot;matched&quot;)
+    public IRubyObject matched(ThreadContext context) {
+<span class="nc" id="L462">        check();</span>
+<span class="nc bnc" id="L463" title="All 2 branches missed.">        if (!isMatched()) return getRuntime().getNil();</span>
+<span class="nc" id="L464">        return extractRange(context.runtime, lastPos + beg, lastPos + end);</span>
+    }
+    
+    @JRubyMethod(name = &quot;matched_size&quot;)
+    public IRubyObject matched_size() {
+<span class="nc" id="L469">        check();</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">        if (!isMatched()) return getRuntime().getNil();</span>
+<span class="nc" id="L471">        return RubyFixnum.newFixnum(getRuntime(), end - beg);</span>
+    }
+
+    @JRubyMethod(name = &quot;matchedsize&quot;)
+    public IRubyObject matchedsize(ThreadContext context) {
+<span class="nc" id="L476">        Ruby runtime = context.runtime;</span>
+<span class="nc bnc" id="L477" title="All 2 branches missed.">        if (runtime.isVerbose()) {</span>
+<span class="nc" id="L478">            runtime.getWarnings().warning(ID.DEPRECATED_METHOD, &quot;StringScanner#matchedsize is obsolete; use #matched_size instead&quot;);</span>
+        }
+<span class="nc" id="L480">        return matched_size();        </span>
+    }
+
+    @JRubyMethod(name = &quot;[]&quot;, required = 1)
+    public IRubyObject op_aref(ThreadContext context, IRubyObject idx) {
+<span class="nc" id="L485">        check();</span>
+<span class="nc bnc" id="L486" title="All 2 branches missed.">        if (!isMatched()) {</span>
+<span class="nc" id="L487">            return context.runtime.getNil();</span>
+        }
+<span class="nc" id="L489">        int i = RubyNumeric.num2int(idx);</span>
+        
+<span class="nc bnc" id="L491" title="All 2 branches missed.">        int numRegs = regs == null ? 1 : regs.numRegs;</span>
+<span class="nc bnc" id="L492" title="All 2 branches missed.">        if (i &lt; 0) i += numRegs;</span>
+<span class="nc bnc" id="L493" title="All 4 branches missed.">        if (i &lt; 0 || i &gt;= numRegs) {</span>
+<span class="nc" id="L494">            return context.runtime.getNil();</span>
+        }
+        
+<span class="nc bnc" id="L497" title="All 2 branches missed.">        if (regs == null) {</span>
+<span class="nc bnc" id="L498" title="All 4 branches missed.">            assert i == 0;</span>
+<span class="nc bnc" id="L499" title="All 2 branches missed.">            if (beg == -1) return getRuntime().getNil();</span>
+<span class="nc" id="L500">            return extractRange(context.runtime, lastPos + beg, lastPos + end);</span>
+        } else {
+<span class="nc bnc" id="L502" title="All 2 branches missed.">            if (regs.beg[i] == -1) return getRuntime().getNil();</span>
+<span class="nc" id="L503">            return extractRange(context.runtime, lastPos + regs.beg[i], lastPos + regs.end[i]);</span>
+        }
+    }
+
+    @JRubyMethod(name = &quot;pre_match&quot;)
+    public IRubyObject pre_match(ThreadContext context) {
+<span class="nc" id="L509">        check();</span>
+<span class="nc bnc" id="L510" title="All 2 branches missed.">        if (!isMatched()) {</span>
+<span class="nc" id="L511">            return context.runtime.getNil();</span>
+        }
+<span class="nc" id="L513">        return extractRange(context.runtime, 0, lastPos + beg);</span>
+    }
+    
+    @JRubyMethod(name = &quot;post_match&quot;)
+    public IRubyObject post_match(ThreadContext context) {
+<span class="nc" id="L518">        check();</span>
+<span class="nc bnc" id="L519" title="All 2 branches missed.">        if (!isMatched()) {</span>
+<span class="nc" id="L520">            return context.runtime.getNil();</span>
+        }
+<span class="nc" id="L522">        return extractRange(context.runtime, lastPos + end, str.getByteList().getRealSize());</span>
+    }
+    
+    @JRubyMethod(name = &quot;rest&quot;)
+    public IRubyObject rest(ThreadContext context) {
+<span class="nc" id="L527">        check();</span>
+<span class="nc" id="L528">        ByteList value = str.getByteList();</span>
+<span class="nc bnc" id="L529" title="All 2 branches missed.">        if (pos &gt;= value.getRealSize()) {</span>
+<span class="nc" id="L530">            return RubyString.newEmptyString(context.runtime).infectBy(str);</span>
+        }
+<span class="nc" id="L532">        return extractRange(context.runtime, pos, value.getRealSize());</span>
+    }
+    
+    @JRubyMethod(name = &quot;rest_size&quot;)
+    public RubyFixnum rest_size() {
+<span class="nc" id="L537">        check();</span>
+<span class="nc" id="L538">        ByteList value = str.getByteList();</span>
+<span class="nc bnc" id="L539" title="All 2 branches missed.">        if (pos &gt;= value.getRealSize()) return RubyFixnum.zero(getRuntime());</span>
+<span class="nc" id="L540">        return RubyFixnum.newFixnum(getRuntime(), value.getRealSize() - pos);</span>
+    }
+
+    @JRubyMethod(name = &quot;restsize&quot;)
+    public RubyFixnum restsize(ThreadContext context) {
+<span class="nc" id="L545">        Ruby runtime = context.runtime;</span>
+<span class="nc bnc" id="L546" title="All 2 branches missed.">        if (runtime.isVerbose()) {</span>
+<span class="nc" id="L547">            runtime.getWarnings().warning(ID.DEPRECATED_METHOD, &quot;StringScanner#restsize is obsolete; use #rest_size instead&quot;);</span>
+        }
+<span class="nc" id="L549">        return rest_size();</span>
+    }
+    
+    @JRubyMethod(name = &quot;inspect&quot;)
+    @Override
+    public IRubyObject inspect() {
+<span class="nc bnc" id="L555" title="All 2 branches missed.">        if (str == null) return inspect(&quot;(uninitialized)&quot;);</span>
+<span class="nc bnc" id="L556" title="All 2 branches missed.">        if (pos &gt;= str.getByteList().getRealSize()) return inspect(&quot;fin&quot;);</span>
+<span class="nc bnc" id="L557" title="All 2 branches missed.">        if (pos == 0) return inspect(pos + &quot;/&quot; + str.getByteList().getRealSize() + &quot; @ &quot; + inspect2());</span>
+<span class="nc" id="L558">        return inspect(pos + &quot;/&quot; + str.getByteList().getRealSize() + &quot; &quot; + inspect1() + &quot; @ &quot; + inspect2());</span>
+    }
+    
+    private IRubyObject inspect(String msg) {
+<span class="nc" id="L562">        RubyString result = getRuntime().newString(&quot;#&lt;&quot; + getMetaClass() + &quot; &quot; + msg + &quot;&gt;&quot;); </span>
+<span class="nc bnc" id="L563" title="All 2 branches missed.">        if (str != null) result.infectBy(str);</span>
+<span class="nc" id="L564">        return result;</span>
+    }
+    
+    private static final int INSPECT_LENGTH = 5;
+    
+    private IRubyObject inspect1() {
+<span class="nc bnc" id="L570" title="All 2 branches missed.">        if (pos == 0) return RubyString.newEmptyString(getRuntime());</span>
+<span class="nc bnc" id="L571" title="All 2 branches missed.">        if (pos &gt; INSPECT_LENGTH) {</span>
+<span class="nc" id="L572">            return RubyString.newStringNoCopy(getRuntime(), &quot;...&quot;.getBytes()).</span>
+<span class="nc" id="L573">            append(str.substr(getRuntime(), pos - INSPECT_LENGTH, INSPECT_LENGTH)).inspect();</span>
+        } else {
+<span class="nc" id="L575">            return str.substr(getRuntime(), 0, pos).inspect();</span>
+        }
+    }
+    
+    private IRubyObject inspect2() {
+<span class="nc bnc" id="L580" title="All 2 branches missed.">        if (pos &gt;= str.getByteList().getRealSize()) return RubyString.newEmptyString(getRuntime());</span>
+<span class="nc" id="L581">        int len = str.getByteList().getRealSize() - pos;</span>
+<span class="nc bnc" id="L582" title="All 2 branches missed.">        if (len &gt; INSPECT_LENGTH) {</span>
+<span class="nc" id="L583">            return ((RubyString)str.substr(getRuntime(), pos, INSPECT_LENGTH)).cat(&quot;...&quot;.getBytes()).inspect();</span>
+        } else {
+<span class="nc" id="L585">            return str.substr(getRuntime(), pos, len).inspect();</span>
+        }
+    }
+
+    @JRubyMethod(name = &quot;must_C_version&quot;, meta = true)
+    public static IRubyObject mustCversion(IRubyObject recv) {
+<span class="nc" id="L591">        return recv;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

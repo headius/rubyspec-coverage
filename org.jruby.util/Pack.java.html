@@ -1,0 +1,2329 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Pack.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util</a> &gt; <span class="el_source">Pack.java</span></div><h1>Pack.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2003-2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2005 Derek Berner &lt;derek.berner@state.nm.us&gt;
+ * Copyright (C) 2006 Evan Buswell &lt;ebuswell@gmail.com&gt;
+ * Copyright (C) 2007 Nick Sieger &lt;nicksieger@gmail.com&gt;
+ * Copyright (C) 2009 Joseph LaFata &lt;joe@quibb.org&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.util;
+
+import java.math.BigInteger;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import org.jcodings.Encoding;
+
+import org.jcodings.specific.ASCIIEncoding;
+import org.jcodings.specific.USASCIIEncoding;
+import org.jcodings.specific.UTF8Encoding;
+import org.jruby.platform.Platform;
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyBignum;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyFloat;
+import org.jruby.RubyNumeric;
+import org.jruby.RubyObject;
+import org.jruby.RubyString;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+
+<span class="nc" id="L58">public class Pack {</span>
+<span class="fc" id="L59">    private static final byte[] sSp10 = &quot;          &quot;.getBytes();</span>
+<span class="fc" id="L60">    private static final byte[] sNil10 = &quot;\000\000\000\000\000\000\000\000\000\000&quot;.getBytes();</span>
+    private static final int IS_STAR = -1;
+<span class="fc" id="L62">    private static final ASCIIEncoding ASCII = ASCIIEncoding.INSTANCE;</span>
+<span class="fc" id="L63">    private static final USASCIIEncoding USASCII = USASCIIEncoding.INSTANCE;</span>
+<span class="fc" id="L64">    private static final UTF8Encoding UTF8 = UTF8Encoding.INSTANCE;</span>
+    /** Native pack type.
+     **/
+    private static final String NATIVE_CODES = &quot;sSiIlL&quot;;
+    private static final String MAPPED_CODES = &quot;sSiIqQ&quot;;
+    
+    private static final char BE = '&gt;' - 1; // 61, only 1 char &quot;free&quot; b/w q and s
+    private static final char LE = '&lt;'; // 60
+<span class="fc" id="L72">    private static final String ENDIANESS_CODES = new String(new char[] {</span>
+            's' + BE, 'S' + BE/*n*/, 'i' + BE, 'I' + BE, 'l' + BE, 'L' + BE/*N*/, 'q' + BE, 'Q' + BE,
+            's' + LE, 'S' + LE/*v*/, 'i' + LE, 'I' + LE, 'l' + LE, 'L' + LE/*V*/, 'q' + LE, 'Q' + LE});
+    private static final String UNPACK_IGNORE_NULL_CODES = &quot;cC&quot;;
+    private static final String PACK_IGNORE_NULL_CODES = &quot;cCiIlLnNqQsSvV&quot;;
+    private static final String PACK_IGNORE_NULL_CODES_WITH_MODIFIERS = &quot;lLsS&quot;;
+    private static final String sTooFew = &quot;too few arguments&quot;;
+    private static final byte[] hex_table;
+    private static final byte[] uu_table;
+    private static final byte[] b64_table;
+    private static final byte[] sHexDigits;
+<span class="fc" id="L83">    private static final int[] b64_xtable = new int[256];</span>
+<span class="fc" id="L84">    private static final Converter[] converters = new Converter[256];</span>
+
+    private static long num2quad(IRubyObject arg) {
+<span class="pc bpc" id="L87" title="1 of 2 branches missed.">        if (arg == arg.getRuntime().getNil()) {</span>
+<span class="nc" id="L88">            return 0L;</span>
+        }
+<span class="fc bfc" id="L90" title="All 2 branches covered.">        else if (arg instanceof RubyBignum) {</span>
+<span class="fc" id="L91">            BigInteger big = ((RubyBignum)arg).getValue();</span>
+<span class="fc" id="L92">            return big.longValue();</span>
+        }
+<span class="fc" id="L94">        return RubyNumeric.num2long(arg);</span>
+    }
+
+    private static float obj2flt(Ruby runtime, IRubyObject o) {
+<span class="fc" id="L98">        return (float) TypeConverter.toFloat(runtime, o).getDoubleValue();        </span>
+    }
+
+    private static double obj2dbl(Ruby runtime, IRubyObject o) {
+<span class="fc" id="L102">        return TypeConverter.toFloat(runtime, o).getDoubleValue();        </span>
+    }    
+
+    static {
+<span class="fc" id="L106">        hex_table = ByteList.plain(&quot;0123456789ABCDEF&quot;);</span>
+<span class="fc" id="L107">        uu_table =</span>
+<span class="fc" id="L108">            ByteList.plain(&quot;`!\&quot;#$%&amp;'()*+,-./0123456789:;&lt;=&gt;?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_&quot;);</span>
+<span class="fc" id="L109">        b64_table =</span>
+<span class="fc" id="L110">            ByteList.plain(&quot;ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/&quot;);</span>
+<span class="fc" id="L111">        sHexDigits = ByteList.plain(&quot;0123456789abcdef0123456789ABCDEFx&quot;);</span>
+
+        // b64_xtable for decoding Base 64
+<span class="fc bfc" id="L114" title="All 2 branches covered.">        for (int i = 0; i &lt; 256; i++) {</span>
+<span class="fc" id="L115">            b64_xtable[i] = -1;</span>
+        }
+<span class="fc bfc" id="L117" title="All 2 branches covered.">        for (int i = 0; i &lt; 64; i++) {</span>
+<span class="fc" id="L118">            b64_xtable[(int)b64_table[i]] = i;</span>
+        }
+
+        // single precision, little-endian
+<span class="fc" id="L122">        converters['e'] = new Converter(4) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L124">                return RubyFloat.newFloat(runtime, decodeFloatLittleEndian(enc));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="fc" id="L129">                encodeFloatLittleEndian(result, obj2flt(runtime, o));</span>
+<span class="fc" id="L130">            }</span>
+        };
+        // single precision, big-endian
+<span class="fc" id="L133">        converters['g'] = new Converter(4) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L135">                return RubyFloat.newFloat(runtime, decodeFloatBigEndian(enc));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="fc" id="L140">                encodeFloatBigEndian(result, obj2flt(runtime, o));</span>
+<span class="fc" id="L141">            }</span>
+        };
+        // single precision, native
+<span class="fc" id="L144">        Converter tmp = new Converter(4) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="pc bpc" id="L146" title="1 of 2 branches missed.">                return RubyFloat.newFloat(runtime, </span>
+                        Platform.BYTE_ORDER == Platform.BIG_ENDIAN ? 
+<span class="pc" id="L148">                        decodeFloatBigEndian(enc) : decodeFloatLittleEndian(enc));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result) {
+<span class="pc bpc" id="L153" title="1 of 2 branches missed.">                if (Platform.BYTE_ORDER == Platform.BIG_ENDIAN) {                </span>
+<span class="nc" id="L154">                    encodeFloatBigEndian(result, obj2flt(runtime, o));</span>
+                } else {
+<span class="fc" id="L156">                    encodeFloatLittleEndian(result, obj2flt(runtime, o));</span>
+                }
+<span class="fc" id="L158">            }</span>
+        };
+<span class="fc" id="L160">        converters['F'] = tmp; // single precision, native</span>
+<span class="fc" id="L161">        converters['f'] = tmp; // single precision, native</span>
+
+        // double precision, little-endian
+<span class="fc" id="L164">        converters['E'] = new Converter(8) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L166">                return RubyFloat.newFloat(runtime, decodeDoubleLittleEndian(enc));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="fc" id="L171">                encodeDoubleLittleEndian(result, obj2dbl(runtime, o));</span>
+<span class="fc" id="L172">            }               </span>
+        };
+        // double precision, big-endian
+<span class="fc" id="L175">        converters['G'] = new Converter(8) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L177">                return RubyFloat.newFloat(runtime, decodeDoubleBigEndian(enc));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="fc" id="L182">                encodeDoubleBigEndian(result, obj2dbl(runtime, o));</span>
+<span class="fc" id="L183">            }</span>
+        };
+        // double precision, native
+<span class="fc" id="L186">        tmp = new Converter(8) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="pc bpc" id="L188" title="1 of 2 branches missed.">                if (Platform.BYTE_ORDER == Platform.BIG_ENDIAN) {</span>
+<span class="nc" id="L189">                    return RubyFloat.newFloat(runtime, decodeDoubleBigEndian(enc));</span>
+                } else {
+<span class="fc" id="L191">                    return RubyFloat.newFloat(runtime, decodeDoubleLittleEndian(enc));</span>
+                }
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="fc" id="L197">                encodeDoubleLittleEndian(result, obj2dbl(runtime, o));</span>
+<span class="fc" id="L198">            }     </span>
+        };
+<span class="fc" id="L200">        converters['D'] = tmp; // double precision, native</span>
+<span class="fc" id="L201">        converters['d'] = tmp; // double precision, native</span>
+
+        // signed short, little-endian
+<span class="fc" id="L204">        tmp = new QuadConverter(2, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L206">                return runtime.newFixnum(decodeShortUnsignedLittleEndian(enc));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="fc" id="L211">                encodeShortLittleEndian(result, overflowQuad(num2quad(o)));</span>
+<span class="fc" id="L212">            }            </span>
+        };
+<span class="fc" id="L214">        converters['v'] = tmp;</span>
+<span class="fc" id="L215">        converters['S' + LE] = tmp;</span>
+        // signed short, big-endian
+<span class="fc" id="L217">        tmp = new QuadConverter(2, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L219">                return runtime.newFixnum(decodeShortUnsignedBigEndian(enc));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result) {
+<span class="fc" id="L224">                encodeShortBigEndian(result, overflowQuad(num2quad(o)));</span>
+<span class="fc" id="L225">            }</span>
+        };
+<span class="fc" id="L227">        converters['n'] = tmp;</span>
+<span class="fc" id="L228">        converters['S' + BE] = tmp;</span>
+        // signed short, native
+<span class="fc" id="L230">        converters['s'] = new QuadConverter(2, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="pc bpc" id="L232" title="1 of 2 branches missed.">                return runtime.newFixnum(Platform.BYTE_ORDER == Platform.BIG_ENDIAN ? </span>
+<span class="pc" id="L233">                        decodeShortBigEndian(enc) : decodeShortLittleEndian(enc));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result) {
+<span class="fc" id="L238">                encodeShortByByteOrder(result, overflowQuad(num2quad(o))); // XXX: 0xffff0000 on BE?</span>
+<span class="fc" id="L239">            }</span>
+        };
+        // unsigned short, native
+<span class="fc" id="L242">        converters['S'] = new QuadConverter(2, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="pc bpc" id="L244" title="1 of 2 branches missed.">                return runtime.newFixnum(Platform.BYTE_ORDER == Platform.BIG_ENDIAN ?</span>
+<span class="pc" id="L245">                    decodeShortUnsignedBigEndian(enc) : decodeShortUnsignedLittleEndian(enc));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="fc" id="L250">                encodeShortByByteOrder(result, overflowQuad(num2quad(o)));</span>
+<span class="fc" id="L251">            }</span>
+        };
+        // signed short, little endian
+<span class="fc" id="L254">        converters['s' + LE] = new QuadConverter(2, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L256">                return runtime.newFixnum(decodeShortLittleEndian(enc));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result) {
+<span class="fc" id="L261">                encodeShortLittleEndian(result, overflowQuad(num2quad(o))); // XXX: 0xffff0000 on BE?</span>
+<span class="fc" id="L262">            }</span>
+        };
+        // signed short, big endian
+<span class="fc" id="L265">        converters['s' + BE] = new QuadConverter(2, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L267">                return runtime.newFixnum(decodeShortBigEndian(enc));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result) {
+<span class="fc" id="L272">                encodeShortBigEndian(result, overflowQuad(num2quad(o))); // XXX: 0xffff0000 on BE?</span>
+<span class="fc" id="L273">            }</span>
+        };
+
+        // signed char
+<span class="fc" id="L277">        converters['c'] = new Converter(1, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L279">                int c = enc.get();</span>
+<span class="pc bpc" id="L280" title="1 of 2 branches missed.">                return runtime.newFixnum(c &gt; (char) 127 ? c-256 : c);</span>
+            }
+
+            public void encode(Ruby runtime, IRubyObject o, ByteList result) {
+<span class="fc" id="L284">                byte c = (byte) (num2quad(o) &amp; 0xff);</span>
+<span class="fc" id="L285">                result.append(c);</span>
+<span class="fc" id="L286">            }</span>
+        };
+        // unsigned char
+<span class="fc" id="L289">        converters['C'] = new Converter(1, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L291">                return runtime.newFixnum(enc.get() &amp; 0xFF);</span>
+            }
+
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">                byte c = o == runtime.getNil() ? 0 : (byte) (num2quad(o) &amp; 0xff);</span>
+<span class="fc" id="L296">                result.append(c);</span>
+<span class="fc" id="L297">            }</span>
+        };
+
+        // unsigned long, little-endian
+<span class="fc" id="L301">        tmp = new Converter(4, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L303">                return runtime.newFixnum(decodeIntUnsignedLittleEndian(enc));</span>
+            }
+            
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="fc" id="L307">                encodeIntLittleEndian(result, (int) RubyNumeric.num2long(o));</span>
+<span class="fc" id="L308">            }</span>
+        };
+<span class="fc" id="L310">        converters['V'] = tmp;</span>
+<span class="fc" id="L311">        converters['L' + LE] = tmp;</span>
+<span class="fc" id="L312">        converters['I' + LE] = tmp;</span>
+        
+        // unsigned long, big-endian
+<span class="fc" id="L315">        tmp = new Converter(4, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L317">                return runtime.newFixnum(decodeIntUnsignedBigEndian(enc));</span>
+            }
+            
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="fc" id="L321">                encodeIntBigEndian(result, (int) RubyNumeric.num2long(o));</span>
+<span class="fc" id="L322">            }</span>
+        };
+<span class="fc" id="L324">        converters['N'] = tmp;</span>
+<span class="fc" id="L325">        converters['L' + BE] = tmp;</span>
+<span class="fc" id="L326">        converters['I' + BE] = tmp;</span>
+
+        // unsigned int, native
+<span class="fc" id="L329">        tmp = new Converter(4, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="pc bpc" id="L331" title="1 of 2 branches missed.">                if (Platform.BYTE_ORDER == Platform.BIG_ENDIAN) {</span>
+<span class="nc" id="L332">                    return runtime.newFixnum(decodeIntUnsignedBigEndian(enc));</span>
+                } else {
+<span class="fc" id="L334">                    return runtime.newFixnum(decodeIntUnsignedLittleEndian(enc));</span>
+                }
+            }
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="pc bpc" id="L338" title="1 of 2 branches missed.">                int s = o == runtime.getNil() ? 0 : (int) RubyNumeric.num2long(o);</span>
+<span class="fc" id="L339">                packInt_i(result, s);</span>
+<span class="fc" id="L340">            }</span>
+        };
+<span class="fc" id="L342">        converters['I'] = tmp; // unsigned int, native</span>
+<span class="fc" id="L343">        converters['L'] = tmp; // unsigned long, native</span>
+
+        // int, native
+<span class="fc" id="L346">        tmp = new Converter(4, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L348">                int value = unpackInt_i(enc);</span>
+<span class="fc" id="L349">                return runtime.newFixnum(value);</span>
+            }
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="pc bpc" id="L352" title="1 of 2 branches missed.">                int s = o == runtime.getNil() ? 0 : (int)RubyNumeric.num2long(o);</span>
+<span class="fc" id="L353">                packInt_i(result, s);</span>
+<span class="fc" id="L354">            }</span>
+        };
+<span class="fc" id="L356">        converters['i'] = tmp; // int, native</span>
+<span class="fc" id="L357">        converters['l'] = tmp; // long, native</span>
+        
+        // int, little endian
+<span class="fc" id="L360">        tmp = new Converter(4, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L362">                return runtime.newFixnum(decodeIntLittleEndian(enc));</span>
+            }
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="pc bpc" id="L365" title="1 of 2 branches missed.">                int s = o == runtime.getNil() ? 0 : (int)RubyNumeric.num2long(o);</span>
+<span class="fc" id="L366">                encodeIntLittleEndian(result, s);</span>
+<span class="fc" id="L367">            }</span>
+        };
+<span class="fc" id="L369">        converters['i' + LE] = tmp; // int, native</span>
+<span class="fc" id="L370">        converters['l' + LE] = tmp; // long, native</span>
+        
+        // int, big endian
+<span class="fc" id="L373">        tmp = new Converter(4, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L375">                return runtime.newFixnum(decodeIntBigEndian(enc));</span>
+            }
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="pc bpc" id="L378" title="1 of 2 branches missed.">                int s = o == runtime.getNil() ? 0 : (int)RubyNumeric.num2long(o);</span>
+<span class="fc" id="L379">                encodeIntBigEndian(result, s);</span>
+<span class="fc" id="L380">            }</span>
+        };
+<span class="fc" id="L382">        converters['i' + BE] = tmp; // int, native</span>
+<span class="fc" id="L383">        converters['l' + BE] = tmp; // long, native</span>
+
+        // 64-bit number, native (as bignum)
+<span class="fc" id="L386">        converters['Q'] = new QuadConverter(8, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="pc bpc" id="L388" title="1 of 2 branches missed.">                long l = Platform.BYTE_ORDER == Platform.BIG_ENDIAN ? decodeLongBigEndian(enc) : decodeLongLittleEndian(enc);</span>
+
+<span class="fc" id="L390">                return RubyBignum.bignorm(runtime,BigInteger.valueOf(l).and(new BigInteger(&quot;FFFFFFFFFFFFFFFF&quot;, 16)));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="fc" id="L395">                encodeLongByByteOrder(result, num2quad(o));</span>
+<span class="fc" id="L396">            }</span>
+        };
+        // 64-bit number, little endian (as bignum)
+<span class="fc" id="L399">        converters['Q' + LE] = new QuadConverter(8, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L401">                long l = decodeLongLittleEndian(enc);</span>
+<span class="fc" id="L402">                return RubyBignum.bignorm(runtime,BigInteger.valueOf(l).and(new BigInteger(&quot;FFFFFFFFFFFFFFFF&quot;, 16)));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="fc" id="L407">                encodeLongLittleEndian(result, num2quad(o));</span>
+<span class="fc" id="L408">            }</span>
+        };
+        // 64-bit number, big endian (as bignum)
+<span class="fc" id="L411">        converters['Q' + BE] = new QuadConverter(8, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L413">                long l = decodeLongBigEndian(enc);</span>
+<span class="fc" id="L414">                return RubyBignum.bignorm(runtime,BigInteger.valueOf(l).and(new BigInteger(&quot;FFFFFFFFFFFFFFFF&quot;, 16)));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="fc" id="L419">                encodeLongBigEndian(result, num2quad(o));</span>
+<span class="fc" id="L420">            }</span>
+        };
+        // 64-bit number, native (as fixnum)
+<span class="fc" id="L423">        converters['q'] = new QuadConverter(8, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="pc bpc" id="L425" title="1 of 2 branches missed.">                return runtime.newFixnum(Platform.BYTE_ORDER == Platform.BIG_ENDIAN ? </span>
+<span class="pc" id="L426">                        decodeLongBigEndian(enc) : decodeLongLittleEndian(enc));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="fc" id="L431">                encodeLongByByteOrder(result, num2quad(o));</span>
+<span class="fc" id="L432">            }</span>
+        };
+        // 64-bit number, little-endian (as fixnum)
+<span class="fc" id="L435">        converters['q' + LE] = new QuadConverter(8, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L437">                return runtime.newFixnum(decodeLongLittleEndian(enc));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="fc" id="L442">                encodeLongLittleEndian(result, num2quad(o));</span>
+<span class="fc" id="L443">            }</span>
+        };
+        // 64-bit number, big-endian (as fixnum)
+<span class="fc" id="L446">        converters['q' + BE] = new QuadConverter(8, &quot;Integer&quot;) {</span>
+            public IRubyObject decode(Ruby runtime, ByteBuffer enc) {
+<span class="fc" id="L448">                return runtime.newFixnum(decodeLongBigEndian(enc));</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject o, ByteList result){
+<span class="fc" id="L453">                encodeLongBigEndian(result, num2quad(o));</span>
+<span class="fc" id="L454">            }</span>
+        };
+    }
+
+    public static int unpackInt_i(ByteBuffer enc) {
+        int value;
+<span class="pc bpc" id="L460" title="1 of 2 branches missed.">        if (Platform.BYTE_ORDER == Platform.BIG_ENDIAN) {</span>
+<span class="nc" id="L461">            value = decodeIntBigEndian(enc);</span>
+        } else {
+<span class="fc" id="L463">            value = decodeIntLittleEndian(enc);</span>
+        }
+<span class="fc" id="L465">        return value;</span>
+    }
+
+    public static ByteList packInt_i(ByteList result, int s) {
+<span class="pc bpc" id="L469" title="1 of 2 branches missed.">        if (Platform.BYTE_ORDER == Platform.BIG_ENDIAN) {</span>
+<span class="nc" id="L470">            encodeIntBigEndian(result, s);</span>
+        } else {
+<span class="fc" id="L472">            encodeIntLittleEndian(result, s);</span>
+        }
+<span class="fc" id="L474">        return result;</span>
+    }
+
+    /**
+     * encodes a String in base64 or its uuencode variant.
+     * appends the result of the encoding in a StringBuffer
+     * @param io2Append The StringBuffer which should receive the result
+     * @param i2Encode The String to encode
+     * @param iLength The max number of characters to encode
+     * @param iType the type of encoding required (this is the same type as used by the pack method)
+     * @param tailLf true if the traililng &quot;\n&quot; is needed
+     * @return the io2Append buffer
+     **/
+    private static ByteList encodes(Ruby runtime, ByteList io2Append,byte[]charsToEncode, int startIndex, int length, int charCount, byte encodingType, boolean tailLf) {
+<span class="fc bfc" id="L488" title="All 2 branches covered.">        charCount = charCount &lt; length ? charCount : length;</span>
+
+<span class="fc" id="L490">        io2Append.ensure(charCount * 4 / 3 + 6);</span>
+<span class="fc" id="L491">        int i = startIndex;</span>
+<span class="fc bfc" id="L492" title="All 2 branches covered.">        byte[] lTranslationTable = encodingType == 'u' ? uu_table : b64_table;</span>
+        byte lPadding;
+<span class="fc bfc" id="L494" title="All 2 branches covered.">        if (encodingType == 'u') {</span>
+<span class="pc bpc" id="L495" title="1 of 2 branches missed.">            if (charCount &gt;= lTranslationTable.length) {</span>
+<span class="nc" id="L496">                throw runtime.newArgumentError(</span>
+                    &quot;&quot;
+                        + charCount
+                        + &quot; is not a correct value for the number of bytes per line in a u directive.  Correct values range from 0 to &quot;
+                        + lTranslationTable.length);
+            }
+<span class="fc" id="L502">            io2Append.append(lTranslationTable[charCount]);</span>
+<span class="fc" id="L503">            lPadding = '`';</span>
+        } else {
+<span class="fc" id="L505">            lPadding = '=';</span>
+        }
+<span class="fc bfc" id="L507" title="All 2 branches covered.">        while (charCount &gt;= 3) {</span>
+<span class="fc" id="L508">            byte lCurChar = charsToEncode[i++];</span>
+<span class="fc" id="L509">            byte lNextChar = charsToEncode[i++];</span>
+<span class="fc" id="L510">            byte lNextNextChar = charsToEncode[i++];</span>
+<span class="fc" id="L511">            io2Append.append(lTranslationTable[077 &amp; (lCurChar &gt;&gt;&gt; 2)]);</span>
+<span class="fc" id="L512">            io2Append.append(lTranslationTable[077 &amp; (((lCurChar &lt;&lt; 4) &amp; 060) | ((lNextChar &gt;&gt;&gt; 4) &amp; 017))]);</span>
+<span class="fc" id="L513">            io2Append.append(lTranslationTable[077 &amp; (((lNextChar &lt;&lt; 2) &amp; 074) | ((lNextNextChar &gt;&gt;&gt; 6) &amp; 03))]);</span>
+<span class="fc" id="L514">            io2Append.append(lTranslationTable[077 &amp; lNextNextChar]);</span>
+<span class="fc" id="L515">            charCount -= 3;</span>
+<span class="fc" id="L516">        }</span>
+<span class="fc bfc" id="L517" title="All 2 branches covered.">        if (charCount == 2) {</span>
+<span class="fc" id="L518">            byte lCurChar = charsToEncode[i++];</span>
+<span class="fc" id="L519">            byte lNextChar = charsToEncode[i++];</span>
+<span class="fc" id="L520">            io2Append.append(lTranslationTable[077 &amp; (lCurChar &gt;&gt;&gt; 2)]);</span>
+<span class="fc" id="L521">            io2Append.append(lTranslationTable[077 &amp; (((lCurChar &lt;&lt; 4) &amp; 060) | ((lNextChar &gt;&gt; 4) &amp; 017))]);</span>
+<span class="fc" id="L522">            io2Append.append(lTranslationTable[077 &amp; (((lNextChar &lt;&lt; 2) &amp; 074) | (('\0' &gt;&gt; 6) &amp; 03))]);</span>
+<span class="fc" id="L523">            io2Append.append(lPadding);</span>
+<span class="fc bfc" id="L524" title="All 2 branches covered.">        } else if (charCount == 1) {</span>
+<span class="fc" id="L525">            byte lCurChar = charsToEncode[i++];</span>
+<span class="fc" id="L526">            io2Append.append(lTranslationTable[077 &amp; (lCurChar &gt;&gt;&gt; 2)]);</span>
+<span class="fc" id="L527">            io2Append.append(lTranslationTable[077 &amp; (((lCurChar &lt;&lt; 4) &amp; 060) | (('\0' &gt;&gt;&gt; 4) &amp; 017))]);</span>
+<span class="fc" id="L528">            io2Append.append(lPadding);</span>
+<span class="fc" id="L529">            io2Append.append(lPadding);</span>
+        }
+<span class="fc bfc" id="L531" title="All 2 branches covered.">        if (tailLf) {</span>
+<span class="fc" id="L532">            io2Append.append('\n');</span>
+        }
+<span class="fc" id="L534">        return io2Append;</span>
+    }
+
+    /**
+     * encodes a String with the Quoted printable, MIME encoding (see RFC2045).
+     * appends the result of the encoding in a StringBuffer
+     * @param io2Append The StringBuffer which should receive the result
+     * @param i2Encode The String to encode
+     * @param iLength The max number of characters to encode
+     * @return the io2Append buffer
+     **/
+    private static ByteList qpencode(ByteList io2Append, ByteList i2Encode, int iLength) {
+<span class="fc" id="L546">        io2Append.ensure(1024);</span>
+<span class="fc" id="L547">        int lCurLineLength = 0;</span>
+<span class="fc" id="L548">        int lPrevChar = -1;</span>
+<span class="fc" id="L549">        byte[] l2Encode = i2Encode.getUnsafeBytes();</span>
+        try {
+<span class="fc" id="L551">            int end = i2Encode.getBegin() + i2Encode.getRealSize();</span>
+<span class="fc bfc" id="L552" title="All 2 branches covered.">            for (int i = i2Encode.getBegin(); i &lt; end; i++) {</span>
+<span class="fc" id="L553">                int lCurChar = l2Encode[i] &amp; 0xff;</span>
+<span class="fc bfc" id="L554" title="All 10 branches covered.">                if (lCurChar &gt; 126 || (lCurChar &lt; 32 &amp;&amp; lCurChar != '\n' &amp;&amp; lCurChar != '\t') || lCurChar == '=') {</span>
+<span class="fc" id="L555">                    io2Append.append('=');</span>
+<span class="fc" id="L556">                    io2Append.append(hex_table[lCurChar &gt;&gt;&gt; 4]);</span>
+<span class="fc" id="L557">                    io2Append.append(hex_table[lCurChar &amp; 0x0f]);</span>
+<span class="fc" id="L558">                    lCurLineLength += 3;</span>
+<span class="fc" id="L559">                    lPrevChar = -1;</span>
+<span class="fc bfc" id="L560" title="All 2 branches covered.">                } else if (lCurChar == '\n') {</span>
+<span class="pc bpc" id="L561" title="1 of 4 branches missed.">                    if (lPrevChar == ' ' || lPrevChar == '\t') {</span>
+<span class="fc" id="L562">                        io2Append.append('=');</span>
+<span class="fc" id="L563">                        io2Append.append(lCurChar);</span>
+                    }
+<span class="fc" id="L565">                    io2Append.append(lCurChar);</span>
+<span class="fc" id="L566">                    lCurLineLength = 0;</span>
+<span class="fc" id="L567">                    lPrevChar = lCurChar;</span>
+                } else {
+<span class="fc" id="L569">                    io2Append.append(lCurChar);</span>
+<span class="fc" id="L570">                    lCurLineLength++;</span>
+<span class="fc" id="L571">                    lPrevChar = lCurChar;</span>
+                }
+<span class="fc bfc" id="L573" title="All 2 branches covered.">                if (lCurLineLength &gt; iLength) {</span>
+<span class="fc" id="L574">                    io2Append.append('=');</span>
+<span class="fc" id="L575">                    io2Append.append('\n');</span>
+<span class="fc" id="L576">                    lCurLineLength = 0;</span>
+<span class="fc" id="L577">                    lPrevChar = '\n';</span>
+                }
+            }
+<span class="nc" id="L580">        } catch (ArrayIndexOutOfBoundsException e) {</span>
+            //normal exit, this should be faster than a test at each iterations for string with more than
+            //about 40 char
+<span class="fc" id="L583">        }</span>
+
+<span class="fc bfc" id="L585" title="All 2 branches covered.">        if (lCurLineLength &gt; 0) {</span>
+<span class="fc" id="L586">            io2Append.append('=');</span>
+<span class="fc" id="L587">            io2Append.append('\n');</span>
+        }
+<span class="fc" id="L589">        return io2Append;</span>
+    }
+
+    /**
+     *    Decodes &lt;i&gt;str&lt;/i&gt; (which may contain binary data) according to the format
+     *       string, returning an array of each value extracted.
+     *       The format string consists of a sequence of single-character directives.&lt;br/&gt;
+     *       Each directive may be followed by a number, indicating the number of times to repeat with this directive.  An asterisk (``&lt;code&gt;*&lt;/code&gt;'') will use up all
+     *       remaining elements.  &lt;br/&gt;
+     *       The directives &lt;code&gt;sSiIlL&lt;/code&gt; may each be followed by an underscore (``&lt;code&gt;_&lt;/code&gt;'') to use the underlying platform's native size for the specified type; otherwise, it uses a platform-independent consistent size.  &lt;br/&gt;
+     *       Spaces are ignored in the format string.
+     * 
+     *       &lt;table border=&quot;2&quot; width=&quot;500&quot; bgcolor=&quot;#ffe0e0&quot;&gt;
+     *           &lt;tr&gt;
+     *             &lt;td&gt;
+     * &lt;P&gt;&lt;/P&gt;
+     *         &lt;b&gt;Directives for &lt;a href=&quot;ref_c_string.html#String.unpack&quot;&gt;
+     *                   &lt;code&gt;String#unpack&lt;/code&gt;
+     *                 &lt;/a&gt;
+     *               &lt;/b&gt;        &lt;table class=&quot;codebox&quot; cellspacing=&quot;0&quot; border=&quot;0&quot; cellpadding=&quot;3&quot;&gt;
+     * &lt;tr bgcolor=&quot;#ff9999&quot;&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;
+     *                     &lt;b&gt;Format&lt;/b&gt;
+     *                   &lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;
+     *                     &lt;b&gt;Function&lt;/b&gt;
+     *                   &lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;
+     *                     &lt;b&gt;Returns&lt;/b&gt;
+     *                   &lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;A&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;String with trailing nulls and spaces removed.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;String&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;a&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;String.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;String&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;B&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Extract bits from each character (msb first).&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;String&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;b&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Extract bits from each character (lsb first).&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;String&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;C&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Extract a character as an unsigned integer.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Fixnum&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;c&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Extract a character as an integer.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Fixnum&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;d&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat &lt;em&gt;sizeof(double)&lt;/em&gt; characters as a native
+     *           double.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Float&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;E&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat &lt;em&gt;sizeof(double)&lt;/em&gt; characters as a double in
+     *           little-endian byte order.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Float&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;e&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat &lt;em&gt;sizeof(float)&lt;/em&gt; characters as a float in
+     *           little-endian byte order.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Float&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;f&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat &lt;em&gt;sizeof(float)&lt;/em&gt; characters as a native float.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Float&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;G&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat &lt;em&gt;sizeof(double)&lt;/em&gt; characters as a double in
+     *           network byte order.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Float&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;g&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat &lt;em&gt;sizeof(float)&lt;/em&gt; characters as a float in
+     *           network byte order.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Float&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;H&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Extract hex nibbles from each character (most
+     *           significant first).&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;String&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;h&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Extract hex nibbles from each character (least
+     *           significant first).&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;String&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;I&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat &lt;em&gt;sizeof(int)&lt;/em&gt;
+     *                     &lt;sup&gt;1&lt;/sup&gt; successive
+     *           characters as an unsigned native integer.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Integer&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;i&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat &lt;em&gt;sizeof(int)&lt;/em&gt;
+     *                     &lt;sup&gt;1&lt;/sup&gt; successive
+     *           characters as a signed native integer.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Integer&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;L&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat four&lt;sup&gt;1&lt;/sup&gt; successive
+     *           characters as an unsigned native
+     *           long integer.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Integer&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;l&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat four&lt;sup&gt;1&lt;/sup&gt; successive
+     *           characters as a signed native
+     *           long integer.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Integer&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;M&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Extract a quoted-printable string.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;String&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;m&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Extract a base64 encoded string.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;String&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;N&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat four characters as an unsigned long in network
+     *           byte order.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Fixnum&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;n&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat two characters as an unsigned short in network
+     *           byte order.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Fixnum&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;P&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat &lt;em&gt;sizeof(char *)&lt;/em&gt; characters as a pointer, and
+     *           return &lt;em&gt;len&lt;/em&gt; characters from the referenced location.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;String&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;p&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat &lt;em&gt;sizeof(char *)&lt;/em&gt; characters as a pointer to a
+     *           null-terminated string.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;String&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;S&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat two&lt;sup&gt;1&lt;/sup&gt; successive characters as an unsigned
+     *           short in
+     *           native byte order.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Fixnum&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;s&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat two&lt;sup&gt;1&lt;/sup&gt; successive
+     *           characters as a signed short in
+     *           native byte order.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Fixnum&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;U&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Extract UTF-8 characters as unsigned integers.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Integer&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;u&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Extract a UU-encoded string.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;String&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;V&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat four characters as an unsigned long in little-endian
+     *           byte order.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Fixnum&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;v&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Treat two characters as an unsigned short in little-endian
+     *           byte order.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Fixnum&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;X&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Skip backward one character.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;---&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;x&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Skip forward one character.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;---&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Z&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;String with trailing nulls removed.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;String&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;@&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;Skip to the offset given by the length argument.&lt;/td&gt;
+     *   &lt;td valign=&quot;top&quot;&gt;---&lt;/td&gt;
+     * &lt;/tr&gt;
+     * &lt;tr&gt;
+     *                   &lt;td colspan=&quot;9&quot; bgcolor=&quot;#ff9999&quot; height=&quot;2&quot;&gt;&lt;img src=&quot;dot.gif&quot; width=&quot;1&quot; height=&quot;1&quot;&gt;&lt;/td&gt;
+     *                 &lt;/tr&gt;
+     *               &lt;/table&gt;
+     * &lt;P&gt;&lt;/P&gt;
+     *         &lt;sup&gt;1&lt;/sup&gt;&amp;nbsp;May be modified by appending ``_'' to the directive.
+     * &lt;P&gt;&lt;/P&gt;
+     *       &lt;/td&gt;
+     *           &lt;/tr&gt;
+     *         &lt;/table&gt;
+     *
+     * @see RubyArray#pack
+     **/
+    public static RubyArray unpack(Ruby runtime, ByteList encodedString, ByteList formatString) {
+<span class="fc" id="L829">        Encoding encoding = encodedString.getEncoding();</span>
+<span class="fc" id="L830">        RubyArray result = runtime.newArray();</span>
+        // FIXME: potentially could just use ByteList here?
+<span class="fc" id="L832">        ByteBuffer format = ByteBuffer.wrap(formatString.getUnsafeBytes(), formatString.begin(), formatString.length());</span>
+<span class="fc" id="L833">        ByteBuffer encode = ByteBuffer.wrap(encodedString.getUnsafeBytes(), encodedString.begin(), encodedString.length());</span>
+<span class="fc" id="L834">        int type = 0;</span>
+<span class="fc" id="L835">        int next = safeGet(format);</span>
+
+<span class="fc bfc" id="L837" title="All 2 branches covered.">        mainLoop: while (next != 0) {</span>
+<span class="fc" id="L838">            type = next;</span>
+<span class="fc" id="L839">            next = safeGet(format);</span>
+<span class="fc bfc" id="L840" title="All 4 branches covered.">            if (UNPACK_IGNORE_NULL_CODES.indexOf(type) != -1 &amp;&amp; next == 0) {</span>
+<span class="fc" id="L841">                next = safeGetIgnoreNull(format);</span>
+            }
+            
+<span class="fc bfc" id="L844" title="All 2 branches covered.">            if (type == '#') {</span>
+<span class="fc bfc" id="L845" title="All 2 branches covered.">                while (type != '\n') {</span>
+<span class="fc bfc" id="L846" title="All 2 branches covered.">                    if (next == 0) break mainLoop;</span>
+<span class="fc" id="L847">                    type = next;</span>
+<span class="fc" id="L848">                    next = safeGet(format);</span>
+                }
+            }
+
+            // Next indicates to decode using native encoding format
+<span class="fc bfc" id="L853" title="All 4 branches covered.">            if (next == '_' || next == '!') {</span>
+<span class="fc" id="L854">                int index = NATIVE_CODES.indexOf(type);</span>
+<span class="fc bfc" id="L855" title="All 2 branches covered.">                if (index == -1) {</span>
+<span class="fc" id="L856">                    throw runtime.newArgumentError(&quot;'&quot; + next +</span>
+                            &quot;' allowed only after types &quot; + NATIVE_CODES);
+                }
+<span class="fc" id="L859">                type = MAPPED_CODES.charAt(index);</span>
+                
+<span class="fc" id="L861">                next = safeGet(format);</span>
+            }
+            
+<span class="fc bfc" id="L864" title="All 4 branches covered.">            if (next == '&gt;' || next == '&lt;') {</span>
+<span class="fc bfc" id="L865" title="All 2 branches covered.">                next = next == '&gt;' ? BE : LE;</span>
+<span class="fc" id="L866">                int index = ENDIANESS_CODES.indexOf(type + next);</span>
+<span class="pc bpc" id="L867" title="1 of 2 branches missed.">                if (index == -1) {</span>
+<span class="nc" id="L868">                    throw runtime.newArgumentError(&quot;'&quot; + (char)next +</span>
+                            &quot;' allowed only after types sSiIlLqQ&quot;);
+                }
+<span class="fc" id="L871">                type = ENDIANESS_CODES.charAt(index);</span>
+<span class="fc" id="L872">                next = safeGet(format);</span>
+                
+<span class="fc bfc" id="L874" title="All 4 branches covered.">                if (next == '_' || next == '!') next = safeGet(format);</span>
+            }
+
+            // How many occurrences of 'type' we want
+<span class="fc" id="L878">            int occurrences = 0;</span>
+<span class="fc bfc" id="L879" title="All 2 branches covered.">            if (next == 0) {</span>
+<span class="fc" id="L880">                occurrences = 1;</span>
+            } else {
+<span class="fc bfc" id="L882" title="All 2 branches covered.">                if (next == '*') {</span>
+<span class="fc" id="L883">                    occurrences = IS_STAR;</span>
+<span class="fc" id="L884">                    next = safeGet(format);</span>
+<span class="fc bfc" id="L885" title="All 2 branches covered.">                } else if (ASCII.isDigit(next)) {</span>
+<span class="fc" id="L886">                    occurrences = 0;</span>
+                    do {
+<span class="fc" id="L888">                        occurrences = occurrences * 10 + Character.digit((char)(next &amp; 0xFF), 10);</span>
+<span class="fc" id="L889">                        next = safeGet(format);</span>
+<span class="fc bfc" id="L890" title="All 4 branches covered.">                    } while (next != 0 &amp;&amp; ASCII.isDigit(next));</span>
+                } else {
+<span class="fc bfc" id="L892" title="All 2 branches covered.">                    occurrences = type == '@' ? 0 : 1;</span>
+                }
+            }
+
+            // See if we have a converter for the job...
+<span class="fc" id="L897">            Converter converter = converters[type];</span>
+<span class="fc bfc" id="L898" title="All 2 branches covered.">            if (converter != null) {</span>
+<span class="fc" id="L899">                decode(runtime, encode, occurrences, result, converter);</span>
+<span class="fc" id="L900">                type = next;</span>
+<span class="fc" id="L901">                continue;</span>
+            }
+
+            // Otherwise the unpack should be here...
+<span class="fc bfc" id="L905" title="All 17 branches covered.">            switch (type) {</span>
+                case '@' :
+                    try {
+<span class="fc bfc" id="L908" title="All 2 branches covered.">                        if (occurrences == IS_STAR) {</span>
+<span class="fc" id="L909">                            encode.position(encodedString.begin() + encode.remaining());</span>
+                        } else {
+<span class="fc" id="L911">                            encode.position(encodedString.begin() + occurrences);</span>
+                        }
+<span class="fc" id="L913">                    } catch (IllegalArgumentException iae) {</span>
+<span class="fc" id="L914">                        throw runtime.newArgumentError(&quot;@ outside of string&quot;);</span>
+<span class="fc" id="L915">                    }</span>
+                    break;
+                case '%' :
+<span class="fc" id="L918">                    throw runtime.newArgumentError(&quot;% is not supported&quot;);</span>
+                case 'A' :
+                    {
+<span class="fc bfc" id="L921" title="All 4 branches covered.">                    if (occurrences == IS_STAR || occurrences &gt; encode.remaining()) {</span>
+<span class="fc" id="L922">                        occurrences = encode.remaining();</span>
+                    }
+
+<span class="fc" id="L925">                    byte[] potential = new byte[occurrences];</span>
+<span class="fc" id="L926">                    encode.get(potential);</span>
+
+<span class="fc bfc" id="L928" title="All 2 branches covered.">                    for (int t = occurrences - 1; occurrences &gt; 0; occurrences--, t--) {</span>
+<span class="fc" id="L929">                        byte c = potential[t];</span>
+
+<span class="fc bfc" id="L931" title="All 4 branches covered.">                           if (c != '\0' &amp;&amp; c != ' ') {</span>
+<span class="fc" id="L932">                               break;</span>
+                           }
+                    }
+
+<span class="fc" id="L936">                    result.append(RubyString.newString(runtime, new ByteList(potential, 0, occurrences, encoding, false)));</span>
+                    }
+<span class="fc" id="L938">                    break;</span>
+                case 'Z' :
+                    {
+<span class="fc bfc" id="L941" title="All 2 branches covered.">                        boolean isStar = (occurrences == IS_STAR);</span>
+
+<span class="fc bfc" id="L943" title="All 4 branches covered.">                        if (occurrences == IS_STAR || occurrences &gt; encode.remaining()) {</span>
+<span class="fc" id="L944">                            occurrences = encode.remaining();</span>
+                        }
+
+<span class="fc" id="L947">                        byte[] potential = new byte[occurrences];</span>
+<span class="fc" id="L948">                        int t = 0;</span>
+
+<span class="fc bfc" id="L950" title="All 2 branches covered.">                        while (t &lt; occurrences) {</span>
+<span class="fc" id="L951">                            byte b = encode.get();</span>
+<span class="fc bfc" id="L952" title="All 2 branches covered.">                            if (b == 0) {</span>
+<span class="fc" id="L953">                                break;</span>
+                            }
+<span class="fc" id="L955">                            potential[t] = b; </span>
+<span class="fc" id="L956">                            t++;</span>
+<span class="fc" id="L957">                        }</span>
+
+<span class="fc" id="L959">                        result.append(RubyString.newString(runtime, new ByteList(potential, 0, t, encoding, false)));</span>
+
+                        // In case when the number of occurences is
+                        // explicitly specified, we have to read up
+                        // the remaining garbage after the '\0' to
+                        // satisfy the requested pattern.
+<span class="fc bfc" id="L965" title="All 2 branches covered.">                        if (!isStar) {</span>
+<span class="fc bfc" id="L966" title="All 2 branches covered.">                            if (t &lt; occurrences) {</span>
+                                // We encountered '\0' when
+                                // were reading the buffer above,
+                                // increment the number of read bytes.
+<span class="fc" id="L970">                                t++;</span>
+                            }
+
+<span class="fc bfc" id="L973" title="All 2 branches covered.">                            while (t &lt; occurrences) {</span>
+<span class="fc" id="L974">                                encode.get();</span>
+<span class="fc" id="L975">                                t++;</span>
+                            }
+                        }
+                    }
+<span class="fc" id="L979">                    break;</span>
+                case 'a' :
+<span class="fc bfc" id="L981" title="All 4 branches covered.">                    if (occurrences == IS_STAR || occurrences &gt; encode.remaining()) {</span>
+<span class="fc" id="L982">                        occurrences = encode.remaining();</span>
+                    }
+<span class="fc" id="L984">                    byte[] potential = new byte[occurrences];</span>
+<span class="fc" id="L985">                    encode.get(potential);</span>
+<span class="fc" id="L986">                    result.append(RubyString.newString(runtime, new ByteList(potential, encoding, false)));</span>
+<span class="fc" id="L987">                    break;</span>
+                case 'b' :
+                    {
+<span class="fc bfc" id="L990" title="All 4 branches covered.">                        if (occurrences == IS_STAR || occurrences &gt; encode.remaining() * 8) {</span>
+<span class="fc" id="L991">                            occurrences = encode.remaining() * 8;</span>
+                        }
+<span class="fc" id="L993">                        int bits = 0;</span>
+<span class="fc" id="L994">                        byte[] lElem = new byte[occurrences];</span>
+<span class="fc bfc" id="L995" title="All 2 branches covered.">                        for (int lCurByte = 0; lCurByte &lt; occurrences; lCurByte++) {</span>
+<span class="fc bfc" id="L996" title="All 2 branches covered.">                            if ((lCurByte &amp; 7) != 0) {</span>
+<span class="fc" id="L997">                                bits &gt;&gt;&gt;= 1;</span>
+                            } else {
+<span class="fc" id="L999">                                bits = encode.get();</span>
+                            }
+<span class="fc bfc" id="L1001" title="All 2 branches covered.">                            lElem[lCurByte] = (bits &amp; 1) != 0 ? (byte)'1' : (byte)'0';</span>
+                        }
+<span class="fc" id="L1003">                        result.append(RubyString.newString(runtime, new ByteList(lElem, encoding, false)));</span>
+                    }
+<span class="fc" id="L1005">                    break;</span>
+                case 'B' :
+                    {
+<span class="fc bfc" id="L1008" title="All 4 branches covered.">                        if (occurrences == IS_STAR || occurrences &gt; encode.remaining() * 8) {</span>
+<span class="fc" id="L1009">                            occurrences = encode.remaining() * 8;</span>
+                        }
+<span class="fc" id="L1011">                        int bits = 0;</span>
+<span class="fc" id="L1012">                        byte[] lElem = new byte[occurrences];</span>
+<span class="fc bfc" id="L1013" title="All 2 branches covered.">                        for (int lCurByte = 0; lCurByte &lt; occurrences; lCurByte++) {</span>
+<span class="fc bfc" id="L1014" title="All 2 branches covered.">                            if ((lCurByte &amp; 7) != 0) {</span>
+<span class="fc" id="L1015">                                bits &lt;&lt;= 1;</span>
+                            } else {
+<span class="fc" id="L1017">                                bits = encode.get();</span>
+                            }
+<span class="fc bfc" id="L1019" title="All 2 branches covered.">                            lElem[lCurByte] = (bits &amp; 128) != 0 ? (byte)'1' : (byte)'0';</span>
+                        }
+
+<span class="fc" id="L1022">                        result.append(RubyString.newString(runtime, new ByteList(lElem, encoding, false)));</span>
+                    }
+<span class="fc" id="L1024">                    break;</span>
+                case 'h' :
+                    {
+<span class="fc bfc" id="L1027" title="All 4 branches covered.">                        if (occurrences == IS_STAR || occurrences &gt; encode.remaining() * 2) {</span>
+<span class="fc" id="L1028">                            occurrences = encode.remaining() * 2;</span>
+                        }
+<span class="fc" id="L1030">                        int bits = 0;</span>
+<span class="fc" id="L1031">                        byte[] lElem = new byte[occurrences];</span>
+<span class="fc bfc" id="L1032" title="All 2 branches covered.">                        for (int lCurByte = 0; lCurByte &lt; occurrences; lCurByte++) {</span>
+<span class="fc bfc" id="L1033" title="All 2 branches covered.">                            if ((lCurByte &amp; 1) != 0) {</span>
+<span class="fc" id="L1034">                                bits &gt;&gt;&gt;= 4;</span>
+                            } else {
+<span class="fc" id="L1036">                                bits = encode.get();</span>
+                            }
+<span class="fc" id="L1038">                            lElem[lCurByte] = sHexDigits[bits &amp; 15];</span>
+                        }
+<span class="fc" id="L1040">                        result.append(RubyString.newString(runtime, new ByteList(lElem, encoding, false)));</span>
+                    }
+<span class="fc" id="L1042">                    break;</span>
+                case 'H' :
+                    {
+<span class="fc bfc" id="L1045" title="All 4 branches covered.">                        if (occurrences == IS_STAR || occurrences &gt; encode.remaining() * 2) {</span>
+<span class="fc" id="L1046">                            occurrences = encode.remaining() * 2;</span>
+                        }
+<span class="fc" id="L1048">                        int bits = 0;</span>
+<span class="fc" id="L1049">                        byte[] lElem = new byte[occurrences];</span>
+<span class="fc bfc" id="L1050" title="All 2 branches covered.">                        for (int lCurByte = 0; lCurByte &lt; occurrences; lCurByte++) {</span>
+<span class="fc bfc" id="L1051" title="All 2 branches covered.">                            if ((lCurByte &amp; 1) != 0) {</span>
+<span class="fc" id="L1052">                                bits &lt;&lt;= 4;</span>
+                            } else {
+<span class="fc" id="L1054">                                bits = encode.get();</span>
+                            }
+<span class="fc" id="L1056">                            lElem[lCurByte] = sHexDigits[(bits &gt;&gt;&gt; 4) &amp; 15];</span>
+                        }
+<span class="fc" id="L1058">                        result.append(RubyString.newString(runtime, new ByteList(lElem, encoding, false)));</span>
+                    }
+<span class="fc" id="L1060">                    break;</span>
+
+                case 'u':
+                {
+<span class="fc" id="L1064">                    int length = encode.remaining() * 3 / 4;</span>
+<span class="fc" id="L1065">                    byte[] lElem = new byte[length];</span>
+<span class="fc" id="L1066">                    int index = 0;</span>
+<span class="fc" id="L1067">                    int s = 0;</span>
+<span class="fc" id="L1068">                    int total = 0;</span>
+<span class="fc bfc" id="L1069" title="All 2 branches covered.">                    if (length &gt; 0) s = encode.get();</span>
+<span class="pc bpc" id="L1070" title="1 of 6 branches missed.">                    while (encode.hasRemaining() &amp;&amp; s &gt; ' ' &amp;&amp; s &lt; 'a') {</span>
+                        int a, b, c, d;
+<span class="fc" id="L1072">                        byte[] hunk = new byte[3];</span>
+
+<span class="fc" id="L1074">                        int len = (s - ' ') &amp; 077;</span>
+<span class="fc" id="L1075">                        s = safeGet(encode);</span>
+<span class="fc" id="L1076">                        total += len;</span>
+<span class="pc bpc" id="L1077" title="1 of 2 branches missed.">                        if (total &gt; length) {</span>
+<span class="nc" id="L1078">                            len -= total - length;</span>
+<span class="nc" id="L1079">                            total = length;</span>
+                        }
+
+<span class="fc bfc" id="L1082" title="All 2 branches covered.">                        while (len &gt; 0) {</span>
+<span class="fc bfc" id="L1083" title="All 2 branches covered.">                            int mlen = len &gt; 3 ? 3 : len;</span>
+
+<span class="pc bpc" id="L1085" title="2 of 4 branches missed.">                            if (encode.hasRemaining() &amp;&amp; s &gt;= ' ') {</span>
+<span class="fc" id="L1086">                                a = (s - ' ') &amp; 077;</span>
+<span class="fc" id="L1087">                                s = safeGet(encode);</span>
+                            } else
+<span class="nc" id="L1089">                                a = 0;</span>
+<span class="pc bpc" id="L1090" title="2 of 4 branches missed.">                            if (encode.hasRemaining() &amp;&amp; s &gt;= ' ') {</span>
+<span class="fc" id="L1091">                                b = (s - ' ') &amp; 077;</span>
+<span class="fc" id="L1092">                                s = safeGet(encode);</span>
+                            } else
+<span class="nc" id="L1094">                                b = 0;</span>
+<span class="pc bpc" id="L1095" title="2 of 4 branches missed.">                            if (encode.hasRemaining() &amp;&amp; s &gt;= ' ') {</span>
+<span class="fc" id="L1096">                                c = (s - ' ') &amp; 077;</span>
+<span class="fc" id="L1097">                                s = safeGet(encode);</span>
+                            } else
+<span class="nc" id="L1099">                                c = 0;</span>
+<span class="pc bpc" id="L1100" title="2 of 4 branches missed.">                            if (encode.hasRemaining() &amp;&amp; s &gt;= ' ') {</span>
+<span class="fc" id="L1101">                                d = (s - ' ') &amp; 077;</span>
+<span class="fc" id="L1102">                                s = safeGet(encode);</span>
+                            } else
+<span class="nc" id="L1104">                                d = 0;</span>
+<span class="fc" id="L1105">                            hunk[0] = (byte)((a &lt;&lt; 2 | b &gt;&gt; 4) &amp; 255);</span>
+<span class="fc" id="L1106">                            hunk[1] = (byte)((b &lt;&lt; 4 | c &gt;&gt; 2) &amp; 255);</span>
+<span class="fc" id="L1107">                            hunk[2] = (byte)((c &lt;&lt; 6 | d) &amp; 255);</span>
+
+<span class="fc bfc" id="L1109" title="All 2 branches covered.">                            for (int i = 0; i &lt; mlen; i++) lElem[index++] = hunk[i];</span>
+<span class="fc" id="L1110">                            len -= mlen;</span>
+<span class="fc" id="L1111">                        }</span>
+<span class="pc bpc" id="L1112" title="1 of 2 branches missed.">                        if (s == '\r') {</span>
+<span class="nc" id="L1113">                            s = safeGet(encode);</span>
+                        }
+<span class="pc bpc" id="L1115" title="1 of 2 branches missed.">                        if (s == '\n') {</span>
+<span class="fc" id="L1116">                            s = safeGet(encode);</span>
+                        }
+<span class="nc bnc" id="L1118" title="All 2 branches missed.">                        else if (encode.hasRemaining()) {</span>
+<span class="nc bnc" id="L1119" title="All 2 branches missed.">                            if (safeGet(encode) == '\n') {</span>
+<span class="nc" id="L1120">                                safeGet(encode); // Possible Checksum Byte</span>
+<span class="nc bnc" id="L1121" title="All 2 branches missed.">                            } else if (encode.hasRemaining()) {</span>
+<span class="nc" id="L1122">                                encode.position(encode.position() - 1);</span>
+                            }
+                        }
+<span class="fc" id="L1125">                    }</span>
+<span class="fc" id="L1126">                    result.append(RubyString.newString(runtime, new ByteList(lElem, 0, index, encoding, false)));</span>
+                }
+<span class="fc" id="L1128">                break;</span>
+
+                case 'm':
+                {
+<span class="fc" id="L1132">                    int length = encode.remaining()*3/4;</span>
+<span class="fc" id="L1133">                    byte[] lElem = new byte[length];</span>
+<span class="fc" id="L1134">                    int a = -1, b = -1, c = 0, d;</span>
+<span class="fc" id="L1135">                    int index = 0;</span>
+<span class="fc" id="L1136">                    int s = -1;</span>
+
+<span class="fc bfc" id="L1138" title="All 2 branches covered.">                    while (encode.hasRemaining()) {</span>
+<span class="fc" id="L1139">                        a = b = c = d = -1;</span>
+                        
+                        // obtain a
+<span class="fc" id="L1142">                        s = safeGet(encode);</span>
+<span class="fc bfc" id="L1143" title="All 4 branches covered.">                        while (((a = b64_xtable[s]) == -1) &amp;&amp; encode.hasRemaining()) {</span>
+<span class="fc" id="L1144">                            s = safeGet(encode);</span>
+                        }
+<span class="fc bfc" id="L1146" title="All 2 branches covered.">                        if (a == -1) break;</span>
+                        
+                        // obtain b
+<span class="fc" id="L1149">                        s = safeGet(encode);</span>
+<span class="pc bpc" id="L1150" title="3 of 4 branches missed.">                        while (((b = b64_xtable[s]) == -1) &amp;&amp; encode.hasRemaining()) {</span>
+<span class="nc" id="L1151">                            s = safeGet(encode);</span>
+                        }
+<span class="pc bpc" id="L1153" title="1 of 2 branches missed.">                        if (b == -1) break;</span>
+                        
+                        // obtain c
+<span class="fc" id="L1156">                        s = safeGet(encode);</span>
+<span class="fc bfc" id="L1157" title="All 4 branches covered.">                        while (((c = b64_xtable[s]) == -1) &amp;&amp; encode.hasRemaining()) {</span>
+<span class="pc bpc" id="L1158" title="1 of 2 branches missed.">                            if (s == '=') break;</span>
+<span class="nc" id="L1159">                            s = safeGet(encode);</span>
+                        }
+<span class="fc bfc" id="L1161" title="All 4 branches covered.">                        if ((s == '=') || c == -1) {</span>
+<span class="fc bfc" id="L1162" title="All 2 branches covered.">                            if (s == '=') {</span>
+<span class="fc" id="L1163">                                encode.position(encode.position() - 1);</span>
+                            }
+                            break;
+                        }
+                        
+                        // obtain d
+<span class="fc" id="L1169">                        s = safeGet(encode);</span>
+<span class="pc bpc" id="L1170" title="1 of 4 branches missed.">                        while (((d = b64_xtable[s]) == -1) &amp;&amp; encode.hasRemaining()) {</span>
+<span class="pc bpc" id="L1171" title="1 of 2 branches missed.">                            if (s == '=') break;</span>
+<span class="nc" id="L1172">                            s = safeGet(encode);</span>
+                        }
+<span class="pc bpc" id="L1174" title="1 of 4 branches missed.">                        if ((s == '=') || d == -1) {</span>
+<span class="pc bpc" id="L1175" title="1 of 2 branches missed.">                            if (s == '=') {</span>
+<span class="fc" id="L1176">                                encode.position(encode.position() - 1);</span>
+                            }
+                            break;
+                        }
+
+                        // calculate based on a, b, c and d
+<span class="fc" id="L1182">                        lElem[index++] = (byte)((a &lt;&lt; 2 | b &gt;&gt; 4) &amp; 255);</span>
+<span class="fc" id="L1183">                        lElem[index++] = (byte)((b &lt;&lt; 4 | c &gt;&gt; 2) &amp; 255);</span>
+<span class="fc" id="L1184">                        lElem[index++] = (byte)((c &lt;&lt; 6 | d) &amp; 255);</span>
+                    }
+
+<span class="pc bpc" id="L1187" title="1 of 4 branches missed.">                    if (a != -1 &amp;&amp; b != -1) {</span>
+<span class="fc bfc" id="L1188" title="All 4 branches covered.">                        if (c == -1 &amp;&amp; s == '=') {</span>
+<span class="fc" id="L1189">                            lElem[index++] = (byte)((a &lt;&lt; 2 | b &gt;&gt; 4) &amp; 255);</span>
+<span class="pc bpc" id="L1190" title="1 of 4 branches missed.">                        } else if(c != -1 &amp;&amp; s == '=') {</span>
+<span class="fc" id="L1191">                            lElem[index++] = (byte)((a &lt;&lt; 2 | b &gt;&gt; 4) &amp; 255);</span>
+<span class="fc" id="L1192">                            lElem[index++] = (byte)((b &lt;&lt; 4 | c &gt;&gt; 2) &amp; 255);</span>
+                        }
+                    }
+<span class="fc" id="L1195">                    result.append(RubyString.newString(runtime, new ByteList(lElem, 0, index,</span>
+                            ASCIIEncoding.INSTANCE, false)));
+                }
+<span class="fc" id="L1198">                break;</span>
+
+                case 'M' :
+                    {
+<span class="fc" id="L1202">                        byte[] lElem = new byte[Math.max(encode.remaining(),0)];</span>
+<span class="fc" id="L1203">                        int index = 0;</span>
+                        for(;;) {
+<span class="fc bfc" id="L1205" title="All 2 branches covered.">                            if (!encode.hasRemaining()) break;</span>
+<span class="fc" id="L1206">                            int c = safeGet(encode);</span>
+<span class="fc bfc" id="L1207" title="All 2 branches covered.">                            if (c != '=') {</span>
+<span class="fc" id="L1208">                                lElem[index++] = (byte)c;</span>
+                            } else {
+<span class="pc bpc" id="L1210" title="1 of 2 branches missed.">                                if (!encode.hasRemaining()) break;</span>
+<span class="fc" id="L1211">                                encode.mark();</span>
+<span class="fc" id="L1212">                                int c1 = safeGet(encode);</span>
+<span class="pc bpc" id="L1213" title="3 of 6 branches missed.">                                if (c1 == '\n' || (c1 == '\r' &amp;&amp; (c1 = safeGet(encode)) == '\n')) continue;</span>
+<span class="fc" id="L1214">                                int d1 = Character.digit(c1, 16);</span>
+<span class="pc bpc" id="L1215" title="1 of 2 branches missed.">                                if (d1 == -1) {</span>
+<span class="nc" id="L1216">                                    encode.reset();</span>
+<span class="nc" id="L1217">                                    break;</span>
+                                }
+<span class="fc" id="L1219">                                encode.mark();</span>
+<span class="pc bpc" id="L1220" title="1 of 2 branches missed.">                                if (!encode.hasRemaining()) break;</span>
+<span class="fc" id="L1221">                                int c2 = safeGet(encode);</span>
+<span class="fc" id="L1222">                                int d2 = Character.digit(c2, 16);</span>
+<span class="pc bpc" id="L1223" title="1 of 2 branches missed.">                                if (d2 == -1) {</span>
+<span class="nc" id="L1224">                                    encode.reset();</span>
+<span class="nc" id="L1225">                                    break;</span>
+                                }
+<span class="fc" id="L1227">                                byte value = (byte)(d1 &lt;&lt; 4 | d2);</span>
+<span class="fc" id="L1228">                                lElem[index++] = value;</span>
+                            }
+<span class="fc" id="L1230">                        }</span>
+<span class="fc" id="L1231">                        result.append(RubyString.newString(runtime, new ByteList(lElem, 0, index,</span>
+                                ASCIIEncoding.INSTANCE, false)));
+                    }
+<span class="fc" id="L1234">                    break;</span>
+                case 'U' :
+                    {
+<span class="fc bfc" id="L1237" title="All 4 branches covered.">                        if (occurrences == IS_STAR || occurrences &gt; encode.remaining()) {</span>
+<span class="fc" id="L1238">                            occurrences = encode.remaining();</span>
+                        }
+
+<span class="fc bfc" id="L1241" title="All 4 branches covered.">                        while (occurrences-- &gt; 0 &amp;&amp; encode.remaining() &gt; 0) {</span>
+                            try {
+                                // TODO: for now, we use a faithful
+                                // reimplementation of MRI's algorithm,
+                                // but should use UTF8Encoding facilities
+                                // from Joni, once it starts prefroming
+                                // UTF-8 content validation. 
+<span class="fc" id="L1248">                                result.append(</span>
+<span class="fc" id="L1249">                                        runtime.newFixnum(utf8Decode(encode)));</span>
+<span class="nc" id="L1250">                            } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L1251">                                throw runtime.newArgumentError(e.getMessage());</span>
+<span class="fc" id="L1252">                            }</span>
+                        }
+                    }
+                    break;
+                 case 'X':
+<span class="fc bfc" id="L1257" title="All 2 branches covered.">                     if (occurrences == IS_STAR) {</span>
+                         // MRI behavior: Contrary to what seems to be logical,
+                         // when '*' is given, MRI calculates the distance
+                         // to the end, in order to go backwards.
+<span class="fc" id="L1261">                         occurrences = /*encode.limit() - */encode.remaining();</span>
+                     }
+
+                     try {
+<span class="fc" id="L1265">                         encode.position(encode.position() - occurrences);</span>
+<span class="fc" id="L1266">                     } catch (IllegalArgumentException e) {</span>
+<span class="fc" id="L1267">                         throw runtime.newArgumentError(&quot;in `unpack': X outside of string&quot;);</span>
+<span class="fc" id="L1268">                     }</span>
+                     break;
+                 case 'x':
+<span class="fc bfc" id="L1271" title="All 2 branches covered.">                      if (occurrences == IS_STAR) {</span>
+<span class="fc" id="L1272">                           occurrences = encode.remaining();</span>
+                      }
+
+                      try {
+<span class="fc" id="L1276">                          encode.position(encode.position() + occurrences);</span>
+<span class="fc" id="L1277">                      } catch (IllegalArgumentException e) {</span>
+<span class="fc" id="L1278">                          throw runtime.newArgumentError(&quot;in `unpack': x outside of string&quot;);</span>
+<span class="fc" id="L1279">                      }</span>
+
+                     break;
+                case 'w':
+<span class="pc bpc" id="L1283" title="2 of 4 branches missed.">                    if (occurrences == IS_STAR || occurrences &gt; encode.remaining()) {</span>
+<span class="nc" id="L1284">                        occurrences = encode.remaining();</span>
+                    }
+
+<span class="fc" id="L1287">                    long ul = 0;</span>
+<span class="fc" id="L1288">                    long ulmask = (0xfe &lt;&lt; 56) &amp; 0xffffffff;</span>
+<span class="fc" id="L1289">                    RubyBignum big128 = RubyBignum.newBignum(runtime, 128);</span>
+<span class="fc" id="L1290">                    int pos = encode.position();</span>
+
+<span class="pc bpc" id="L1292" title="1 of 4 branches missed.">                    while (occurrences &gt; 0 &amp;&amp; pos &lt; encode.limit()) {</span>
+<span class="fc" id="L1293">                        ul &lt;&lt;= 7;</span>
+<span class="fc" id="L1294">                        ul |= encode.get(pos) &amp; 0x7f;</span>
+<span class="fc bfc" id="L1295" title="All 2 branches covered.">                        if((encode.get(pos++) &amp; 0x80) == 0) {</span>
+<span class="fc" id="L1296">                            result.append(RubyFixnum.newFixnum(runtime, ul));</span>
+<span class="fc" id="L1297">                            occurrences--;</span>
+<span class="fc" id="L1298">                            ul = 0;</span>
+<span class="pc bpc" id="L1299" title="1 of 2 branches missed.">                        } else if((ul &amp; ulmask) == 0) {</span>
+<span class="fc" id="L1300">                            RubyBignum big = RubyBignum.newBignum(runtime, ul);</span>
+<span class="pc bpc" id="L1301" title="2 of 4 branches missed.">                            while(occurrences &gt; 0 &amp;&amp; pos &lt; encode.limit()) {</span>
+<span class="fc" id="L1302">                                IRubyObject mulResult = big.op_mul(runtime.getCurrentContext(), big128);</span>
+<span class="fc" id="L1303">                                IRubyObject v = mulResult.callMethod(runtime.getCurrentContext(), &quot;+&quot;,</span>
+<span class="fc" id="L1304">                                        RubyBignum.newBignum(runtime, encode.get(pos) &amp; 0x7f));</span>
+<span class="fc bfc" id="L1305" title="All 2 branches covered.">                                if(v instanceof RubyFixnum) {</span>
+<span class="fc" id="L1306">                                    big = RubyBignum.newBignum(runtime, RubyNumeric.fix2long(v));</span>
+<span class="pc bpc" id="L1307" title="1 of 2 branches missed.">                                } else if (v instanceof RubyBignum) {</span>
+<span class="fc" id="L1308">                                    big = (RubyBignum)v;</span>
+                                }
+<span class="fc bfc" id="L1310" title="All 2 branches covered.">                                if((encode.get(pos++) &amp; 0x80) == 0) {</span>
+<span class="fc" id="L1311">                                    result.add(RubyBignum.bignorm(runtime, big.getValue()));</span>
+<span class="fc" id="L1312">                                    occurrences--;</span>
+<span class="fc" id="L1313">                                    ul = 0;</span>
+<span class="fc" id="L1314">                                    break;</span>
+                                }
+<span class="fc" id="L1316">                            }</span>
+<span class="fc" id="L1317">                        }</span>
+                    }
+                    try {
+<span class="fc" id="L1320">                        encode.position(pos);</span>
+<span class="nc" id="L1321">                    } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L1322">                        throw runtime.newArgumentError(&quot;in `unpack': poorly encoded input&quot;);</span>
+<span class="fc" id="L1323">                    }</span>
+                    break;
+            }
+<span class="fc" id="L1326">        }</span>
+<span class="fc" id="L1327">        return result;</span>
+    }
+
+    /** rb_uv_to_utf8
+     *
+     */
+    public static int utf8Decode(Ruby runtime, byte[]to, int p, int code) {
+<span class="fc bfc" id="L1334" title="All 2 branches covered.">        if (code &lt;= 0x7f) {</span>
+<span class="fc" id="L1335">            to[p] = (byte)code;</span>
+<span class="fc" id="L1336">            return 1;</span>
+        }
+<span class="fc bfc" id="L1338" title="All 2 branches covered.">        if (code &lt;= 0x7ff) {</span>
+<span class="fc" id="L1339">            to[p + 0] = (byte)(((code &gt;&gt;&gt; 6) &amp; 0xff) | 0xc0);</span>
+<span class="fc" id="L1340">            to[p + 1] = (byte)((code &amp; 0x3f) | 0x80);</span>
+<span class="fc" id="L1341">            return 2;</span>
+        }
+<span class="fc bfc" id="L1343" title="All 2 branches covered.">        if (code &lt;= 0xffff) {</span>
+<span class="fc" id="L1344">            to[p + 0] = (byte)(((code &gt;&gt;&gt; 12) &amp; 0xff) | 0xe0);</span>
+<span class="fc" id="L1345">            to[p + 1] = (byte)(((code &gt;&gt;&gt; 6) &amp; 0x3f) | 0x80);</span>
+<span class="fc" id="L1346">            to[p + 2] = (byte)((code &amp; 0x3f) | 0x80);</span>
+<span class="fc" id="L1347">            return 3;</span>
+        }
+<span class="fc bfc" id="L1349" title="All 2 branches covered.">        if (code &lt;= 0x1fffff) {</span>
+<span class="fc" id="L1350">            to[p + 0] = (byte)(((code &gt;&gt;&gt; 18) &amp; 0xff) | 0xf0);</span>
+<span class="fc" id="L1351">            to[p + 1] = (byte)(((code &gt;&gt;&gt; 12) &amp; 0x3f) | 0x80);</span>
+<span class="fc" id="L1352">            to[p + 2] = (byte)(((code &gt;&gt;&gt; 6) &amp; 0x3f) | 0x80);</span>
+<span class="fc" id="L1353">            to[p + 3] = (byte)((code &amp; 0x3f) | 0x80);</span>
+<span class="fc" id="L1354">            return 4;</span>
+        }
+<span class="pc bpc" id="L1356" title="1 of 2 branches missed.">        if (code &lt;= 0x3ffffff) {</span>
+<span class="nc" id="L1357">            to[p + 0] = (byte)(((code &gt;&gt;&gt; 24) &amp; 0xff) | 0xf8);</span>
+<span class="nc" id="L1358">            to[p + 1] = (byte)(((code &gt;&gt;&gt; 18) &amp; 0x3f) | 0x80);</span>
+<span class="nc" id="L1359">            to[p + 2] = (byte)(((code &gt;&gt;&gt; 12) &amp; 0x3f) | 0x80);</span>
+<span class="nc" id="L1360">            to[p + 3] = (byte)(((code &gt;&gt;&gt; 6) &amp; 0x3f) | 0x80);</span>
+<span class="nc" id="L1361">            to[p + 4] = (byte)((code &amp; 0x3f) | 0x80);</span>
+<span class="nc" id="L1362">            return 5;</span>
+        }
+<span class="pc bpc" id="L1364" title="1 of 2 branches missed.">        if (code &lt;= 0x7fffffff) {</span>
+<span class="fc" id="L1365">            to[p + 0] = (byte)(((code &gt;&gt;&gt; 30) &amp; 0xff) | 0xfc);</span>
+<span class="fc" id="L1366">            to[p + 1] = (byte)(((code &gt;&gt;&gt; 24) &amp; 0x3f) | 0x80);</span>
+<span class="fc" id="L1367">            to[p + 2] = (byte)(((code &gt;&gt;&gt; 18) &amp; 0x3f) | 0x80);</span>
+<span class="fc" id="L1368">            to[p + 3] = (byte)(((code &gt;&gt;&gt; 12) &amp; 0x3f) | 0x80);</span>
+<span class="fc" id="L1369">            to[p + 4] = (byte)(((code &gt;&gt;&gt; 6) &amp; 0x3f) | 0x80);</span>
+<span class="fc" id="L1370">            to[p + 5] = (byte)((code &amp; 0x3f) | 0x80);</span>
+<span class="fc" id="L1371">            return 6;</span>
+        }
+<span class="nc" id="L1373">        throw runtime.newRangeError(&quot;pack(U): value out of range&quot;);</span>
+    }
+
+    /** utf8_to_uv
+     */
+    private static int utf8Decode(ByteBuffer buffer) {        
+<span class="fc" id="L1379">        int c = buffer.get() &amp; 0xFF;</span>
+<span class="fc" id="L1380">        int uv = c;</span>
+        int n;
+
+<span class="fc bfc" id="L1383" title="All 2 branches covered.">        if ((c &amp; 0x80) == 0) {</span>
+<span class="fc" id="L1384">            return c;</span>
+        }
+
+<span class="pc bpc" id="L1387" title="1 of 2 branches missed.">        if ((c &amp; 0x40) == 0) {</span>
+<span class="nc" id="L1388">            throw new IllegalArgumentException(&quot;malformed UTF-8 character&quot;);</span>
+        }
+        
+<span class="fc bfc" id="L1391" title="All 2 branches covered.">      if      ((uv &amp; 0x20) == 0) { n = 2; uv &amp;= 0x1f; }</span>
+<span class="fc bfc" id="L1392" title="All 2 branches covered.">      else if ((uv &amp; 0x10) == 0) { n = 3; uv &amp;= 0x0f; }</span>
+<span class="pc bpc" id="L1393" title="1 of 2 branches missed.">      else if ((uv &amp; 0x08) == 0) { n = 4; uv &amp;= 0x07; }</span>
+<span class="nc bnc" id="L1394" title="All 2 branches missed.">      else if ((uv &amp; 0x04) == 0) { n = 5; uv &amp;= 0x03; }</span>
+<span class="nc bnc" id="L1395" title="All 2 branches missed.">      else if ((uv &amp; 0x02) == 0) { n = 6; uv &amp;= 0x01; }</span>
+      else {
+<span class="nc" id="L1397">          throw new IllegalArgumentException(&quot;malformed UTF-8 character&quot;);</span>
+      }
+<span class="pc bpc" id="L1399" title="1 of 2 branches missed.">      if (n &gt; buffer.remaining() + 1) {</span>
+<span class="nc" id="L1400">          throw new IllegalArgumentException(</span>
+                  &quot;malformed UTF-8 character (expected &quot; + n + &quot; bytes, &quot;
+<span class="nc" id="L1402">                  + &quot;given &quot; + (buffer.remaining() + 1)  + &quot; bytes)&quot;);</span>
+      }
+
+<span class="fc" id="L1405">      int limit = n - 1;</span>
+
+<span class="fc" id="L1407">      n--;</span>
+
+<span class="pc bpc" id="L1409" title="1 of 2 branches missed.">      if (n != 0) {</span>
+<span class="fc bfc" id="L1410" title="All 2 branches covered.">          while (n-- != 0) {</span>
+<span class="fc" id="L1411">              c = buffer.get() &amp; 0xff;</span>
+<span class="pc bpc" id="L1412" title="1 of 2 branches missed.">              if ((c &amp; 0xc0) != 0x80) {</span>
+<span class="nc" id="L1413">                  throw new IllegalArgumentException(&quot;malformed UTF-8 character&quot;);</span>
+              }
+              else {
+<span class="fc" id="L1416">                  c &amp;= 0x3f;</span>
+<span class="fc" id="L1417">                  uv = uv &lt;&lt; 6 | c;</span>
+              }
+          }
+      }
+
+<span class="pc bpc" id="L1422" title="1 of 2 branches missed.">      if (uv &lt; utf8_limits[limit]) {</span>
+<span class="nc" id="L1423">          throw new IllegalArgumentException(&quot;redundant UTF-8 sequence&quot;);</span>
+      }
+
+<span class="fc" id="L1426">      return uv;</span>
+    }
+
+<span class="fc" id="L1429">    private static final long utf8_limits[] = {</span>
+        0x0,                        /* 1 */
+        0x80,                       /* 2 */
+        0x800,                      /* 3 */
+        0x10000,                    /* 4 */
+        0x200000,                   /* 5 */
+        0x4000000,                  /* 6 */
+        0x80000000,                 /* 7 */
+    };
+
+    private static int safeGet(ByteBuffer encode) {
+<span class="fc bfc" id="L1440" title="All 2 branches covered.">        while (encode.hasRemaining()) {</span>
+<span class="fc" id="L1441">            int got = encode.get() &amp; 0xff;</span>
+            
+<span class="fc bfc" id="L1443" title="All 2 branches covered.">            if (got != 0) return got;</span>
+<span class="fc" id="L1444">        }</span>
+        
+<span class="fc" id="L1446">        return 0;</span>
+    }
+
+    private static int safeGetIgnoreNull(ByteBuffer encode) {
+<span class="fc" id="L1450">        int next = 0;</span>
+<span class="pc bpc" id="L1451" title="3 of 4 branches missed.">        while (encode.hasRemaining() &amp;&amp; next == 0) {</span>
+<span class="nc" id="L1452">            next = safeGet(encode);</span>
+        }
+<span class="fc" id="L1454">        return next;</span>
+    }
+
+    public static void decode(Ruby runtime, ByteBuffer encode, int occurrences,
+            RubyArray result, Converter converter) {
+<span class="fc" id="L1459">        int lPadLength = 0;</span>
+
+<span class="fc bfc" id="L1461" title="All 2 branches covered.">        if (occurrences == IS_STAR) {</span>
+<span class="fc" id="L1462">            occurrences = encode.remaining() / converter.size;</span>
+<span class="fc bfc" id="L1463" title="All 2 branches covered.">        } else if (occurrences &gt; encode.remaining() / converter.size) {</span>
+<span class="fc" id="L1464">            lPadLength = occurrences - encode.remaining() / converter.size;</span>
+<span class="fc" id="L1465">            occurrences = encode.remaining() / converter.size;</span>
+        }
+<span class="fc bfc" id="L1467" title="All 2 branches covered.">        for (; occurrences-- &gt; 0;) {</span>
+<span class="fc" id="L1468">            result.append(converter.decode(runtime, encode));</span>
+        }
+
+<span class="fc bfc" id="L1471" title="All 2 branches covered.">        for (; lPadLength-- &gt; 0;)</span>
+<span class="fc" id="L1472">            result.append(runtime.getNil());</span>
+<span class="fc" id="L1473">    }</span>
+
+    public static int encode(Ruby runtime, int occurrences, ByteList result,
+            RubyArray list, int index, ConverterExecutor converter) {
+<span class="fc" id="L1477">        int listSize = list.size();</span>
+
+<span class="fc bfc" id="L1479" title="All 2 branches covered.">        while (occurrences-- &gt; 0) {</span>
+<span class="pc bpc" id="L1480" title="1 of 4 branches missed.">            if (listSize-- &lt;= 0 || index &gt;= list.size()) {</span>
+<span class="fc" id="L1481">                throw runtime.newArgumentError(sTooFew);</span>
+            }
+
+<span class="fc" id="L1484">            IRubyObject from = list.eltInternal(index++);</span>
+
+<span class="fc" id="L1486">            converter.encode(runtime, from, result);</span>
+<span class="fc" id="L1487">        }</span>
+
+<span class="fc" id="L1489">        return index;</span>
+    }
+
+<span class="fc" id="L1492">    private abstract static class ConverterExecutor {</span>
+        protected Converter converter;
+        public void setConverter(Converter converter) {
+<span class="fc" id="L1495">            this.converter = converter;</span>
+<span class="fc" id="L1496">        }</span>
+
+        public abstract IRubyObject decode(Ruby runtime, ByteBuffer format);
+        public abstract void encode(Ruby runtime, IRubyObject from, ByteList result);
+    }
+
+    private static ConverterExecutor executor() {
+<span class="fc" id="L1503">        return new ConverterExecutor() {</span>
+            @Override
+            public IRubyObject decode(Ruby runtime, ByteBuffer format) {
+<span class="nc" id="L1506">                return converter.decode(runtime, format);</span>
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject from, ByteList result) {
+<span class="fc bfc" id="L1511" title="All 4 branches covered.">                if (from == runtime.getNil() &amp;&amp; converter.getType() != null) throw runtime.newTypeError(from, converter.getType());                </span>
+<span class="fc" id="L1512">                converter.encode(runtime, from, result);</span>
+<span class="fc" id="L1513">            }</span>
+        };
+    }
+
+    public abstract static class Converter {
+        public int size;
+        public String type;
+
+        public Converter(int size) {
+<span class="fc" id="L1522">            this(size, null);</span>
+<span class="fc" id="L1523">        }</span>
+        
+<span class="fc" id="L1525">        public Converter(int size, String type) {</span>
+<span class="fc" id="L1526">            this.size = size;</span>
+<span class="fc" id="L1527">            this.type = type;</span>
+<span class="fc" id="L1528">        }</span>
+        
+        public String getType() {
+<span class="fc" id="L1531">            return type;</span>
+        }
+
+        public abstract IRubyObject decode(Ruby runtime, ByteBuffer format);
+        public abstract void encode(Ruby runtime, IRubyObject from, ByteList result);
+    }
+
+<span class="nc" id="L1538">    private abstract static class QuadConverter extends Converter{</span>
+        public QuadConverter(int size, String type) {
+<span class="fc" id="L1540">            super(size, type);</span>
+<span class="fc" id="L1541">        }</span>
+        
+        public QuadConverter(int size) {
+<span class="nc" id="L1544">            super(size);</span>
+<span class="nc" id="L1545">        }</span>
+
+        protected int overflowQuad(long quad) {
+<span class="fc" id="L1548">            return (int) (quad &amp; 0xffff);</span>
+        }
+
+        protected void encodeShortByByteOrder(ByteList result, int s) {
+<span class="pc bpc" id="L1552" title="1 of 2 branches missed.">            if (Platform.BYTE_ORDER == Platform.BIG_ENDIAN) {</span>
+<span class="nc" id="L1553">                encodeShortBigEndian(result, s);</span>
+            } else {
+<span class="fc" id="L1555">                encodeShortLittleEndian(result, s);</span>
+            }
+<span class="fc" id="L1557">        }</span>
+
+        protected void encodeLongByByteOrder(ByteList result, long l) {
+<span class="pc bpc" id="L1560" title="1 of 2 branches missed.">            if (Platform.BYTE_ORDER == Platform.BIG_ENDIAN) {</span>
+<span class="nc" id="L1561">                encodeLongBigEndian(result, l);</span>
+            } else {
+<span class="fc" id="L1563">                encodeLongLittleEndian(result, l);</span>
+            }
+<span class="fc" id="L1565">        }</span>
+    }
+
+    /**
+     * shrinks a stringbuffer.
+     * shrinks a stringbuffer by a number of characters.
+     * @param i2Shrink the stringbuffer
+     * @param iLength how much to shrink
+     * @return the stringbuffer
+     **/
+    private static final ByteList shrink(ByteList i2Shrink, int iLength) {
+<span class="fc" id="L1576">        iLength = i2Shrink.length() - iLength;</span>
+
+<span class="fc bfc" id="L1578" title="All 2 branches covered.">        if (iLength &lt; 0) {</span>
+<span class="fc" id="L1579">            throw new IllegalArgumentException();</span>
+        }
+<span class="fc" id="L1581">        i2Shrink.length(iLength);</span>
+<span class="fc" id="L1582">        return i2Shrink;</span>
+    }
+
+    /**
+     * grows a stringbuffer.
+     * uses the Strings to pad the buffer for a certain length
+     * @param i2Grow the buffer to grow
+     * @param iPads the string used as padding
+     * @param iLength how much padding is needed
+     * @return the padded buffer
+     **/
+    private static final ByteList grow(ByteList i2Grow, byte[]iPads, int iLength) {
+<span class="fc" id="L1594">        int lPadLength = iPads.length;</span>
+<span class="pc bpc" id="L1595" title="1 of 2 branches missed.">        while (iLength &gt;= lPadLength) {</span>
+<span class="nc" id="L1596">            i2Grow.append(iPads);</span>
+<span class="nc" id="L1597">            iLength -= lPadLength;</span>
+        }
+<span class="fc" id="L1599">        i2Grow.append(iPads, 0, iLength);</span>
+<span class="fc" id="L1600">        return i2Grow;</span>
+    }
+
+    /**
+     * Same as pack but defaults tainting of output to false.
+     */
+    public static RubyString pack(Ruby runtime, RubyArray list, ByteList formatString) {
+<span class="nc" id="L1607">        return packCommon(runtime, list, formatString, false, executor());</span>
+    }
+
+    public static RubyString pack(ThreadContext context, Ruby runtime, RubyArray list, RubyString formatString) {
+<span class="fc" id="L1611">        RubyString pack = packCommon(runtime, list, formatString.getByteList(), formatString.isTaint(), executor());</span>
+<span class="fc" id="L1612">        return (RubyString) pack.infectBy(formatString);</span>
+    }
+
+    private static RubyString packCommon(Ruby runtime, RubyArray list, ByteList formatString, boolean tainted, ConverterExecutor executor) {
+<span class="fc" id="L1616">        ByteBuffer format = ByteBuffer.wrap(formatString.getUnsafeBytes(), formatString.begin(), formatString.length());</span>
+<span class="fc" id="L1617">        ByteList result = new ByteList();</span>
+<span class="fc" id="L1618">        boolean taintOutput = tainted;</span>
+<span class="fc" id="L1619">        int listSize = list.size();</span>
+<span class="fc" id="L1620">        int type = 0;</span>
+<span class="fc" id="L1621">        int next = safeGet(format);</span>
+
+<span class="fc" id="L1623">        int idx = 0;</span>
+        ByteList lCurElemString;
+
+<span class="fc" id="L1626">        int enc_info = 1;</span>
+
+<span class="fc bfc" id="L1628" title="All 2 branches covered.">        mainLoop: while (next != 0) {</span>
+<span class="fc" id="L1629">            type = next;</span>
+<span class="fc" id="L1630">            next = safeGet(format);</span>
+<span class="fc bfc" id="L1631" title="All 4 branches covered.">            if (PACK_IGNORE_NULL_CODES.indexOf(type) != -1 &amp;&amp; next == 0) {</span>
+<span class="fc" id="L1632">                next = safeGetIgnoreNull(format);</span>
+            }
+
+            // Skip all whitespace in pack format string
+<span class="fc bfc" id="L1636" title="All 2 branches covered.">            while (ASCII.isSpace(type)) {</span>
+<span class="fc bfc" id="L1637" title="All 2 branches covered.">                if (next == 0) break mainLoop;</span>
+<span class="fc" id="L1638">                type = next;</span>
+<span class="fc" id="L1639">                next = safeGet(format);</span>
+            }
+
+            // Skip embedded comments in pack format string
+<span class="fc bfc" id="L1643" title="All 2 branches covered.">            if (type == '#') {</span>
+<span class="fc bfc" id="L1644" title="All 2 branches covered.">                while (type != '\n') {</span>
+<span class="fc bfc" id="L1645" title="All 2 branches covered.">                    if (next == 0) break mainLoop;</span>
+<span class="fc" id="L1646">                    type = next;</span>
+<span class="fc" id="L1647">                    next = safeGet(format);</span>
+                }
+            }
+
+<span class="fc bfc" id="L1651" title="All 4 branches covered.">            if (next == '!' || next == '_') {</span>
+<span class="fc" id="L1652">                int index = NATIVE_CODES.indexOf(type);</span>
+<span class="fc bfc" id="L1653" title="All 2 branches covered.">                if (index == -1) {</span>
+<span class="fc" id="L1654">                    throw runtime.newArgumentError(&quot;'&quot; + next +</span>
+                            &quot;' allowed only after types &quot; + NATIVE_CODES);
+                }
+<span class="fc" id="L1657">                int typeBeforeMap = type;</span>
+<span class="fc" id="L1658">                type = MAPPED_CODES.charAt(index);</span>
+
+<span class="fc" id="L1660">                next = safeGet(format);</span>
+<span class="fc bfc" id="L1661" title="All 4 branches covered.">                if (PACK_IGNORE_NULL_CODES_WITH_MODIFIERS.indexOf(typeBeforeMap) != -1 &amp;&amp; next == 0) {</span>
+<span class="fc" id="L1662">                    next = safeGetIgnoreNull(format);</span>
+                }
+            }
+            
+<span class="fc bfc" id="L1666" title="All 4 branches covered.">            if (next == '&gt;' || next == '&lt;') {</span>
+<span class="fc bfc" id="L1667" title="All 2 branches covered.">                next = next == '&gt;' ? BE : LE;</span>
+<span class="fc" id="L1668">                int index = ENDIANESS_CODES.indexOf(type + next);</span>
+<span class="pc bpc" id="L1669" title="1 of 2 branches missed.">                if (index == -1) {</span>
+<span class="nc" id="L1670">                    throw runtime.newArgumentError(&quot;'&quot; + (char)next +</span>
+                            &quot;' allowed only after types sSiIlLqQ&quot;);
+                }
+<span class="fc" id="L1673">                type = ENDIANESS_CODES.charAt(index);</span>
+<span class="fc" id="L1674">                next = safeGet(format);</span>
+            }
+
+            // Determine how many of type are needed (default: 1)
+<span class="fc" id="L1678">            int occurrences = 1;</span>
+<span class="fc" id="L1679">            boolean isStar = false;</span>
+<span class="fc" id="L1680">            boolean ignoreStar = false;</span>
+<span class="fc bfc" id="L1681" title="All 2 branches covered.">            if (next != 0) {</span>
+<span class="fc bfc" id="L1682" title="All 2 branches covered.">                if (next == '*') {</span>
+<span class="fc bfc" id="L1683" title="All 2 branches covered.">                    if (&quot;@XxumM&quot;.indexOf(type) != -1) {</span>
+<span class="fc" id="L1684">                        occurrences = 0;</span>
+<span class="fc" id="L1685">                        ignoreStar = true;</span>
+                    } else {
+<span class="fc" id="L1687">                        occurrences = list.size() - idx;</span>
+<span class="fc" id="L1688">                        isStar = true;</span>
+                    }
+<span class="fc" id="L1690">                    next = safeGet(format);</span>
+<span class="fc bfc" id="L1691" title="All 2 branches covered.">                } else if (ASCII.isDigit(next)) {</span>
+<span class="fc" id="L1692">                    occurrences = 0;</span>
+                    do {
+<span class="fc" id="L1694">                        occurrences = occurrences * 10 + Character.digit((char)(next &amp; 0xFF), 10);</span>
+<span class="fc" id="L1695">                        next = safeGet(format);</span>
+<span class="pc bpc" id="L1696" title="1 of 4 branches missed.">                    } while (next != 0 &amp;&amp; ASCII.isDigit(next));</span>
+                }
+            }
+
+<span class="fc bfc" id="L1700" title="All 3 branches covered.">            switch (type) {</span>
+                case 'U':
+<span class="fc bfc" id="L1702" title="All 2 branches covered.">                    if (enc_info == 1) enc_info = 2;</span>
+                    break;
+                case 'm':
+                case 'M':
+                case 'u':
+<span class="fc" id="L1707">                    break;</span>
+                default:
+<span class="fc" id="L1709">                    enc_info = 0;</span>
+                    break;
+            }
+
+<span class="fc" id="L1713">            Converter converter = converters[type];</span>
+
+<span class="fc bfc" id="L1715" title="All 2 branches covered.">            if (converter != null) {</span>
+<span class="fc" id="L1716">                executor.setConverter(converter);</span>
+<span class="fc" id="L1717">                idx = encode(runtime, occurrences, result, list, idx, executor);</span>
+<span class="fc" id="L1718">                continue;</span>
+            }
+
+<span class="fc bfc" id="L1721" title="All 10 branches covered.">            switch (type) {</span>
+                case '%' :
+<span class="fc" id="L1723">                    throw runtime.newArgumentError(&quot;% is not supported&quot;);</span>
+                case 'A' :
+                case 'a' :
+                case 'Z' :
+                case 'B' :
+                case 'b' :
+                case 'H' :
+                case 'h' :
+                    {
+<span class="fc bfc" id="L1732" title="All 2 branches covered.">                        if (listSize-- &lt;= 0) {</span>
+<span class="fc" id="L1733">                            throw runtime.newArgumentError(sTooFew);</span>
+                        }
+
+<span class="fc" id="L1736">                        IRubyObject from = list.eltInternal(idx++);</span>
+<span class="fc bfc" id="L1737" title="All 2 branches covered.">                        if(from.isTaint()) taintOutput = true;</span>
+
+<span class="fc bfc" id="L1739" title="All 2 branches covered.">                        lCurElemString = from == runtime.getNil() ? ByteList.EMPTY_BYTELIST : from.convertToString().getByteList();</span>
+
+<span class="fc bfc" id="L1741" title="All 2 branches covered.">                        if (isStar) {</span>
+<span class="fc" id="L1742">                            occurrences = lCurElemString.length();</span>
+                            // 'Z' adds extra null pad (versus 'a')
+<span class="fc bfc" id="L1744" title="All 2 branches covered.">                            if (type == 'Z') occurrences++;</span>
+                        }
+
+<span class="pc bpc" id="L1747" title="1 of 6 branches missed.">                        switch (type) {</span>
+                            case 'a' :
+                            case 'A' :
+                            case 'Z' :
+<span class="fc bfc" id="L1751" title="All 2 branches covered.">                                if (lCurElemString.length() &gt;= occurrences) {</span>
+<span class="fc" id="L1752">                                    result.append(lCurElemString.getUnsafeBytes(), lCurElemString.getBegin(), occurrences);</span>
+                                } else {//need padding
+                                    //I'm fairly sure there is a library call to create a
+                                    //string filled with a given char with a given length but I couldn't find it
+<span class="fc" id="L1756">                                    result.append(lCurElemString);</span>
+<span class="fc" id="L1757">                                    occurrences -= lCurElemString.length();</span>
+
+<span class="fc bfc" id="L1759" title="All 2 branches covered.">                                    switch (type) {</span>
+                                      case 'a':
+                                      case 'Z':
+<span class="fc" id="L1762">                                          grow(result, sNil10, occurrences);</span>
+<span class="fc" id="L1763">                                          break;</span>
+                                      default:
+<span class="fc" id="L1765">                                          grow(result, sSp10, occurrences);</span>
+<span class="fc" id="L1766">                                          break;</span>
+                                    }
+                                }
+                            break;
+                            case 'b' :
+                                {
+<span class="fc" id="L1772">                                    int currentByte = 0;</span>
+<span class="fc" id="L1773">                                    int padLength = 0;</span>
+
+<span class="pc bpc" id="L1775" title="1 of 2 branches missed.">                                    if (occurrences &gt; lCurElemString.length()) {</span>
+<span class="nc" id="L1776">                                        padLength = (occurrences - lCurElemString.length()) / 2 + (occurrences + lCurElemString.length()) % 2;</span>
+<span class="nc" id="L1777">                                        occurrences = lCurElemString.length();</span>
+                                    }
+
+<span class="fc bfc" id="L1780" title="All 2 branches covered.">                                    for (int i = 0; i &lt; occurrences;) {</span>
+<span class="fc bfc" id="L1781" title="All 2 branches covered.">                                        if ((lCurElemString.charAt(i++) &amp; 1) != 0) {//if the low bit is set</span>
+<span class="fc" id="L1782">                                            currentByte |= 128; //set the high bit of the result</span>
+                                        }
+
+<span class="fc bfc" id="L1785" title="All 2 branches covered.">                                        if ((i &amp; 7) == 0) {</span>
+<span class="fc" id="L1786">                                            result.append((byte) (currentByte &amp; 0xff));</span>
+<span class="fc" id="L1787">                                            currentByte = 0;</span>
+<span class="fc" id="L1788">                                            continue;</span>
+                                        }
+
+                                           //if the index is not a multiple of 8, we are not on a byte boundary
+<span class="fc" id="L1792">                                           currentByte &gt;&gt;= 1; //shift the byte</span>
+                                    }
+
+<span class="fc bfc" id="L1795" title="All 2 branches covered.">                                    if ((occurrences &amp; 7) != 0) { //if the length is not a multiple of 8</span>
+<span class="fc" id="L1796">                                        currentByte &gt;&gt;= 7 - (occurrences &amp; 7); //we need to pad the last byte</span>
+<span class="fc" id="L1797">                                        result.append((byte) (currentByte &amp; 0xff));</span>
+                                    }
+
+                                    //do some padding, I don't understand the padding strategy
+<span class="fc" id="L1801">                                    result.length(result.length() + padLength);</span>
+                                }
+<span class="fc" id="L1803">                            break;</span>
+                            case 'B' :
+                                {
+<span class="fc" id="L1806">                                    int currentByte = 0;</span>
+<span class="fc" id="L1807">                                    int padLength = 0;</span>
+
+<span class="pc bpc" id="L1809" title="1 of 2 branches missed.">                                    if (occurrences &gt; lCurElemString.length()) {</span>
+<span class="nc" id="L1810">                                        padLength = (occurrences - lCurElemString.length()) / 2 + (occurrences + lCurElemString.length()) % 2;</span>
+<span class="nc" id="L1811">                                        occurrences = lCurElemString.length();</span>
+                                    }
+
+<span class="fc bfc" id="L1814" title="All 2 branches covered.">                                    for (int i = 0; i &lt; occurrences;) {</span>
+<span class="fc" id="L1815">                                        currentByte |= lCurElemString.charAt(i++) &amp; 1;</span>
+
+                                        // we filled up current byte; append it and create next one
+<span class="fc bfc" id="L1818" title="All 2 branches covered.">                                        if ((i &amp; 7) == 0) {</span>
+<span class="fc" id="L1819">                                            result.append((byte) (currentByte &amp; 0xff));</span>
+<span class="fc" id="L1820">                                            currentByte = 0;</span>
+<span class="fc" id="L1821">                                            continue;</span>
+                                        }
+
+                                        //if the index is not a multiple of 8, we are not on a byte boundary
+<span class="fc" id="L1825">                                        currentByte &lt;&lt;= 1;</span>
+                                    }
+
+<span class="fc bfc" id="L1828" title="All 2 branches covered.">                                    if ((occurrences &amp; 7) != 0) { //if the length is not a multiple of 8</span>
+<span class="fc" id="L1829">                                        currentByte &lt;&lt;= 7 - (occurrences &amp; 7); //we need to pad the last byte</span>
+<span class="fc" id="L1830">                                        result.append((byte) (currentByte &amp; 0xff));</span>
+                                    }
+
+<span class="fc" id="L1833">                                    result.length(result.length() + padLength);</span>
+                                }
+<span class="fc" id="L1835">                            break;</span>
+                            case 'h' :
+                                {
+<span class="fc" id="L1838">                                    int currentByte = 0;</span>
+<span class="fc" id="L1839">                                    int padLength = 0;</span>
+
+<span class="fc bfc" id="L1841" title="All 2 branches covered.">                                    if (occurrences &gt; lCurElemString.length()) {</span>
+<span class="fc" id="L1842">                                        padLength = occurrences - lCurElemString.length() + 1;</span>
+<span class="fc" id="L1843">                                        occurrences = lCurElemString.length();</span>
+                                    }
+
+<span class="fc bfc" id="L1846" title="All 2 branches covered.">                                    for (int i = 0; i &lt; occurrences;) {</span>
+<span class="fc" id="L1847">                                        byte currentChar = (byte)lCurElemString.charAt(i++);</span>
+
+<span class="fc bfc" id="L1849" title="All 2 branches covered.">                                        if (Character.isJavaIdentifierStart(currentChar)) {</span>
+                                            //this test may be too lax but it is the same as in MRI
+<span class="fc" id="L1851">                                            currentByte |= (((currentChar &amp; 15) + 9) &amp; 15) &lt;&lt; 4;</span>
+                                        } else {
+<span class="fc" id="L1853">                                            currentByte |= (currentChar &amp; 15) &lt;&lt; 4;</span>
+                                        }
+
+<span class="fc bfc" id="L1856" title="All 2 branches covered.">                                        if ((i &amp; 1) != 0) {</span>
+<span class="fc" id="L1857">                                            currentByte &gt;&gt;= 4;</span>
+                                        } else {
+<span class="fc" id="L1859">                                            result.append((byte) (currentByte &amp; 0xff));</span>
+<span class="fc" id="L1860">                                            currentByte = 0;</span>
+                                        }
+<span class="fc" id="L1862">                                    }</span>
+
+<span class="fc bfc" id="L1864" title="All 2 branches covered.">                                    if ((occurrences &amp; 1) != 0) {</span>
+<span class="fc" id="L1865">                                        result.append((byte) (currentByte &amp; 0xff));</span>
+<span class="pc bpc" id="L1866" title="1 of 2 branches missed.">                                        if(padLength &gt; 0) {</span>
+<span class="nc" id="L1867">                                            padLength--;</span>
+                                        }
+                                    }
+
+<span class="fc" id="L1871">                                    result.length(result.length() + padLength / 2);</span>
+                                }
+<span class="fc" id="L1873">                            break;</span>
+                            case 'H' :
+                                {
+<span class="fc" id="L1876">                                    int currentByte = 0;</span>
+<span class="fc" id="L1877">                                    int padLength = 0;</span>
+
+<span class="fc bfc" id="L1879" title="All 2 branches covered.">                                    if (occurrences &gt; lCurElemString.length()) {</span>
+<span class="fc" id="L1880">                                        padLength = occurrences - lCurElemString.length() + 1;</span>
+<span class="fc" id="L1881">                                        occurrences = lCurElemString.length();</span>
+                                    }
+
+<span class="fc bfc" id="L1884" title="All 2 branches covered.">                                    for (int i = 0; i &lt; occurrences;) {</span>
+<span class="fc" id="L1885">                                        byte currentChar = (byte)lCurElemString.charAt(i++);</span>
+
+<span class="fc bfc" id="L1887" title="All 2 branches covered.">                                        if (Character.isJavaIdentifierStart(currentChar)) {</span>
+                                            //this test may be too lax but it is the same as in MRI
+<span class="fc" id="L1889">                                            currentByte |= ((currentChar &amp; 15) + 9) &amp; 15;</span>
+                                        } else {
+<span class="fc" id="L1891">                                            currentByte |= currentChar &amp; 15;</span>
+                                        }
+
+<span class="fc bfc" id="L1894" title="All 2 branches covered.">                                        if ((i &amp; 1) != 0) {</span>
+<span class="fc" id="L1895">                                            currentByte &lt;&lt;= 4;</span>
+                                        } else {
+<span class="fc" id="L1897">                                            result.append((byte) (currentByte &amp; 0xff));</span>
+<span class="fc" id="L1898">                                            currentByte = 0;</span>
+                                        }
+<span class="fc" id="L1900">                                    }</span>
+
+<span class="fc bfc" id="L1902" title="All 2 branches covered.">                                    if ((occurrences &amp; 1) != 0) {</span>
+<span class="fc" id="L1903">                                        result.append((byte) (currentByte &amp; 0xff));</span>
+<span class="pc bpc" id="L1904" title="1 of 2 branches missed.">                                        if(padLength &gt; 0) {</span>
+<span class="nc" id="L1905">                                            padLength--;</span>
+                                        }
+                                    }
+
+<span class="fc" id="L1909">                                    result.length(result.length() + padLength / 2);</span>
+                                }
+                            break;
+                        }
+<span class="fc" id="L1913">                        break;</span>
+                    }
+
+                case 'x' :
+<span class="fc" id="L1917">                    grow(result, sNil10, occurrences);</span>
+<span class="fc" id="L1918">                    break;</span>
+                case 'X' :
+                    try {
+<span class="fc" id="L1921">                        shrink(result, occurrences);</span>
+<span class="fc" id="L1922">                    } catch (IllegalArgumentException e) {</span>
+<span class="fc" id="L1923">                        throw runtime.newArgumentError(&quot;in `pack': X outside of string&quot;);</span>
+<span class="fc" id="L1924">                    }</span>
+                    break;
+                case '@' :
+<span class="fc" id="L1927">                    occurrences -= result.length();</span>
+<span class="fc bfc" id="L1928" title="All 2 branches covered.">                    if (occurrences &gt; 0) {</span>
+<span class="fc" id="L1929">                        grow(result, sNil10, occurrences);</span>
+                    }
+<span class="fc" id="L1931">                    occurrences = -occurrences;</span>
+<span class="fc bfc" id="L1932" title="All 2 branches covered.">                    if (occurrences &gt; 0) {</span>
+<span class="fc" id="L1933">                        shrink(result, occurrences);</span>
+                    }
+                    break;
+                case 'u' :
+                case 'm' : {
+<span class="fc bfc" id="L1938" title="All 2 branches covered.">                        if (listSize-- &lt;= 0) throw runtime.newArgumentError(sTooFew);</span>
+
+<span class="fc" id="L1940">                        IRubyObject from = list.eltInternal(idx++);</span>
+<span class="fc bfc" id="L1941" title="All 2 branches covered.">                        if (from == runtime.getNil()) throw runtime.newTypeError(from, &quot;Integer&quot;);</span>
+<span class="fc" id="L1942">                        lCurElemString = from.convertToString().getByteList();</span>
+<span class="fc bfc" id="L1943" title="All 6 branches covered.">                        if (occurrences == 0 &amp;&amp; type == 'm' &amp;&amp; !ignoreStar) {</span>
+<span class="fc" id="L1944">                            encodes(runtime, result, lCurElemString.getUnsafeBytes(),</span>
+<span class="fc" id="L1945">                                    lCurElemString.getBegin(), lCurElemString.length(),</span>
+<span class="fc" id="L1946">                                    lCurElemString.length(), (byte)type, false);</span>
+<span class="fc" id="L1947">                            break;</span>
+                        }
+
+<span class="fc bfc" id="L1950" title="All 2 branches covered.">                        occurrences = occurrences &lt;= 2 ? 45 : occurrences / 3 * 3;</span>
+<span class="fc bfc" id="L1951" title="All 2 branches covered.">                        if (lCurElemString.length() == 0) break;</span>
+
+<span class="fc" id="L1953">                        byte[] charsToEncode = lCurElemString.getUnsafeBytes();</span>
+<span class="fc bfc" id="L1954" title="All 2 branches covered.">                        for (int i = 0; i &lt; lCurElemString.length(); i += occurrences) {</span>
+<span class="fc" id="L1955">                            encodes(runtime, result, charsToEncode,</span>
+<span class="fc" id="L1956">                                    i + lCurElemString.getBegin(), lCurElemString.length() - i,</span>
+                                    occurrences, (byte)type, true);
+                        }
+                    }
+<span class="fc" id="L1960">                    break;</span>
+                case 'M' : {
+<span class="fc bfc" id="L1962" title="All 2 branches covered.">                       if (listSize-- &lt;= 0) throw runtime.newArgumentError(sTooFew);</span>
+
+<span class="fc" id="L1964">                       IRubyObject from = list.eltInternal(idx++);</span>
+<span class="fc bfc" id="L1965" title="All 2 branches covered.">                       lCurElemString = from == runtime.getNil() ? ByteList.EMPTY_BYTELIST : from.asString().getByteList();</span>
+
+<span class="fc bfc" id="L1967" title="All 2 branches covered.">                       if (occurrences &lt;= 1) {</span>
+<span class="fc" id="L1968">                           occurrences = 72;</span>
+                       }
+
+<span class="fc" id="L1971">                       qpencode(result, lCurElemString, occurrences);</span>
+                    }
+<span class="fc" id="L1973">                    break;</span>
+                case 'U' :
+<span class="fc bfc" id="L1975" title="All 2 branches covered.">                    while (occurrences-- &gt; 0) {</span>
+<span class="fc bfc" id="L1976" title="All 2 branches covered.">                        if (listSize-- &lt;= 0) throw runtime.newArgumentError(sTooFew);</span>
+
+<span class="fc" id="L1978">                        IRubyObject from = list.eltInternal(idx++);</span>
+<span class="pc bpc" id="L1979" title="1 of 2 branches missed.">                        int code = from == runtime.getNil() ? 0 : RubyNumeric.num2int(from);</span>
+
+<span class="fc bfc" id="L1981" title="All 2 branches covered.">                        if (code &lt; 0) throw runtime.newRangeError(&quot;pack(U): value out of range&quot;);</span>
+
+<span class="fc" id="L1983">                        result.ensure(result.getRealSize() + 6);</span>
+<span class="fc" id="L1984">                        result.setRealSize(result.getRealSize() + utf8Decode(runtime, result.getUnsafeBytes(), result.getBegin() + result.getRealSize(), code));</span>
+<span class="fc" id="L1985">                    }</span>
+                    break;
+                case 'w' :
+<span class="fc bfc" id="L1988" title="All 2 branches covered.">                    while (occurrences-- &gt; 0) {</span>
+<span class="fc bfc" id="L1989" title="All 2 branches covered.">                        if (listSize-- &lt;= 0) throw runtime.newArgumentError(sTooFew);</span>
+
+<span class="fc" id="L1991">                        ByteList buf = new ByteList();</span>
+<span class="fc" id="L1992">                        IRubyObject from = list.eltInternal(idx++);</span>
+
+<span class="fc bfc" id="L1994" title="All 2 branches covered.">                        if (from.isNil()) throw runtime.newTypeError(&quot;pack('w') does not take nil&quot;);</span>
+
+
+<span class="fc bfc" id="L1997" title="All 2 branches covered.">                        if (from instanceof RubyBignum) {</span>
+<span class="fc" id="L1998">                            RubyBignum big128 = RubyBignum.newBignum(runtime, 128);</span>
+<span class="fc bfc" id="L1999" title="All 2 branches covered.">                            while (from instanceof RubyBignum) {</span>
+<span class="fc" id="L2000">                                RubyBignum bignum = (RubyBignum)from;</span>
+<span class="fc" id="L2001">                                RubyArray ary = (RubyArray)bignum.divmod(runtime.getCurrentContext(), big128);</span>
+<span class="fc" id="L2002">                                buf.append((byte)(RubyNumeric.fix2int(ary.at(RubyFixnum.one(runtime))) | 0x80) &amp; 0xff);</span>
+<span class="fc" id="L2003">                                from = ary.at(RubyFixnum.zero(runtime));</span>
+<span class="fc" id="L2004">                            }</span>
+                        }
+
+<span class="fc" id="L2007">                        long l = RubyNumeric.num2long(from);</span>
+
+                        // we don't deal with negatives.
+<span class="fc bfc" id="L2010" title="All 2 branches covered.">                        if (l &gt;= 0) {</span>
+
+<span class="fc bfc" id="L2012" title="All 2 branches covered.">                            while(l != 0) {</span>
+<span class="fc" id="L2013">                                buf.append((byte)(((l &amp; 0x7f) | 0x80) &amp; 0xff));</span>
+<span class="fc" id="L2014">                                l &gt;&gt;= 7;</span>
+                            }
+
+<span class="fc" id="L2017">                            int left = 0;</span>
+<span class="fc" id="L2018">                            int right = buf.getRealSize() - 1;</span>
+
+<span class="fc bfc" id="L2020" title="All 2 branches covered.">                            if (right &gt;= 0) {</span>
+<span class="fc" id="L2021">                                buf.getUnsafeBytes()[0] &amp;= 0x7F;</span>
+                            } else {
+<span class="fc" id="L2023">                                buf.append(0);</span>
+                            }
+
+<span class="fc bfc" id="L2026" title="All 2 branches covered.">                            while (left &lt; right) {</span>
+<span class="fc" id="L2027">                                byte tmp = buf.getUnsafeBytes()[left];</span>
+<span class="fc" id="L2028">                                buf.getUnsafeBytes()[left] = buf.getUnsafeBytes()[right];</span>
+<span class="fc" id="L2029">                                buf.getUnsafeBytes()[right] = tmp;</span>
+
+<span class="fc" id="L2031">                                left++;</span>
+<span class="fc" id="L2032">                                right--;</span>
+<span class="fc" id="L2033">                            }</span>
+
+<span class="fc" id="L2035">                            result.append(buf);</span>
+<span class="fc" id="L2036">                        } else {</span>
+<span class="fc" id="L2037">                            throw runtime.newArgumentError(&quot;can't compress negative numbers&quot;);</span>
+                        }
+<span class="fc" id="L2039">                    }</span>
+
+                    break;
+            }
+<span class="fc" id="L2043">        }        </span>
+
+<span class="fc" id="L2045">        RubyString output = runtime.newString(result);</span>
+<span class="fc bfc" id="L2046" title="All 2 branches covered.">        if (taintOutput) output.taint(runtime.getCurrentContext());</span>
+
+<span class="fc bfc" id="L2048" title="All 3 branches covered.">        switch (enc_info)</span>
+        {
+            case 1:
+<span class="fc" id="L2051">                output.setEncodingAndCodeRange(USASCII, RubyObject.USER8_F);</span>
+<span class="fc" id="L2052">                break;</span>
+            case 2:
+<span class="fc" id="L2054">                output.force_encoding(runtime.getCurrentContext(),</span>
+<span class="fc" id="L2055">                        runtime.getEncodingService().convertEncodingToRubyEncoding(UTF8));</span>
+<span class="fc" id="L2056">                break;</span>
+            default:
+                /* do nothing, keep ASCII-8BIT */
+        }
+
+<span class="fc" id="L2061">        return output;</span>
+    }
+
+    /**
+     * Retrieve an encoded int in little endian starting at index in the
+     * string value.
+     *
+     * @param encode string to get int from
+     * @return the decoded integer
+     */
+    private static int decodeIntLittleEndian(ByteBuffer encode) {
+<span class="fc" id="L2072">        encode.order(ByteOrder.LITTLE_ENDIAN);</span>
+<span class="fc" id="L2073">        int value = encode.getInt();</span>
+<span class="fc" id="L2074">        encode.order(ByteOrder.BIG_ENDIAN);</span>
+<span class="fc" id="L2075">        return value;</span>
+    }
+
+    /**
+     * Retrieve an encoded int in little endian starting at index in the
+     * string value.
+     *
+     * @param encode string to get int from
+     * @return the decoded integer
+     */
+    private static int decodeIntBigEndian(ByteBuffer encode) {
+<span class="fc" id="L2086">        return encode.getInt();</span>
+    }
+
+    /**
+     * Retrieve an encoded int in big endian starting at index in the string
+     * value.
+     *
+     * @param encode string to get int from
+     * @return the decoded integer
+     */
+    private static long decodeIntUnsignedBigEndian(ByteBuffer encode) {
+<span class="fc" id="L2097">        return (long)encode.getInt() &amp; 0xFFFFFFFFL;</span>
+    }
+
+    /**
+     * Retrieve an encoded int in little endian starting at index in the
+     * string value.
+     *
+     * @param encode the encoded string
+     * @return the decoded integer
+     */
+    private static long decodeIntUnsignedLittleEndian(ByteBuffer encode) {
+<span class="fc" id="L2108">        encode.order(ByteOrder.LITTLE_ENDIAN);</span>
+<span class="fc" id="L2109">        long value = encode.getInt() &amp; 0xFFFFFFFFL;</span>
+<span class="fc" id="L2110">        encode.order(ByteOrder.BIG_ENDIAN);</span>
+<span class="fc" id="L2111">        return value;</span>
+    }
+
+    /**
+     * Encode an int in little endian format into a packed representation.
+     *
+     * @param result to be appended to
+     * @param s the integer to encode
+     */
+    private static void encodeIntLittleEndian(ByteList result, int s) {
+<span class="fc" id="L2121">        result.append((byte) (s &amp; 0xff)).append((byte) ((s &gt;&gt; 8) &amp; 0xff));</span>
+<span class="fc" id="L2122">        result.append((byte) ((s&gt;&gt;16) &amp; 0xff)).append((byte) ((s&gt;&gt;24) &amp;0xff));</span>
+<span class="fc" id="L2123">    }</span>
+
+    /**
+     * Encode an int in big-endian format into a packed representation.
+     *
+     * @param result to be appended to
+     * @param s the integer to encode
+     */
+    private static void encodeIntBigEndian(ByteList result, int s) {
+<span class="fc" id="L2132">        result.append((byte) ((s&gt;&gt;24) &amp;0xff)).append((byte) ((s&gt;&gt;16) &amp;0xff));</span>
+<span class="fc" id="L2133">        result.append((byte) ((s &gt;&gt; 8) &amp; 0xff)).append((byte) (s &amp; 0xff));</span>
+<span class="fc" id="L2134">    }</span>
+
+    /**
+     * Decode a long in big-endian format from a packed value
+     *
+     * @param encode string to get int from
+     * @return the long value
+     */
+    private static long decodeLongBigEndian(ByteBuffer encode) {
+<span class="fc" id="L2143">        int c1 = decodeIntBigEndian(encode);</span>
+<span class="fc" id="L2144">        int c2 = decodeIntBigEndian(encode);</span>
+
+<span class="fc" id="L2146">        return ((long) c1 &lt;&lt; 32) + (c2 &amp; 0xffffffffL);</span>
+    }
+
+    /**
+     * Decode a long in little-endian format from a packed value
+     *
+     * @param encode string to get int from
+     * @return the long value
+     */
+    private static long decodeLongLittleEndian(ByteBuffer encode) {
+<span class="fc" id="L2156">        int c1 = decodeIntLittleEndian(encode);</span>
+<span class="fc" id="L2157">        int c2 = decodeIntLittleEndian(encode);</span>
+
+<span class="fc" id="L2159">        return ((long) c2 &lt;&lt; 32) + (c1 &amp; 0xffffffffL);</span>
+    }
+
+    /**
+     * Encode a long in little-endian format into a packed value
+     *
+     * @param result to pack long into
+     * @param l is the long to encode
+     */
+    private static void encodeLongLittleEndian(ByteList result, long l) {
+<span class="fc" id="L2169">        encodeIntLittleEndian(result, (int) (l &amp; 0xffffffff));</span>
+<span class="fc" id="L2170">        encodeIntLittleEndian(result, (int) (l &gt;&gt;&gt; 32));</span>
+<span class="fc" id="L2171">    }</span>
+
+    /**
+     * Encode a long in big-endian format into a packed value
+     *
+     * @param result to pack long into
+     * @param l is the long to encode
+     */
+    private static void encodeLongBigEndian(ByteList result, long l) {
+<span class="fc" id="L2180">        encodeIntBigEndian(result, (int) (l &gt;&gt;&gt; 32));</span>
+<span class="fc" id="L2181">        encodeIntBigEndian(result, (int) (l &amp; 0xffffffff));</span>
+<span class="fc" id="L2182">    }</span>
+
+    /**
+     * Decode a double from a packed value
+     *
+     * @param encode string to get int from
+     * @return the double value
+     */
+    private static double decodeDoubleLittleEndian(ByteBuffer encode) {
+<span class="fc" id="L2191">        return Double.longBitsToDouble(decodeLongLittleEndian(encode));</span>
+    }
+
+    /**
+     * Decode a double in big-endian from a packed value
+     *
+     * @param encode string to get int from
+     * @return the double value
+     */
+    private static double decodeDoubleBigEndian(ByteBuffer encode) {
+<span class="fc" id="L2201">        return Double.longBitsToDouble(decodeLongBigEndian(encode));</span>
+    }
+
+    /**
+     * Encode a double in little endian format into a packed value
+     *
+     * @param result to pack double into
+     * @param d is the double to encode
+     */
+    private static void encodeDoubleLittleEndian(ByteList result, double d) {
+<span class="fc" id="L2211">        encodeLongLittleEndian(result, Double.doubleToRawLongBits(d));</span>
+<span class="fc" id="L2212">    }</span>
+
+    /**
+     * Encode a double in big-endian format into a packed value
+     *
+     * @param result to pack double into
+     * @param d is the double to encode
+     */
+    private static void encodeDoubleBigEndian(ByteList result, double d) {
+<span class="fc" id="L2221">        encodeLongBigEndian(result, Double.doubleToRawLongBits(d));</span>
+<span class="fc" id="L2222">    }</span>
+
+    /**
+     * Decode a float in big-endian from a packed value
+     *
+     * @param encode string to get int from
+     * @return the double value
+     */
+    private static float decodeFloatBigEndian(ByteBuffer encode) {
+<span class="fc" id="L2231">        return Float.intBitsToFloat(decodeIntBigEndian(encode));</span>
+    }
+
+    /**
+     * Decode a float in little-endian from a packed value
+     *
+     * @param encode string to get int from
+     * @return the double value
+     */
+    private static float decodeFloatLittleEndian(ByteBuffer encode) {
+<span class="fc" id="L2241">        return Float.intBitsToFloat(decodeIntLittleEndian(encode));</span>
+    }
+
+    /**
+     * Encode a float in little endian format into a packed value
+     * @param result to pack float into
+     * @param f is the float to encode
+     */
+    private static void encodeFloatLittleEndian(ByteList result, float f) {
+<span class="fc" id="L2250">        encodeIntLittleEndian(result, Float.floatToRawIntBits(f));</span>
+<span class="fc" id="L2251">    }</span>
+
+    /**
+     * Encode a float in big-endian format into a packed value
+     * @param result to pack float into
+     * @param f is the float to encode
+     */
+    private static void encodeFloatBigEndian(ByteList result, float f) {
+<span class="fc" id="L2259">        encodeIntBigEndian(result, Float.floatToRawIntBits(f));</span>
+<span class="fc" id="L2260">    }</span>
+
+    /**
+     * Decode a short in little-endian from a packed value
+     *
+     * @param encode string to get int from
+     * @return the short value
+     */
+    private static int decodeShortUnsignedLittleEndian(ByteBuffer encode) {
+<span class="fc" id="L2269">        encode.order(ByteOrder.LITTLE_ENDIAN);</span>
+<span class="fc" id="L2270">        int value = encode.getShort() &amp; 0xFFFF;</span>
+<span class="fc" id="L2271">        encode.order(ByteOrder.BIG_ENDIAN);</span>
+<span class="fc" id="L2272">        return value;</span>
+    }
+
+    /**
+     * Decode a short in big-endian from a packed value
+     *
+     * @param encode string to get int from
+     * @return the short value
+     */
+    private static int decodeShortUnsignedBigEndian(ByteBuffer encode) {
+<span class="fc" id="L2282">        int value = encode.getShort() &amp; 0xFFFF;</span>
+<span class="fc" id="L2283">        return value;</span>
+    }
+
+    /**
+     * Decode a short in little-endian from a packed value
+     *
+     * @param encode string to get int from
+     * @return the short value
+     */
+    private static int decodeShortLittleEndian(ByteBuffer encode) {
+<span class="fc" id="L2293">        encode.order(ByteOrder.LITTLE_ENDIAN);</span>
+<span class="fc" id="L2294">        int value = encode.getShort();</span>
+<span class="fc" id="L2295">        encode.order(ByteOrder.BIG_ENDIAN);</span>
+<span class="fc" id="L2296">        return value;</span>
+    }
+
+    /**
+     * Decode a short in big-endian from a packed value
+     *
+     * @param encode string to get int from
+     * @return the short value
+     */
+    private static short decodeShortBigEndian(ByteBuffer encode) {
+<span class="fc" id="L2306">        return encode.getShort();</span>
+    }
+
+    /**
+     * Encode an short in little endian format into a packed representation.
+     *
+     * @param result to be appended to
+     * @param s the short to encode
+     */
+    private static void encodeShortLittleEndian(ByteList result, int s) {
+<span class="fc" id="L2316">        result.append((byte) (s &amp; 0xff)).append((byte) ((s &amp; 0xff00) &gt;&gt; 8));</span>
+<span class="fc" id="L2317">    }</span>
+
+    /**
+     * Encode an shortin big-endian format into a packed representation.
+     *
+     * @param result to be appended to
+     * @param s the short to encode
+     */
+    private static void encodeShortBigEndian(ByteList result, int s) {
+<span class="fc" id="L2326">        result.append((byte) ((s &amp; 0xff00) &gt;&gt; 8)).append((byte) (s &amp; 0xff));</span>
+<span class="fc" id="L2327">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

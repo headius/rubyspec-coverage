@@ -1,0 +1,616 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>VariableTableManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime.ivars</a> &gt; <span class="el_source">VariableTableManager.java</span></div><h1>VariableTableManager.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.runtime.ivars;
+
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import org.jruby.Ruby;
+import org.jruby.RubyBasicObject;
+import org.jruby.RubyClass;
+import org.jruby.runtime.ObjectSpace;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.unsafe.UnsafeHolder;
+
+/**
+ * This class encapculates all logic relating to the management of instance
+ * variable tables in RubyBasicObject instances.
+ * 
+ * The logic originally lived in both RubyBasicObject and RubyClass, tightly
+ * coupled to each and difficult to follow as it bounced back and forth. We
+ * moved the logic here for a couple reasons:
+ * 
+ * &lt;li&gt;To have a single place from which we could follow ivar logic.&lt;/li&gt;
+ * &lt;li&gt;To make it easier to swap in new implementations of instance variable
+ * logic as we work toward reifying ivars into fields.&lt;/li&gt;
+ * &lt;li&gt;To remove rather noisy logic from RubyBasicObject and RubyClass.&lt;/li&gt;
+ */
+public class VariableTableManager {
+    /** the &quot;real&quot; class associated with this table */
+    private final RubyClass realClass;
+    
+    /** an empty array of String */
+<span class="fc" id="L60">    private static String[] EMPTY_STRING_ARRAY = new String[0];</span>
+    
+    /** a map from strings to accessors for this table */
+<span class="fc" id="L63">    private Map&lt;String, VariableAccessor&gt; variableAccessors = (Map&lt;String, VariableAccessor&gt;)Collections.EMPTY_MAP;</span>
+    
+    /** an array of all registered variable names */
+<span class="fc" id="L66">    private volatile String[] variableNames = EMPTY_STRING_ARRAY;</span>
+
+    /** whether a slot has been allocated to object_id */
+<span class="fc" id="L69">    private volatile boolean hasObjectID = false;</span>
+    
+    /** whether objects associated with this table use fields */
+<span class="fc" id="L72">    private volatile int fieldVariables = 0;</span>
+    
+    /** a lazy accessor for object_id */
+<span class="fc" id="L75">    private final VariableAccessorField objectIdVariableAccessorField = new VariableAccessorField(&quot;object_id&quot;);</span>
+    /** a lazy accessor for FFI handle */
+<span class="fc" id="L77">    private final VariableAccessorField ffiHandleVariableAccessorField = new VariableAccessorField(&quot;ffi&quot;);</span>
+    /** a lazy accessor for object group */
+<span class="fc" id="L79">    private final VariableAccessorField objectGroupVariableAccessorField = new VariableAccessorField(&quot;objectspace_group&quot;);</span>
+    
+    /**
+     * Construct a new VariableTable Manager for the given &quot;real&quot; class.
+     * 
+     * @param realClass the &quot;real&quot; class associated with this table
+     */
+<span class="fc" id="L86">    public VariableTableManager(RubyClass realClass) {</span>
+<span class="fc" id="L87">        this.realClass = realClass;</span>
+<span class="fc" id="L88">    }</span>
+
+    /**
+     * Get the map of all current variable accessors with intent to read from it.
+     * 
+     * @return a map of current variable accessors
+     */
+    public Map&lt;String, VariableAccessor&gt; getVariableAccessorsForRead() {
+<span class="fc" id="L96">        return variableAccessors;</span>
+    }
+    
+    /**
+     * Whether this table has been used to allocate space for an object_id.
+     * 
+     * @return true if object_id has been allocated; false otherwise
+     */
+    public boolean hasObjectID() {
+<span class="nc" id="L105">        return hasObjectID;</span>
+    }
+    
+    /**
+     * Get the object_id from a given RubyBasicObject, possibly allocating
+     * space for it.
+     * 
+     * @param self the object from which to get object_id
+     * @return the object's object_id (possibly new)
+     */
+    public long getObjectId(RubyBasicObject self) {
+<span class="fc" id="L116">        VariableAccessor objectIdAccessor = getObjectIdAccessorField().getVariableAccessorForRead();</span>
+<span class="fc" id="L117">        Long id = (Long)objectIdAccessor.get(self);</span>
+<span class="fc bfc" id="L118" title="All 2 branches covered.">        if (id != null) return id;</span>
+        
+<span class="fc" id="L120">        synchronized (self) {</span>
+<span class="fc" id="L121">            objectIdAccessor = getObjectIdAccessorField().getVariableAccessorForRead();</span>
+<span class="fc" id="L122">            id = (Long)objectIdAccessor.get(self);</span>
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">            if (id != null) return id;</span>
+
+<span class="fc" id="L125">            return initObjectId(self, getObjectIdAccessorField().getVariableAccessorForWrite(this));</span>
+<span class="nc" id="L126">        }</span>
+    }
+    
+    /**
+     * Virtual entry point for setting a variable into an object.
+     * 
+     * @param self the object into which to set the value
+     * @param index the index allocated for the value
+     * @param value the value
+     */
+    public void setVariableInternal(RubyBasicObject self, int index, Object value) {
+<span class="nc bnc" id="L137" title="All 2 branches missed.">        if(UnsafeHolder.U == null) {</span>
+<span class="nc" id="L138">            SynchronizedVariableAccessor.setVariable(self,realClass,index,value);</span>
+        } else {
+<span class="nc" id="L140">            StampedVariableAccessor.setVariable(self,realClass,index,value);</span>
+        }
+<span class="nc" id="L142">    }</span>
+    
+    /**
+     * Static entry point for setting a variable in an object.
+     * 
+     * @param realClass the &quot;real&quot; class of the object
+     * @param self the object into which to set the variable
+     * @param index the index allocated for the variable
+     * @param value the value of the variable
+     */
+    public static void setVariableInternal(RubyClass realClass, RubyBasicObject self, int index, Object value) {
+<span class="pc bpc" id="L153" title="1 of 2 branches missed.">        if(UnsafeHolder.U == null) {</span>
+<span class="nc" id="L154">            SynchronizedVariableAccessor.setVariable(self,realClass,index,value);</span>
+        } else {
+<span class="fc" id="L156">            StampedVariableAccessor.setVariable(self,realClass,index,value);</span>
+        }
+<span class="fc" id="L158">    }</span>
+
+    /**
+     * Get the variable accessor for the given name with intent to use it for
+     * writing.
+     * 
+     * @param name the name of the variable
+     * @return an accessor appropriate for writing
+     */
+    public VariableAccessor getVariableAccessorForWrite(String name) {
+<span class="fc" id="L168">        VariableAccessor ivarAccessor = variableAccessors.get(name);</span>
+<span class="fc bfc" id="L169" title="All 2 branches covered.">        if (ivarAccessor == null) {</span>
+
+<span class="fc" id="L171">            synchronized (realClass) {</span>
+<span class="fc" id="L172">                Map&lt;String, VariableAccessor&gt; myVariableAccessors = variableAccessors;</span>
+<span class="fc" id="L173">                ivarAccessor = myVariableAccessors.get(name);</span>
+
+<span class="pc bpc" id="L175" title="1 of 2 branches missed.">                if (ivarAccessor == null) {</span>
+                    // allocate a new accessor and populate a new table
+<span class="fc" id="L177">                    ivarAccessor = allocateVariableAccessor(name);</span>
+<span class="fc" id="L178">                    Map&lt;String, VariableAccessor&gt; newVariableAccessors = new HashMap&lt;String, VariableAccessor&gt;(myVariableAccessors.size() + 1);</span>
+
+<span class="fc" id="L180">                    newVariableAccessors.putAll(myVariableAccessors);</span>
+<span class="fc" id="L181">                    newVariableAccessors.put(name, ivarAccessor);</span>
+
+<span class="fc" id="L183">                    variableAccessors = newVariableAccessors;</span>
+                }
+<span class="pc" id="L185">            }</span>
+        }
+<span class="fc" id="L187">        return ivarAccessor;</span>
+    }
+    
+    public VariableAccessor getVariableAccessorForVar(String name, int index) {
+<span class="nc" id="L191">        VariableAccessor ivarAccessor = variableAccessors.get(name);</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">        if (ivarAccessor == null) {</span>
+
+<span class="nc" id="L194">            synchronized (realClass) {</span>
+<span class="nc" id="L195">                Map&lt;String, VariableAccessor&gt; myVariableAccessors = variableAccessors;</span>
+<span class="nc" id="L196">                ivarAccessor = myVariableAccessors.get(name);</span>
+
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                if (ivarAccessor == null) {</span>
+                    // allocate a new accessor and populate a new table
+<span class="nc" id="L200">                    ivarAccessor = allocateVariableAccessorForVar(name, index);</span>
+<span class="nc" id="L201">                    Map&lt;String, VariableAccessor&gt; newVariableAccessors = new HashMap&lt;String, VariableAccessor&gt;(myVariableAccessors.size() + 1);</span>
+
+<span class="nc" id="L203">                    newVariableAccessors.putAll(myVariableAccessors);</span>
+<span class="nc" id="L204">                    newVariableAccessors.put(name, ivarAccessor);</span>
+
+<span class="nc" id="L206">                    variableAccessors = newVariableAccessors;</span>
+                }
+<span class="nc" id="L208">            }</span>
+        }
+<span class="nc" id="L210">        return ivarAccessor;</span>
+    }
+
+    /**
+     * Get the variable accessor for the given name with intent to use it for
+     * reading.
+     * 
+     * @param name the name of the variable
+     * @return an accessor appropriate for reading
+     */
+    public VariableAccessor getVariableAccessorForRead(String name) {
+<span class="fc" id="L221">        VariableAccessor accessor = getVariableAccessorsForRead().get(name);</span>
+<span class="fc bfc" id="L222" title="All 2 branches covered.">        if (accessor == null) accessor = VariableAccessor.DUMMY_ACCESSOR;</span>
+<span class="fc" id="L223">        return accessor;</span>
+    }
+
+    /**
+     * Retrieve the lazy accessor (VariableAccessorField) for object_id.
+     * 
+     * @return the lazy accessor for object_id
+     */
+    public VariableAccessorField getObjectIdAccessorField() {
+<span class="fc" id="L232">        return objectIdVariableAccessorField;</span>
+    }
+
+    /**
+     * Retrieve the lazy accessor (VariableAccessorField) for FFI handle.
+     * 
+     * @return the lazy accessor for FFI handle
+     */
+    public VariableAccessorField getFFIHandleAccessorField() {
+<span class="nc" id="L241">        return ffiHandleVariableAccessorField;</span>
+    }
+
+    /**
+     * Retrieve the read accessor for FFI handle.
+     * 
+     * @return the read accessor for FFI handle
+     */
+    public VariableAccessor getFFIHandleAccessorForRead() {
+<span class="fc" id="L250">        return ffiHandleVariableAccessorField.getVariableAccessorForRead();</span>
+    }
+
+    /**
+     * Retrieve the write accessor for FFI handle.
+     * 
+     * @return the write accessor for FFI handle
+     */
+    public VariableAccessor getFFIHandleAccessorForWrite() {
+<span class="fc" id="L259">        return ffiHandleVariableAccessorField.getVariableAccessorForWrite(this);</span>
+    }
+
+    /**
+     * Retrieve the lazy accessor (VariableAccessorField) for object group.
+     * 
+     * @return the lazy accessor for object group
+     */
+    public VariableAccessorField getObjectGroupAccessorField() {
+<span class="nc" id="L268">        return objectGroupVariableAccessorField;</span>
+    }
+
+    /**
+     * Retrieve the read accessor for object group.
+     * 
+     * @return the read accessor for object group
+     */
+    public VariableAccessor getObjectGroupAccessorForRead() {
+<span class="nc" id="L277">        return objectGroupVariableAccessorField.getVariableAccessorForRead();</span>
+    }
+
+    /**
+     * Retrieve the write accessor for object group.
+     * 
+     * @return the write accessor for object group
+     */
+    public VariableAccessor getObjectGroupAccessorForWrite() {
+<span class="nc" id="L286">        return objectGroupVariableAccessorField.getVariableAccessorForWrite(this);</span>
+    }
+
+    /**
+     * Retrieve the FFI ext handle for the given object.
+     * 
+     * @param self the object
+     * @return the object's FFI handle
+     */
+    public final Object getFFIHandle(RubyBasicObject self) {
+<span class="fc" id="L296">        return getFFIHandleAccessorForRead().get(self);</span>
+    }
+
+    /**
+     * Set the FFI handle for the given object.
+     * 
+     * @param self the object
+     * @param self the object's FFI handle
+     */
+    public final void setFFIHandle(RubyBasicObject self, Object value) {
+<span class="fc" id="L306">        int index = getFFIHandleAccessorForWrite().getIndex();</span>
+<span class="fc" id="L307">        setVariableInternal(realClass, self, index, value);</span>
+<span class="fc" id="L308">    }</span>
+
+    /**
+     * Get the size of the variable table, excluding extra vars (object_id,
+     * etc).
+     * 
+     * @return the variable table's size, excluding extras
+     */
+    public int getVariableTableSize() {
+<span class="fc" id="L317">        return variableAccessors.size();</span>
+    }
+
+    /**
+     * Get the size of the variable table, including extra vars (object_etc,
+     * etc).
+     * 
+     * @return 
+     */
+    public int getVariableTableSizeWithExtras() {
+<span class="fc" id="L327">        return variableNames.length;</span>
+    }
+
+    /**
+     * Get a Map representing all variables registered in the variable table.
+     * 
+     * @return a map of names to accessors for all variables
+     */
+    public Map&lt;String, VariableAccessor&gt; getVariableTableCopy() {
+<span class="nc" id="L336">        return new HashMap&lt;String, VariableAccessor&gt;(getVariableAccessorsForRead());</span>
+    }
+
+    /**
+     * Get an array of all the known instance variable names. The offset into
+     * the array indicates the offset of the variable's value in the per-object
+     * variable array.
+     *
+     * @return a copy of the array of known instance variable names
+     */
+    public String[] getVariableNames() {
+<span class="nc" id="L347">        String[] original = variableNames;</span>
+<span class="nc" id="L348">        String[] copy = new String[original.length];</span>
+<span class="nc" id="L349">        System.arraycopy(original, 0, copy, 0, original.length);</span>
+<span class="nc" id="L350">        return copy;</span>
+    }
+    
+    /**
+     * Sync one this object's variables with other's - this is used to make
+     * rbClone work correctly.
+     * 
+     * @param self the object into which to sync variables
+     * @param other the object from which to sync variables
+     */
+    public void syncVariables(RubyBasicObject self, IRubyObject other) {
+<span class="fc" id="L361">        RubyClass otherRealClass = other.getMetaClass().getRealClass();</span>
+<span class="fc bfc" id="L362" title="All 2 branches covered.">        boolean sameTable = otherRealClass == realClass;</span>
+
+<span class="pc bpc" id="L364" title="1 of 4 branches missed.">        if (sameTable &amp;&amp; fieldVariables == 0) {</span>
+<span class="fc" id="L365">            int idIndex = otherRealClass.getObjectIdAccessorField().getVariableAccessorForRead().getIndex();</span>
+            
+<span class="fc" id="L367">            Object[] otherVars = ((RubyBasicObject) other).varTable;</span>
+            
+<span class="pc bpc" id="L369" title="1 of 2 branches missed.">            if(UnsafeHolder.U == null)</span>
+            {
+<span class="nc" id="L371">                synchronized (self) {</span>
+<span class="nc" id="L372">                    self.varTable = makeSyncedTable(self.varTable, otherVars, idIndex);</span>
+<span class="nc" id="L373">                }</span>
+            } else {
+                for(;;) {
+<span class="fc" id="L376">                    int oldStamp = self.varTableStamp;</span>
+                    // wait for read mode
+<span class="pc bpc" id="L378" title="1 of 2 branches missed.">                    if((oldStamp &amp; 0x01) == 1)</span>
+<span class="nc" id="L379">                        continue;</span>
+                    // acquire exclusive write mode
+<span class="pc bpc" id="L381" title="1 of 2 branches missed.">                    if(!UnsafeHolder.U.compareAndSwapInt(self, RubyBasicObject.STAMP_OFFSET, oldStamp, ++oldStamp))</span>
+<span class="nc" id="L382">                        continue;</span>
+                    
+<span class="fc" id="L384">                    Object[] currentTable = (Object[]) UnsafeHolder.U.getObjectVolatile(self, RubyBasicObject.VAR_TABLE_OFFSET);</span>
+<span class="fc" id="L385">                    Object[] newTable = makeSyncedTable(currentTable,otherVars, idIndex);</span>
+                    
+<span class="fc" id="L387">                    UnsafeHolder.U.putOrderedObject(self, RubyBasicObject.VAR_TABLE_OFFSET, newTable);</span>
+                    
+                    // release write mode
+<span class="fc" id="L390">                    self.varTableStamp = oldStamp+1;</span>
+<span class="fc" id="L391">                    break;</span>
+                }
+
+                
+            }
+
+<span class="fc" id="L397">        } else {</span>
+<span class="fc bfc" id="L398" title="All 2 branches covered.">            for (Map.Entry&lt;String, VariableAccessor&gt; entry : otherRealClass.getVariableAccessorsForRead().entrySet()) {</span>
+<span class="fc" id="L399">                VariableAccessor accessor = entry.getValue();</span>
+<span class="fc" id="L400">                Object value = accessor.get(other);</span>
+
+<span class="fc bfc" id="L402" title="All 2 branches covered.">                if (value != null) {</span>
+<span class="pc bpc" id="L403" title="1 of 2 branches missed.">                    if (sameTable) {</span>
+<span class="nc" id="L404">                        accessor.set(self, value);</span>
+                    } else {
+<span class="fc" id="L406">                        realClass.getVariableAccessorForWrite(accessor.getName()).set(self, value);</span>
+                    }
+                }
+<span class="fc" id="L409">            }</span>
+        }
+<span class="fc" id="L411">    }</span>
+    
+    /**
+     * Returns true if object has any variables, defined as:
+     * &lt;ul&gt;
+     * &lt;li&gt; instance variables
+     * &lt;li&gt; class variables
+     * &lt;li&gt; constants
+     * &lt;li&gt; internal variables, such as those used when marshaling Ranges and Exceptions
+     * &lt;/ul&gt;
+     * @return true if object has any variables, else false
+     */
+    public boolean hasVariables(RubyBasicObject object) {
+        // we check both to exclude object_id
+        Object[] myVarTable;
+<span class="pc bpc" id="L426" title="2 of 8 branches missed.">        return fieldVariables &gt; 0 || getVariableTableSize() &gt; 0 &amp;&amp; (myVarTable = object.varTable) != null &amp;&amp; myVarTable.length &gt; 0;</span>
+    }
+
+    public void serializeVariables(RubyBasicObject object, ObjectOutputStream oos) throws IOException {
+<span class="nc bnc" id="L430" title="All 2 branches missed.">        if (object.varTable != null) {</span>
+<span class="nc" id="L431">            Map&lt;String, VariableAccessor&gt; accessors = getVariableAccessorsForRead();</span>
+<span class="nc" id="L432">            oos.writeInt(accessors.size());</span>
+<span class="nc bnc" id="L433" title="All 2 branches missed.">            for (VariableAccessor accessor : accessors.values()) {</span>
+<span class="nc" id="L434">                oos.writeUTF(RubyBasicObject.ERR_INSECURE_SET_INST_VAR);</span>
+<span class="nc" id="L435">                oos.writeObject(accessor.get(object));</span>
+<span class="nc" id="L436">            }</span>
+<span class="nc" id="L437">        } else {</span>
+<span class="nc" id="L438">            oos.writeInt(0);</span>
+        }
+<span class="nc" id="L440">    }</span>
+
+    public void deserializeVariables(RubyBasicObject object, ObjectInputStream ois) throws IOException, ClassNotFoundException {
+<span class="nc" id="L443">        int varCount = ois.readInt();</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">        for (int i = 0; i &lt; varCount; i++) {</span>
+<span class="nc" id="L445">            String name = ois.readUTF();</span>
+<span class="nc" id="L446">            Object value = ois.readObject();</span>
+<span class="nc" id="L447">            getVariableAccessorForWrite(name).set(object, value);</span>
+        }
+<span class="nc" id="L449">    }</span>
+    
+    public Object clearVariable(RubyBasicObject object, String name) {
+<span class="fc" id="L452">        synchronized(object) {</span>
+<span class="fc" id="L453">            Object value = getVariableAccessorForRead(name).get(object);</span>
+<span class="fc" id="L454">            getVariableAccessorForWrite(name).set(object, null);</span>
+            
+<span class="fc" id="L456">            return value;</span>
+<span class="nc" id="L457">        }</span>
+    }
+
+    /**
+     * We lazily stand up the object ID since it forces us to stand up
+     * per-object state for a given object. We also check for ObjectSpace here,
+     * and normally we do not register a given object ID into ObjectSpace due
+     * to the high cost associated with constructing the related weakref. Most
+     * uses of id/object_id will only ever need it to be a unique identifier,
+     * and the id2ref behavior provided by ObjectSpace is considered internal
+     * and not generally supported.
+     *
+     * Note that this method does not need to be synchronized, since it is
+     * only called from #getObjectId, which synchronizes against the target
+     * object. The accessor is already present, and variable accesses are
+     * thread-safe (albeit not atomic, which necessitates the synchronization
+     * in getObjectId).
+     *
+     * Synchronization here ends up being a bottleneck for every object
+     * created from the class that contains this VariableTableManager. See
+     * GH #1400.
+     * 
+     * @param objectIdAccessor The variable accessor to use for storing the
+     * generated object ID
+     * @return The generated object ID
+     */
+    private long initObjectId(RubyBasicObject self, VariableAccessor objectIdAccessor) {
+<span class="fc" id="L484">        Ruby runtime = self.getRuntime();</span>
+        long id;
+        
+<span class="pc bpc" id="L487" title="1 of 2 branches missed.">        if (runtime.isObjectSpaceEnabled()) {</span>
+<span class="nc" id="L488">            id = runtime.getObjectSpace().createAndRegisterObjectId(self);</span>
+        } else {
+<span class="fc" id="L490">            id = ObjectSpace.calculateObjectId(self);</span>
+        }
+        
+        // we use a direct path here to avoid frozen checks
+<span class="fc" id="L494">        setObjectId(realClass, self, objectIdAccessor.getIndex(), id);</span>
+
+<span class="fc" id="L496">        return id;</span>
+    }
+
+    /**
+     * Update object_id with the given value.
+     * 
+     * @param self the object into which to set object_id
+     * @param index the index allocated to store object_id
+     * @param value the value of object_id
+     */
+    private static void setObjectId(RubyClass realClass, RubyBasicObject self, int index, long value) {
+<span class="pc bpc" id="L507" title="1 of 2 branches missed.">        if (index &lt; 0) return;</span>
+<span class="fc" id="L508">        setVariableInternal(realClass, self, index, value);</span>
+<span class="fc" id="L509">    }</span>
+
+    /**
+     * Make a new variable table based on the values in a current and other
+     * (incoming) table, excluding object_id at specified index.
+     * 
+     * @param currentTable the current table
+     * @param otherTable the other (incoming) table
+     * @param objectIdIdx the index of object_id to exclude
+     * @return a new table formed by combining the given tables
+     */
+    private static Object[] makeSyncedTable(Object[] currentTable, Object[] otherTable, int objectIdIdx) {
+<span class="pc bpc" id="L521" title="1 of 4 branches missed.">        if(currentTable == null || currentTable.length &lt; otherTable.length) {</span>
+<span class="fc" id="L522">            currentTable = otherTable.clone();</span>
+        } else {
+<span class="fc" id="L524">            System.arraycopy(otherTable, 0, currentTable, 0, otherTable.length);</span>
+        }
+    
+        // null out object ID so we don't share it
+<span class="pc bpc" id="L528" title="1 of 4 branches missed.">        if (objectIdIdx &gt;= 0 &amp;&amp; objectIdIdx &lt; currentTable.length) {</span>
+<span class="fc" id="L529">            currentTable[objectIdIdx] = null;</span>
+        }
+        
+<span class="fc" id="L532">        return currentTable;</span>
+    }
+
+    /**
+     * Allocate a new VariableAccessor for the named variable.
+     * 
+     * @param name the name of the variable
+     * @return the new VariableAccessor
+     */
+    synchronized final VariableAccessor allocateVariableAccessor(String name) {
+<span class="fc" id="L542">        int id = realClass.id;</span>
+<span class="fc" id="L543">        String[] myVariableNames = variableNames;</span>
+
+<span class="fc" id="L545">        int newIndex = myVariableNames.length;</span>
+<span class="fc" id="L546">        String[] newVariableNames = new String[newIndex + 1];</span>
+
+        VariableAccessor newVariableAccessor;
+<span class="pc bpc" id="L549" title="1 of 2 branches missed.">        if (UnsafeHolder.U == null) {</span>
+<span class="nc" id="L550">            newVariableAccessor = new SynchronizedVariableAccessor(realClass, name, newIndex, id);</span>
+        } else {
+<span class="fc" id="L552">            newVariableAccessor = new StampedVariableAccessor(realClass, name, newIndex, id);</span>
+        }
+
+<span class="fc" id="L555">        System.arraycopy(myVariableNames, 0, newVariableNames, 0, newIndex);</span>
+
+<span class="fc" id="L557">        newVariableNames[newIndex] = name;</span>
+<span class="fc" id="L558">        variableNames = newVariableNames;</span>
+
+<span class="fc" id="L560">        return newVariableAccessor;</span>
+    }
+    
+    synchronized final VariableAccessor allocateVariableAccessorForVar(String name, int index) {
+<span class="nc" id="L564">        int id = realClass.id;</span>
+<span class="nc" id="L565">        String[] myVariableNames = variableNames;</span>
+
+<span class="nc" id="L567">        int newIndex = myVariableNames.length;</span>
+<span class="nc" id="L568">        String[] newVariableNames = new String[newIndex + 1];</span>
+        
+<span class="nc" id="L570">        fieldVariables += 1;</span>
+
+        VariableAccessor newVariableAccessor;
+<span class="nc bnc" id="L573" title="All 11 branches missed.">        switch (index) {</span>
+            case 0:
+<span class="nc" id="L575">                newVariableAccessor = new VariableAccessorVar0(realClass, name, newIndex, id);</span>
+<span class="nc" id="L576">                break;</span>
+            case 1:
+<span class="nc" id="L578">                newVariableAccessor = new VariableAccessorVar1(realClass, name, newIndex, id);</span>
+<span class="nc" id="L579">                break;</span>
+            case 2:
+<span class="nc" id="L581">                newVariableAccessor = new VariableAccessorVar2(realClass, name, newIndex, id);</span>
+<span class="nc" id="L582">                break;</span>
+            case 3:
+<span class="nc" id="L584">                newVariableAccessor = new VariableAccessorVar3(realClass, name, newIndex, id);</span>
+<span class="nc" id="L585">                break;</span>
+            case 4:
+<span class="nc" id="L587">                newVariableAccessor = new VariableAccessorVar4(realClass, name, newIndex, id);</span>
+<span class="nc" id="L588">                break;</span>
+            case 5:
+<span class="nc" id="L590">                newVariableAccessor = new VariableAccessorVar5(realClass, name, newIndex, id);</span>
+<span class="nc" id="L591">                break;</span>
+            case 6:
+<span class="nc" id="L593">                newVariableAccessor = new VariableAccessorVar6(realClass, name, newIndex, id);</span>
+<span class="nc" id="L594">                break;</span>
+            case 7:
+<span class="nc" id="L596">                newVariableAccessor = new VariableAccessorVar7(realClass, name, newIndex, id);</span>
+<span class="nc" id="L597">                break;</span>
+            case 8:
+<span class="nc" id="L599">                newVariableAccessor = new VariableAccessorVar8(realClass, name, newIndex, id);</span>
+<span class="nc" id="L600">                break;</span>
+            case 9:
+<span class="nc" id="L602">                newVariableAccessor = new VariableAccessorVar9(realClass, name, newIndex, id);</span>
+<span class="nc" id="L603">                break;</span>
+            default:
+<span class="nc" id="L605">                throw new RuntimeException(&quot;unsupported var index in &quot; + realClass + &quot;: &quot; + index);</span>
+        }
+
+<span class="nc" id="L608">        System.arraycopy(myVariableNames, 0, newVariableNames, 0, newIndex);</span>
+
+<span class="nc" id="L610">        newVariableNames[newIndex] = name;</span>
+<span class="nc" id="L611">        variableNames = newVariableNames;</span>
+
+<span class="nc" id="L613">        return newVariableAccessor;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

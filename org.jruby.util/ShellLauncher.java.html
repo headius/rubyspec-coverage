@@ -1,0 +1,1668 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ShellLauncher.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util</a> &gt; <span class="el_source">ShellLauncher.java</span></div><h1>ShellLauncher.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2007-2011 JRuby Team &lt;team@jruby.org&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+
+package org.jruby.util;
+
+import static java.lang.System.out;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.FilterInputStream;
+import java.io.FilterOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
+import java.io.PrintStream;
+import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import org.jruby.Main;
+import org.jruby.Ruby;
+import org.jruby.RubyArray;
+import org.jruby.RubyHash;
+import org.jruby.RubyIO;
+import org.jruby.RubyInstanceConfig;
+import org.jruby.RubyModule;
+import org.jruby.RubyString;
+import jnr.posix.util.FieldAccess;
+import jnr.posix.util.Platform;
+import org.jruby.runtime.Helpers;
+import org.jruby.ext.rbconfig.RbConfigLibrary;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.cli.Options;
+import org.jruby.util.io.IOOptions;
+import org.jruby.util.io.ModeFlags;
+
+/**
+ * This mess of a class is what happens when all Java gives you is
+ * Runtime.getRuntime().exec(). Thanks dude, that really helped.
+ * @author nicksieger
+ */
+@SuppressWarnings(&quot;deprecation&quot;)
+<span class="nc" id="L82">public class ShellLauncher {</span>
+    private static final boolean DEBUG = false;
+
+    private static final String PATH_ENV = &quot;PATH&quot;;
+
+    // from MRI -- note the unixy file separators
+<span class="fc" id="L88">    private static final String[] DEFAULT_PATH =</span>
+        { &quot;/usr/local/bin&quot;, &quot;/usr/ucb&quot;, &quot;/usr/bin&quot;, &quot;/bin&quot; };
+
+<span class="fc" id="L91">    private static final String[] WINDOWS_EXE_SUFFIXES =</span>
+        { &quot;.exe&quot;, &quot;.com&quot;, &quot;.bat&quot;, &quot;.cmd&quot; }; // the order is important
+
+<span class="fc" id="L94">    private static final String[] WINDOWS_INTERNAL_CMDS = {</span>
+        &quot;assoc&quot;, &quot;break&quot;, &quot;call&quot;, &quot;cd&quot;, &quot;chcp&quot;,
+        &quot;chdir&quot;, &quot;cls&quot;, &quot;color&quot;, &quot;copy&quot;, &quot;ctty&quot;, &quot;date&quot;, &quot;del&quot;, &quot;dir&quot;, &quot;echo&quot;, &quot;endlocal&quot;,
+        &quot;erase&quot;, &quot;exit&quot;, &quot;for&quot;, &quot;ftype&quot;, &quot;goto&quot;, &quot;if&quot;, &quot;lfnfor&quot;, &quot;lh&quot;, &quot;lock&quot;, &quot;md&quot;, &quot;mkdir&quot;,
+        &quot;move&quot;, &quot;path&quot;, &quot;pause&quot;, &quot;popd&quot;, &quot;prompt&quot;, &quot;pushd&quot;, &quot;rd&quot;, &quot;rem&quot;, &quot;ren&quot;, &quot;rename&quot;,
+        &quot;rmdir&quot;, &quot;set&quot;, &quot;setlocal&quot;, &quot;shift&quot;, &quot;start&quot;, &quot;time&quot;, &quot;title&quot;, &quot;truename&quot;, &quot;type&quot;,
+        &quot;unlock&quot;, &quot;ver&quot;, &quot;verify&quot;, &quot;vol&quot;, };
+
+    // TODO: better check is needed, with quoting/escaping
+<span class="fc" id="L103">    private static final Pattern SHELL_METACHARACTER_PATTERN =</span>
+<span class="fc" id="L104">        Pattern.compile(&quot;[*?{}\\[\\]&lt;&gt;()~&amp;|$;'`\\\\\&quot;\\n]&quot;);</span>
+
+<span class="fc" id="L106">    private static final Pattern WIN_ENVVAR_PATTERN = Pattern.compile(&quot;%\\w+%&quot;);</span>
+
+    private static class ScriptThreadProcess extends Process implements Runnable {
+        private final String[] argArray;
+        private final String[] env;
+        private final File pwd;
+        private final boolean pipedStreams;
+        private final PipedInputStream processOutput;
+        private final PipedInputStream processError;
+        private final PipedOutputStream processInput;
+
+        private RubyInstanceConfig config;
+        private Thread processThread;
+        private int result;
+        private Ruby parentRuntime;
+
+        public ScriptThreadProcess(Ruby parentRuntime, final String[] argArray, final String[] env, final File dir) {
+<span class="nc" id="L123">            this(parentRuntime, argArray, env, dir, true);</span>
+<span class="nc" id="L124">        }</span>
+
+<span class="nc" id="L126">        public ScriptThreadProcess(Ruby parentRuntime, final String[] argArray, final String[] env, final File dir, final boolean pipedStreams) {</span>
+<span class="nc" id="L127">            this.parentRuntime = parentRuntime;</span>
+<span class="nc" id="L128">            this.argArray = argArray;</span>
+<span class="nc" id="L129">            this.env = env;</span>
+<span class="nc" id="L130">            this.pwd = dir;</span>
+<span class="nc" id="L131">            this.pipedStreams = pipedStreams;</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">            if (pipedStreams) {</span>
+<span class="nc" id="L133">                processOutput = new PipedInputStream();</span>
+<span class="nc" id="L134">                processError = new PipedInputStream();</span>
+<span class="nc" id="L135">                processInput = new PipedOutputStream();</span>
+            } else {
+<span class="nc" id="L137">                processOutput = processError = null;</span>
+<span class="nc" id="L138">                processInput = null;</span>
+            }
+<span class="nc" id="L140">        }</span>
+        public void run() {
+            try {
+<span class="nc" id="L143">                this.result = (new Main(config).run(argArray)).getStatus();</span>
+<span class="nc" id="L144">            } catch (Throwable throwable) {</span>
+<span class="nc" id="L145">                throwable.printStackTrace(this.config.getError());</span>
+<span class="nc" id="L146">                this.result = -1;</span>
+            } finally {
+<span class="nc" id="L148">                this.config.getOutput().close();</span>
+<span class="nc" id="L149">                this.config.getError().close();</span>
+<span class="nc" id="L150">                try {this.config.getInput().close();} catch (IOException ioe) {}</span>
+<span class="nc" id="L151">            }</span>
+<span class="nc" id="L152">        }</span>
+
+        private Map&lt;String, String&gt; environmentMap(String[] env) {
+<span class="nc" id="L155">            Map&lt;String, String&gt; m = new HashMap&lt;String, String&gt;();</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">            for (int i = 0; i &lt; env.length; i++) {</span>
+<span class="nc" id="L157">                String[] kv = env[i].split(&quot;=&quot;, 2);</span>
+<span class="nc" id="L158">                m.put(kv[0], kv[1]);</span>
+            }
+<span class="nc" id="L160">            return m;</span>
+        }
+
+        public void start() throws IOException {
+<span class="nc" id="L164">            config = new RubyInstanceConfig(parentRuntime.getInstanceConfig());</span>
+            
+<span class="nc" id="L166">            config.setEnvironment(environmentMap(env));</span>
+<span class="nc" id="L167">            config.setCurrentDirectory(pwd.toString());</span>
+            
+<span class="nc bnc" id="L169" title="All 2 branches missed.">            if (pipedStreams) {</span>
+<span class="nc" id="L170">                config.setInput(new PipedInputStream(processInput));</span>
+<span class="nc" id="L171">                config.setOutput(new PrintStream(new PipedOutputStream(processOutput)));</span>
+<span class="nc" id="L172">                config.setError(new PrintStream(new PipedOutputStream(processError)));</span>
+            }
+<span class="nc" id="L174">            String procName = &quot;piped&quot;;</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">            if (argArray.length &gt; 0) {</span>
+<span class="nc" id="L176">                procName = argArray[0];</span>
+            }
+<span class="nc" id="L178">            processThread = new Thread(this, &quot;ScriptThreadProcess: &quot; + procName);</span>
+<span class="nc" id="L179">            processThread.setDaemon(true);</span>
+<span class="nc" id="L180">            processThread.start();</span>
+<span class="nc" id="L181">        }</span>
+
+        public OutputStream getOutputStream() {
+<span class="nc" id="L184">            return processInput;</span>
+        }
+
+        public InputStream getInputStream() {
+<span class="nc" id="L188">            return processOutput;</span>
+        }
+
+        public InputStream getErrorStream() {
+<span class="nc" id="L192">            return processError;</span>
+        }
+
+        public int waitFor() throws InterruptedException {
+<span class="nc" id="L196">            processThread.join();</span>
+<span class="nc" id="L197">            return result;</span>
+        }
+
+        public int exitValue() {
+<span class="nc" id="L201">            return result;</span>
+        }
+
+        public void destroy() {
+<span class="nc bnc" id="L205" title="All 2 branches missed.">            if (pipedStreams) {</span>
+<span class="nc" id="L206">                closeStreams();</span>
+            }
+<span class="nc" id="L208">            processThread.interrupt();</span>
+<span class="nc" id="L209">        }</span>
+
+        private void closeStreams() {
+<span class="nc" id="L212">            try { processInput.close(); } catch (IOException io) {}</span>
+<span class="nc" id="L213">            try { processOutput.close(); } catch (IOException io) {}</span>
+<span class="nc" id="L214">            try { processError.close(); } catch (IOException io) {}</span>
+<span class="nc" id="L215">        }</span>
+    }
+
+    public static String[] getCurrentEnv(Ruby runtime) {
+<span class="nc" id="L219">        return getModifiedEnv(runtime, Collections.EMPTY_LIST, false);</span>
+    }
+
+    private static String[] getCurrentEnv(Ruby runtime, Map mergeEnv) {
+        // TODO: ensure nobody passes null
+<span class="nc bnc" id="L224" title="All 2 branches missed.">        return getModifiedEnv(runtime, mergeEnv == null ? Collections.EMPTY_LIST : mergeEnv.entrySet(), false);</span>
+    }
+
+    public static String[] getModifiedEnv(Ruby runtime, Collection mergeEnv, boolean clearEnv) {
+<span class="fc" id="L228">        ThreadContext context = runtime.getCurrentContext();</span>
+
+        // disable tracing for the dup call below
+<span class="fc" id="L231">        boolean traceEnabled = context.isEventHooksEnabled();</span>
+<span class="fc" id="L232">        context.setEventHooksEnabled(false);</span>
+
+        try {
+            // dup for JRUBY-6603 (avoid concurrent modification while we walk it)
+<span class="fc" id="L236">            RubyHash hash = null;</span>
+<span class="pc bpc" id="L237" title="1 of 2 branches missed.">            if (!clearEnv) {</span>
+<span class="fc" id="L238">                hash = (RubyHash)runtime.getObject().getConstant(&quot;ENV&quot;).dup();</span>
+            }
+            String[] ret, ary;
+
+<span class="pc bpc" id="L242" title="1 of 2 branches missed.">            if (mergeEnv != null) {</span>
+<span class="fc" id="L243">                ret = new String[hash.size() + mergeEnv.size()];</span>
+            } else {
+<span class="nc" id="L245">                ret = new String[hash.size()];</span>
+            }
+
+<span class="fc" id="L248">            int i=0;</span>
+<span class="pc bpc" id="L249" title="1 of 2 branches missed.">            if (hash != null) {</span>
+<span class="fc bfc" id="L250" title="All 2 branches covered.">                for(Map.Entry&lt;String, String&gt; e : (Set&lt;Map.Entry&lt;String, String&gt;&gt;)hash.entrySet()) {</span>
+                    // if the key is nil, raise TypeError
+<span class="pc bpc" id="L252" title="1 of 2 branches missed.">                    if (e.getKey() == null) {</span>
+<span class="nc" id="L253">                        throw runtime.newTypeError(runtime.getNil(), runtime.getStructClass());</span>
+                    }
+                    // ignore if the value is nil
+<span class="pc bpc" id="L256" title="1 of 2 branches missed.">                    if (e.getValue() == null) {</span>
+<span class="nc" id="L257">                        continue;</span>
+                    }
+<span class="fc" id="L259">                    ret[i] = e.getKey() + &quot;=&quot; + e.getValue();</span>
+<span class="fc" id="L260">                    i++;</span>
+<span class="fc" id="L261">                }</span>
+            }
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">            if (mergeEnv != null) {</span>
+<span class="pc bpc" id="L264" title="1 of 2 branches missed.">                if (mergeEnv instanceof Set) {</span>
+<span class="nc bnc" id="L265" title="All 2 branches missed.">                    for (Map.Entry&lt;String, String&gt; e : (Set&lt;Map.Entry&lt;String, String&gt;&gt;)mergeEnv) {</span>
+                        // if the key is nil, raise TypeError
+<span class="nc bnc" id="L267" title="All 2 branches missed.">                        if (e.getKey() == null) {</span>
+<span class="nc" id="L268">                            throw runtime.newTypeError(runtime.getNil(), runtime.getStructClass());</span>
+                        }
+                        // ignore if the value is nil
+<span class="nc bnc" id="L271" title="All 2 branches missed.">                        if (e.getValue() == null) {</span>
+<span class="nc" id="L272">                            continue;</span>
+                        }
+<span class="nc" id="L274">                        ret[i] = e.getKey().toString() + &quot;=&quot; + e.getValue().toString();</span>
+<span class="nc" id="L275">                        i++;</span>
+<span class="nc" id="L276">                    }</span>
+<span class="pc bpc" id="L277" title="1 of 2 branches missed.">                } else if (mergeEnv instanceof RubyArray) {</span>
+<span class="fc bfc" id="L278" title="All 2 branches covered.">                    for (int j = 0; j &lt; ((RubyArray)mergeEnv).size(); j++) {</span>
+<span class="fc" id="L279">                        RubyArray e = ((RubyArray)mergeEnv).eltOk(j).convertToArray();</span>
+                        // if there are not two elements, raise ArgumentError
+<span class="pc bpc" id="L281" title="1 of 2 branches missed.">                        if (e.size() != 2) {</span>
+<span class="nc" id="L282">                            throw runtime.newArgumentError(&quot;env assignments must come in pairs&quot;);</span>
+                        }
+                        // if the key is nil, raise TypeError
+<span class="pc bpc" id="L285" title="1 of 2 branches missed.">                        if (e.eltOk(0) == null) {</span>
+<span class="nc" id="L286">                            throw runtime.newTypeError(runtime.getNil(), runtime.getStructClass());</span>
+                        }
+                        // ignore if the value is nil
+<span class="pc bpc" id="L289" title="1 of 2 branches missed.">                        if (e.eltOk(1) == null) {</span>
+<span class="nc" id="L290">                            continue;</span>
+                        }
+<span class="fc" id="L292">                        ret[i] = e.eltOk(0).toString() + &quot;=&quot; + e.eltOk(1).toString();</span>
+<span class="fc" id="L293">                        i++;</span>
+                    }
+                }
+            }
+            
+<span class="fc" id="L298">            ary = new String[i];</span>
+<span class="fc" id="L299">            System.arraycopy(ret, 0, ary, 0, i);</span>
+<span class="fc" id="L300">            return ary;</span>
+
+        } finally {
+<span class="pc" id="L303">            context.setEventHooksEnabled(traceEnabled);</span>
+        }
+    }
+
+    private static boolean filenameIsPathSearchable(String fname, boolean forExec) {
+<span class="fc" id="L308">        boolean isSearchable = true;</span>
+<span class="fc bfc" id="L309" title="All 2 branches covered.">        if (fname.startsWith(&quot;/&quot;)   ||</span>
+<span class="pc bpc" id="L310" title="1 of 2 branches missed.">            fname.startsWith(&quot;./&quot;)  ||</span>
+<span class="pc bpc" id="L311" title="2 of 4 branches missed.">            fname.startsWith(&quot;../&quot;) ||</span>
+<span class="pc bpc" id="L312" title="1 of 2 branches missed.">            (forExec &amp;&amp; (fname.indexOf(&quot;/&quot;) != -1))) {</span>
+<span class="fc" id="L313">            isSearchable = false;</span>
+        }
+<span class="pc bpc" id="L315" title="1 of 2 branches missed.">        if (Platform.IS_WINDOWS) {</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">            if (fname.startsWith(&quot;\\&quot;)  ||</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">                fname.startsWith(&quot;.\\&quot;) ||</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">                fname.startsWith(&quot;..\\&quot;) ||</span>
+<span class="nc bnc" id="L319" title="All 6 branches missed.">                ((fname.length() &gt; 2) &amp;&amp; fname.startsWith(&quot;:&quot;,1)) ||</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">                (forExec &amp;&amp; (fname.indexOf(&quot;\\&quot;) != -1))) {</span>
+<span class="nc" id="L321">                isSearchable = false;</span>
+            }
+        }
+<span class="fc" id="L324">        return isSearchable;</span>
+    }
+
+    private static File tryFile(Ruby runtime, String fdir, String fname) {
+        File pathFile;
+<span class="fc bfc" id="L329" title="All 2 branches covered.">        if (fdir == null) {</span>
+<span class="fc" id="L330">            pathFile = new File(fname);</span>
+        } else {
+<span class="fc" id="L332">            pathFile = new File(fdir, fname);</span>
+        }
+
+<span class="pc bpc" id="L335" title="1 of 2 branches missed.">        if (!pathFile.isAbsolute()) {</span>
+<span class="nc" id="L336">            pathFile = new File(runtime.getCurrentDirectory(), pathFile.getPath());</span>
+        }
+
+<span class="fc" id="L339">        log(runtime, &quot;Trying file &quot; + pathFile);</span>
+<span class="fc bfc" id="L340" title="All 2 branches covered.">        if (pathFile.exists()) {</span>
+<span class="fc" id="L341">            return pathFile;</span>
+        } else {
+<span class="fc" id="L343">            return null;</span>
+        }
+    }
+
+    private static boolean withExeSuffix(String fname) {
+<span class="nc" id="L348">        String lowerCaseFname = fname.toLowerCase();</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">        for (String suffix : WINDOWS_EXE_SUFFIXES) {</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">            if (lowerCaseFname.endsWith(suffix)) {</span>
+<span class="nc" id="L351">                return true;</span>
+            }
+        }
+<span class="nc" id="L354">        return false;</span>
+    }
+
+    private static File isValidFile(Ruby runtime, String fdir, String fname, boolean isExec) {
+<span class="fc" id="L358">        File validFile = null;</span>
+<span class="pc bpc" id="L359" title="2 of 4 branches missed.">        if (isExec &amp;&amp; Platform.IS_WINDOWS) {</span>
+<span class="nc bnc" id="L360" title="All 2 branches missed.">            if (withExeSuffix(fname)) {</span>
+<span class="nc" id="L361">                validFile = tryFile(runtime, fdir, fname);</span>
+            } else {
+<span class="nc bnc" id="L363" title="All 2 branches missed.">                for (String suffix: WINDOWS_EXE_SUFFIXES) {</span>
+<span class="nc" id="L364">                    validFile = tryFile(runtime, fdir, fname + suffix);</span>
+<span class="nc bnc" id="L365" title="All 2 branches missed.">                    if (validFile != null) {</span>
+                        // found a valid file, no need to search further
+<span class="nc" id="L367">                        break;</span>
+                    }
+                }
+            }
+        } else {
+<span class="fc" id="L372">            validFile = tryFile(runtime, fdir, fname);</span>
+<span class="fc bfc" id="L373" title="All 2 branches covered.">            if (validFile != null) {</span>
+<span class="fc bfc" id="L374" title="All 2 branches covered.">                if (validFile.isDirectory()) {</span>
+<span class="fc" id="L375">                    return null;</span>
+                }
+<span class="pc bpc" id="L377" title="1 of 4 branches missed.">                if (isExec &amp;&amp; !runtime.getPosix().stat(validFile.getAbsolutePath()).isExecutable()) {</span>
+<span class="fc" id="L378">                    throw runtime.newErrnoEACCESError(validFile.getAbsolutePath());</span>
+                }
+            }
+        }
+<span class="fc" id="L382">        return validFile;</span>
+    }
+
+    private static File isValidFile(Ruby runtime, String fname, boolean isExec) {
+<span class="fc" id="L386">        String fdir = null;</span>
+<span class="fc" id="L387">        return isValidFile(runtime, fdir, fname, isExec);</span>
+    }
+
+    private static File findPathFile(Ruby runtime, String fname, String[] path, boolean isExec) {
+<span class="fc" id="L391">        File pathFile = null;</span>
+<span class="fc" id="L392">        boolean doPathSearch = filenameIsPathSearchable(fname, isExec);</span>
+<span class="fc bfc" id="L393" title="All 2 branches covered.">        if (doPathSearch) {</span>
+<span class="fc bfc" id="L394" title="All 2 branches covered.">            for (String fdir: path) {</span>
+                // NOTE: Jruby's handling of tildes is more complete than
+                //       MRI's, which can't handle user names after the tilde
+                //       when searching the executable path
+<span class="fc" id="L398">                pathFile = isValidFile(runtime, fdir, fname, isExec);</span>
+<span class="fc bfc" id="L399" title="All 2 branches covered.">                if (pathFile != null) {</span>
+<span class="fc" id="L400">                    break;</span>
+                }
+            }
+        } else {
+<span class="fc" id="L404">            pathFile = isValidFile(runtime, fname, isExec);</span>
+        }
+<span class="fc" id="L406">        return pathFile;</span>
+    }
+
+    // MRI: Hopefully close to dln_find_exe_r used by popen logic
+    public static File findPathExecutable(Ruby runtime, String fname) {
+<span class="fc" id="L411">        RubyHash env = (RubyHash) runtime.getObject().getConstant(&quot;ENV&quot;);</span>
+<span class="fc" id="L412">        IRubyObject pathObject = env.op_aref(runtime.getCurrentContext(), RubyString.newString(runtime, PATH_ENV));</span>
+<span class="fc" id="L413">        String[] pathNodes = null;</span>
+<span class="pc bpc" id="L414" title="1 of 2 branches missed.">        if (pathObject == null) {</span>
+<span class="nc" id="L415">            pathNodes = DEFAULT_PATH; // ASSUME: not modified by callee</span>
+        }
+        else {
+<span class="fc" id="L418">            String pathSeparator = System.getProperty(&quot;path.separator&quot;);</span>
+<span class="fc" id="L419">            String path = pathObject.toString();</span>
+<span class="pc bpc" id="L420" title="1 of 2 branches missed.">            if (Platform.IS_WINDOWS) {</span>
+                // Windows-specific behavior
+<span class="nc" id="L422">                path = &quot;.&quot; + pathSeparator + path;</span>
+            }
+<span class="fc" id="L424">            pathNodes = path.split(pathSeparator);</span>
+        }
+<span class="fc" id="L426">        return findPathFile(runtime, fname, pathNodes, true);</span>
+    }
+
+    public static int runAndWait(Ruby runtime, IRubyObject[] rawArgs) {
+<span class="nc" id="L430">        return runAndWait(runtime, rawArgs, runtime.getOutputStream());</span>
+    }
+
+    public static long[] runAndWaitPid(Ruby runtime, IRubyObject[] rawArgs) {
+<span class="nc" id="L434">        return runAndWaitPid(runtime, rawArgs, runtime.getOutputStream(), true);</span>
+    }
+
+    public static long runWithoutWait(Ruby runtime, IRubyObject[] rawArgs) {
+<span class="nc" id="L438">        return runWithoutWait(runtime, rawArgs, runtime.getOutputStream());</span>
+    }
+
+    public static int runExternalAndWait(Ruby runtime, IRubyObject[] rawArgs, Map mergeEnv) {
+<span class="fc" id="L442">        OutputStream output = runtime.getOutputStream();</span>
+<span class="fc" id="L443">        OutputStream error = runtime.getErrorStream();</span>
+<span class="fc" id="L444">        InputStream input = runtime.getInputStream();</span>
+<span class="fc" id="L445">        Process aProcess = null;</span>
+<span class="fc" id="L446">        File pwd = new File(runtime.getCurrentDirectory());</span>
+<span class="fc" id="L447">        LaunchConfig cfg = new LaunchConfig(runtime, rawArgs, true);</span>
+
+        try {
+            try {
+<span class="nc bnc" id="L451" title="All 2 branches missed.">                if (cfg.shouldRunInShell()) {</span>
+<span class="nc" id="L452">                    log(runtime, &quot;Launching with shell&quot;);</span>
+                    // execute command with sh -c
+                    // this does shell expansion of wildcards
+<span class="nc" id="L455">                    cfg.verifyExecutableForShell();</span>
+<span class="nc" id="L456">                    aProcess = buildProcess(runtime, cfg.getExecArgs(), getCurrentEnv(runtime, mergeEnv), pwd);</span>
+                } else {
+<span class="nc" id="L458">                    log(runtime, &quot;Launching directly (no shell)&quot;);</span>
+<span class="nc" id="L459">                    cfg.verifyExecutableForDirect();</span>
+<span class="nc" id="L460">                    aProcess = buildProcess(runtime, cfg.getExecArgs(), getCurrentEnv(runtime, mergeEnv), pwd);</span>
+                }
+<span class="nc" id="L462">            } catch (SecurityException se) {</span>
+<span class="nc" id="L463">                throw runtime.newSecurityError(se.getLocalizedMessage());</span>
+<span class="nc" id="L464">            }</span>
+<span class="nc" id="L465">            handleStreams(runtime, aProcess, input, output, error);</span>
+<span class="nc" id="L466">            return aProcess.waitFor();</span>
+<span class="nc" id="L467">        } catch (IOException e) {</span>
+<span class="nc" id="L468">            throw runtime.newIOErrorFromException(e);</span>
+<span class="nc" id="L469">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L470">            throw runtime.newThreadError(&quot;unexpected interrupt&quot;);</span>
+        }
+    }
+
+    public static long runExternalWithoutWait(Ruby runtime, IRubyObject env, IRubyObject prog, IRubyObject options, IRubyObject args) {
+<span class="nc" id="L475">        return runExternal(runtime, env, prog, options, args, false);</span>
+    }
+
+    public static long runExternal(Ruby runtime, IRubyObject env, IRubyObject prog, IRubyObject options, IRubyObject args, boolean wait) {
+<span class="nc bnc" id="L479" title="All 4 branches missed.">        if (env.isNil() || !(env instanceof Map)) {</span>
+<span class="nc" id="L480">            env = null;</span>
+        }
+        
+<span class="nc" id="L483">        IRubyObject[] rawArgs = args.convertToArray().toJavaArray();</span>
+        
+<span class="nc" id="L485">        OutputStream output = runtime.getOutputStream();</span>
+<span class="nc" id="L486">        OutputStream error = runtime.getErrorStream();</span>
+<span class="nc" id="L487">        InputStream input = runtime.getInputStream();</span>
+        
+        try {
+<span class="nc" id="L490">            Process aProcess = null;</span>
+<span class="nc" id="L491">            File pwd = new File(runtime.getCurrentDirectory());</span>
+<span class="nc" id="L492">            LaunchConfig cfg = new LaunchConfig(runtime, rawArgs, true);</span>
+
+            try {
+<span class="nc bnc" id="L495" title="All 2 branches missed.">                if (cfg.shouldRunInShell()) {</span>
+<span class="nc" id="L496">                    log(runtime, &quot;Launching with shell&quot;);</span>
+                    // execute command with sh -c
+                    // this does shell expansion of wildcards
+<span class="nc" id="L499">                    cfg.verifyExecutableForShell();</span>
+<span class="nc" id="L500">                    aProcess = buildProcess(runtime, cfg.getExecArgs(), getCurrentEnv(runtime, (Map)env), pwd);</span>
+                } else {
+<span class="nc" id="L502">                    log(runtime, &quot;Launching directly (no shell)&quot;);</span>
+<span class="nc" id="L503">                    cfg.verifyExecutableForDirect();</span>
+<span class="nc" id="L504">                    aProcess = buildProcess(runtime, cfg.getExecArgs(), getCurrentEnv(runtime, (Map)env), pwd);</span>
+                }
+<span class="nc" id="L506">            } catch (SecurityException se) {</span>
+<span class="nc" id="L507">                throw runtime.newSecurityError(se.getLocalizedMessage());</span>
+<span class="nc" id="L508">            }</span>
+            
+<span class="nc bnc" id="L510" title="All 2 branches missed.">            if (wait) {</span>
+<span class="nc" id="L511">                handleStreams(runtime, aProcess, input, output, error);</span>
+                try {
+<span class="nc" id="L513">                    return aProcess.waitFor();</span>
+<span class="nc" id="L514">                } catch (InterruptedException e) {</span>
+<span class="nc" id="L515">                    throw runtime.newThreadError(&quot;unexpected interrupt&quot;);</span>
+                }
+            } else {
+<span class="nc" id="L518">                handleStreamsNonblocking(runtime, aProcess, runtime.getOutputStream(), error);</span>
+<span class="nc" id="L519">                return getPidFromProcess(aProcess);</span>
+            }
+<span class="nc" id="L521">        } catch (IOException e) {</span>
+<span class="nc" id="L522">            throw runtime.newIOErrorFromException(e);</span>
+        }
+    }
+
+    public static Process buildProcess(Ruby runtime, String[] args, String[] env, File pwd) throws IOException {
+<span class="nc" id="L527">        return runtime.getPosix().newProcessMaker(args)</span>
+<span class="nc" id="L528">                .environment(env)</span>
+<span class="nc" id="L529">                .directory(pwd)</span>
+<span class="nc" id="L530">                .start();</span>
+    }
+
+    public static long runExternalWithoutWait(Ruby runtime, IRubyObject[] rawArgs) {
+<span class="nc" id="L534">        return runWithoutWait(runtime, rawArgs, runtime.getOutputStream());</span>
+    }
+
+    public static int execAndWait(Ruby runtime, IRubyObject[] rawArgs) {
+<span class="nc" id="L538">        return execAndWait(runtime, rawArgs, Collections.EMPTY_MAP);</span>
+    }
+
+    public static int execAndWait(Ruby runtime, IRubyObject[] rawArgs, Map mergeEnv) {
+<span class="nc" id="L542">        File pwd = new File(runtime.getCurrentDirectory());</span>
+<span class="nc" id="L543">        LaunchConfig cfg = new LaunchConfig(runtime, rawArgs, true);</span>
+
+<span class="nc bnc" id="L545" title="All 2 branches missed.">        if (cfg.shouldRunInProcess()) {</span>
+<span class="nc" id="L546">            log(runtime, &quot;ExecAndWait in-process&quot;);</span>
+            try {
+                // exec needs to behave differently in-process, because it's technically
+                // supposed to replace the calling process. So if we're supposed to run
+                // in-process, we allow it to use the default streams and not use
+                // pumpers at all. See JRUBY-2156 and JRUBY-2154.
+<span class="nc" id="L552">                ScriptThreadProcess ipScript = new ScriptThreadProcess(</span>
+<span class="nc" id="L553">                        runtime, cfg.getExecArgs(), getCurrentEnv(runtime, mergeEnv), pwd, false);</span>
+<span class="nc" id="L554">                ipScript.start();</span>
+<span class="nc" id="L555">                return ipScript.waitFor();</span>
+<span class="nc" id="L556">            } catch (IOException e) {</span>
+<span class="nc" id="L557">                throw runtime.newIOErrorFromException(e);</span>
+<span class="nc" id="L558">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L559">                throw runtime.newThreadError(&quot;unexpected interrupt&quot;);</span>
+            }
+        } else {
+<span class="nc" id="L562">            return runExternalAndWait(runtime, rawArgs, mergeEnv);</span>
+        }
+    }
+
+    public static int runAndWait(Ruby runtime, IRubyObject[] rawArgs, OutputStream output) {
+<span class="nc" id="L567">        return runAndWait(runtime, rawArgs, output, true);</span>
+    }
+
+    public static int runAndWait(Ruby runtime, IRubyObject[] rawArgs, OutputStream output, boolean doExecutableSearch) {
+<span class="nc" id="L571">        return (int)runAndWaitPid(runtime, rawArgs, output, doExecutableSearch)[0];</span>
+    }
+
+    public static long[] runAndWaitPid(Ruby runtime, IRubyObject[] rawArgs, OutputStream output, boolean doExecutableSearch) {
+<span class="nc" id="L575">        OutputStream error = runtime.getErrorStream();</span>
+<span class="nc" id="L576">        InputStream input = runtime.getInputStream();</span>
+        try {
+<span class="nc" id="L578">            Process aProcess = run(runtime, rawArgs, doExecutableSearch);</span>
+<span class="nc" id="L579">            handleStreams(runtime, aProcess, input, output, error);</span>
+<span class="nc" id="L580">            return new long[] {aProcess.waitFor(), getPidFromProcess(aProcess)};</span>
+<span class="nc" id="L581">        } catch (IOException e) {</span>
+<span class="nc" id="L582">            throw runtime.newIOErrorFromException(e);</span>
+<span class="nc" id="L583">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L584">            throw runtime.newThreadError(&quot;unexpected interrupt&quot;);</span>
+        }
+    }
+
+    private static long runWithoutWait(Ruby runtime, IRubyObject[] rawArgs, OutputStream output) {
+<span class="nc" id="L589">        OutputStream error = runtime.getErrorStream();</span>
+        try {
+<span class="nc" id="L591">            Process aProcess = run(runtime, rawArgs, true);</span>
+<span class="nc" id="L592">            handleStreamsNonblocking(runtime, aProcess, output, error);</span>
+<span class="nc" id="L593">            return getPidFromProcess(aProcess);</span>
+<span class="nc" id="L594">        } catch (IOException e) {</span>
+<span class="nc" id="L595">            throw runtime.newIOErrorFromException(e);</span>
+        }
+    }
+
+    private static long runExternalWithoutWait(Ruby runtime, IRubyObject[] rawArgs, OutputStream output) {
+<span class="nc" id="L600">        OutputStream error = runtime.getErrorStream();</span>
+        try {
+<span class="nc" id="L602">            Process aProcess = run(runtime, rawArgs, true, true);</span>
+<span class="nc" id="L603">            handleStreamsNonblocking(runtime, aProcess, output, error);</span>
+<span class="nc" id="L604">            return getPidFromProcess(aProcess);</span>
+<span class="nc" id="L605">        } catch (IOException e) {</span>
+<span class="nc" id="L606">            throw runtime.newIOErrorFromException(e);</span>
+        }
+    }
+
+    public static long getPidFromProcess(Process process) {
+<span class="nc bnc" id="L611" title="All 2 branches missed.">        if (process instanceof ScriptThreadProcess) {</span>
+<span class="nc" id="L612">            return process.hashCode();</span>
+<span class="nc bnc" id="L613" title="All 2 branches missed.">        } else if (process instanceof POpenProcess) {</span>
+<span class="nc" id="L614">            return reflectPidFromProcess(((POpenProcess)process).getChild());</span>
+        } else {
+<span class="nc" id="L616">            return reflectPidFromProcess(process);</span>
+        }
+    }
+    
+    private static final Class UNIXProcess;
+    private static final Field UNIXProcess_pid;
+    private static final Class ProcessImpl;
+    private static final Field ProcessImpl_handle;
+    private interface PidGetter { public long getPid(Process process); }
+    private static final PidGetter PID_GETTER;
+    
+    static {
+        // default PidGetter
+<span class="fc" id="L629">        PidGetter pg = new PidGetter() {</span>
+            public long getPid(Process process) {
+<span class="nc" id="L631">                return process.hashCode();</span>
+            }
+        };
+        
+<span class="fc" id="L635">        Class up = null;</span>
+<span class="fc" id="L636">        Field pid = null;</span>
+        try {
+<span class="fc" id="L638">            up = Class.forName(&quot;java.lang.UNIXProcess&quot;);</span>
+<span class="fc" id="L639">            pid = up.getDeclaredField(&quot;pid&quot;);</span>
+<span class="fc" id="L640">            pid.setAccessible(true);</span>
+<span class="nc" id="L641">        } catch (Exception e) {</span>
+            // ignore and try windows version
+<span class="fc" id="L643">        }</span>
+<span class="fc" id="L644">        UNIXProcess = up;</span>
+<span class="fc" id="L645">        UNIXProcess_pid = pid;</span>
+
+<span class="fc" id="L647">        Class pi = null;</span>
+<span class="fc" id="L648">        Field handle = null;</span>
+        try {
+<span class="nc" id="L650">            pi = Class.forName(&quot;java.lang.ProcessImpl&quot;);</span>
+<span class="nc" id="L651">            handle = pi.getDeclaredField(&quot;handle&quot;);</span>
+<span class="nc" id="L652">            handle.setAccessible(true);</span>
+<span class="fc" id="L653">        } catch (Exception e) {</span>
+            // ignore and use hashcode
+<span class="nc" id="L655">        }</span>
+<span class="fc" id="L656">        ProcessImpl = pi;</span>
+<span class="fc" id="L657">        ProcessImpl_handle = handle;</span>
+
+<span class="pc bpc" id="L659" title="1 of 2 branches missed.">        if (UNIXProcess_pid != null) {</span>
+<span class="pc bpc" id="L660" title="1 of 2 branches missed.">            if (ProcessImpl_handle != null) {</span>
+                // try both
+<span class="nc" id="L662">                pg = new PidGetter() {</span>
+                    public long getPid(Process process) {
+                        try {
+<span class="nc bnc" id="L665" title="All 2 branches missed.">                            if (UNIXProcess.isInstance(process)) {</span>
+<span class="nc" id="L666">                                return (Integer)UNIXProcess_pid.get(process);</span>
+<span class="nc bnc" id="L667" title="All 2 branches missed.">                            } else if (ProcessImpl.isInstance(process)) {</span>
+<span class="nc" id="L668">                                Long hproc = (Long) ProcessImpl_handle.get(process);</span>
+<span class="nc" id="L669">                                return WindowsFFI.getKernel32().GetProcessId(hproc);</span>
+                            }
+<span class="nc" id="L671">                        } catch (Exception e) {</span>
+                            // ignore and use hashcode
+<span class="nc" id="L673">                        }</span>
+<span class="nc" id="L674">                        return process.hashCode();</span>
+                    }
+                };
+            } else {
+                // just unix
+<span class="fc" id="L679">                pg = new PidGetter() {</span>
+                    public long getPid(Process process) {
+                        try {
+<span class="nc bnc" id="L682" title="All 2 branches missed.">                            if (UNIXProcess.isInstance(process)) {</span>
+<span class="nc" id="L683">                                return (Integer)UNIXProcess_pid.get(process);</span>
+                            }
+<span class="nc" id="L685">                        } catch (Exception e) {</span>
+                            // ignore and use hashcode
+<span class="nc" id="L687">                        }</span>
+<span class="nc" id="L688">                        return process.hashCode();</span>
+                    }
+                };
+            }
+<span class="nc bnc" id="L692" title="All 2 branches missed.">        } else if (ProcessImpl_handle != null) {</span>
+            // just windows
+<span class="nc" id="L694">            pg = new PidGetter() {</span>
+                public long getPid(Process process) {
+                    try {
+<span class="nc bnc" id="L697" title="All 2 branches missed.">                        if (ProcessImpl.isInstance(process)) {</span>
+<span class="nc" id="L698">                            Long hproc = (Long) ProcessImpl_handle.get(process);</span>
+<span class="nc" id="L699">                            return WindowsFFI.getKernel32().GetProcessId(hproc);</span>
+                        }
+
+<span class="nc" id="L702">                    } catch (Exception e) {</span>
+                        // ignore and use hashcode
+<span class="nc" id="L704">                    }</span>
+<span class="nc" id="L705">                    return process.hashCode();</span>
+                }
+            };
+        } else {
+            // neither
+<span class="nc" id="L710">            pg = new PidGetter() {</span>
+                public long getPid(Process process) {
+<span class="nc" id="L712">                    return process.hashCode();</span>
+                }
+            };
+        }
+<span class="fc" id="L716">        PID_GETTER = pg;</span>
+<span class="fc" id="L717">    }</span>
+
+    public static long reflectPidFromProcess(Process process) {
+<span class="nc" id="L720">        return PID_GETTER.getPid(process);</span>
+    }
+
+    public static Process run(Ruby runtime, IRubyObject string) throws IOException {
+<span class="nc" id="L724">        return run(runtime, new IRubyObject[] {string}, false);</span>
+    }
+
+    public static POpenProcess popen(Ruby runtime, IRubyObject string, ModeFlags modes) throws IOException {
+<span class="nc" id="L728">        return new POpenProcess(popenShared(runtime, new IRubyObject[] {string}, null, true), runtime, modes);</span>
+    }
+
+    public static POpenProcess popen(Ruby runtime, IRubyObject[] strings, Map env, ModeFlags modes) throws IOException {
+<span class="nc" id="L732">        return new POpenProcess(popenShared(runtime, strings, env), runtime, modes);</span>
+    }
+    
+    @Deprecated
+    public static POpenProcess popen(Ruby runtime, IRubyObject string, IOOptions modes) throws IOException {
+<span class="nc" id="L737">        return new POpenProcess(popenShared(runtime, new IRubyObject[] {string}, null, true), runtime, modes);</span>
+    }
+
+    @Deprecated
+    public static POpenProcess popen(Ruby runtime, IRubyObject[] strings, Map env, IOOptions modes) throws IOException {
+<span class="nc" id="L742">        return new POpenProcess(popenShared(runtime, strings, env), runtime, modes);</span>
+    }
+
+    @Deprecated
+    public static POpenProcess popen3(Ruby runtime, IRubyObject[] strings) throws IOException {
+<span class="nc" id="L747">        return new POpenProcess(popenShared(runtime, strings));</span>
+    }
+
+    @Deprecated
+    public static POpenProcess popen3(Ruby runtime, IRubyObject[] strings, boolean addShell) throws IOException {
+<span class="nc" id="L752">        return new POpenProcess(popenShared(runtime, strings, null, addShell));</span>
+    }
+
+    private static Process popenShared(Ruby runtime, IRubyObject[] strings) throws IOException {
+<span class="nc" id="L756">        return popenShared(runtime, strings, null);</span>
+    }
+
+    private static Process popenShared(Ruby runtime, IRubyObject[] strings, Map env) throws IOException {
+<span class="nc" id="L760">        return popenShared(runtime, strings, env, false);</span>
+    }
+
+    private static Process popenShared(Ruby runtime, IRubyObject[] strings, Map env, boolean addShell) throws IOException {
+<span class="nc" id="L764">        String shell = getShell(runtime);</span>
+<span class="nc" id="L765">        Process childProcess = null;</span>
+<span class="nc" id="L766">        File pwd = new File(runtime.getCurrentDirectory());</span>
+
+        try {
+            // Peel off env hash, if given
+<span class="nc" id="L770">            IRubyObject envHash = null;</span>
+<span class="nc bnc" id="L771" title="All 6 branches missed.">            if (env == null &amp;&amp; strings.length &gt; 0 &amp;&amp; !(envHash = TypeConverter.checkHashType(runtime, strings[0])).isNil()) {</span>
+<span class="nc" id="L772">                strings = Arrays.copyOfRange(strings, 1, strings.length);</span>
+<span class="nc" id="L773">                env = (Map)envHash;</span>
+            }
+
+            // Peel off options hash and warn that we don't support them
+<span class="nc bnc" id="L777" title="All 4 branches missed.">            if (strings.length &gt; 1 &amp;&amp; !(envHash = TypeConverter.checkHashType(runtime, strings[strings.length - 1])).isNil()) {</span>
+<span class="nc bnc" id="L778" title="All 2 branches missed.">                if (!((RubyHash)envHash).isEmpty()) {</span>
+<span class="nc" id="L779">                    runtime.getWarnings().warn(&quot;popen3 does not support spawn options in JRuby 1.7&quot;);</span>
+                }
+<span class="nc" id="L781">                strings = Arrays.copyOfRange(strings, 0, strings.length - 1);</span>
+            }
+
+<span class="nc" id="L784">            String[] args = parseCommandLine(runtime.getCurrentContext(), runtime, strings);</span>
+<span class="nc" id="L785">            boolean useShell = false;</span>
+<span class="nc bnc" id="L786" title="All 4 branches missed.">            if (addShell) for (String arg : args) useShell |= shouldUseShell(arg);</span>
+            
+            // CON: popen is a case where I think we should just always shell out.
+<span class="nc bnc" id="L789" title="All 2 branches missed.">            if (strings.length == 1) {</span>
+<span class="nc bnc" id="L790" title="All 2 branches missed.">                if (useShell) {</span>
+                    // single string command, pass to sh to expand wildcards
+<span class="nc" id="L792">                    String[] argArray = new String[3];</span>
+<span class="nc" id="L793">                    argArray[0] = shell;</span>
+<span class="nc bnc" id="L794" title="All 2 branches missed.">                    argArray[1] = shell.endsWith(&quot;sh&quot;) ? &quot;-c&quot; : &quot;/c&quot;;</span>
+<span class="nc" id="L795">                    argArray[2] = strings[0].asJavaString();</span>
+<span class="nc" id="L796">                    childProcess = buildProcess(runtime, argArray, getCurrentEnv(runtime, env), pwd);</span>
+<span class="nc" id="L797">                } else {</span>
+<span class="nc" id="L798">                    childProcess = buildProcess(runtime, args, getCurrentEnv(runtime, env), pwd);</span>
+                }
+            } else {
+<span class="nc bnc" id="L801" title="All 2 branches missed.">                if (useShell) {</span>
+<span class="nc" id="L802">                    String[] argArray = new String[args.length + 2];</span>
+<span class="nc" id="L803">                    argArray[0] = shell;</span>
+<span class="nc bnc" id="L804" title="All 2 branches missed.">                    argArray[1] = shell.endsWith(&quot;sh&quot;) ? &quot;-c&quot; : &quot;/c&quot;;</span>
+<span class="nc" id="L805">                    System.arraycopy(args, 0, argArray, 2, args.length);</span>
+<span class="nc" id="L806">                    childProcess = buildProcess(runtime, argArray, getCurrentEnv(runtime, env), pwd);</span>
+<span class="nc" id="L807">                } else {</span>
+                    // direct invocation of the command
+<span class="nc" id="L809">                    childProcess = buildProcess(runtime, args, getCurrentEnv(runtime, env), pwd);</span>
+                }
+            }
+<span class="nc" id="L812">        } catch (SecurityException se) {</span>
+<span class="nc" id="L813">            throw runtime.newSecurityError(se.getLocalizedMessage());</span>
+<span class="nc" id="L814">        }</span>
+
+<span class="nc" id="L816">        return childProcess;</span>
+    }
+
+    /**
+     * Unwrap all filtering streams between the given stream and its actual
+     * unfiltered stream. This is primarily to unwrap streams that have
+     * buffers that would interfere with interactivity.
+     *
+     * @param filteredStream The stream to unwrap
+     * @return An unwrapped stream, presumably unbuffered
+     */
+    public static OutputStream unwrapBufferedStream(OutputStream filteredStream) {
+<span class="nc bnc" id="L828" title="All 2 branches missed.">        if (RubyInstanceConfig.NO_UNWRAP_PROCESS_STREAMS) return filteredStream;</span>
+<span class="nc bnc" id="L829" title="All 2 branches missed.">        while (filteredStream instanceof FilterOutputStream) {</span>
+            try {
+<span class="nc" id="L831">                filteredStream = (OutputStream)</span>
+<span class="nc" id="L832">                    FieldAccess.getProtectedFieldValue(FilterOutputStream.class,</span>
+                        &quot;out&quot;, filteredStream);
+<span class="nc" id="L834">            } catch (Exception e) {</span>
+<span class="nc" id="L835">                break; // break out if we've dug as deep as we can</span>
+<span class="nc" id="L836">            }</span>
+        }
+<span class="nc" id="L838">        return filteredStream;</span>
+    }
+
+    /**
+     * Unwrap all filtering streams between the given stream and its actual
+     * unfiltered stream. This is primarily to unwrap streams that have
+     * buffers that would interfere with interactivity.
+     *
+     * @param filteredStream The stream to unwrap
+     * @return An unwrapped stream, presumably unbuffered
+     */
+    public static InputStream unwrapBufferedStream(InputStream filteredStream) {
+<span class="nc bnc" id="L850" title="All 2 branches missed.">        if (RubyInstanceConfig.NO_UNWRAP_PROCESS_STREAMS) return filteredStream;</span>
+        
+        // Java 7+ uses a stream that drains the child on exit, which when
+        // unwrapped breaks because the channel gets drained prematurely.
+//        System.out.println(&quot;class is :&quot; + filteredStream.getClass().getName());
+<span class="nc bnc" id="L855" title="All 2 branches missed.">        if (filteredStream.getClass().getName().indexOf(&quot;ProcessPipeInputStream&quot;) != 1) {</span>
+<span class="nc" id="L856">            return filteredStream;</span>
+        }
+        
+<span class="nc bnc" id="L859" title="All 2 branches missed.">        while (filteredStream instanceof FilterInputStream) {</span>
+            try {
+<span class="nc" id="L861">                filteredStream = (InputStream)</span>
+<span class="nc" id="L862">                    FieldAccess.getProtectedFieldValue(FilterInputStream.class,</span>
+                        &quot;in&quot;, filteredStream);
+<span class="nc" id="L864">            } catch (Exception e) {</span>
+<span class="nc" id="L865">                break; // break out if we've dug as deep as we can</span>
+<span class="nc" id="L866">            }</span>
+        }
+<span class="nc" id="L868">        return filteredStream;</span>
+    }
+
+    public static class POpenProcess extends Process {
+        private final Process child;
+        private final boolean waitForChild;
+
+        // real stream references, to keep them from being GCed prematurely
+        private InputStream realInput;
+        private OutputStream realOutput;
+        private InputStream realInerr;
+
+        private InputStream input;
+        private OutputStream output;
+        private InputStream inerr;
+        private FileChannel inputChannel;
+        private FileChannel outputChannel;
+        private FileChannel inerrChannel;
+        private Pumper inputPumper;
+        private Pumper inerrPumper;
+
+        @Deprecated
+        public POpenProcess(Process child, Ruby runtime, IOOptions modes) {
+<span class="nc" id="L891">            this(child, runtime, modes.getModeFlags());</span>
+<span class="nc" id="L892">        }</span>
+        
+<span class="nc" id="L894">        public POpenProcess(Process child, Ruby runtime, ModeFlags modes) {</span>
+<span class="nc" id="L895">            this.child = child;</span>
+
+<span class="nc bnc" id="L897" title="All 2 branches missed.">            if (modes.isWritable()) {</span>
+<span class="nc" id="L898">                this.waitForChild = true;</span>
+<span class="nc" id="L899">                prepareOutput(child);</span>
+            } else {
+<span class="nc" id="L901">                this.waitForChild = false;</span>
+                // close process output
+                // See JRUBY-3405; hooking up to parent process stdin caused
+                // problems for IRB etc using stdin.
+<span class="nc" id="L905">                try {child.getOutputStream().close();} catch (IOException ioe) {}</span>
+            }
+
+<span class="nc bnc" id="L908" title="All 2 branches missed.">            if (modes.isReadable()) {</span>
+<span class="nc" id="L909">                prepareInput(child);</span>
+            } else {
+<span class="nc" id="L911">                pumpInput(child, runtime);</span>
+            }
+
+<span class="nc" id="L914">            pumpInerr(child, runtime);            </span>
+<span class="nc" id="L915">        }</span>
+
+<span class="nc" id="L917">        public POpenProcess(Process child) {</span>
+<span class="nc" id="L918">            this.child = child;</span>
+<span class="nc" id="L919">            this.waitForChild = false;</span>
+
+<span class="nc" id="L921">            prepareOutput(child);</span>
+<span class="nc" id="L922">            prepareInput(child);</span>
+<span class="nc" id="L923">            prepareInerr(child);</span>
+<span class="nc" id="L924">        }</span>
+
+        @Override
+        public OutputStream getOutputStream() {
+<span class="nc" id="L928">            return output;</span>
+        }
+
+        @Override
+        public InputStream getInputStream() {
+<span class="nc" id="L933">            return input;</span>
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+<span class="nc" id="L938">            return inerr;</span>
+        }
+
+        public FileChannel getInput() {
+<span class="nc" id="L942">            return inputChannel;</span>
+        }
+
+        public FileChannel getOutput() {
+<span class="nc" id="L946">            return outputChannel;</span>
+        }
+
+        public FileChannel getError() {
+<span class="nc" id="L950">            return inerrChannel;</span>
+        }
+
+        public boolean hasOutput() {
+<span class="nc bnc" id="L954" title="All 4 branches missed.">            return output != null || outputChannel != null;</span>
+        }
+
+        public Process getChild() {
+<span class="nc" id="L958">            return child;</span>
+        }
+
+        @Override
+        public int waitFor() throws InterruptedException {
+<span class="nc" id="L963">            return child.waitFor();</span>
+        }
+
+        @Override
+        public int exitValue() {
+<span class="nc" id="L968">            return child.exitValue();</span>
+        }
+
+        @Override
+        public void destroy() {
+            try {
+                // We try to safely close all streams and channels to the greatest
+                // extent possible.
+<span class="nc bnc" id="L976" title="All 2 branches missed.">                try {if (input != null) input.close();} catch (Exception e) {}</span>
+<span class="nc bnc" id="L977" title="All 2 branches missed.">                try {if (inerr != null) inerr.close();} catch (Exception e) {}</span>
+<span class="nc bnc" id="L978" title="All 2 branches missed.">                try {if (output != null) output.close();} catch (Exception e) {}</span>
+<span class="nc bnc" id="L979" title="All 2 branches missed.">                try {if (inputChannel != null) inputChannel.close();} catch (Exception e) {}</span>
+<span class="nc bnc" id="L980" title="All 2 branches missed.">                try {if (inerrChannel != null) inerrChannel.close();} catch (Exception e) {}</span>
+<span class="nc bnc" id="L981" title="All 2 branches missed.">                try {if (outputChannel != null) outputChannel.close();} catch (Exception e) {}</span>
+
+                // processes seem to have some peculiar locking sequences, so we
+                // need to ensure nobody is trying to close/destroy while we are
+<span class="nc" id="L985">                synchronized (this) {</span>
+<span class="nc bnc" id="L986" title="All 2 branches missed.">                    if (inputPumper != null) synchronized(inputPumper) {inputPumper.quit();}</span>
+<span class="nc bnc" id="L987" title="All 2 branches missed.">                    if (inerrPumper != null) synchronized(inerrPumper) {inerrPumper.quit();}</span>
+<span class="nc bnc" id="L988" title="All 2 branches missed.">                    if (waitForChild) {</span>
+<span class="nc" id="L989">                        waitFor();</span>
+                    } else {
+<span class="nc" id="L991">                        RubyIO.obliterateProcess(child);</span>
+                    }
+<span class="nc" id="L993">                }</span>
+<span class="nc" id="L994">            } catch (InterruptedException ie) {</span>
+<span class="nc" id="L995">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L996">            }</span>
+<span class="nc" id="L997">        }</span>
+
+        private void prepareInput(Process child) {
+            // popen callers wants to be able to read, provide subprocess in directly
+<span class="nc" id="L1001">            realInput = child.getInputStream();</span>
+            // We no longer unwrap, because Java 7+ empties the underlying stream and new native IO popen[3,4] works
+            // properly. The pure-Java version has always been somewhat crippled and hacky.
+<span class="nc" id="L1004">            input = realInput;</span>
+<span class="nc" id="L1005">            inputChannel = null;</span>
+<span class="nc" id="L1006">            inputPumper = null;</span>
+<span class="nc" id="L1007">        }</span>
+
+        private void prepareInerr(Process child) {
+            // popen callers wants to be able to read, provide subprocess in directly
+<span class="nc" id="L1011">            realInerr = child.getErrorStream();</span>
+            // We no longer unwrap, because Java 7+ empties the underlying stream and new native IO popen[3,4] works
+            // properly. The pure-Java version has always been somewhat crippled and hacky.
+<span class="nc" id="L1014">            inerr = realInerr;</span>
+<span class="nc" id="L1015">            inerrChannel = null;</span>
+<span class="nc" id="L1016">            inerrPumper = null;</span>
+<span class="nc" id="L1017">        }</span>
+
+        private void prepareOutput(Process child) {
+            // popen caller wants to be able to write, provide subprocess out directly
+<span class="nc" id="L1021">            realOutput = child.getOutputStream();</span>
+<span class="nc" id="L1022">            output = unwrapBufferedStream(realOutput);</span>
+<span class="nc bnc" id="L1023" title="All 2 branches missed.">            if (output instanceof FileOutputStream) {</span>
+<span class="nc" id="L1024">                outputChannel = ((FileOutputStream) output).getChannel();</span>
+            } else {
+<span class="nc" id="L1026">                outputChannel = null;</span>
+            }
+<span class="nc" id="L1028">        }</span>
+
+        private void pumpInput(Process child, Ruby runtime) {
+            // no read requested, hook up read to parents output
+<span class="nc" id="L1032">            InputStream childIn = unwrapBufferedStream(child.getInputStream());</span>
+<span class="nc" id="L1033">            FileChannel childInChannel = null;</span>
+<span class="nc bnc" id="L1034" title="All 2 branches missed.">            if (childIn instanceof FileInputStream) {</span>
+<span class="nc" id="L1035">                childInChannel = ((FileInputStream) childIn).getChannel();</span>
+            }
+<span class="nc" id="L1037">            OutputStream parentOut = unwrapBufferedStream(runtime.getOut());</span>
+<span class="nc" id="L1038">            FileChannel parentOutChannel = null;</span>
+<span class="nc bnc" id="L1039" title="All 2 branches missed.">            if (parentOut instanceof FileOutputStream) {</span>
+<span class="nc" id="L1040">                parentOutChannel = ((FileOutputStream) parentOut).getChannel();</span>
+            }
+<span class="nc bnc" id="L1042" title="All 4 branches missed.">            if (childInChannel != null &amp;&amp; parentOutChannel != null) {</span>
+<span class="nc" id="L1043">                inputPumper = new ChannelPumper(runtime, childInChannel, parentOutChannel, Pumper.Slave.IN, this);</span>
+            } else {
+<span class="nc" id="L1045">                inputPumper = new StreamPumper(runtime, childIn, parentOut, false, Pumper.Slave.IN, this);</span>
+            }
+<span class="nc" id="L1047">            inputPumper.start();</span>
+<span class="nc" id="L1048">            input = null;</span>
+<span class="nc" id="L1049">            inputChannel = null;</span>
+<span class="nc" id="L1050">        }</span>
+
+        private void pumpInerr(Process child, Ruby runtime) {
+            // no read requested, hook up read to parents output
+<span class="nc" id="L1054">            InputStream childIn = unwrapBufferedStream(child.getErrorStream());</span>
+<span class="nc" id="L1055">            FileChannel childInChannel = null;</span>
+<span class="nc bnc" id="L1056" title="All 2 branches missed.">            if (childIn instanceof FileInputStream) {</span>
+<span class="nc" id="L1057">                childInChannel = ((FileInputStream) childIn).getChannel();</span>
+            }
+<span class="nc" id="L1059">            OutputStream parentOut = unwrapBufferedStream(runtime.getOut());</span>
+<span class="nc" id="L1060">            FileChannel parentOutChannel = null;</span>
+<span class="nc bnc" id="L1061" title="All 2 branches missed.">            if (parentOut instanceof FileOutputStream) {</span>
+<span class="nc" id="L1062">                parentOutChannel = ((FileOutputStream) parentOut).getChannel();</span>
+            }
+<span class="nc bnc" id="L1064" title="All 4 branches missed.">            if (childInChannel != null &amp;&amp; parentOutChannel != null) {</span>
+<span class="nc" id="L1065">                inerrPumper = new ChannelPumper(runtime, childInChannel, parentOutChannel, Pumper.Slave.IN, this);</span>
+            } else {
+<span class="nc" id="L1067">                inerrPumper = new StreamPumper(runtime, childIn, parentOut, false, Pumper.Slave.IN, this);</span>
+            }
+<span class="nc" id="L1069">            inerrPumper.start();</span>
+<span class="nc" id="L1070">            inerr = null;</span>
+<span class="nc" id="L1071">            inerrChannel = null;</span>
+<span class="nc" id="L1072">        }</span>
+    }
+
+    public static class LaunchConfig {
+<span class="fc" id="L1076">        public LaunchConfig(Ruby runtime, IRubyObject[] rawArgs, boolean doExecutableSearch) {</span>
+<span class="fc" id="L1077">            this.runtime = runtime;</span>
+<span class="fc" id="L1078">            this.rawArgs = rawArgs;</span>
+<span class="fc" id="L1079">            this.doExecutableSearch = doExecutableSearch;</span>
+<span class="fc" id="L1080">            shell = getShell(runtime);</span>
+<span class="fc" id="L1081">            args = parseCommandLine(runtime.getCurrentContext(), runtime, rawArgs);</span>
+<span class="fc" id="L1082">        }</span>
+
+        /**
+         * Only run an in-process script if the script name has &quot;ruby&quot;, &quot;.rb&quot;,
+         * or &quot;irb&quot; in the name.
+         */
+        public boolean shouldRunInProcess() {
+<span class="pc bpc" id="L1089" title="1 of 2 branches missed.">            if (!runtime.getInstanceConfig().isRunRubyInProcess()</span>
+<span class="nc bnc" id="L1090" title="All 2 branches missed.">                    || RubyInstanceConfig.hasLoadedNativeExtensions()) {</span>
+<span class="fc" id="L1091">                return false;</span>
+            }
+
+            // Check for special shell characters [&lt;&gt;|] at the beginning
+            // and end of each command word and don't run in process if we find them.
+<span class="nc bnc" id="L1096" title="All 2 branches missed.">            for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="nc" id="L1097">                String c = args[i];</span>
+<span class="nc bnc" id="L1098" title="All 2 branches missed.">                if (c.trim().length() == 0) continue;</span>
+
+<span class="nc" id="L1100">                char[] firstLast = new char[] {c.charAt(0), c.charAt(c.length()-1)};</span>
+<span class="nc bnc" id="L1101" title="All 2 branches missed.">                for (int j = 0; j &lt; firstLast.length; j++) {</span>
+<span class="nc bnc" id="L1102" title="All 3 branches missed.">                    switch (firstLast[j]) {</span>
+                    case '&lt;': case '&gt;': case '|': case ';': case '(': case ')':
+                    case '~': case '&amp;': case '$': case '&quot;': case '`': case '\n':
+                    case '\\': case '\'':
+<span class="nc" id="L1106">                        return false;</span>
+                    case '2':
+<span class="nc bnc" id="L1108" title="All 4 branches missed.">                        if(c.length() &gt; 1 &amp;&amp; c.charAt(1) == '&gt;') return false;</span>
+                    }
+                }
+            }
+
+<span class="nc" id="L1113">            String command = args[0];</span>
+
+<span class="nc bnc" id="L1115" title="All 2 branches missed.">            if (Platform.IS_WINDOWS) command = command.toLowerCase();</span>
+
+            // handle both slash types, \ and /.
+<span class="nc" id="L1118">            String[] slashDelimitedTokens = command.split(&quot;[/\\\\]&quot;);</span>
+<span class="nc" id="L1119">            String finalToken = slashDelimitedTokens[slashDelimitedTokens.length - 1];</span>
+<span class="nc bnc" id="L1120" title="All 4 branches missed.">            boolean inProc = (finalToken.endsWith(&quot;ruby&quot;)</span>
+<span class="nc bnc" id="L1121" title="All 2 branches missed.">                    || (Platform.IS_WINDOWS &amp;&amp; finalToken.endsWith(&quot;ruby.exe&quot;))</span>
+<span class="nc bnc" id="L1122" title="All 2 branches missed.">                    || finalToken.endsWith(&quot;.rb&quot;)</span>
+<span class="nc bnc" id="L1123" title="All 2 branches missed.">                    || finalToken.endsWith(&quot;irb&quot;));</span>
+
+<span class="nc bnc" id="L1125" title="All 2 branches missed.">            if (!inProc) return false;</span>
+
+            // snip off ruby or jruby command from list of arguments
+            // leave alone if the command is the name of a script
+<span class="nc bnc" id="L1129" title="All 2 branches missed.">            int startIndex = command.endsWith(&quot;.rb&quot;) ? 0 : 1;</span>
+<span class="nc bnc" id="L1130" title="All 2 branches missed.">            if (command.trim().endsWith(&quot;irb&quot;)) {</span>
+<span class="nc" id="L1131">                startIndex = 0;</span>
+<span class="nc" id="L1132">                args[0] = runtime.getJRubyHome() + File.separator + &quot;bin&quot; + File.separator + &quot;jirb&quot;;</span>
+            }
+
+<span class="nc" id="L1135">            execArgs = new String[args.length - startIndex];</span>
+<span class="nc" id="L1136">            System.arraycopy(args, startIndex, execArgs, 0, execArgs.length);</span>
+
+<span class="nc" id="L1138">            return true;</span>
+        }
+
+        /**
+         * This hack is to work around a problem with cmd.exe on windows where it can't
+         * interpret a filename with spaces in the first argument position as a command.
+         * In that case it's better to try passing the bare arguments to runtime.exec.
+         * On all other platforms we'll always run the command in the shell.
+         */
+        public boolean shouldRunInShell() {
+<span class="pc bpc" id="L1148" title="1 of 2 branches missed.">            if (rawArgs.length != 1) {</span>
+                // this is the case when exact executable and its parameters passed,
+                // in such cases MRI just executes it, without any shell.
+<span class="nc" id="L1151">                return false;</span>
+            }
+
+            // in one-arg form, we always use shell, except for Windows
+<span class="pc bpc" id="L1155" title="1 of 2 branches missed.">            if (!Platform.IS_WINDOWS) return true;</span>
+
+            // now, deal with Windows
+<span class="nc bnc" id="L1158" title="All 2 branches missed.">            if (shell == null) return false;</span>
+
+            // TODO: Better name for the method
+            // Essentially, we just check for shell meta characters.
+            // TODO: we use args here and rawArgs in upper method.
+<span class="nc bnc" id="L1163" title="All 2 branches missed.">            for (String arg : args) {</span>
+<span class="nc bnc" id="L1164" title="All 2 branches missed.">                if (!shouldVerifyPathExecutable(arg.trim())) {</span>
+<span class="nc" id="L1165">                    return true;</span>
+                }
+            }
+
+            // OK, so no shell meta-chars, now check that the command does exist
+<span class="nc" id="L1170">            executable = args[0].trim();</span>
+<span class="nc" id="L1171">            executableFile = findPathExecutable(runtime, executable);</span>
+
+            // if the executable exists, start it directly with no shell
+<span class="nc bnc" id="L1174" title="All 2 branches missed.">            if (executableFile != null) {</span>
+<span class="nc" id="L1175">                log(runtime, &quot;Got it: &quot; + executableFile);</span>
+                // TODO: special processing for BAT/CMD files needed at all?
+                // if (isBatch(executableFile)) {
+                //    log(runtime, &quot;This is a BAT/CMD file, will start in shell&quot;);
+                //    return true;
+                // }
+<span class="nc" id="L1181">                return false;</span>
+            } else {
+<span class="nc" id="L1183">                log(runtime, &quot;Didn't find executable: &quot; + executable);</span>
+            }
+
+<span class="nc bnc" id="L1186" title="All 2 branches missed.">            if (isCmdBuiltin(executable)) {</span>
+<span class="nc" id="L1187">                cmdBuiltin = true;</span>
+<span class="nc" id="L1188">                return true;</span>
+            }
+
+            // TODO: maybe true here?
+<span class="nc" id="L1192">            return false;</span>
+        }
+
+        public void verifyExecutableForShell() {
+<span class="nc" id="L1196">            String cmdline = rawArgs[0].toString().trim();</span>
+<span class="nc bnc" id="L1197" title="All 6 branches missed.">            if (doExecutableSearch &amp;&amp; shouldVerifyPathExecutable(cmdline) &amp;&amp; !cmdBuiltin) {</span>
+<span class="nc" id="L1198">                verifyExecutable();</span>
+            }
+
+            // now, prepare the exec args
+
+<span class="nc" id="L1203">            execArgs = new String[3];</span>
+<span class="nc" id="L1204">            execArgs[0] = shell;</span>
+<span class="nc bnc" id="L1205" title="All 2 branches missed.">            execArgs[1] = shell.endsWith(&quot;sh&quot;) ? &quot;-c&quot; : &quot;/c&quot;;</span>
+
+<span class="nc bnc" id="L1207" title="All 2 branches missed.">            if (Platform.IS_WINDOWS) {</span>
+                // that's how MRI does it too
+<span class="nc" id="L1209">                execArgs[2] = &quot;\&quot;&quot; + cmdline + &quot;\&quot;&quot;;</span>
+            } else {
+<span class="nc" id="L1211">                execArgs[2] = cmdline;</span>
+            }
+<span class="nc" id="L1213">        }</span>
+
+        public void verifyExecutableForDirect() {
+<span class="nc bnc" id="L1216" title="All 2 branches missed.">            if (isCmdBuiltin(args[0].trim())) {</span>
+<span class="nc" id="L1217">                execArgs = new String[args.length + 2];</span>
+<span class="nc" id="L1218">                execArgs[0] = shell;</span>
+<span class="nc" id="L1219">                execArgs[1] = &quot;/c&quot;;</span>
+<span class="nc" id="L1220">                execArgs[2] = args[0].trim();</span>
+<span class="nc" id="L1221">                System.arraycopy(args, 1, execArgs, 3, args.length - 1);</span>
+            } else {
+<span class="nc" id="L1223">                verifyExecutable();</span>
+<span class="nc" id="L1224">                execArgs = args;</span>
+                try {
+<span class="nc" id="L1226">                    execArgs[0] = executableFile.getCanonicalPath();</span>
+<span class="nc" id="L1227">                } catch (IOException ioe) {</span>
+                    // can't get the canonical path, will use as-is
+<span class="nc" id="L1229">                }</span>
+            }
+<span class="nc" id="L1231">        }</span>
+
+        private void verifyExecutable() {
+<span class="pc bpc" id="L1234" title="1 of 2 branches missed.">            if (executableFile == null) {</span>
+<span class="pc bpc" id="L1235" title="1 of 2 branches missed.">                if (executable == null) {</span>
+<span class="fc" id="L1236">                    executable = args[0].trim();</span>
+                }
+<span class="fc" id="L1238">                executableFile = findPathExecutable(runtime, executable);</span>
+            }
+<span class="pc bpc" id="L1240" title="1 of 2 branches missed.">            if (executableFile == null) {</span>
+<span class="fc" id="L1241">                throw runtime.newErrnoENOENTError(executable);</span>
+            }
+<span class="nc" id="L1243">        }</span>
+
+        public String[] getExecArgs() {
+<span class="nc" id="L1246">            return execArgs;</span>
+        }
+
+        private static boolean isBatch(File f) {
+<span class="nc" id="L1250">            String path = f.getPath();</span>
+<span class="nc bnc" id="L1251" title="All 4 branches missed.">            return (path.endsWith(&quot;.bat&quot;) || path.endsWith(&quot;.cmd&quot;));</span>
+        }
+
+        private boolean isCmdBuiltin(String cmd) {
+<span class="nc bnc" id="L1255" title="All 2 branches missed.">            if (!shell.endsWith(&quot;sh&quot;)) { // assume cmd.exe</span>
+<span class="nc" id="L1256">                int idx = Arrays.binarySearch(WINDOWS_INTERNAL_CMDS, cmd.toLowerCase());</span>
+<span class="nc bnc" id="L1257" title="All 2 branches missed.">                if (idx &gt;= 0) {</span>
+<span class="nc" id="L1258">                    log(runtime, &quot;Found Windows shell's built-in command: &quot; + cmd);</span>
+                    // Windows shell internal command, launch in shell then
+<span class="nc" id="L1260">                    return true;</span>
+                }
+            }
+<span class="nc" id="L1263">            return false;</span>
+        }
+
+        /**
+         * Checks a command string to determine if it has I/O redirection
+         * characters that require it to be executed by a command interpreter.
+         */
+        private static boolean hasRedirection(String cmdline) {
+<span class="pc bpc" id="L1271" title="1 of 2 branches missed.">            if (Platform.IS_WINDOWS) {</span>
+                 // Scan the string, looking for redirection characters (&lt; or &gt;), pipe
+                 // character (|) or newline (\n) that are not in a quoted string
+<span class="nc" id="L1274">                 char quote = '\0';</span>
+<span class="nc bnc" id="L1275" title="All 2 branches missed.">                 for (int idx = 0; idx &lt; cmdline.length();) {</span>
+<span class="nc" id="L1276">                     char ptr = cmdline.charAt(idx);</span>
+<span class="nc bnc" id="L1277" title="All 5 branches missed.">                     switch (ptr) {</span>
+                     case '\'':
+                     case '\&quot;':
+<span class="nc bnc" id="L1280" title="All 2 branches missed.">                         if (quote == '\0') {</span>
+<span class="nc" id="L1281">                             quote = ptr;</span>
+<span class="nc bnc" id="L1282" title="All 2 branches missed.">                         } else if (quote == ptr) {</span>
+<span class="nc" id="L1283">                             quote = '\0';</span>
+                         }
+<span class="nc" id="L1285">                         idx++;</span>
+<span class="nc" id="L1286">                         break;</span>
+                     case '&gt;':
+                     case '&lt;':
+                     case '|':
+                     case '\n':
+<span class="nc bnc" id="L1291" title="All 2 branches missed.">                         if (quote == '\0') {</span>
+<span class="nc" id="L1292">                             return true;</span>
+                         }
+<span class="nc" id="L1294">                         idx++;</span>
+<span class="nc" id="L1295">                         break;</span>
+                     case '%':
+                         // detect Windows environment variables: %ABC%
+<span class="nc" id="L1298">                         Matcher envVarMatcher = WIN_ENVVAR_PATTERN.matcher(cmdline.substring(idx));</span>
+<span class="nc bnc" id="L1299" title="All 2 branches missed.">                         if (envVarMatcher.find()) {</span>
+<span class="nc" id="L1300">                             return true;</span>
+                         } else {
+<span class="nc" id="L1302">                             idx++;</span>
+                         }
+<span class="nc" id="L1304">                         break;</span>
+                     case '\\':
+                         // slash serves as escape character
+<span class="nc" id="L1307">                         idx++;</span>
+                     default:
+<span class="nc" id="L1309">                         idx++;</span>
+                         break;
+                     }
+<span class="nc" id="L1312">                 }</span>
+<span class="nc" id="L1313">                 return false;</span>
+            } else {
+                // TODO: better check here needed, with quoting/escaping
+<span class="fc" id="L1316">                Matcher metaMatcher = SHELL_METACHARACTER_PATTERN.matcher(cmdline);</span>
+<span class="fc" id="L1317">                return metaMatcher.find();</span>
+            }
+        }
+
+        // Should we try to verify the path executable, or just punt to the shell?
+        private static boolean shouldVerifyPathExecutable(String cmdline) {
+<span class="fc" id="L1323">            boolean verifyPathExecutable = true;</span>
+<span class="pc bpc" id="L1324" title="1 of 2 branches missed.">            if (hasRedirection(cmdline)) {</span>
+<span class="nc" id="L1325">                return false;</span>
+            }
+<span class="fc" id="L1327">            return verifyPathExecutable;</span>
+        }
+
+        private Ruby runtime;
+        private boolean doExecutableSearch;
+        private IRubyObject[] rawArgs;
+        private String shell;
+        private String[] args;
+        private String[] execArgs;
+<span class="fc" id="L1336">        private boolean cmdBuiltin = false;</span>
+
+        private String executable;
+        private File executableFile;
+    }
+
+    public static Process run(Ruby runtime, IRubyObject[] rawArgs, boolean doExecutableSearch) throws IOException {
+<span class="nc" id="L1343">        return run(runtime, rawArgs, doExecutableSearch, false);</span>
+    }
+
+    private static boolean hasGlobCharacter(String word) {
+<span class="nc bnc" id="L1347" title="All 8 branches missed.">        return word.contains(&quot;*&quot;) || word.contains(&quot;?&quot;) || word.contains(&quot;[&quot;) || word.contains(&quot;{&quot;);</span>
+    }
+
+    private static String[] expandGlobs(Ruby runtime, String[] originalArgs) {
+<span class="nc" id="L1351">        List&lt;String&gt; expandedList = new ArrayList&lt;String&gt;(originalArgs.length);</span>
+<span class="nc bnc" id="L1352" title="All 2 branches missed.">        for (int i = 0; i &lt; originalArgs.length; i++) {</span>
+<span class="nc bnc" id="L1353" title="All 2 branches missed.">            if (hasGlobCharacter(originalArgs[i])) {</span>
+                // FIXME: Encoding lost here
+<span class="nc" id="L1355">                List&lt;ByteList&gt; globs = Dir.push_glob(runtime.getPosix(), runtime.getCurrentDirectory(),</span>
+<span class="nc" id="L1356">                        new ByteList(originalArgs[i].getBytes()), 0);</span>
+
+<span class="nc bnc" id="L1358" title="All 2 branches missed.">                for (ByteList glob: globs) {</span>
+<span class="nc" id="L1359">                    expandedList.add(glob.toString());</span>
+<span class="nc" id="L1360">                }</span>
+<span class="nc" id="L1361">            } else {</span>
+<span class="nc" id="L1362">                expandedList.add(originalArgs[i]);</span>
+            }
+        }
+
+<span class="nc" id="L1366">        String[] args = new String[expandedList.size()];</span>
+<span class="nc" id="L1367">        expandedList.toArray(args);</span>
+
+<span class="nc" id="L1369">        return args;</span>
+    }
+
+    public static Process run(Ruby runtime, IRubyObject[] rawArgs, boolean doExecutableSearch, boolean forceExternalProcess) throws IOException {
+        Process aProcess;
+<span class="nc" id="L1374">        File pwd = new File(runtime.getCurrentDirectory());</span>
+<span class="nc" id="L1375">        LaunchConfig cfg = new LaunchConfig(runtime, rawArgs, doExecutableSearch);</span>
+
+        try {
+<span class="nc bnc" id="L1378" title="All 4 branches missed.">            if (!forceExternalProcess &amp;&amp; cfg.shouldRunInProcess()) {</span>
+<span class="nc" id="L1379">                log(runtime, &quot;Launching in-process&quot;);</span>
+<span class="nc" id="L1380">                ScriptThreadProcess ipScript = new ScriptThreadProcess(runtime,</span>
+<span class="nc" id="L1381">                        expandGlobs(runtime, cfg.getExecArgs()), getCurrentEnv(runtime), pwd);</span>
+<span class="nc" id="L1382">                ipScript.start();</span>
+<span class="nc" id="L1383">                return ipScript;</span>
+            } else {
+<span class="nc bnc" id="L1385" title="All 2 branches missed.">                if (cfg.shouldRunInShell()) {</span>
+<span class="nc" id="L1386">                    log(runtime, &quot;Launching with shell&quot;);</span>
+                    // execute command with sh -c
+                    // this does shell expansion of wildcards
+<span class="nc" id="L1389">                    cfg.verifyExecutableForShell();</span>
+                } else {
+<span class="nc" id="L1391">                    log(runtime, &quot;Launching directly (no shell)&quot;);</span>
+<span class="nc" id="L1392">                    cfg.verifyExecutableForDirect();</span>
+                }
+
+<span class="nc" id="L1395">                aProcess = buildProcess(runtime, cfg.getExecArgs(), getCurrentEnv(runtime), pwd);</span>
+            }
+<span class="nc" id="L1397">        } catch (SecurityException se) {</span>
+<span class="nc" id="L1398">            throw runtime.newSecurityError(se.getLocalizedMessage());</span>
+<span class="nc" id="L1399">        }</span>
+        
+<span class="nc" id="L1401">        return aProcess;</span>
+    }
+
+    private interface Pumper extends Runnable {
+<span class="nc" id="L1405">        public enum Slave { IN, OUT };</span>
+        public void start();
+        public void quit();
+    }
+
+    private static class StreamPumper extends Thread implements Pumper {
+        private final InputStream in;
+        private final OutputStream out;
+        private final boolean onlyIfAvailable;
+<span class="nc" id="L1414">        private final Object waitLock = new Object();</span>
+        private final Object sync;
+        private final Slave slave;
+        private volatile boolean quit;
+        private final Ruby runtime;
+
+<span class="nc" id="L1420">        StreamPumper(Ruby runtime, InputStream in, OutputStream out, boolean avail, Slave slave, Object sync) {</span>
+<span class="nc" id="L1421">            this.in = unwrapBufferedStream(in);</span>
+<span class="nc" id="L1422">            this.out = unwrapBufferedStream(out);</span>
+<span class="nc" id="L1423">            this.onlyIfAvailable = avail;</span>
+<span class="nc" id="L1424">            this.slave = slave;</span>
+<span class="nc" id="L1425">            this.sync = sync;</span>
+<span class="nc" id="L1426">            this.runtime = runtime;</span>
+<span class="nc" id="L1427">            setDaemon(true);</span>
+<span class="nc" id="L1428">        }</span>
+        @Override
+        public void run() {
+<span class="nc" id="L1431">            runtime.getCurrentContext().setEventHooksEnabled(false);</span>
+<span class="nc" id="L1432">            byte[] buf = new byte[1024];</span>
+            int numRead;
+<span class="nc" id="L1434">            boolean hasReadSomething = false;</span>
+            try {
+<span class="nc bnc" id="L1436" title="All 2 branches missed.">                while (!quit) {</span>
+                    // The problem we trying to solve below: STDIN in Java
+                    // is blocked and non-interruptible, so if we invoke read
+                    // on it, we might never be able to interrupt such thread.
+                    // So, we use in.available() to see if there is any input
+                    // ready, and only then read it. But this approach can't
+                    // tell whether the end of stream reached or not, so we
+                    // might end up looping right at the end of the stream.
+                    // Well, at least, we can improve the situation by checking
+                    // if some input was ever available, and if so, not
+                    // checking for available anymore, and just go to read.
+<span class="nc bnc" id="L1447" title="All 4 branches missed.">                    if (onlyIfAvailable &amp;&amp; !hasReadSomething) {</span>
+<span class="nc bnc" id="L1448" title="All 2 branches missed.">                        if (in.available() == 0) {</span>
+<span class="nc" id="L1449">                            synchronized (waitLock) {</span>
+<span class="nc" id="L1450">                                waitLock.wait(10);</span>
+<span class="nc" id="L1451">                            }</span>
+<span class="nc" id="L1452">                            continue;</span>
+                        } else {
+<span class="nc" id="L1454">                            hasReadSomething = true;</span>
+                        }
+                    }
+
+<span class="nc bnc" id="L1458" title="All 2 branches missed.">                    if ((numRead = in.read(buf)) == -1) {</span>
+<span class="nc" id="L1459">                        break;</span>
+                    }
+<span class="nc" id="L1461">                    out.write(buf, 0, numRead);</span>
+                }
+<span class="nc" id="L1463">            } catch (Exception e) {</span>
+            } finally {
+<span class="nc bnc" id="L1465" title="All 6 branches missed.">                if (onlyIfAvailable) {</span>
+<span class="nc" id="L1466">                    synchronized (sync) {</span>
+                        // We need to close the out, since some
+                        // processes would just wait for the stream
+                        // to be closed before they process its content,
+                        // and produce the output. E.g.: &quot;cat&quot;.
+<span class="nc bnc" id="L1471" title="All 6 branches missed.">                        if (slave == Slave.OUT) {</span>
+                            // we only close out if it's the slave stream, to avoid
+                            // closing a directly-mapped stream from parent process
+<span class="nc" id="L1474">                            try { out.close(); } catch (IOException ioe) {}</span>
+                        }
+<span class="nc" id="L1476">                    }</span>
+                }
+            }
+<span class="nc" id="L1479">        }</span>
+        public void quit() {
+<span class="nc" id="L1481">            this.quit = true;</span>
+<span class="nc" id="L1482">            synchronized (waitLock) {</span>
+<span class="nc" id="L1483">                waitLock.notify();</span>
+<span class="nc" id="L1484">            }</span>
+<span class="nc" id="L1485">            stop();</span>
+<span class="nc" id="L1486">        }</span>
+    }
+
+<span class="nc" id="L1489">    private static class ChannelPumper extends Thread implements Pumper {</span>
+        private final FileChannel inChannel;
+        private final FileChannel outChannel;
+        private final Slave slave;
+        private final Object sync;
+        private volatile boolean quit;
+        private final Ruby runtime;
+
+<span class="nc" id="L1497">        ChannelPumper(Ruby runtime, FileChannel inChannel, FileChannel outChannel, Slave slave, Object sync) {</span>
+            if (DEBUG) out.println(&quot;using channel pumper&quot;);
+<span class="nc" id="L1499">            this.inChannel = inChannel;</span>
+<span class="nc" id="L1500">            this.outChannel = outChannel;</span>
+<span class="nc" id="L1501">            this.slave = slave;</span>
+<span class="nc" id="L1502">            this.sync = sync;</span>
+<span class="nc" id="L1503">            this.runtime = runtime;</span>
+<span class="nc" id="L1504">            setDaemon(true);</span>
+<span class="nc" id="L1505">        }</span>
+        @Override
+        public void run() {
+<span class="nc" id="L1508">            runtime.getCurrentContext().setEventHooksEnabled(false);</span>
+<span class="nc" id="L1509">            ByteBuffer buf = ByteBuffer.allocateDirect(1024);</span>
+<span class="nc" id="L1510">            buf.clear();</span>
+            try {
+<span class="nc bnc" id="L1512" title="All 6 branches missed.">                while (!quit &amp;&amp; inChannel.isOpen() &amp;&amp; outChannel.isOpen()) {</span>
+<span class="nc" id="L1513">                    int read = inChannel.read(buf);</span>
+<span class="nc bnc" id="L1514" title="All 2 branches missed.">                    if (read == -1) break;</span>
+<span class="nc" id="L1515">                    buf.flip();</span>
+<span class="nc" id="L1516">                    outChannel.write(buf);</span>
+<span class="nc" id="L1517">                    buf.clear();</span>
+<span class="nc" id="L1518">                }</span>
+<span class="nc" id="L1519">            } catch (Exception e) {</span>
+            } finally {
+                // processes seem to have some peculiar locking sequences, so we
+                // need to ensure nobody is trying to close/destroy while we are
+<span class="nc" id="L1523">                synchronized (sync) {</span>
+<span class="nc bnc" id="L1524" title="All 9 branches missed.">                    switch (slave) {</span>
+                    case OUT:
+<span class="nc" id="L1526">                        try { outChannel.close(); } catch (IOException ioe) {}</span>
+<span class="nc" id="L1527">                        break;</span>
+                    case IN:
+<span class="nc" id="L1529">                        try { inChannel.close(); } catch (IOException ioe) {}</span>
+                    }
+<span class="nc" id="L1531">                }</span>
+<span class="nc" id="L1532">            }</span>
+<span class="nc" id="L1533">        }</span>
+        public void quit() {
+<span class="nc" id="L1535">            interrupt();</span>
+<span class="nc" id="L1536">            this.quit = true;</span>
+<span class="nc" id="L1537">            stop();</span>
+<span class="nc" id="L1538">        }</span>
+    }
+
+    private static void handleStreams(Ruby runtime, Process p, InputStream in, OutputStream out, OutputStream err) throws IOException {
+<span class="nc" id="L1542">        InputStream pOut = p.getInputStream();</span>
+<span class="nc" id="L1543">        InputStream pErr = p.getErrorStream();</span>
+<span class="nc" id="L1544">        OutputStream pIn = p.getOutputStream();</span>
+
+<span class="nc" id="L1546">        StreamPumper t1 = new StreamPumper(runtime, pOut, out, false, Pumper.Slave.IN, p);</span>
+<span class="nc" id="L1547">        StreamPumper t2 = new StreamPumper(runtime, pErr, err, false, Pumper.Slave.IN, p);</span>
+
+        // The assumption here is that the 'in' stream provides
+        // proper available() support. If available() always
+        // returns 0, we'll hang!
+<span class="nc" id="L1552">        StreamPumper t3 = new StreamPumper(runtime, in, pIn, true, Pumper.Slave.OUT, p);</span>
+
+<span class="nc" id="L1554">        t1.start();</span>
+<span class="nc" id="L1555">        t2.start();</span>
+<span class="nc" id="L1556">        t3.start();</span>
+
+<span class="nc" id="L1558">        try { t1.join(); } catch (InterruptedException ie) {}</span>
+<span class="nc" id="L1559">        try { t2.join(); } catch (InterruptedException ie) {}</span>
+<span class="nc" id="L1560">        t3.quit();</span>
+
+<span class="nc" id="L1562">        try { err.flush(); } catch (IOException io) {}</span>
+<span class="nc" id="L1563">        try { out.flush(); } catch (IOException io) {}</span>
+
+<span class="nc" id="L1565">        try { pIn.close(); } catch (IOException io) {}</span>
+<span class="nc" id="L1566">        try { pOut.close(); } catch (IOException io) {}</span>
+<span class="nc" id="L1567">        try { pErr.close(); } catch (IOException io) {}</span>
+
+        // Force t3 to quit, just in case if it's stuck.
+        // Note: On some platforms, even interrupt might not
+        // have an effect if the thread is IO blocked.
+<span class="nc" id="L1572">        try { t3.interrupt(); } catch (SecurityException se) {}</span>
+
+        // finally, forcibly stop the threads. Yeah, I know.
+<span class="nc" id="L1575">        t1.stop();</span>
+<span class="nc" id="L1576">        t2.stop();</span>
+<span class="nc" id="L1577">        t3.stop();</span>
+<span class="nc" id="L1578">        try { t1.join(); } catch (InterruptedException ie) {}</span>
+<span class="nc" id="L1579">        try { t2.join(); } catch (InterruptedException ie) {}</span>
+<span class="nc" id="L1580">        try { t3.join(); } catch (InterruptedException ie) {}</span>
+<span class="nc" id="L1581">    }</span>
+
+    private static void handleStreamsNonblocking(Ruby runtime, Process p, OutputStream out, OutputStream err) throws IOException {
+<span class="nc" id="L1584">        InputStream pOut = p.getInputStream();</span>
+<span class="nc" id="L1585">        InputStream pErr = p.getErrorStream();</span>
+
+<span class="nc" id="L1587">        StreamPumper t1 = new StreamPumper(runtime, pOut, out, false, Pumper.Slave.IN, p);</span>
+<span class="nc" id="L1588">        StreamPumper t2 = new StreamPumper(runtime, pErr, err, false, Pumper.Slave.IN, p);</span>
+
+<span class="nc" id="L1590">        t1.start();</span>
+<span class="nc" id="L1591">        t2.start();</span>
+<span class="nc" id="L1592">    }</span>
+
+    // TODO: move inside the LaunchConfig
+    private static String[] parseCommandLine(ThreadContext context, Ruby runtime, IRubyObject[] rawArgs) {
+        String[] args;
+<span class="pc bpc" id="L1597" title="1 of 2 branches missed.">        if (rawArgs.length == 1) {</span>
+<span class="pc bpc" id="L1598" title="1 of 2 branches missed.">            if (hasLeadingArgvArray(rawArgs)) {</span>
+                // can't make use of it, discard the argv[0] entry
+<span class="nc" id="L1600">                args = new String[] { getPathEntry((RubyArray) rawArgs[0]) };</span>
+            } else {
+<span class="fc" id="L1602">                synchronized (runtime.getLoadService()) {</span>
+<span class="fc" id="L1603">                    runtime.getLoadService().require(&quot;jruby/path_helper&quot;);</span>
+<span class="pc" id="L1604">                }</span>
+<span class="fc" id="L1605">                RubyModule pathHelper = runtime.getClassFromPath(&quot;JRuby::PathHelper&quot;);</span>
+<span class="fc" id="L1606">                RubyArray parts = (RubyArray) Helpers.invoke(</span>
+                        context, pathHelper, &quot;smart_split_command&quot;, rawArgs);
+<span class="fc" id="L1608">                args = new String[parts.getLength()];</span>
+<span class="fc bfc" id="L1609" title="All 2 branches covered.">                for (int i = 0; i &lt; parts.getLength(); i++) {</span>
+<span class="fc" id="L1610">                    args[i] = parts.entry(i).toString();</span>
+                }
+<span class="fc" id="L1612">            }</span>
+        } else {
+<span class="nc" id="L1614">            args = new String[rawArgs.length];</span>
+<span class="nc" id="L1615">            int start = 0;</span>
+<span class="nc bnc" id="L1616" title="All 2 branches missed.">            if (hasLeadingArgvArray(rawArgs)) {</span>
+<span class="nc" id="L1617">                start = 1;</span>
+<span class="nc" id="L1618">                args[0] = getPathEntry((RubyArray) rawArgs[0]);</span>
+            }
+<span class="nc bnc" id="L1620" title="All 2 branches missed.">            for (int i = start; i &lt; rawArgs.length; i++) {</span>
+<span class="nc" id="L1621">                args[i] = rawArgs[i].toString();</span>
+            }
+        }
+<span class="fc" id="L1624">        return args;</span>
+    }
+
+    /** Takes an argument array suitable for Kernel#exec or similar,
+     * and indicates whether it has a leading two-element array giving
+     * the path and argv[0] entries separately.
+     *
+     * We can't use the argv[0] entry through ProcessBuilder, so
+     * we discard it.
+     */
+    private static boolean hasLeadingArgvArray(IRubyObject[] rawArgs) {
+<span class="pc bpc" id="L1635" title="2 of 4 branches missed.">        return (rawArgs.length &gt;= 1</span>
+                &amp;&amp; (rawArgs[0] instanceof RubyArray)
+<span class="pc bnc" id="L1637" title="All 2 branches missed.">                &amp;&amp; (((RubyArray) rawArgs[0]).getLength() == 2));</span>
+    }
+
+    private static String getPathEntry(RubyArray initArray) {
+<span class="nc" id="L1641">        return initArray.entry(0).toString();</span>
+    }
+
+    private static String getShell(Ruby runtime) {
+<span class="fc" id="L1645">        return RbConfigLibrary.jrubyShell();</span>
+    }
+
+    private static boolean shouldUseShell(String command) {
+<span class="nc" id="L1649">        boolean useShell = false;</span>
+<span class="nc bnc" id="L1650" title="All 2 branches missed.">        for (char c : command.toCharArray()) {</span>
+<span class="nc bnc" id="L1651" title="All 6 branches missed.">            if (c != ' ' &amp;&amp; !Character.isLetter(c) &amp;&amp; &quot;*?{}[]&lt;&gt;()~&amp;|\\$;'`\&quot;\n&quot;.indexOf(c) != -1) {</span>
+<span class="nc" id="L1652">                useShell = true;</span>
+            }
+        }
+<span class="nc bnc" id="L1655" title="All 6 branches missed.">        if (Platform.IS_WINDOWS &amp;&amp; command.length() &gt;= 1 &amp;&amp; command.charAt(0) == '@') {</span>
+            // JRUBY-5522
+<span class="nc" id="L1657">            useShell = true;</span>
+        }
+<span class="nc" id="L1659">        return useShell;</span>
+    }
+
+    static void log(Ruby runtime, String msg) {
+<span class="pc bpc" id="L1663" title="1 of 2 branches missed.">        if (RubyInstanceConfig.DEBUG_LAUNCHING) {</span>
+<span class="nc" id="L1664">            runtime.getErr().println(&quot;ShellLauncher: &quot; + msg);</span>
+        }
+<span class="fc" id="L1666">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

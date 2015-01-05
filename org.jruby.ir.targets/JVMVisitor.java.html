@@ -1,0 +1,2224 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JVMVisitor.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.targets</a> &gt; <span class="el_source">JVMVisitor.java</span></div><h1>JVMVisitor.java</h1><pre class="source lang-java linenums">package org.jruby.ir.targets;
+
+import com.headius.invokebinder.Signature;
+import org.jcodings.specific.USASCIIEncoding;
+import org.jruby.*;
+import org.jruby.compiler.NotCompilableException;
+import org.jruby.compiler.impl.SkinnyMethodAdapter;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.internal.runtime.GlobalVariables;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.ir.*;
+import org.jruby.ir.instructions.*;
+import org.jruby.ir.instructions.boxing.*;
+import org.jruby.ir.instructions.defined.GetErrorInfoInstr;
+import org.jruby.ir.instructions.defined.RestoreErrorInfoInstr;
+import org.jruby.ir.instructions.specialized.OneFixnumArgNoBlockCallInstr;
+import org.jruby.ir.instructions.specialized.OneFloatArgNoBlockCallInstr;
+import org.jruby.ir.instructions.specialized.OneOperandArgNoBlockCallInstr;
+import org.jruby.ir.instructions.specialized.ZeroOperandArgNoBlockCallInstr;
+import org.jruby.ir.operands.*;
+import org.jruby.ir.operands.Boolean;
+import org.jruby.ir.operands.Float;
+import org.jruby.ir.operands.GlobalVariable;
+import org.jruby.ir.operands.Label;
+import org.jruby.ir.representations.BasicBlock;
+import org.jruby.ir.runtime.IRRuntimeHelpers;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.*;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.invokedynamic.InvokeDynamicSupport;
+import org.jruby.util.ByteList;
+import org.jruby.util.ClassDefiningClassLoader;
+import org.jruby.util.JavaNameMangler;
+import org.jruby.util.KeyValuePair;
+import org.jruby.util.RegexpOptions;
+import org.jruby.util.cli.Options;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+import org.objectweb.asm.Handle;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
+import org.objectweb.asm.commons.Method;
+
+import java.lang.invoke.MethodType;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
+import static org.jruby.util.CodegenUtils.*;
+
+/**
+ * Implementation of IRCompiler for the JVM.
+ */
+<span class="pc bpc" id="L55" title="1 of 2 branches missed.">public class JVMVisitor extends IRVisitor {</span>
+
+<span class="fc" id="L57">    private static final Logger LOG = LoggerFactory.getLogger(&quot;JVMVisitor&quot;);</span>
+    public static final String DYNAMIC_SCOPE = &quot;$dynamicScope&quot;;
+    private static final boolean DEBUG = false;
+
+<span class="fc" id="L61">    public JVMVisitor() {</span>
+<span class="pc bpc" id="L62" title="1 of 2 branches missed.">        this.jvm = Options.COMPILE_INVOKEDYNAMIC.load() ? new JVM7() : new JVM6();</span>
+<span class="fc" id="L63">        this.methodIndex = 0;</span>
+<span class="fc" id="L64">        this.scopeMap = new HashMap();</span>
+<span class="fc" id="L65">    }</span>
+
+    public Class compile(IRScope scope, ClassDefiningClassLoader jrubyClassLoader) {
+<span class="nc" id="L68">        return defineFromBytecode(scope, compileToBytecode(scope), jrubyClassLoader);</span>
+    }
+
+    public byte[] compileToBytecode(IRScope scope) {
+<span class="fc" id="L72">        codegenScope(scope);</span>
+
+//        try {
+//            FileOutputStream fos = new FileOutputStream(&quot;tmp.class&quot;);
+//            fos.write(target.code());
+//            fos.close();
+//        } catch (Exception e) {
+//            e.printStackTrace();
+//        }
+
+<span class="fc" id="L82">        return code();</span>
+    }
+
+    public Class defineFromBytecode(IRScope scope, byte[] code, ClassDefiningClassLoader jrubyClassLoader) {
+<span class="fc" id="L86">        Class result = jrubyClassLoader.defineClass(c(JVM.scriptToClass(scope.getFileName())), code);</span>
+
+<span class="fc bfc" id="L88" title="All 2 branches covered.">        for (Map.Entry&lt;String, IRScope&gt; entry : scopeMap.entrySet()) {</span>
+            try {
+<span class="fc" id="L90">                result.getField(entry.getKey()).set(null, entry.getValue());</span>
+<span class="nc" id="L91">            } catch (Exception e) {</span>
+<span class="nc" id="L92">                throw new NotCompilableException(e);</span>
+<span class="fc" id="L93">            }</span>
+<span class="fc" id="L94">        }</span>
+
+<span class="fc" id="L96">        return result;</span>
+    }
+
+    public byte[] code() {
+<span class="fc" id="L100">        return jvm.code();</span>
+    }
+
+    public void codegenScope(IRScope scope) {
+<span class="fc bfc" id="L104" title="All 2 branches covered.">        if (scope instanceof IRScriptBody) {</span>
+<span class="fc" id="L105">            codegenScriptBody((IRScriptBody)scope);</span>
+<span class="pc bpc" id="L106" title="1 of 2 branches missed.">        } else if (scope instanceof IRMethod) {</span>
+<span class="fc" id="L107">            emitMethodJIT((IRMethod)scope);</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        } else if (scope instanceof IRModuleBody) {</span>
+<span class="nc" id="L109">            emitModuleBodyJIT((IRModuleBody)scope);</span>
+        } else {
+<span class="nc" id="L111">            throw new NotCompilableException(&quot;don't know how to JIT: &quot; + scope);</span>
+        }
+<span class="fc" id="L113">    }</span>
+
+    public void codegenScriptBody(IRScriptBody script) {
+<span class="fc" id="L116">        emitScriptBody(script);</span>
+<span class="fc" id="L117">    }</span>
+
+    private void logScope(IRScope scope) {
+<span class="nc" id="L120">        StringBuilder b = new StringBuilder();</span>
+
+<span class="nc" id="L122">        b.append(&quot;\n\nLinearized instructions for JIT:\n&quot;);</span>
+
+<span class="nc" id="L124">        int i = 0;</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">        for (BasicBlock bb : scope.buildLinearization()) {</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">            for (Instr instr : bb.getInstrs()) {</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                if (i &gt; 0) b.append(&quot;\n&quot;);</span>
+
+<span class="nc" id="L129">                b.append(&quot;  &quot;).append(i).append('\t').append(instr);</span>
+
+<span class="nc" id="L131">                i++;</span>
+<span class="nc" id="L132">            }</span>
+<span class="nc" id="L133">        }</span>
+
+<span class="nc" id="L135">        LOG.info(&quot;Starting JVM compilation on scope &quot; + scope);</span>
+<span class="nc" id="L136">        LOG.info(b.toString());</span>
+<span class="nc" id="L137">    }</span>
+
+    public void emitScope(IRScope scope, String name, Signature signature, boolean specificArity) {
+<span class="fc" id="L140">        List &lt;BasicBlock&gt; bbs = scope.prepareForCompilation();</span>
+
+<span class="fc" id="L142">        Map &lt;BasicBlock, Label&gt; exceptionTable = scope.buildJVMExceptionTable();</span>
+
+<span class="pc bpc" id="L144" title="1 of 2 branches missed.">        if (Options.IR_COMPILER_DEBUG.load()) logScope(scope);</span>
+
+<span class="fc" id="L146">        emitClosures(scope);</span>
+
+<span class="fc" id="L148">        jvm.pushmethod(name, scope, signature, specificArity);</span>
+
+        // store IRScope in map for insertion into class later
+<span class="fc" id="L151">        String scopeField = name + &quot;_IRScope&quot;;</span>
+<span class="fc bfc" id="L152" title="All 2 branches covered.">        if (scopeMap.get(scopeField) == null) {</span>
+<span class="fc" id="L153">            scopeMap.put(scopeField, scope);</span>
+<span class="fc" id="L154">            jvm.cls().visitField(Opcodes.ACC_STATIC | Opcodes.ACC_PUBLIC | Opcodes.ACC_VOLATILE, scopeField, ci(IRScope.class), null, null).visitEnd();</span>
+        }
+
+        // Some scopes (closures, module/class bodies) do not have explicit call protocol yet.
+        // Unconditionally load current dynamic scope for those bodies.
+<span class="fc bfc" id="L159" title="All 2 branches covered.">        if (!scope.hasExplicitCallProtocol()) {</span>
+<span class="fc" id="L160">            jvmMethod().loadContext();</span>
+<span class="fc" id="L161">            jvmMethod().invokeVirtual(Type.getType(ThreadContext.class), Method.getMethod(&quot;org.jruby.runtime.DynamicScope getCurrentScope()&quot;));</span>
+<span class="fc" id="L162">            jvmStoreLocal(DYNAMIC_SCOPE);</span>
+        }
+
+<span class="fc" id="L165">        IRBytecodeAdapter m = jvmMethod();</span>
+
+<span class="fc" id="L167">        int numberOfLabels = bbs.size();</span>
+<span class="fc" id="L168">        int ipc = 0; // synthetic, used for debug traces that show which instr failed</span>
+<span class="fc bfc" id="L169" title="All 2 branches covered.">        for (int i = 0; i &lt; numberOfLabels; i++) {</span>
+<span class="fc" id="L170">            BasicBlock bb = bbs.get(i);</span>
+<span class="fc" id="L171">            org.objectweb.asm.Label start = jvm.methodData().getLabel(bb.getLabel());</span>
+<span class="fc" id="L172">            Label rescueLabel = exceptionTable.get(bb);</span>
+<span class="fc" id="L173">            org.objectweb.asm.Label end = null;</span>
+
+<span class="fc" id="L175">            m.mark(start);</span>
+
+<span class="fc" id="L177">            boolean newEnd = false;</span>
+<span class="fc bfc" id="L178" title="All 2 branches covered.">            if (rescueLabel != null) {</span>
+<span class="fc bfc" id="L179" title="All 2 branches covered.">                if (i+1 &lt; numberOfLabels) {</span>
+<span class="fc" id="L180">                    end = jvm.methodData().getLabel(bbs.get(i+1).getLabel());</span>
+                } else {
+<span class="fc" id="L182">                    newEnd = true;</span>
+<span class="fc" id="L183">                    end = new org.objectweb.asm.Label();</span>
+                }
+
+<span class="fc" id="L186">                org.objectweb.asm.Label rescue = jvm.methodData().getLabel(rescueLabel);</span>
+<span class="fc" id="L187">                jvmAdapter().trycatch(start, end, rescue, p(Throwable.class));</span>
+            }
+
+            // ensure there's at least one instr per block
+<span class="fc" id="L191">            m.adapter.nop();</span>
+
+            // visit remaining instrs
+<span class="fc bfc" id="L194" title="All 2 branches covered.">            for (Instr instr : bb.getInstrs()) {</span>
+                if (DEBUG) instr.setIPC(ipc++); // debug mode uses instr offset for backtrace
+<span class="fc" id="L196">                visit(instr);</span>
+<span class="fc" id="L197">            }</span>
+
+<span class="fc bfc" id="L199" title="All 2 branches covered.">            if (newEnd) {</span>
+<span class="fc" id="L200">                m.mark(end);</span>
+            }
+        }
+
+<span class="fc" id="L204">        jvm.popmethod();</span>
+<span class="fc" id="L205">    }</span>
+
+<span class="fc" id="L207">    private static final Signature METHOD_SIGNATURE_BASE = Signature</span>
+<span class="fc" id="L208">            .returning(IRubyObject.class)</span>
+<span class="fc" id="L209">            .appendArgs(new String[]{&quot;context&quot;, &quot;scope&quot;, &quot;self&quot;, &quot;block&quot;, &quot;class&quot;}, ThreadContext.class, StaticScope.class, IRubyObject.class, Block.class, RubyModule.class);</span>
+
+    public static final Signature signatureFor(IRScope method, boolean aritySplit) {
+<span class="fc bfc" id="L212" title="All 2 branches covered.">        if (aritySplit) {</span>
+<span class="fc" id="L213">            StaticScope argScope = method.getStaticScope();</span>
+<span class="pc bpc" id="L214" title="1 of 2 branches missed.">            if (argScope.isArgumentScope() &amp;&amp;</span>
+<span class="fc bfc" id="L215" title="All 2 branches covered.">                    argScope.getOptionalArgs() == 0 &amp;&amp;</span>
+<span class="fc bfc" id="L216" title="All 2 branches covered.">                    argScope.getRestArg() == -1 &amp;&amp;</span>
+<span class="pc bpc" id="L217" title="1 of 2 branches missed.">                    !method.receivesKeywordArgs()) {</span>
+                // we have only required arguments...emit a signature appropriate to that arity
+<span class="fc" id="L219">                String[] args = new String[argScope.getRequiredArgs()];</span>
+<span class="fc" id="L220">                Class[] types = Helpers.arrayOf(Class.class, args.length, IRubyObject.class);</span>
+<span class="fc bfc" id="L221" title="All 2 branches covered.">                for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="fc" id="L222">                    args[i] = &quot;arg&quot; + i;</span>
+                }
+<span class="fc" id="L224">                return METHOD_SIGNATURE_BASE.insertArgs(3, args, types);</span>
+            }
+            // we can't do an specific-arity signature
+<span class="fc" id="L227">            return null;</span>
+        }
+
+        // normal boxed arg list signature
+<span class="fc" id="L231">        return METHOD_SIGNATURE_BASE.insertArgs(3, new String[]{&quot;args&quot;}, IRubyObject[].class);</span>
+    }
+
+<span class="fc" id="L234">    private static final Signature CLOSURE_SIGNATURE = Signature</span>
+<span class="fc" id="L235">            .returning(IRubyObject.class)</span>
+<span class="fc" id="L236">            .appendArgs(new String[]{&quot;context&quot;, &quot;scope&quot;, &quot;self&quot;, &quot;args&quot;, &quot;block&quot;, &quot;superName&quot;, &quot;type&quot;}, ThreadContext.class, StaticScope.class, IRubyObject.class, IRubyObject[].class, Block.class, String.class, Block.Type.class);</span>
+
+    public void emitScriptBody(IRScriptBody script) {
+<span class="fc" id="L239">        String clsName = jvm.scriptToClass(script.getFileName());</span>
+<span class="fc" id="L240">        jvm.pushscript(clsName, script.getFileName());</span>
+
+<span class="fc" id="L242">        emitScope(script, &quot;__script__&quot;, signatureFor(script, false), false);</span>
+
+<span class="fc" id="L244">        jvm.cls().visitEnd();</span>
+<span class="fc" id="L245">        jvm.popclass();</span>
+<span class="fc" id="L246">    }</span>
+
+    public void emitMethod(IRMethod method) {
+<span class="fc" id="L249">        String name = JavaNameMangler.mangleMethodName(method.getName() + &quot;_&quot; + methodIndex++);</span>
+
+<span class="fc" id="L251">        emitWithSignatures(method, name);</span>
+<span class="fc" id="L252">    }</span>
+
+    public void  emitMethodJIT(IRMethod method) {
+<span class="fc" id="L255">        String clsName = jvm.scriptToClass(method.getFileName());</span>
+<span class="fc" id="L256">        jvm.pushscript(clsName, method.getFileName());</span>
+
+<span class="fc" id="L258">        emitWithSignatures(method, &quot;__script__&quot;);</span>
+
+<span class="fc" id="L260">        jvm.cls().visitEnd();</span>
+<span class="fc" id="L261">        jvm.popclass();</span>
+<span class="fc" id="L262">    }</span>
+
+    private void emitWithSignatures(IRMethod method, String name) {
+<span class="fc" id="L265">        method.setJittedName(name);</span>
+
+<span class="fc" id="L267">        Signature signature = signatureFor(method, false);</span>
+<span class="fc" id="L268">        emitScope(method, name, signature, false);</span>
+<span class="fc" id="L269">        method.addNativeSignature(-1, signature.type());</span>
+
+<span class="fc" id="L271">        Signature specificSig = signatureFor(method, true);</span>
+<span class="fc bfc" id="L272" title="All 2 branches covered.">        if (specificSig != null) {</span>
+<span class="fc" id="L273">            emitScope(method, name, specificSig, true);</span>
+<span class="fc" id="L274">            method.addNativeSignature(method.getStaticScope().getRequiredArgs(), specificSig.type());</span>
+        }
+<span class="fc" id="L276">    }</span>
+
+    public Handle emitModuleBodyJIT(IRModuleBody method) {
+<span class="nc" id="L279">        String baseName = method.getName() + &quot;_&quot; + methodIndex++;</span>
+        String name;
+
+<span class="nc bnc" id="L282" title="All 2 branches missed.">        if (baseName.indexOf(&quot;DUMMY_MC&quot;) != -1) {</span>
+<span class="nc" id="L283">            name = &quot;METACLASS_&quot; + methodIndex++;</span>
+        } else {
+<span class="nc" id="L285">            name = baseName + &quot;_&quot; + methodIndex++;</span>
+        }
+<span class="nc" id="L287">        String clsName = jvm.scriptToClass(method.getFileName());</span>
+<span class="nc" id="L288">        jvm.pushscript(clsName, method.getFileName());</span>
+
+<span class="nc" id="L290">        Signature signature = signatureFor(method, false);</span>
+<span class="nc" id="L291">        emitScope(method, &quot;__script__&quot;, signature, false);</span>
+
+<span class="nc" id="L293">        Handle handle = new Handle(Opcodes.H_INVOKESTATIC, jvm.clsData().clsName, name, sig(signature.type().returnType(), signature.type().parameterArray()));</span>
+
+<span class="nc" id="L295">        jvm.cls().visitEnd();</span>
+<span class="nc" id="L296">        jvm.popclass();</span>
+
+<span class="nc" id="L298">        return handle;</span>
+    }
+
+    private void emitClosures(IRScope s) {
+        // Emit code for all nested closures
+<span class="fc bfc" id="L303" title="All 2 branches covered.">        for (IRClosure c: s.getClosures()) {</span>
+<span class="fc" id="L304">            c.setHandle(emitClosure(c));</span>
+<span class="fc" id="L305">        }</span>
+<span class="fc" id="L306">    }</span>
+
+    public Handle emitClosure(IRClosure closure) {
+        /* Compile the closure like a method */
+<span class="fc" id="L310">        String name = JavaNameMangler.mangleMethodName(closure.getName() + &quot;__&quot; + closure.getLexicalParent().getName() + &quot;_&quot; + methodIndex++);</span>
+
+<span class="fc" id="L312">        emitScope(closure, name, CLOSURE_SIGNATURE, false);</span>
+
+<span class="fc" id="L314">        return new Handle(Opcodes.H_INVOKESTATIC, jvm.clsData().clsName, name, sig(CLOSURE_SIGNATURE.type().returnType(), CLOSURE_SIGNATURE.type().parameterArray()));</span>
+    }
+
+    public Handle emitModuleBody(IRModuleBody method) {
+<span class="fc" id="L318">        String baseName = method.getName() + &quot;_&quot; + methodIndex++;</span>
+        String name;
+
+<span class="pc bpc" id="L321" title="1 of 2 branches missed.">        if (baseName.indexOf(&quot;DUMMY_MC&quot;) != -1) {</span>
+<span class="nc" id="L322">            name = &quot;METACLASS_&quot; + methodIndex++;</span>
+        } else {
+<span class="fc" id="L324">            name = baseName + &quot;_&quot; + methodIndex++;</span>
+        }
+
+<span class="fc" id="L327">        Signature signature = signatureFor(method, false);</span>
+<span class="fc" id="L328">        emitScope(method, name, signature, false);</span>
+
+<span class="fc" id="L330">        return new Handle(Opcodes.H_INVOKESTATIC, jvm.clsData().clsName, name, sig(signature.type().returnType(), signature.type().parameterArray()));</span>
+    }
+
+    public void visit(Instr instr) {
+        if (DEBUG) { // debug will skip emitting actual file line numbers
+            jvmAdapter().line(instr.getIPC());
+        }
+<span class="fc" id="L337">        instr.visit(this);</span>
+<span class="fc" id="L338">    }</span>
+
+    public void visit(Operand operand) {
+<span class="fc" id="L341">        operand.visit(this);</span>
+<span class="fc" id="L342">    }</span>
+
+    private int getJVMLocalVarIndex(Variable variable) {
+<span class="fc bfc" id="L345" title="All 2 branches covered.">        if (variable instanceof TemporaryLocalVariable) {</span>
+<span class="pc bpc" id="L346" title="3 of 4 branches missed.">            switch (((TemporaryLocalVariable)variable).getType()) {</span>
+<span class="nc" id="L347">            case FLOAT: return jvm.methodData().local(variable, JVM.DOUBLE_TYPE);</span>
+<span class="nc" id="L348">            case FIXNUM: return jvm.methodData().local(variable, JVM.LONG_TYPE);</span>
+<span class="nc" id="L349">            case BOOLEAN: return jvm.methodData().local(variable, JVM.BOOLEAN_TYPE);</span>
+<span class="fc" id="L350">            default: return jvm.methodData().local(variable);</span>
+            }
+        } else {
+<span class="fc" id="L353">            return jvm.methodData().local(variable);</span>
+        }
+    }
+
+    private int getJVMLocalVarIndex(String specialVar) {
+<span class="fc" id="L358">        return jvm.methodData().local(specialVar);</span>
+    }
+
+    private org.objectweb.asm.Label getJVMLabel(Label label) {
+<span class="fc" id="L362">        return jvm.methodData().getLabel(label);</span>
+    }
+
+    private void jvmStoreLocal(Variable variable) {
+<span class="fc bfc" id="L366" title="All 2 branches covered.">        if (variable instanceof TemporaryLocalVariable) {</span>
+<span class="pc bpc" id="L367" title="3 of 4 branches missed.">            switch (((TemporaryLocalVariable)variable).getType()) {</span>
+<span class="nc" id="L368">            case FLOAT: jvmAdapter().dstore(getJVMLocalVarIndex(variable)); break;</span>
+<span class="nc" id="L369">            case FIXNUM: jvmAdapter().lstore(getJVMLocalVarIndex(variable)); break;</span>
+<span class="nc" id="L370">            case BOOLEAN: jvmAdapter().istore(getJVMLocalVarIndex(variable)); break;</span>
+<span class="fc" id="L371">            default: jvmMethod().storeLocal(getJVMLocalVarIndex(variable)); break;</span>
+            }
+        } else {
+<span class="fc" id="L374">            jvmMethod().storeLocal(getJVMLocalVarIndex(variable));</span>
+        }
+<span class="fc" id="L376">    }</span>
+
+    private void jvmStoreLocal(String specialVar) {
+<span class="fc" id="L379">        jvmMethod().storeLocal(getJVMLocalVarIndex(specialVar));</span>
+<span class="fc" id="L380">    }</span>
+
+    private void jvmLoadLocal(Variable variable) {
+<span class="pc bpc" id="L383" title="1 of 2 branches missed.">        if (variable instanceof TemporaryLocalVariable) {</span>
+<span class="pc bpc" id="L384" title="3 of 4 branches missed.">            switch (((TemporaryLocalVariable)variable).getType()) {</span>
+<span class="nc" id="L385">            case FLOAT: jvmAdapter().dload(getJVMLocalVarIndex(variable)); break;</span>
+<span class="nc" id="L386">            case FIXNUM: jvmAdapter().lload(getJVMLocalVarIndex(variable)); break;</span>
+<span class="nc" id="L387">            case BOOLEAN: jvmAdapter().iload(getJVMLocalVarIndex(variable)); break;</span>
+<span class="fc" id="L388">            default: jvmMethod().loadLocal(getJVMLocalVarIndex(variable)); break;</span>
+            }
+        } else {
+<span class="nc" id="L391">            jvmMethod().loadLocal(getJVMLocalVarIndex(variable));</span>
+        }
+<span class="fc" id="L393">    }</span>
+
+    private void jvmLoadLocal(String specialVar) {
+<span class="fc" id="L396">        jvmMethod().loadLocal(getJVMLocalVarIndex(specialVar));</span>
+<span class="fc" id="L397">    }</span>
+
+    // JVM maintains a stack of ClassData (for nested classes being compiled)
+    // Each class maintains a stack of MethodData (for methods being compiled in the class)
+    // MethodData wraps a IRBytecodeAdapter which wraps a SkinnyMethodAdapter which has a ASM MethodVisitor which emits bytecode
+    // A long chain of indirection: JVM -&gt; MethodData -&gt; IRBytecodeAdapter -&gt; SkinnyMethodAdapter -&gt; ASM.MethodVisitor
+    // In some places, methods reference JVM -&gt; MethodData -&gt; IRBytecodeAdapter (via jvm.method()) and ask it to walk the last 2 links
+    // In other places, methods reference JVM -&gt; MethodData -&gt; IRBytecodeAdapter -&gt; SkinnyMethodAdapter (via jvm.method().adapter) and ask it to walk the last link
+    // Can this be cleaned up to either (a) get rid of IRBytecodeAdapter OR (b) implement passthru' methods for SkinnyMethodAdapter methods (like the others it implements)?
+
+    // SSS FIXME: Needs an update to reflect instr. change
+    @Override
+    public void AliasInstr(AliasInstr aliasInstr) {
+<span class="nc" id="L410">        IRBytecodeAdapter m = jvm.method();</span>
+<span class="nc" id="L411">        m.loadContext();</span>
+<span class="nc" id="L412">        m.loadSelf();</span>
+<span class="nc" id="L413">        jvmLoadLocal(DYNAMIC_SCOPE);</span>
+        // CON FIXME: Ideally this would not have to pass through RubyString and toString
+<span class="nc" id="L415">        visit(aliasInstr.getNewName());</span>
+<span class="nc" id="L416">        jvmAdapter().invokevirtual(p(Object.class), &quot;toString&quot;, sig(String.class));</span>
+<span class="nc" id="L417">        visit(aliasInstr.getOldName());</span>
+<span class="nc" id="L418">        jvmAdapter().invokevirtual(p(Object.class), &quot;toString&quot;, sig(String.class));</span>
+<span class="nc" id="L419">        m.invokeIRHelper(&quot;defineAlias&quot;, sig(void.class, ThreadContext.class, IRubyObject.class, DynamicScope.class, String.class, String.class));</span>
+<span class="nc" id="L420">    }</span>
+
+    @Override
+    public void AttrAssignInstr(AttrAssignInstr attrAssignInstr) {
+<span class="fc" id="L424">        compileCallCommon(</span>
+<span class="fc" id="L425">                jvmMethod(),</span>
+<span class="fc" id="L426">                attrAssignInstr.getName(),</span>
+<span class="fc" id="L427">                attrAssignInstr.getCallArgs(),</span>
+<span class="fc" id="L428">                attrAssignInstr.getReceiver(),</span>
+<span class="fc" id="L429">                attrAssignInstr.getCallArgs().length,</span>
+                null,
+                false,
+<span class="fc bfc" id="L432" title="All 2 branches covered.">                attrAssignInstr.getReceiver() instanceof Self ? CallType.FUNCTIONAL : CallType.NORMAL,</span>
+                null);
+<span class="fc" id="L434">    }</span>
+
+    @Override
+    public void BEQInstr(BEQInstr beqInstr) {
+<span class="nc" id="L438">        jvmMethod().loadContext();</span>
+<span class="nc" id="L439">        visit(beqInstr.getArg1());</span>
+<span class="nc" id="L440">        visit(beqInstr.getArg2());</span>
+<span class="nc" id="L441">        jvmMethod().invokeHelper(&quot;BEQ&quot;, boolean.class, ThreadContext.class, IRubyObject.class, IRubyObject.class);</span>
+<span class="nc" id="L442">        jvmAdapter().iftrue(getJVMLabel(beqInstr.getJumpTarget()));</span>
+<span class="nc" id="L443">    }</span>
+
+    @Override
+    public void BFalseInstr(BFalseInstr bFalseInstr) {
+<span class="fc" id="L447">        Operand arg1 = bFalseInstr.getArg1();</span>
+<span class="fc" id="L448">        visit(arg1);</span>
+        // this is a gross hack because we don't have distinction in boolean instrs between boxed and unboxed
+<span class="pc bpc" id="L450" title="2 of 4 branches missed.">        if (!(arg1 instanceof TemporaryBooleanVariable) &amp;&amp; !(arg1 instanceof UnboxedBoolean)) {</span>
+            // unbox
+<span class="fc" id="L452">            jvmAdapter().invokeinterface(p(IRubyObject.class), &quot;isTrue&quot;, sig(boolean.class));</span>
+        }
+<span class="fc" id="L454">        jvmMethod().bfalse(getJVMLabel(bFalseInstr.getJumpTarget()));</span>
+<span class="fc" id="L455">    }</span>
+
+    @Override
+    public void BlockGivenInstr(BlockGivenInstr blockGivenInstr) {
+<span class="nc" id="L459">        jvmMethod().loadContext();</span>
+<span class="nc" id="L460">        visit(blockGivenInstr.getBlockArg());</span>
+<span class="nc" id="L461">        jvmMethod().invokeIRHelper(&quot;isBlockGiven&quot;, sig(RubyBoolean.class, ThreadContext.class, Object.class));</span>
+<span class="nc" id="L462">        jvmStoreLocal(blockGivenInstr.getResult());</span>
+<span class="nc" id="L463">    }</span>
+
+    private void loadFloatArg(Operand arg) {
+<span class="nc bnc" id="L466" title="All 2 branches missed.">        if (arg instanceof Variable) {</span>
+<span class="nc" id="L467">            visit(arg);</span>
+        } else {
+            double val;
+<span class="nc bnc" id="L470" title="All 2 branches missed.">            if (arg instanceof Float) {</span>
+<span class="nc" id="L471">                val = ((Float)arg).value;</span>
+<span class="nc bnc" id="L472" title="All 2 branches missed.">            } else if (arg instanceof Fixnum) {</span>
+<span class="nc" id="L473">                val = (double)((Fixnum)arg).value;</span>
+            } else {
+                // Should not happen -- so, forcing an exception.
+<span class="nc" id="L476">                throw new NotCompilableException(&quot;Non-float/fixnum in loadFloatArg!&quot; + arg);</span>
+            }
+<span class="nc" id="L478">            jvmAdapter().ldc(val);</span>
+        }
+<span class="nc" id="L480">    }</span>
+
+    private void loadFixnumArg(Operand arg) {
+<span class="nc bnc" id="L483" title="All 2 branches missed.">        if (arg instanceof Variable) {</span>
+<span class="nc" id="L484">            visit(arg);</span>
+        } else {
+            long val;
+<span class="nc bnc" id="L487" title="All 2 branches missed.">            if (arg instanceof Float) {</span>
+<span class="nc" id="L488">                val = (long)((Float)arg).value;</span>
+<span class="nc bnc" id="L489" title="All 2 branches missed.">            } else if (arg instanceof Fixnum) {</span>
+<span class="nc" id="L490">                val = ((Fixnum)arg).value;</span>
+            } else {
+                // Should not happen -- so, forcing an exception.
+<span class="nc" id="L493">                throw new NotCompilableException(&quot;Non-float/fixnum in loadFixnumArg!&quot; + arg);</span>
+            }
+<span class="nc" id="L495">            jvmAdapter().ldc(val);</span>
+        }
+<span class="nc" id="L497">    }</span>
+
+    private void loadBooleanArg(Operand arg) {
+<span class="nc bnc" id="L500" title="All 2 branches missed.">        if (arg instanceof Variable) {</span>
+<span class="nc" id="L501">            visit(arg);</span>
+        } else {
+            boolean val;
+<span class="nc bnc" id="L504" title="All 2 branches missed.">            if (arg instanceof UnboxedBoolean) {</span>
+<span class="nc" id="L505">                val = ((UnboxedBoolean)arg).isTrue();</span>
+            } else {
+                // Should not happen -- so, forcing an exception.
+<span class="nc" id="L508">                throw new NotCompilableException(&quot;Non-float/fixnum in loadFixnumArg!&quot; + arg);</span>
+            }
+<span class="nc" id="L510">            jvmAdapter().ldc(val);</span>
+        }
+<span class="nc" id="L512">    }</span>
+
+    @Override
+    public void BoxFloatInstr(BoxFloatInstr instr) {
+<span class="nc" id="L516">        IRBytecodeAdapter   m = jvmMethod();</span>
+<span class="nc" id="L517">        SkinnyMethodAdapter a = m.adapter;</span>
+
+        // Load runtime
+<span class="nc" id="L520">        m.loadContext();</span>
+<span class="nc" id="L521">        a.getfield(p(ThreadContext.class), &quot;runtime&quot;, ci(Ruby.class));</span>
+
+        // Get unboxed float
+<span class="nc" id="L524">        loadFloatArg(instr.getValue());</span>
+
+        // Box the float
+<span class="nc" id="L527">        a.invokevirtual(p(Ruby.class), &quot;newFloat&quot;, sig(RubyFloat.class, double.class));</span>
+
+        // Store it
+<span class="nc" id="L530">        jvmStoreLocal(instr.getResult());</span>
+<span class="nc" id="L531">    }</span>
+
+    @Override
+    public void BoxFixnumInstr(BoxFixnumInstr instr) {
+<span class="nc" id="L535">        IRBytecodeAdapter   m = jvmMethod();</span>
+<span class="nc" id="L536">        SkinnyMethodAdapter a = m.adapter;</span>
+
+        // Load runtime
+<span class="nc" id="L539">        m.loadContext();</span>
+<span class="nc" id="L540">        a.getfield(p(ThreadContext.class), &quot;runtime&quot;, ci(Ruby.class));</span>
+
+        // Get unboxed fixnum
+<span class="nc" id="L543">        loadFixnumArg(instr.getValue());</span>
+
+        // Box the fixnum
+<span class="nc" id="L546">        a.invokevirtual(p(Ruby.class), &quot;newFixnum&quot;, sig(RubyFixnum.class, long.class));</span>
+
+        // Store it
+<span class="nc" id="L549">        jvmStoreLocal(instr.getResult());</span>
+<span class="nc" id="L550">    }</span>
+
+    @Override
+    public void BoxBooleanInstr(BoxBooleanInstr instr) {
+<span class="nc" id="L554">        IRBytecodeAdapter   m = jvmMethod();</span>
+<span class="nc" id="L555">        SkinnyMethodAdapter a = m.adapter;</span>
+
+        // Load runtime
+<span class="nc" id="L558">        m.loadContext();</span>
+<span class="nc" id="L559">        a.getfield(p(ThreadContext.class), &quot;runtime&quot;, ci(Ruby.class));</span>
+
+        // Get unboxed boolean
+<span class="nc" id="L562">        loadBooleanArg(instr.getValue());</span>
+
+        // Box the fixnum
+<span class="nc" id="L565">        a.invokevirtual(p(Ruby.class), &quot;newBoolean&quot;, sig(RubyBoolean.class, boolean.class));</span>
+
+        // Store it
+<span class="nc" id="L568">        jvmStoreLocal(instr.getResult());</span>
+<span class="nc" id="L569">    }</span>
+
+    @Override
+    public void UnboxFloatInstr(UnboxFloatInstr instr) {
+        // Load boxed value
+<span class="nc" id="L574">        visit(instr.getValue());</span>
+
+        // Unbox it
+<span class="nc" id="L577">        jvmMethod().invokeIRHelper(&quot;unboxFloat&quot;, sig(double.class, IRubyObject.class));</span>
+
+        // Store it
+<span class="nc" id="L580">        jvmStoreLocal(instr.getResult());</span>
+<span class="nc" id="L581">    }</span>
+
+    @Override
+    public void UnboxFixnumInstr(UnboxFixnumInstr instr) {
+        // Load boxed value
+<span class="nc" id="L586">        visit(instr.getValue());</span>
+
+        // Unbox it
+<span class="nc" id="L589">        jvmMethod().invokeIRHelper(&quot;unboxFixnum&quot;, sig(long.class, IRubyObject.class));</span>
+
+        // Store it
+<span class="nc" id="L592">        jvmStoreLocal(instr.getResult());</span>
+<span class="nc" id="L593">    }</span>
+
+    @Override
+    public void UnboxBooleanInstr(UnboxBooleanInstr instr) {
+        // Load boxed value
+<span class="nc" id="L598">        visit(instr.getValue());</span>
+
+        // Unbox it
+<span class="nc" id="L601">        jvmMethod().invokeIRHelper(&quot;unboxBoolean&quot;, sig(boolean.class, IRubyObject.class));</span>
+
+        // Store it
+<span class="nc" id="L604">        jvmStoreLocal(instr.getResult());</span>
+<span class="nc" id="L605">    }</span>
+
+    public void AluInstr(AluInstr instr) {
+<span class="nc" id="L608">        IRBytecodeAdapter   m = jvmMethod();</span>
+<span class="nc" id="L609">        SkinnyMethodAdapter a = m.adapter;</span>
+
+        // Load args
+<span class="nc" id="L612">        visit(instr.getArg1());</span>
+<span class="nc" id="L613">        visit(instr.getArg2());</span>
+
+        // Compute result
+<span class="pc bnc" id="L616" title="All 20 branches missed.">        switch (instr.getOperation()) {</span>
+<span class="nc" id="L617">            case FADD: a.dadd(); break;</span>
+<span class="nc" id="L618">            case FSUB: a.dsub(); break;</span>
+<span class="nc" id="L619">            case FMUL: a.dmul(); break;</span>
+<span class="nc" id="L620">            case FDIV: a.ddiv(); break;</span>
+<span class="nc" id="L621">            case FLT: m.invokeIRHelper(&quot;flt&quot;, sig(boolean.class, double.class, double.class)); break; // annoying to have to do it in a method</span>
+<span class="nc" id="L622">            case FGT: m.invokeIRHelper(&quot;fgt&quot;, sig(boolean.class, double.class, double.class)); break; // annoying to have to do it in a method</span>
+<span class="nc" id="L623">            case FEQ: m.invokeIRHelper(&quot;feq&quot;, sig(boolean.class, double.class, double.class)); break; // annoying to have to do it in a method</span>
+<span class="nc" id="L624">            case IADD: a.ladd(); break;</span>
+<span class="nc" id="L625">            case ISUB: a.lsub(); break;</span>
+<span class="nc" id="L626">            case IMUL: a.lmul(); break;</span>
+<span class="nc" id="L627">            case IDIV: a.ldiv(); break;</span>
+<span class="nc" id="L628">            case ILT: m.invokeIRHelper(&quot;ilt&quot;, sig(boolean.class, long.class, long.class)); break; // annoying to have to do it in a method</span>
+<span class="nc" id="L629">            case IGT: m.invokeIRHelper(&quot;igt&quot;, sig(boolean.class, long.class, long.class)); break; // annoying to have to do it in a method</span>
+<span class="nc" id="L630">            case IOR: a.lor(); break;</span>
+<span class="nc" id="L631">            case IAND: a.land(); break;</span>
+<span class="nc" id="L632">            case IXOR: a.lxor(); break;</span>
+<span class="nc" id="L633">            case ISHL: a.lshl(); break;</span>
+<span class="nc" id="L634">            case ISHR: a.lshr(); break;</span>
+<span class="nc" id="L635">            case IEQ: m.invokeIRHelper(&quot;ilt&quot;, sig(boolean.class, long.class, long.class)); break; // annoying to have to do it in a method</span>
+<span class="nc" id="L636">            default: throw new NotCompilableException(&quot;UNHANDLED!&quot;);</span>
+        }
+
+        // Store it
+<span class="nc" id="L640">        jvmStoreLocal(instr.getResult());</span>
+<span class="nc" id="L641">    }</span>
+
+    @Override
+    public void BacktickInstr(BacktickInstr instr) {
+        // prepare for call to &quot;`&quot; below
+<span class="fc" id="L646">        jvmMethod().loadContext();</span>
+<span class="fc" id="L647">        jvmMethod().loadSelf(); // TODO: remove caller</span>
+<span class="fc" id="L648">        jvmMethod().loadSelf();</span>
+
+<span class="fc" id="L650">        ByteList csByteList = new ByteList();</span>
+<span class="fc" id="L651">        jvmMethod().pushString(csByteList);</span>
+
+<span class="fc bfc" id="L653" title="All 2 branches covered.">        for (Operand p : instr.getPieces()) {</span>
+            // visit piece and ensure it's a string
+<span class="fc" id="L655">            visit(p);</span>
+<span class="fc" id="L656">            jvmAdapter().dup();</span>
+<span class="fc" id="L657">            org.objectweb.asm.Label after = new org.objectweb.asm.Label();</span>
+<span class="fc" id="L658">            jvmAdapter().instance_of(p(RubyString.class));</span>
+<span class="fc" id="L659">            jvmAdapter().iftrue(after);</span>
+<span class="fc" id="L660">            jvmAdapter().invokevirtual(p(IRubyObject.class), &quot;anyToString&quot;, sig(IRubyObject.class));</span>
+
+<span class="fc" id="L662">            jvmAdapter().label(after);</span>
+<span class="fc" id="L663">            jvmAdapter().invokevirtual(p(RubyString.class), &quot;append&quot;, sig(RubyString.class, IRubyObject.class));</span>
+<span class="fc" id="L664">        }</span>
+
+        // freeze the string
+<span class="fc" id="L667">        jvmAdapter().dup();</span>
+<span class="fc" id="L668">        jvmAdapter().ldc(true);</span>
+<span class="fc" id="L669">        jvmAdapter().invokeinterface(p(IRubyObject.class), &quot;setFrozen&quot;, sig(void.class, boolean.class));</span>
+
+        // invoke the &quot;`&quot; method on self
+<span class="fc" id="L672">        jvmMethod().invokeSelf(&quot;`&quot;, 1, false);</span>
+<span class="fc" id="L673">        jvmStoreLocal(instr.getResult());</span>
+<span class="fc" id="L674">    }</span>
+
+    @Override
+    public void BNEInstr(BNEInstr bneinstr) {
+<span class="fc" id="L678">        jvmMethod().loadContext();</span>
+<span class="fc" id="L679">        visit(bneinstr.getArg1());</span>
+<span class="fc" id="L680">        visit(bneinstr.getArg2());</span>
+<span class="fc" id="L681">        jvmMethod().invokeHelper(&quot;BNE&quot;, boolean.class, ThreadContext.class, IRubyObject.class, IRubyObject.class);</span>
+<span class="fc" id="L682">        jvmAdapter().iftrue(getJVMLabel(bneinstr.getJumpTarget()));</span>
+<span class="fc" id="L683">    }</span>
+
+    @Override
+    public void BNilInstr(BNilInstr bnilinstr) {
+<span class="fc" id="L687">        visit(bnilinstr.getArg1());</span>
+<span class="fc" id="L688">        jvmMethod().isNil();</span>
+<span class="fc" id="L689">        jvmMethod().btrue(getJVMLabel(bnilinstr.getJumpTarget()));</span>
+<span class="fc" id="L690">    }</span>
+
+    @Override
+    public void BreakInstr(BreakInstr breakInstr) {
+<span class="fc" id="L694">        jvmMethod().loadContext();</span>
+<span class="fc" id="L695">        jvmLoadLocal(DYNAMIC_SCOPE);</span>
+<span class="fc" id="L696">        visit(breakInstr.getReturnValue());</span>
+<span class="fc" id="L697">        jvmMethod().loadBlockType();</span>
+<span class="fc" id="L698">        jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;initiateBreak&quot;, sig(IRubyObject.class, ThreadContext.class, DynamicScope.class, IRubyObject.class, Block.Type.class));</span>
+<span class="fc" id="L699">        jvmMethod().returnValue();</span>
+
+<span class="fc" id="L701">    }</span>
+
+    @Override
+    public void BTrueInstr(BTrueInstr btrueinstr) {
+<span class="fc" id="L705">        Operand arg1 = btrueinstr.getArg1();</span>
+<span class="fc" id="L706">        visit(arg1);</span>
+        // this is a gross hack because we don't have distinction in boolean instrs between boxed and unboxed
+<span class="pc bpc" id="L708" title="2 of 4 branches missed.">        if (!(arg1 instanceof TemporaryBooleanVariable) &amp;&amp; !(arg1 instanceof UnboxedBoolean)) {</span>
+<span class="fc" id="L709">            jvmMethod().isTrue();</span>
+        }
+<span class="fc" id="L711">        jvmMethod().btrue(getJVMLabel(btrueinstr.getJumpTarget()));</span>
+<span class="fc" id="L712">    }</span>
+
+    @Override
+    public void BUndefInstr(BUndefInstr bundefinstr) {
+<span class="nc" id="L716">        visit(bundefinstr.getArg1());</span>
+<span class="nc" id="L717">        jvmMethod().pushUndefined();</span>
+<span class="nc" id="L718">        jvmAdapter().if_acmpeq(getJVMLabel(bundefinstr.getJumpTarget()));</span>
+<span class="nc" id="L719">    }</span>
+
+    @Override
+    public void BuildCompoundArrayInstr(BuildCompoundArrayInstr instr) {
+<span class="fc" id="L723">        visit(instr.getAppendingArg());</span>
+<span class="pc bpc" id="L724" title="1 of 2 branches missed.">        if (instr.isArgsPush()) jvmAdapter().checkcast(&quot;org/jruby/RubyArray&quot;);</span>
+<span class="fc" id="L725">        visit(instr.getAppendedArg());</span>
+<span class="pc bpc" id="L726" title="1 of 2 branches missed.">        if (instr.isArgsPush()) {</span>
+<span class="nc" id="L727">            jvmMethod().invokeHelper(&quot;argsPush&quot;, RubyArray.class, RubyArray.class, IRubyObject.class);</span>
+        } else {
+<span class="fc" id="L729">            jvmMethod().invokeHelper(&quot;argsCat&quot;, RubyArray.class, IRubyObject.class, IRubyObject.class);</span>
+        }
+<span class="fc" id="L731">        jvmStoreLocal(instr.getResult());</span>
+<span class="fc" id="L732">    }</span>
+
+    @Override
+    public void BuildCompoundStringInstr(BuildCompoundStringInstr compoundstring) {
+<span class="fc" id="L736">        ByteList csByteList = new ByteList();</span>
+<span class="fc" id="L737">        csByteList.setEncoding(compoundstring.getEncoding());</span>
+<span class="fc" id="L738">        jvmMethod().pushString(csByteList);</span>
+<span class="fc bfc" id="L739" title="All 2 branches covered.">        for (Operand p : compoundstring.getPieces()) {</span>
+//            if ((p instanceof StringLiteral) &amp;&amp; (compoundstring.isSameEncodingAndCodeRange((StringLiteral)p))) {
+//                jvmMethod().pushByteList(((StringLiteral)p).bytelist);
+//                jvmAdapter().invokevirtual(p(RubyString.class), &quot;cat&quot;, sig(RubyString.class, ByteList.class));
+//            } else {
+<span class="fc" id="L744">                visit(p);</span>
+<span class="fc" id="L745">                jvmAdapter().invokevirtual(p(RubyString.class), &quot;append19&quot;, sig(RubyString.class, IRubyObject.class));</span>
+//            }
+<span class="fc" id="L747">        }</span>
+<span class="fc" id="L748">        jvmStoreLocal(compoundstring.getResult());</span>
+<span class="fc" id="L749">    }</span>
+
+    @Override
+    public void BuildDynRegExpInstr(BuildDynRegExpInstr instr) {
+<span class="fc" id="L753">        final IRBytecodeAdapter m = jvmMethod();</span>
+<span class="fc" id="L754">        SkinnyMethodAdapter a = m.adapter;</span>
+
+<span class="fc" id="L756">        RegexpOptions options = instr.getOptions();</span>
+<span class="fc" id="L757">        final List&lt;Operand&gt; operands = instr.getPieces();</span>
+
+<span class="fc" id="L759">        Runnable r = new Runnable() {</span>
+            @Override
+            public void run() {
+<span class="fc" id="L762">                m.loadContext();</span>
+<span class="fc bfc" id="L763" title="All 2 branches covered.">                for (int i = 0; i &lt; operands.size(); i++) {</span>
+<span class="fc" id="L764">                    Operand operand = operands.get(i);</span>
+<span class="fc" id="L765">                    visit(operand);</span>
+                }
+<span class="fc" id="L767">            }</span>
+        };
+
+<span class="fc" id="L770">        m.pushDRegexp(r, options, operands.size());</span>
+
+<span class="fc" id="L772">        jvmStoreLocal(instr.getResult());</span>
+<span class="fc" id="L773">    }</span>
+
+    @Override
+    public void BuildRangeInstr(BuildRangeInstr instr) {
+<span class="fc" id="L777">        jvmMethod().loadContext();</span>
+<span class="fc" id="L778">        visit(instr.getBegin());</span>
+<span class="fc" id="L779">        visit(instr.getEnd());</span>
+<span class="fc" id="L780">        jvmAdapter().ldc(instr.isExclusive());</span>
+<span class="fc" id="L781">        jvmAdapter().invokestatic(p(RubyRange.class), &quot;newRange&quot;, sig(RubyRange.class, ThreadContext.class, IRubyObject.class, IRubyObject.class, boolean.class));</span>
+<span class="fc" id="L782">        jvmStoreLocal(instr.getResult());</span>
+<span class="fc" id="L783">    }</span>
+
+    @Override
+    public void CallInstr(CallInstr callInstr) {
+<span class="fc" id="L787">        IRBytecodeAdapter m = jvmMethod();</span>
+<span class="fc" id="L788">        String name = callInstr.getName();</span>
+<span class="fc" id="L789">        Operand[] args = callInstr.getCallArgs();</span>
+<span class="fc" id="L790">        Operand receiver = callInstr.getReceiver();</span>
+<span class="fc" id="L791">        int numArgs = args.length;</span>
+<span class="fc" id="L792">        Operand closure = callInstr.getClosureArg(null);</span>
+<span class="fc bfc" id="L793" title="All 2 branches covered.">        boolean hasClosure = closure != null;</span>
+<span class="fc" id="L794">        CallType callType = callInstr.getCallType();</span>
+<span class="fc" id="L795">        Variable result = callInstr.getResult();</span>
+
+<span class="fc" id="L797">        compileCallCommon(m, name, args, receiver, numArgs, closure, hasClosure, callType, result);</span>
+<span class="fc" id="L798">    }</span>
+
+    private void compileCallCommon(IRBytecodeAdapter m, String name, Operand[] args, Operand receiver, int numArgs, Operand closure, boolean hasClosure, CallType callType, Variable result) {
+<span class="fc" id="L801">        m.loadContext();</span>
+<span class="fc" id="L802">        m.loadSelf(); // caller</span>
+<span class="fc" id="L803">        visit(receiver);</span>
+<span class="fc" id="L804">        int arity = numArgs;</span>
+
+<span class="fc bfc" id="L806" title="All 4 branches covered.">        if (numArgs == 1 &amp;&amp; args[0] instanceof Splat) {</span>
+<span class="fc" id="L807">            visit(args[0]);</span>
+<span class="fc" id="L808">            m.adapter.invokevirtual(p(RubyArray.class), &quot;toJavaArray&quot;, sig(IRubyObject[].class));</span>
+<span class="fc" id="L809">            arity = -1;</span>
+<span class="pc bpc" id="L810" title="1 of 2 branches missed.">        } else if (CallBase.containsArgSplat(args)) {</span>
+<span class="nc" id="L811">            throw new NotCompilableException(&quot;splat in non-initial argument for normal call is unsupported in JIT&quot;);</span>
+        } else {
+<span class="fc bfc" id="L813" title="All 2 branches covered.">            for (Operand operand : args) {</span>
+<span class="fc" id="L814">                visit(operand);</span>
+            }
+        }
+
+<span class="fc bfc" id="L818" title="All 2 branches covered.">        if (hasClosure) {</span>
+<span class="fc" id="L819">            m.loadContext();</span>
+<span class="fc" id="L820">            visit(closure);</span>
+<span class="fc" id="L821">            m.invokeIRHelper(&quot;getBlockFromObject&quot;, sig(Block.class, ThreadContext.class, Object.class));</span>
+        }
+
+<span class="pc bpc" id="L824" title="1 of 3 branches missed.">        switch (callType) {</span>
+            case FUNCTIONAL:
+            case VARIABLE:
+<span class="fc" id="L827">                m.invokeSelf(name, arity, hasClosure);</span>
+<span class="fc" id="L828">                break;</span>
+            case NORMAL:
+<span class="fc" id="L830">                m.invokeOther(name, arity, hasClosure);</span>
+                break;
+        }
+
+<span class="fc bfc" id="L834" title="All 2 branches covered.">        if (result != null) {</span>
+<span class="fc" id="L835">            jvmStoreLocal(result);</span>
+        } else {
+            // still need to drop, since all dyncalls return something (FIXME)
+<span class="fc" id="L838">            m.adapter.pop();</span>
+        }
+<span class="fc" id="L840">    }</span>
+
+    @Override
+    public void CheckArgsArrayArityInstr(CheckArgsArrayArityInstr checkargsarrayarityinstr) {
+<span class="nc" id="L844">        jvmMethod().loadContext();</span>
+<span class="nc" id="L845">        visit(checkargsarrayarityinstr.getArgsArray());</span>
+<span class="nc" id="L846">        jvmAdapter().pushInt(checkargsarrayarityinstr.required);</span>
+<span class="nc" id="L847">        jvmAdapter().pushInt(checkargsarrayarityinstr.opt);</span>
+<span class="nc" id="L848">        jvmAdapter().pushInt(checkargsarrayarityinstr.rest);</span>
+<span class="nc" id="L849">        jvmMethod().invokeStatic(Type.getType(Helpers.class), Method.getMethod(&quot;void irCheckArgsArrayArity(org.jruby.runtime.ThreadContext, org.jruby.RubyArray, int, int, int)&quot;));</span>
+<span class="nc" id="L850">    }</span>
+
+    @Override
+    public void CheckArityInstr(CheckArityInstr checkarityinstr) {
+<span class="fc bfc" id="L854" title="All 2 branches covered.">        if (jvm.methodData().specificArity &gt;= 0) {</span>
+            // no arity check in specific arity path
+        } else {
+<span class="fc" id="L857">            jvmMethod().loadContext();</span>
+<span class="fc" id="L858">            jvmMethod().loadArgs();</span>
+<span class="fc" id="L859">            jvmAdapter().ldc(checkarityinstr.required);</span>
+<span class="fc" id="L860">            jvmAdapter().ldc(checkarityinstr.opt);</span>
+<span class="fc" id="L861">            jvmAdapter().ldc(checkarityinstr.rest);</span>
+<span class="fc" id="L862">            jvmAdapter().ldc(checkarityinstr.receivesKeywords);</span>
+<span class="fc" id="L863">            jvmAdapter().ldc(checkarityinstr.restKey);</span>
+<span class="fc" id="L864">            jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;checkArity&quot;, sig(void.class, ThreadContext.class, Object[].class, int.class, int.class, int.class, boolean.class, int.class));</span>
+        }
+<span class="fc" id="L866">    }</span>
+
+    @Override
+    public void ClassSuperInstr(ClassSuperInstr classsuperinstr) {
+<span class="fc" id="L870">        String name = classsuperinstr.getName();</span>
+<span class="fc" id="L871">        Operand[] args = classsuperinstr.getCallArgs();</span>
+<span class="fc" id="L872">        Operand definingModule = classsuperinstr.getDefiningModule();</span>
+<span class="fc" id="L873">        boolean containsArgSplat = classsuperinstr.containsArgSplat();</span>
+<span class="fc" id="L874">        Operand closure = classsuperinstr.getClosureArg(null);</span>
+
+<span class="fc" id="L876">        superCommon(name, classsuperinstr, args, definingModule, containsArgSplat, closure);</span>
+<span class="fc" id="L877">    }</span>
+
+    @Override
+    public void ConstMissingInstr(ConstMissingInstr constmissinginstr) {
+<span class="fc" id="L881">        visit(constmissinginstr.getReceiver());</span>
+<span class="fc" id="L882">        jvmAdapter().checkcast(&quot;org/jruby/RubyModule&quot;);</span>
+<span class="fc" id="L883">        jvmMethod().loadContext();</span>
+<span class="fc" id="L884">        jvmAdapter().ldc(&quot;const_missing&quot;);</span>
+        // FIXME: This has lost it's encoding info by this point
+<span class="fc" id="L886">        jvmMethod().pushSymbol(constmissinginstr.getMissingConst(), USASCIIEncoding.INSTANCE);</span>
+<span class="fc" id="L887">        jvmMethod().invokeVirtual(Type.getType(RubyModule.class), Method.getMethod(&quot;org.jruby.runtime.builtin.IRubyObject callMethod(org.jruby.runtime.ThreadContext, java.lang.String, org.jruby.runtime.builtin.IRubyObject)&quot;));</span>
+<span class="fc" id="L888">        jvmStoreLocal(constmissinginstr.getResult());</span>
+<span class="fc" id="L889">    }</span>
+
+    @Override
+    public void CopyInstr(CopyInstr copyinstr) {
+<span class="fc" id="L893">        Operand  src = copyinstr.getSource();</span>
+<span class="fc" id="L894">        Variable res = copyinstr.getResult();</span>
+<span class="pc bpc" id="L895" title="1 of 2 branches missed.">        if (res instanceof TemporaryFloatVariable) {</span>
+<span class="nc" id="L896">            loadFloatArg(src);</span>
+<span class="pc bpc" id="L897" title="1 of 2 branches missed.">        } else if (res instanceof TemporaryFixnumVariable) {</span>
+<span class="nc" id="L898">            loadFixnumArg(src);</span>
+        } else {
+<span class="fc" id="L900">            visit(src);</span>
+        }
+<span class="fc" id="L902">        jvmStoreLocal(res);</span>
+<span class="fc" id="L903">    }</span>
+
+    @Override
+    public void DefineClassInstr(DefineClassInstr defineclassinstr) {
+<span class="fc" id="L907">        IRClassBody newIRClassBody = defineclassinstr.getNewIRClassBody();</span>
+
+<span class="fc" id="L909">        jvmMethod().loadContext();</span>
+<span class="fc" id="L910">        Handle handle = emitModuleBody(newIRClassBody);</span>
+<span class="fc" id="L911">        jvmMethod().pushHandle(handle);</span>
+<span class="fc" id="L912">        jvmAdapter().getstatic(jvm.clsData().clsName, handle.getName() + &quot;_IRScope&quot;, ci(IRScope.class));</span>
+<span class="fc" id="L913">        visit(defineclassinstr.getContainer());</span>
+<span class="fc" id="L914">        visit(defineclassinstr.getSuperClass());</span>
+
+<span class="fc" id="L916">        jvmMethod().invokeIRHelper(&quot;newCompiledClassBody&quot;, sig(DynamicMethod.class, ThreadContext.class, java.lang.invoke.MethodHandle.class, IRScope.class, Object.class, Object.class));</span>
+
+<span class="fc" id="L918">        jvmStoreLocal(defineclassinstr.getResult());</span>
+<span class="fc" id="L919">    }</span>
+
+    @Override
+    public void DefineClassMethodInstr(DefineClassMethodInstr defineclassmethodinstr) {
+<span class="nc" id="L923">        IRMethod method = defineclassmethodinstr.getMethod();</span>
+
+<span class="nc" id="L925">        jvmMethod().loadContext();</span>
+
+<span class="nc" id="L927">        emitMethod(method);</span>
+
+<span class="nc" id="L929">        Map&lt;Integer, MethodType&gt; signatures = method.getNativeSignatures();</span>
+
+<span class="nc" id="L931">        MethodType signature = signatures.get(-1);</span>
+
+<span class="nc" id="L933">        String defSignature = pushHandlesForDef(</span>
+<span class="nc" id="L934">                method.getJittedName(),</span>
+                signatures,
+                signature,
+<span class="nc" id="L937">                sig(void.class, ThreadContext.class, java.lang.invoke.MethodHandle.class, IRScope.class, IRubyObject.class),</span>
+<span class="nc" id="L938">                sig(void.class, ThreadContext.class, java.lang.invoke.MethodHandle.class, java.lang.invoke.MethodHandle.class, int.class, IRScope.class, IRubyObject.class));</span>
+
+<span class="nc" id="L940">        jvmAdapter().getstatic(jvm.clsData().clsName, method.getJittedName() + &quot;_IRScope&quot;, ci(IRScope.class));</span>
+<span class="nc" id="L941">        visit(defineclassmethodinstr.getContainer());</span>
+
+        // add method
+<span class="nc" id="L944">        jvmMethod().adapter.invokestatic(p(IRRuntimeHelpers.class), &quot;defCompiledClassMethod&quot;, defSignature);</span>
+<span class="nc" id="L945">    }</span>
+
+    // SSS FIXME: Needs an update to reflect instr. change
+    @Override
+    public void DefineInstanceMethodInstr(DefineInstanceMethodInstr defineinstancemethodinstr) {
+<span class="fc" id="L950">        IRMethod method = defineinstancemethodinstr.getMethod();</span>
+
+<span class="fc" id="L952">        IRBytecodeAdapter   m = jvmMethod();</span>
+<span class="fc" id="L953">        SkinnyMethodAdapter a = m.adapter;</span>
+
+<span class="fc" id="L955">        m.loadContext();</span>
+
+<span class="fc" id="L957">        emitMethod(method);</span>
+<span class="fc" id="L958">        Map&lt;Integer, MethodType&gt; signatures = method.getNativeSignatures();</span>
+
+<span class="fc" id="L960">        MethodType variable = signatures.get(-1); // always a variable arity handle</span>
+
+<span class="fc" id="L962">        String defSignature = pushHandlesForDef(</span>
+<span class="fc" id="L963">                method.getJittedName(),</span>
+                signatures,
+                variable,
+<span class="fc" id="L966">                sig(void.class, ThreadContext.class, java.lang.invoke.MethodHandle.class, IRScope.class, DynamicScope.class, IRubyObject.class),</span>
+<span class="fc" id="L967">                sig(void.class, ThreadContext.class, java.lang.invoke.MethodHandle.class, java.lang.invoke.MethodHandle.class, int.class, IRScope.class, DynamicScope.class, IRubyObject.class));</span>
+
+<span class="fc" id="L969">        a.getstatic(jvm.clsData().clsName, method.getJittedName() + &quot;_IRScope&quot;, ci(IRScope.class));</span>
+<span class="fc" id="L970">        jvmLoadLocal(DYNAMIC_SCOPE);</span>
+<span class="fc" id="L971">        jvmMethod().loadSelf();</span>
+
+        // add method
+<span class="fc" id="L974">        a.invokestatic(p(IRRuntimeHelpers.class), &quot;defCompiledInstanceMethod&quot;, defSignature);</span>
+<span class="fc" id="L975">    }</span>
+
+    public String pushHandlesForDef(String name, Map&lt;Integer, MethodType&gt; signatures, MethodType variable, String variableOnly, String variableAndSpecific) {
+        String defSignature;
+
+<span class="fc" id="L980">        jvmMethod().pushHandle(new Handle(Opcodes.H_INVOKESTATIC, jvm.clsData().clsName, name, sig(variable.returnType(), variable.parameterArray())));</span>
+
+<span class="pc bpc" id="L982" title="1 of 2 branches missed.">        if (signatures.size() == 1) {</span>
+<span class="nc" id="L983">            defSignature = variableOnly;</span>
+        } else {
+<span class="fc" id="L985">            defSignature = variableAndSpecific;</span>
+
+            // FIXME: only supports one arity
+<span class="pc bpc" id="L988" title="1 of 2 branches missed.">            for (Map.Entry&lt;Integer, MethodType&gt; entry : signatures.entrySet()) {</span>
+<span class="fc bfc" id="L989" title="All 2 branches covered.">                if (entry.getKey() == -1) continue; // variable arity signature pushed above</span>
+<span class="fc" id="L990">                jvmMethod().pushHandle(new Handle(Opcodes.H_INVOKESTATIC, jvm.clsData().clsName, name, sig(entry.getValue().returnType(), entry.getValue().parameterArray())));</span>
+<span class="fc" id="L991">                jvmAdapter().pushInt(entry.getKey());</span>
+<span class="fc" id="L992">                break;</span>
+            }
+        }
+<span class="fc" id="L995">        return defSignature;</span>
+    }
+
+    @Override
+    public void DefineMetaClassInstr(DefineMetaClassInstr definemetaclassinstr) {
+<span class="nc" id="L1000">        IRModuleBody metaClassBody = definemetaclassinstr.getMetaClassBody();</span>
+
+<span class="nc" id="L1002">        jvmMethod().loadContext();</span>
+<span class="nc" id="L1003">        Handle handle = emitModuleBody(metaClassBody);</span>
+<span class="nc" id="L1004">        jvmMethod().pushHandle(handle);</span>
+<span class="nc" id="L1005">        jvmAdapter().getstatic(jvm.clsData().clsName, handle.getName() + &quot;_IRScope&quot;, ci(IRScope.class));</span>
+<span class="nc" id="L1006">        visit(definemetaclassinstr.getObject());</span>
+
+<span class="nc" id="L1008">        jvmMethod().invokeIRHelper(&quot;newCompiledMetaClass&quot;, sig(DynamicMethod.class, ThreadContext.class, java.lang.invoke.MethodHandle.class, IRScope.class, IRubyObject.class));</span>
+
+<span class="nc" id="L1010">        jvmStoreLocal(definemetaclassinstr.getResult());</span>
+<span class="nc" id="L1011">    }</span>
+
+    @Override
+    public void DefineModuleInstr(DefineModuleInstr definemoduleinstr) {
+<span class="fc" id="L1015">        IRModuleBody newIRModuleBody = definemoduleinstr.getNewIRModuleBody();</span>
+
+<span class="fc" id="L1017">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1018">        Handle handle = emitModuleBody(newIRModuleBody);</span>
+<span class="fc" id="L1019">        jvmMethod().pushHandle(handle);</span>
+<span class="fc" id="L1020">        jvmAdapter().getstatic(jvm.clsData().clsName, handle.getName() + &quot;_IRScope&quot;, ci(IRScope.class));</span>
+<span class="fc" id="L1021">        visit(definemoduleinstr.getContainer());</span>
+
+<span class="fc" id="L1023">        jvmMethod().invokeIRHelper(&quot;newCompiledModuleBody&quot;, sig(DynamicMethod.class, ThreadContext.class, java.lang.invoke.MethodHandle.class, IRScope.class, Object.class));</span>
+
+<span class="fc" id="L1025">        jvmStoreLocal(definemoduleinstr.getResult());</span>
+<span class="fc" id="L1026">    }</span>
+
+    @Override
+    public void EQQInstr(EQQInstr eqqinstr) {
+<span class="fc" id="L1030">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1031">        visit(eqqinstr.getArg1());</span>
+<span class="fc" id="L1032">        visit(eqqinstr.getArg2());</span>
+<span class="fc" id="L1033">        jvmMethod().invokeIRHelper(&quot;isEQQ&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject.class, IRubyObject.class));</span>
+<span class="fc" id="L1034">        jvmStoreLocal(eqqinstr.getResult());</span>
+<span class="fc" id="L1035">    }</span>
+
+    @Override
+    public void ExceptionRegionEndMarkerInstr(ExceptionRegionEndMarkerInstr exceptionregionendmarkerinstr) {
+<span class="nc" id="L1039">        throw new NotCompilableException(&quot;Marker instructions shouldn't reach compiler: &quot; + exceptionregionendmarkerinstr);</span>
+    }
+
+    @Override
+    public void ExceptionRegionStartMarkerInstr(ExceptionRegionStartMarkerInstr exceptionregionstartmarkerinstr) {
+<span class="nc" id="L1044">        throw new NotCompilableException(&quot;Marker instructions shouldn't reach compiler: &quot; + exceptionregionstartmarkerinstr);</span>
+    }
+
+    @Override
+    public void GetClassVarContainerModuleInstr(GetClassVarContainerModuleInstr getclassvarcontainermoduleinstr) {
+<span class="nc" id="L1049">        jvmMethod().loadContext();</span>
+<span class="nc" id="L1050">        visit(getclassvarcontainermoduleinstr.getStartingScope());</span>
+<span class="nc bnc" id="L1051" title="All 2 branches missed.">        if (getclassvarcontainermoduleinstr.getObject() != null) {</span>
+<span class="nc" id="L1052">            visit(getclassvarcontainermoduleinstr.getObject());</span>
+        } else {
+<span class="nc" id="L1054">            jvmAdapter().aconst_null();</span>
+        }
+<span class="nc" id="L1056">        jvmMethod().invokeIRHelper(&quot;getModuleFromScope&quot;, sig(RubyModule.class, ThreadContext.class, StaticScope.class, IRubyObject.class));</span>
+<span class="nc" id="L1057">        jvmStoreLocal(getclassvarcontainermoduleinstr.getResult());</span>
+<span class="nc" id="L1058">    }</span>
+
+    @Override
+    public void GetClassVariableInstr(GetClassVariableInstr getclassvariableinstr) {
+<span class="fc" id="L1062">        visit(getclassvariableinstr.getSource());</span>
+<span class="fc" id="L1063">        jvmAdapter().checkcast(p(RubyModule.class));</span>
+<span class="fc" id="L1064">        jvmAdapter().ldc(getclassvariableinstr.getRef());</span>
+<span class="fc" id="L1065">        jvmAdapter().invokevirtual(p(RubyModule.class), &quot;getClassVar&quot;, sig(IRubyObject.class, String.class));</span>
+<span class="fc" id="L1066">        jvmStoreLocal(getclassvariableinstr.getResult());</span>
+<span class="fc" id="L1067">    }</span>
+
+    @Override
+    public void GetFieldInstr(GetFieldInstr getfieldinstr) {
+<span class="fc" id="L1071">        visit(getfieldinstr.getSource());</span>
+<span class="fc" id="L1072">        jvmMethod().getField(getfieldinstr.getRef());</span>
+<span class="fc" id="L1073">        jvmStoreLocal(getfieldinstr.getResult());</span>
+<span class="fc" id="L1074">    }</span>
+
+    @Override
+    public void GetGlobalVariableInstr(GetGlobalVariableInstr getglobalvariableinstr) {
+<span class="fc" id="L1078">        Operand source = getglobalvariableinstr.getSource();</span>
+<span class="fc" id="L1079">        GlobalVariable gvar = (GlobalVariable)source;</span>
+<span class="fc" id="L1080">        String name = gvar.getName();</span>
+<span class="fc" id="L1081">        jvmMethod().loadRuntime();</span>
+<span class="fc" id="L1082">        jvmMethod().invokeVirtual(Type.getType(Ruby.class), Method.getMethod(&quot;org.jruby.internal.runtime.GlobalVariables getGlobalVariables()&quot;));</span>
+<span class="fc" id="L1083">        jvmAdapter().ldc(name);</span>
+<span class="fc" id="L1084">        jvmMethod().invokeVirtual(Type.getType(GlobalVariables.class), Method.getMethod(&quot;org.jruby.runtime.builtin.IRubyObject get(String)&quot;));</span>
+<span class="fc" id="L1085">        jvmStoreLocal(getglobalvariableinstr.getResult());</span>
+<span class="fc" id="L1086">    }</span>
+
+    @Override
+    public void GVarAliasInstr(GVarAliasInstr gvaraliasinstr) {
+<span class="nc" id="L1090">        jvmMethod().loadRuntime();</span>
+<span class="nc" id="L1091">        jvmAdapter().invokevirtual(p(Ruby.class), &quot;getGlobalVariables&quot;, sig(GlobalVariables.class));</span>
+<span class="nc" id="L1092">        visit(gvaraliasinstr.getNewName());</span>
+<span class="nc" id="L1093">        jvmAdapter().invokevirtual(p(Object.class), &quot;toString&quot;, sig(String.class));</span>
+<span class="nc" id="L1094">        visit(gvaraliasinstr.getOldName());</span>
+<span class="nc" id="L1095">        jvmAdapter().invokevirtual(p(Object.class), &quot;toString&quot;, sig(String.class));</span>
+<span class="nc" id="L1096">        jvmAdapter().invokevirtual(p(GlobalVariables.class), &quot;alias&quot;, sig(void.class, String.class, String.class));</span>
+<span class="nc" id="L1097">    }</span>
+
+    @Override
+    public void InheritanceSearchConstInstr(InheritanceSearchConstInstr inheritancesearchconstinstr) {
+<span class="fc" id="L1101">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1102">        visit(inheritancesearchconstinstr.getCurrentModule());</span>
+
+<span class="fc" id="L1104">        jvmMethod().inheritanceSearchConst(inheritancesearchconstinstr.getConstName(), inheritancesearchconstinstr.isNoPrivateConsts());</span>
+<span class="fc" id="L1105">        jvmStoreLocal(inheritancesearchconstinstr.getResult());</span>
+<span class="fc" id="L1106">    }</span>
+
+    @Override
+    public void InstanceSuperInstr(InstanceSuperInstr instancesuperinstr) {
+<span class="fc" id="L1110">        String name = instancesuperinstr.getName();</span>
+<span class="fc" id="L1111">        Operand[] args = instancesuperinstr.getCallArgs();</span>
+<span class="fc" id="L1112">        Operand definingModule = instancesuperinstr.getDefiningModule();</span>
+<span class="fc" id="L1113">        boolean containsArgSplat = instancesuperinstr.containsArgSplat();</span>
+<span class="fc" id="L1114">        Operand closure = instancesuperinstr.getClosureArg(null);</span>
+
+<span class="fc" id="L1116">        superCommon(name, instancesuperinstr, args, definingModule, containsArgSplat, closure);</span>
+<span class="fc" id="L1117">    }</span>
+
+    private void superCommon(String name, CallInstr instr, Operand[] args, Operand definingModule, boolean containsArgSplat, Operand closure) {
+<span class="fc" id="L1120">        IRBytecodeAdapter m = jvmMethod();</span>
+<span class="fc" id="L1121">        Operation operation = instr.getOperation();</span>
+
+<span class="fc" id="L1123">        m.loadContext();</span>
+<span class="fc" id="L1124">        m.loadSelf(); // TODO: get rid of caller</span>
+<span class="fc" id="L1125">        m.loadSelf();</span>
+<span class="pc bpc" id="L1126" title="1 of 2 branches missed.">        if (definingModule == UndefinedValue.UNDEFINED) {</span>
+<span class="nc" id="L1127">            jvmAdapter().aconst_null();</span>
+        } else {
+<span class="fc" id="L1129">            visit(definingModule);</span>
+        }
+
+        // TODO: CON: is this safe?
+<span class="fc" id="L1133">        jvmAdapter().checkcast(p(RubyClass.class));</span>
+
+        // process args
+<span class="fc bfc" id="L1136" title="All 2 branches covered.">        for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="fc" id="L1137">            Operand operand = args[i];</span>
+<span class="fc" id="L1138">            visit(operand);</span>
+        }
+
+        // if there's splats, provide a map and let the call site sort it out
+<span class="fc" id="L1142">        boolean[] splatMap = IRRuntimeHelpers.buildSplatMap(args, containsArgSplat);</span>
+
+<span class="pc bpc" id="L1144" title="1 of 2 branches missed.">        boolean hasClosure = closure != null;</span>
+<span class="pc bpc" id="L1145" title="1 of 2 branches missed.">        if (hasClosure) {</span>
+<span class="fc" id="L1146">            m.loadContext();</span>
+<span class="fc" id="L1147">            visit(closure);</span>
+<span class="fc" id="L1148">            m.invokeIRHelper(&quot;getBlockFromObject&quot;, sig(Block.class, ThreadContext.class, Object.class));</span>
+        }
+
+<span class="pc bpc" id="L1151" title="3 of 5 branches missed.">        switch (operation) {</span>
+            case INSTANCE_SUPER:
+<span class="fc" id="L1153">                m.invokeInstanceSuper(name, args.length, hasClosure, splatMap);</span>
+<span class="fc" id="L1154">                break;</span>
+            case CLASS_SUPER:
+<span class="fc" id="L1156">                m.invokeClassSuper(name, args.length, hasClosure, splatMap);</span>
+<span class="fc" id="L1157">                break;</span>
+            case UNRESOLVED_SUPER:
+<span class="nc" id="L1159">                m.invokeUnresolvedSuper(name, args.length, hasClosure, splatMap);</span>
+<span class="nc" id="L1160">                break;</span>
+            case ZSUPER:
+<span class="nc" id="L1162">                m.invokeZSuper(name, args.length, hasClosure, splatMap);</span>
+<span class="nc" id="L1163">                break;</span>
+            default:
+<span class="nc" id="L1165">                throw new NotCompilableException(&quot;unknown super type &quot; + operation + &quot; in &quot; + instr);</span>
+        }
+
+<span class="fc" id="L1168">        jvmStoreLocal(instr.getResult());</span>
+<span class="fc" id="L1169">    }</span>
+
+    @Override
+    public void JumpInstr(JumpInstr jumpinstr) {
+<span class="fc" id="L1173">        jvmMethod().goTo(getJVMLabel(jumpinstr.getJumpTarget()));</span>
+<span class="fc" id="L1174">    }</span>
+
+    @Override
+    public void LabelInstr(LabelInstr labelinstr) {
+<span class="nc" id="L1178">    }</span>
+
+    @Override
+    public void LexicalSearchConstInstr(LexicalSearchConstInstr lexicalsearchconstinstr) {
+<span class="fc" id="L1182">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1183">        visit(lexicalsearchconstinstr.getDefiningScope());</span>
+
+<span class="fc" id="L1185">        jvmMethod().lexicalSearchConst(lexicalsearchconstinstr.getConstName());</span>
+
+<span class="fc" id="L1187">        jvmStoreLocal(lexicalsearchconstinstr.getResult());</span>
+<span class="fc" id="L1188">    }</span>
+
+    @Override
+    public void LineNumberInstr(LineNumberInstr linenumberinstr) {
+        if (DEBUG) return; // debug mode uses IPC for line numbers
+
+<span class="fc" id="L1194">        jvmAdapter().line(linenumberinstr.getLineNumber() + 1);</span>
+<span class="fc" id="L1195">    }</span>
+
+    @Override
+    public void LoadLocalVarInstr(LoadLocalVarInstr loadlocalvarinstr) {
+<span class="fc" id="L1199">        IRBytecodeAdapter m = jvmMethod();</span>
+<span class="fc" id="L1200">        jvmLoadLocal(DYNAMIC_SCOPE);</span>
+<span class="fc" id="L1201">        int depth = loadlocalvarinstr.getLocalVar().getScopeDepth();</span>
+<span class="fc" id="L1202">        int location = loadlocalvarinstr.getLocalVar().getLocation();</span>
+        // TODO if we can avoid loading nil unnecessarily, it could be a big win
+<span class="fc bfc" id="L1204" title="All 2 branches covered.">        OUTER: switch (depth) {</span>
+            case 0:
+<span class="fc bfc" id="L1206" title="All 5 branches covered.">                switch (location) {</span>
+                    case 0:
+<span class="fc" id="L1208">                        m.pushNil();</span>
+<span class="fc" id="L1209">                        m.adapter.invokevirtual(p(DynamicScope.class), &quot;getValueZeroDepthZeroOrNil&quot;, sig(IRubyObject.class, IRubyObject.class));</span>
+<span class="fc" id="L1210">                        break OUTER;</span>
+                    case 1:
+<span class="fc" id="L1212">                        m.pushNil();</span>
+<span class="fc" id="L1213">                        m.adapter.invokevirtual(p(DynamicScope.class), &quot;getValueOneDepthZeroOrNil&quot;, sig(IRubyObject.class, IRubyObject.class));</span>
+<span class="fc" id="L1214">                        break OUTER;</span>
+                    case 2:
+<span class="fc" id="L1216">                        m.pushNil();</span>
+<span class="fc" id="L1217">                        m.adapter.invokevirtual(p(DynamicScope.class), &quot;getValueTwoDepthZeroOrNil&quot;, sig(IRubyObject.class, IRubyObject.class));</span>
+<span class="fc" id="L1218">                        break OUTER;</span>
+                    case 3:
+<span class="fc" id="L1220">                        m.pushNil();</span>
+<span class="fc" id="L1221">                        m.adapter.invokevirtual(p(DynamicScope.class), &quot;getValueThreeDepthZeroOrNil&quot;, sig(IRubyObject.class, IRubyObject.class));</span>
+<span class="fc" id="L1222">                        break OUTER;</span>
+                    default:
+<span class="fc" id="L1224">                        m.adapter.pushInt(location);</span>
+<span class="fc" id="L1225">                        m.pushNil();</span>
+<span class="fc" id="L1226">                        m.adapter.invokevirtual(p(DynamicScope.class), &quot;getValueDepthZeroOrNil&quot;, sig(IRubyObject.class, int.class, IRubyObject.class));</span>
+<span class="fc" id="L1227">                        break OUTER;</span>
+                }
+            default:
+<span class="fc" id="L1230">                m.adapter.pushInt(location);</span>
+<span class="fc" id="L1231">                m.adapter.pushInt(depth);</span>
+<span class="fc" id="L1232">                m.pushNil();</span>
+<span class="fc" id="L1233">                m.adapter.invokevirtual(p(DynamicScope.class), &quot;getValueOrNil&quot;, sig(IRubyObject.class, int.class, int.class, IRubyObject.class));</span>
+        }
+<span class="fc" id="L1235">        jvmStoreLocal(loadlocalvarinstr.getResult());</span>
+<span class="fc" id="L1236">    }</span>
+
+    @Override
+    public void Match2Instr(Match2Instr match2instr) {
+<span class="fc" id="L1240">        visit(match2instr.getReceiver());</span>
+<span class="fc" id="L1241">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1242">        visit(match2instr.getArg());</span>
+<span class="fc" id="L1243">        jvmAdapter().invokevirtual(p(RubyRegexp.class), &quot;op_match19&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject.class));</span>
+<span class="fc" id="L1244">        jvmStoreLocal(match2instr.getResult());</span>
+<span class="fc" id="L1245">    }</span>
+
+    @Override
+    public void Match3Instr(Match3Instr match3instr) {
+<span class="fc" id="L1249">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1250">        visit(match3instr.getReceiver());</span>
+<span class="fc" id="L1251">        visit(match3instr.getArg());</span>
+<span class="fc" id="L1252">        jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;match3&quot;, sig(IRubyObject.class, ThreadContext.class, RubyRegexp.class, IRubyObject.class));</span>
+<span class="fc" id="L1253">        jvmStoreLocal(match3instr.getResult());</span>
+<span class="fc" id="L1254">    }</span>
+
+    @Override
+    public void MatchInstr(MatchInstr matchinstr) {
+<span class="nc" id="L1258">        visit(matchinstr.getReceiver());</span>
+<span class="nc" id="L1259">        jvmMethod().loadContext();</span>
+<span class="nc" id="L1260">        jvmAdapter().invokevirtual(p(RubyRegexp.class), &quot;op_match2_19&quot;, sig(IRubyObject.class, ThreadContext.class));</span>
+<span class="nc" id="L1261">        jvmStoreLocal(matchinstr.getResult());</span>
+<span class="nc" id="L1262">    }</span>
+
+    @Override
+    public void ModuleVersionGuardInstr(ModuleVersionGuardInstr moduleversionguardinstr) {
+        // SSS FIXME: Unused at this time
+<span class="nc" id="L1267">        throw new NotCompilableException(&quot;Unsupported instruction: &quot; + moduleversionguardinstr);</span>
+    }
+
+    @Override
+    public void NopInstr(NopInstr nopinstr) {
+        // do nothing
+<span class="nc" id="L1273">    }</span>
+
+    @Override
+    public void NoResultCallInstr(NoResultCallInstr noResultCallInstr) {
+<span class="fc" id="L1277">        IRBytecodeAdapter m = jvmMethod();</span>
+<span class="fc" id="L1278">        String name = noResultCallInstr.getName();</span>
+<span class="fc" id="L1279">        Operand[] args = noResultCallInstr.getCallArgs();</span>
+<span class="fc" id="L1280">        Operand receiver = noResultCallInstr.getReceiver();</span>
+<span class="fc" id="L1281">        int numArgs = args.length;</span>
+<span class="fc" id="L1282">        Operand closure = noResultCallInstr.getClosureArg(null);</span>
+<span class="fc bfc" id="L1283" title="All 2 branches covered.">        boolean hasClosure = closure != null;</span>
+<span class="fc" id="L1284">        CallType callType = noResultCallInstr.getCallType();</span>
+
+<span class="fc" id="L1286">        compileCallCommon(m, name, args, receiver, numArgs, closure, hasClosure, callType, null);</span>
+<span class="fc" id="L1287">    }</span>
+
+    @Override
+    public void OneFixnumArgNoBlockCallInstr(OneFixnumArgNoBlockCallInstr oneFixnumArgNoBlockCallInstr) {
+<span class="fc bfc" id="L1291" title="All 2 branches covered.">        if (MethodIndex.getFastFixnumOpsMethod(oneFixnumArgNoBlockCallInstr.getName()) == null) {</span>
+<span class="fc" id="L1292">            CallInstr(oneFixnumArgNoBlockCallInstr);</span>
+<span class="fc" id="L1293">            return;</span>
+        }
+<span class="fc" id="L1295">        IRBytecodeAdapter m = jvmMethod();</span>
+<span class="fc" id="L1296">        String name = oneFixnumArgNoBlockCallInstr.getName();</span>
+<span class="fc" id="L1297">        long fixnum = oneFixnumArgNoBlockCallInstr.getFixnumArg();</span>
+<span class="fc" id="L1298">        Operand receiver = oneFixnumArgNoBlockCallInstr.getReceiver();</span>
+<span class="fc" id="L1299">        Variable result = oneFixnumArgNoBlockCallInstr.getResult();</span>
+
+<span class="fc" id="L1301">        m.loadContext();</span>
+
+        // for visibility checking without requiring frame self
+        // TODO: don't bother passing when fcall or vcall, and adjust callsite appropriately
+<span class="fc" id="L1305">        m.loadSelf(); // caller</span>
+
+<span class="fc" id="L1307">        visit(receiver);</span>
+
+<span class="fc" id="L1309">        m.invokeOtherOneFixnum(name, fixnum);</span>
+
+<span class="pc bpc" id="L1311" title="1 of 2 branches missed.">        if (result != null) {</span>
+<span class="fc" id="L1312">            jvmStoreLocal(result);</span>
+        } else {
+            // still need to drop, since all dyncalls return something (FIXME)
+<span class="nc" id="L1315">            m.adapter.pop();</span>
+        }
+<span class="fc" id="L1317">    }</span>
+
+    @Override
+    public void OneFloatArgNoBlockCallInstr(OneFloatArgNoBlockCallInstr oneFloatArgNoBlockCallInstr) {
+<span class="pc bpc" id="L1321" title="1 of 2 branches missed.">        if (MethodIndex.getFastFloatOpsMethod(oneFloatArgNoBlockCallInstr.getName()) == null) {</span>
+<span class="fc" id="L1322">            CallInstr(oneFloatArgNoBlockCallInstr);</span>
+<span class="fc" id="L1323">            return;</span>
+        }
+<span class="nc" id="L1325">        IRBytecodeAdapter m = jvmMethod();</span>
+<span class="nc" id="L1326">        String name = oneFloatArgNoBlockCallInstr.getName();</span>
+<span class="nc" id="L1327">        double flote = oneFloatArgNoBlockCallInstr.getFloatArg();</span>
+<span class="nc" id="L1328">        Operand receiver = oneFloatArgNoBlockCallInstr.getReceiver();</span>
+<span class="nc" id="L1329">        Variable result = oneFloatArgNoBlockCallInstr.getResult();</span>
+
+<span class="nc" id="L1331">        m.loadContext();</span>
+
+        // for visibility checking without requiring frame self
+        // TODO: don't bother passing when fcall or vcall, and adjust callsite appropriately
+<span class="nc" id="L1335">        m.loadSelf(); // caller</span>
+
+<span class="nc" id="L1337">        visit(receiver);</span>
+
+<span class="nc" id="L1339">        m.invokeOtherOneFloat(name, flote);</span>
+
+<span class="nc bnc" id="L1341" title="All 2 branches missed.">        if (result != null) {</span>
+<span class="nc" id="L1342">            jvmStoreLocal(result);</span>
+        } else {
+            // still need to drop, since all dyncalls return something (FIXME)
+<span class="nc" id="L1345">            m.adapter.pop();</span>
+        }
+<span class="nc" id="L1347">    }</span>
+
+    @Override
+    public void OneOperandArgNoBlockCallInstr(OneOperandArgNoBlockCallInstr oneOperandArgNoBlockCallInstr) {
+<span class="fc" id="L1351">        CallInstr(oneOperandArgNoBlockCallInstr);</span>
+<span class="fc" id="L1352">    }</span>
+
+    @Override
+    public void OptArgMultipleAsgnInstr(OptArgMultipleAsgnInstr optargmultipleasgninstr) {
+<span class="nc" id="L1356">        visit(optargmultipleasgninstr.getArrayArg());</span>
+<span class="nc" id="L1357">        jvmAdapter().checkcast(p(RubyArray.class));</span>
+<span class="nc" id="L1358">        jvmAdapter().ldc(optargmultipleasgninstr.getMinArgsLength());</span>
+<span class="nc" id="L1359">        jvmAdapter().ldc(optargmultipleasgninstr.getIndex());</span>
+<span class="nc" id="L1360">        jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;extractOptionalArgument&quot;, sig(IRubyObject.class, RubyArray.class, int.class, int.class));</span>
+<span class="nc" id="L1361">        jvmStoreLocal(optargmultipleasgninstr.getResult());</span>
+<span class="nc" id="L1362">    }</span>
+
+    @Override
+    public void PopBindingInstr(PopBindingInstr popbindinginstr) {
+<span class="fc" id="L1366">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1367">        jvmMethod().invokeVirtual(Type.getType(ThreadContext.class), Method.getMethod(&quot;void popScope()&quot;));</span>
+<span class="fc" id="L1368">    }</span>
+
+    @Override
+    public void PopFrameInstr(PopFrameInstr popframeinstr) {
+<span class="fc" id="L1372">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1373">        jvmMethod().invokeVirtual(Type.getType(ThreadContext.class), Method.getMethod(&quot;void postMethodFrameOnly()&quot;));</span>
+<span class="fc" id="L1374">    }</span>
+
+    @Override
+    public void ProcessModuleBodyInstr(ProcessModuleBodyInstr processmodulebodyinstr) {
+<span class="fc" id="L1378">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1379">        visit(processmodulebodyinstr.getModuleBody());</span>
+<span class="fc" id="L1380">        jvmMethod().invokeIRHelper(&quot;invokeModuleBody&quot;, sig(IRubyObject.class, ThreadContext.class, DynamicMethod.class));</span>
+<span class="fc" id="L1381">        jvmStoreLocal(processmodulebodyinstr.getResult());</span>
+<span class="fc" id="L1382">    }</span>
+
+    @Override
+    public void PushBindingInstr(PushBindingInstr pushbindinginstr) {
+<span class="fc" id="L1386">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1387">        jvmMethod().loadStaticScope();</span>
+<span class="fc" id="L1388">        jvmAdapter().invokestatic(p(DynamicScope.class), &quot;newDynamicScope&quot;, sig(DynamicScope.class, StaticScope.class));</span>
+<span class="fc" id="L1389">        jvmAdapter().dup();</span>
+<span class="fc" id="L1390">        jvmStoreLocal(DYNAMIC_SCOPE);</span>
+<span class="fc" id="L1391">        jvmMethod().invokeVirtual(Type.getType(ThreadContext.class), Method.getMethod(&quot;void pushScope(org.jruby.runtime.DynamicScope)&quot;));</span>
+<span class="fc" id="L1392">    }</span>
+
+    @Override
+    public void RaiseRequiredKeywordArgumentErrorInstr(RaiseRequiredKeywordArgumentError instr) {
+<span class="nc" id="L1396">        jvmMethod().loadContext();</span>
+<span class="nc" id="L1397">        jvmAdapter().ldc(instr.getName());</span>
+<span class="nc" id="L1398">        jvmMethod().invokeIRHelper(&quot;newRequiredKeywordArgumentError&quot;, sig(RaiseException.class, ThreadContext.class, String.class));</span>
+<span class="nc" id="L1399">        jvmAdapter().athrow();</span>
+<span class="nc" id="L1400">    }</span>
+
+    @Override
+    public void PushFrameInstr(PushFrameInstr pushframeinstr) {
+<span class="fc" id="L1404">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1405">        jvmMethod().loadFrameClass();</span>
+<span class="fc" id="L1406">        jvmAdapter().ldc(pushframeinstr.getFrameName());</span>
+<span class="fc" id="L1407">        jvmMethod().loadSelf();</span>
+<span class="fc" id="L1408">        jvmMethod().loadBlock();</span>
+<span class="fc" id="L1409">        jvmMethod().invokeVirtual(Type.getType(ThreadContext.class), Method.getMethod(&quot;void preMethodFrameOnly(org.jruby.RubyModule, String, org.jruby.runtime.builtin.IRubyObject, org.jruby.runtime.Block)&quot;));</span>
+
+        // FIXME: this should be part of explicit call protocol only when needed, optimizable, and correct for the scope
+        // See also CompiledIRMethod.call
+<span class="fc" id="L1413">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1414">        jvmAdapter().invokestatic(p(Visibility.class), &quot;values&quot;, sig(Visibility[].class));</span>
+<span class="fc" id="L1415">        jvmAdapter().ldc(Visibility.PUBLIC.ordinal());</span>
+<span class="fc" id="L1416">        jvmAdapter().aaload();</span>
+<span class="fc" id="L1417">        jvmAdapter().invokevirtual(p(ThreadContext.class), &quot;setCurrentVisibility&quot;, sig(void.class, Visibility.class));</span>
+<span class="fc" id="L1418">    }</span>
+
+    @Override
+    public void PutClassVariableInstr(PutClassVariableInstr putclassvariableinstr) {
+<span class="nc" id="L1422">        visit(putclassvariableinstr.getValue());</span>
+<span class="nc" id="L1423">        visit(putclassvariableinstr.getTarget());</span>
+
+        // don't understand this logic; duplicated from interpreter
+<span class="nc bnc" id="L1426" title="All 2 branches missed.">        if (putclassvariableinstr.getValue() instanceof CurrentScope) {</span>
+<span class="nc" id="L1427">            jvmAdapter().pop2();</span>
+<span class="nc" id="L1428">            return;</span>
+        }
+
+        // hmm.
+<span class="nc" id="L1432">        jvmAdapter().checkcast(p(RubyModule.class));</span>
+<span class="nc" id="L1433">        jvmAdapter().swap();</span>
+<span class="nc" id="L1434">        jvmAdapter().ldc(putclassvariableinstr.getRef());</span>
+<span class="nc" id="L1435">        jvmAdapter().swap();</span>
+<span class="nc" id="L1436">        jvmAdapter().invokevirtual(p(RubyModule.class), &quot;setClassVar&quot;, sig(IRubyObject.class, String.class, IRubyObject.class));</span>
+<span class="nc" id="L1437">        jvmAdapter().pop();</span>
+<span class="nc" id="L1438">    }</span>
+
+    @Override
+    public void PutConstInstr(PutConstInstr putconstinstr) {
+<span class="nc" id="L1442">        IRBytecodeAdapter m = jvmMethod();</span>
+<span class="nc" id="L1443">        visit(putconstinstr.getTarget());</span>
+<span class="nc" id="L1444">        m.adapter.checkcast(p(RubyModule.class));</span>
+<span class="nc" id="L1445">        m.adapter.ldc(putconstinstr.getRef());</span>
+<span class="nc" id="L1446">        visit(putconstinstr.getValue());</span>
+<span class="nc" id="L1447">        m.adapter.invokevirtual(p(RubyModule.class), &quot;setConstant&quot;, sig(IRubyObject.class, String.class, IRubyObject.class));</span>
+<span class="nc" id="L1448">        m.adapter.pop();</span>
+<span class="nc" id="L1449">    }</span>
+
+    @Override
+    public void PutFieldInstr(PutFieldInstr putfieldinstr) {
+<span class="fc" id="L1453">        visit(putfieldinstr.getTarget());</span>
+<span class="fc" id="L1454">        visit(putfieldinstr.getValue());</span>
+<span class="fc" id="L1455">        jvmMethod().putField(putfieldinstr.getRef());</span>
+<span class="fc" id="L1456">    }</span>
+
+    @Override
+    public void PutGlobalVarInstr(PutGlobalVarInstr putglobalvarinstr) {
+<span class="fc" id="L1460">        GlobalVariable target = (GlobalVariable)putglobalvarinstr.getTarget();</span>
+<span class="fc" id="L1461">        String name = target.getName();</span>
+<span class="fc" id="L1462">        jvmMethod().loadRuntime();</span>
+<span class="fc" id="L1463">        jvmMethod().invokeVirtual(Type.getType(Ruby.class), Method.getMethod(&quot;org.jruby.internal.runtime.GlobalVariables getGlobalVariables()&quot;));</span>
+<span class="fc" id="L1464">        jvmAdapter().ldc(name);</span>
+<span class="fc" id="L1465">        visit(putglobalvarinstr.getValue());</span>
+<span class="fc" id="L1466">        jvmMethod().invokeVirtual(Type.getType(GlobalVariables.class), Method.getMethod(&quot;org.jruby.runtime.builtin.IRubyObject set(String, org.jruby.runtime.builtin.IRubyObject)&quot;));</span>
+        // leaves copy of value on stack
+<span class="fc" id="L1468">        jvmAdapter().pop();</span>
+<span class="fc" id="L1469">    }</span>
+
+    @Override
+    public void ReceiveClosureInstr(ReceiveClosureInstr receiveclosureinstr) {
+<span class="fc" id="L1473">        jvmMethod().loadRuntime();</span>
+<span class="fc" id="L1474">        jvmLoadLocal(&quot;$block&quot;);</span>
+<span class="fc" id="L1475">        jvmMethod().invokeIRHelper(&quot;newProc&quot;, sig(IRubyObject.class, Ruby.class, Block.class));</span>
+<span class="fc" id="L1476">        jvmStoreLocal(receiveclosureinstr.getResult());</span>
+<span class="fc" id="L1477">    }</span>
+
+    @Override
+    public void ReceiveRubyExceptionInstr(ReceiveRubyExceptionInstr receiveexceptioninstr) {
+        // exception should be on stack from try/catch, so unwrap and store it
+<span class="fc" id="L1482">        jvmStoreLocal(receiveexceptioninstr.getResult());</span>
+<span class="fc" id="L1483">    }</span>
+
+    @Override
+    public void ReceiveJRubyExceptionInstr(ReceiveJRubyExceptionInstr receiveexceptioninstr) {
+        // exception should be on stack from try/catch, so just store it
+<span class="fc" id="L1488">        jvmStoreLocal(receiveexceptioninstr.getResult());</span>
+<span class="fc" id="L1489">    }</span>
+
+    @Override
+    public void ReceiveKeywordArgInstr(ReceiveKeywordArgInstr instr) {
+<span class="nc" id="L1493">        jvmMethod().loadContext();</span>
+<span class="nc" id="L1494">        jvmMethod().loadArgs();</span>
+<span class="nc" id="L1495">        jvmAdapter().pushInt(instr.required);</span>
+<span class="nc" id="L1496">        jvmAdapter().ldc(instr.argName);</span>
+<span class="nc" id="L1497">        jvmAdapter().ldc(jvm.methodData().scope.receivesKeywordArgs());</span>
+<span class="nc" id="L1498">        jvmMethod().invokeIRHelper(&quot;receiveKeywordArg&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject[].class, int.class, String.class, boolean.class));</span>
+<span class="nc" id="L1499">        jvmStoreLocal(instr.getResult());</span>
+<span class="nc" id="L1500">    }</span>
+
+    @Override
+    public void ReceiveKeywordRestArgInstr(ReceiveKeywordRestArgInstr instr) {
+<span class="nc" id="L1504">        jvmMethod().loadContext();</span>
+<span class="nc" id="L1505">        jvmMethod().loadArgs();</span>
+<span class="nc" id="L1506">        jvmAdapter().pushInt(instr.required);</span>
+<span class="nc" id="L1507">        jvmAdapter().ldc(jvm.methodData().scope.receivesKeywordArgs());</span>
+<span class="nc" id="L1508">        jvmMethod().invokeIRHelper(&quot;receiveKeywordRestArg&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject[].class, int.class, boolean.class));</span>
+<span class="nc" id="L1509">        jvmStoreLocal(instr.getResult());</span>
+<span class="nc" id="L1510">    }</span>
+
+    @Override
+    public void ReceiveOptArgInstr(ReceiveOptArgInstr instr) {
+<span class="fc" id="L1514">        jvmMethod().loadArgs();</span>
+<span class="fc" id="L1515">        jvmAdapter().pushInt(instr.requiredArgs);</span>
+<span class="fc" id="L1516">        jvmAdapter().pushInt(instr.preArgs);</span>
+<span class="fc" id="L1517">        jvmAdapter().pushInt(instr.getArgIndex());</span>
+<span class="fc" id="L1518">        jvmAdapter().ldc(jvm.methodData().scope.receivesKeywordArgs());</span>
+<span class="fc" id="L1519">        jvmMethod().invokeIRHelper(&quot;receiveOptArg&quot;, sig(IRubyObject.class, IRubyObject[].class, int.class, int.class, int.class, boolean.class));</span>
+<span class="fc" id="L1520">        jvmStoreLocal(instr.getResult());</span>
+<span class="fc" id="L1521">    }</span>
+
+    @Override
+    public void ReceivePreReqdArgInstr(ReceivePreReqdArgInstr instr) {
+<span class="fc bfc" id="L1525" title="All 2 branches covered.">        if (jvm.methodData().specificArity &gt;= 0 &amp;&amp;</span>
+<span class="pc bpc" id="L1526" title="1 of 2 branches missed.">                instr.getArgIndex() &lt; jvm.methodData().specificArity) {</span>
+<span class="fc" id="L1527">            jvmAdapter().aload(jvm.methodData().signature.argOffset(&quot;arg&quot; + instr.getArgIndex()));</span>
+        } else {
+<span class="fc" id="L1529">            jvmMethod().loadContext();</span>
+<span class="fc" id="L1530">            jvmMethod().loadArgs();</span>
+<span class="fc" id="L1531">            jvmAdapter().pushInt(instr.getArgIndex());</span>
+<span class="fc" id="L1532">            jvmMethod().invokeIRHelper(&quot;getPreArgSafe&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject[].class, int.class));</span>
+        }
+<span class="fc" id="L1534">        jvmStoreLocal(instr.getResult());</span>
+<span class="fc" id="L1535">    }</span>
+
+    @Override
+    public void ReceivePostReqdArgInstr(ReceivePostReqdArgInstr instr) {
+<span class="nc" id="L1539">        jvmMethod().loadArgs();</span>
+<span class="nc" id="L1540">        jvmAdapter().pushInt(instr.preReqdArgsCount);</span>
+<span class="nc" id="L1541">        jvmAdapter().pushInt(instr.postReqdArgsCount);</span>
+<span class="nc" id="L1542">        jvmAdapter().pushInt(instr.getArgIndex());</span>
+<span class="nc" id="L1543">        jvmAdapter().ldc(jvm.methodData().scope.receivesKeywordArgs());</span>
+<span class="nc" id="L1544">        jvmMethod().invokeIRHelper(&quot;receivePostReqdArg&quot;, sig(IRubyObject.class, IRubyObject[].class, int.class, int.class, int.class, boolean.class));</span>
+<span class="nc" id="L1545">        jvmStoreLocal(instr.getResult());</span>
+<span class="nc" id="L1546">    }</span>
+
+    @Override
+    public void ReceiveRestArgInstr(ReceiveRestArgInstr instr) {
+<span class="fc" id="L1550">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1551">        jvmMethod().loadArgs();</span>
+<span class="fc" id="L1552">        jvmAdapter().pushInt(instr.required);</span>
+<span class="fc" id="L1553">        jvmAdapter().pushInt(instr.getArgIndex());</span>
+<span class="fc" id="L1554">        jvmAdapter().ldc(jvm.methodData().scope.receivesKeywordArgs());</span>
+<span class="fc" id="L1555">        jvmMethod().invokeIRHelper(&quot;receiveRestArg&quot;, sig(IRubyObject.class, ThreadContext.class, Object[].class, int.class, int.class, boolean.class));</span>
+<span class="fc" id="L1556">        jvmStoreLocal(instr.getResult());</span>
+<span class="fc" id="L1557">    }</span>
+
+    @Override
+    public void ReceiveSelfInstr(ReceiveSelfInstr receiveselfinstr) {
+<span class="fc" id="L1561">        jvmMethod().loadSelf();</span>
+<span class="fc" id="L1562">        jvmStoreLocal(receiveselfinstr.getResult());</span>
+<span class="fc" id="L1563">    }</span>
+
+    @Override
+    public void RecordEndBlockInstr(RecordEndBlockInstr recordEndBlockInstr) {
+<span class="nc" id="L1567">        jvmMethod().loadContext();</span>
+
+<span class="nc" id="L1569">        jvmMethod().loadContext();</span>
+<span class="nc" id="L1570">        visit(recordEndBlockInstr.getEndBlockClosure());</span>
+<span class="nc" id="L1571">        jvmMethod().invokeIRHelper(&quot;getBlockFromObject&quot;, sig(Block.class, ThreadContext.class, Object.class));</span>
+
+<span class="nc" id="L1573">        jvmMethod().invokeIRHelper(&quot;pushExitBlock&quot;, sig(void.class, ThreadContext.class, Block.class));</span>
+<span class="nc" id="L1574">    }</span>
+
+    @Override
+    public void ReqdArgMultipleAsgnInstr(ReqdArgMultipleAsgnInstr reqdargmultipleasgninstr) {
+<span class="fc" id="L1578">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1579">        visit(reqdargmultipleasgninstr.getArrayArg());</span>
+<span class="fc" id="L1580">        jvmAdapter().checkcast(p(RubyArray.class));</span>
+<span class="fc" id="L1581">        jvmAdapter().pushInt(reqdargmultipleasgninstr.getPreArgsCount());</span>
+<span class="fc" id="L1582">        jvmAdapter().pushInt(reqdargmultipleasgninstr.getIndex());</span>
+<span class="fc" id="L1583">        jvmAdapter().pushInt(reqdargmultipleasgninstr.getPostArgsCount());</span>
+<span class="fc" id="L1584">        jvmMethod().invokeIRHelper(&quot;irReqdArgMultipleAsgn&quot;, sig(IRubyObject.class, ThreadContext.class, RubyArray.class, int.class, int.class, int.class));</span>
+<span class="fc" id="L1585">        jvmStoreLocal(reqdargmultipleasgninstr.getResult());</span>
+<span class="fc" id="L1586">    }</span>
+
+    @Override
+    public void RescueEQQInstr(RescueEQQInstr rescueeqqinstr) {
+<span class="fc" id="L1590">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1591">        visit(rescueeqqinstr.getArg1());</span>
+<span class="fc" id="L1592">        visit(rescueeqqinstr.getArg2());</span>
+<span class="fc" id="L1593">        jvmMethod().invokeIRHelper(&quot;isExceptionHandled&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject.class, Object.class));</span>
+<span class="fc" id="L1594">        jvmStoreLocal(rescueeqqinstr.getResult());</span>
+<span class="fc" id="L1595">    }</span>
+
+    @Override
+    public void RestArgMultipleAsgnInstr(RestArgMultipleAsgnInstr restargmultipleasgninstr) {
+<span class="nc" id="L1599">        jvmMethod().loadContext();</span>
+<span class="nc" id="L1600">        visit(restargmultipleasgninstr.getArrayArg());</span>
+<span class="nc" id="L1601">        jvmAdapter().checkcast(p(RubyArray.class));</span>
+<span class="nc" id="L1602">        jvmAdapter().pushInt(restargmultipleasgninstr.getPreArgsCount());</span>
+<span class="nc" id="L1603">        jvmAdapter().pushInt(restargmultipleasgninstr.getPostArgsCount());</span>
+<span class="nc" id="L1604">        jvmAdapter().invokestatic(p(Helpers.class), &quot;viewArgsArray&quot;, sig(RubyArray.class, ThreadContext.class, RubyArray.class, int.class, int.class));</span>
+<span class="nc" id="L1605">        jvmStoreLocal(restargmultipleasgninstr.getResult());</span>
+<span class="nc" id="L1606">    }</span>
+
+    @Override
+    public void RuntimeHelperCall(RuntimeHelperCall runtimehelpercall) {
+<span class="pc bpc" id="L1610" title="10 of 15 branches missed.">        switch (runtimehelpercall.getHelperMethod()) {</span>
+            case HANDLE_PROPAGATE_BREAK:
+<span class="fc" id="L1612">                jvmMethod().loadContext();</span>
+<span class="fc" id="L1613">                jvmLoadLocal(DYNAMIC_SCOPE);</span>
+<span class="fc" id="L1614">                visit(runtimehelpercall.getArgs()[0]);</span>
+<span class="fc" id="L1615">                jvmMethod().loadBlockType();</span>
+<span class="fc" id="L1616">                jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;handlePropagatedBreak&quot;, sig(IRubyObject.class, ThreadContext.class, DynamicScope.class, Object.class, Block.Type.class));</span>
+<span class="fc" id="L1617">                jvmStoreLocal(runtimehelpercall.getResult());</span>
+<span class="fc" id="L1618">                break;</span>
+            case HANDLE_NONLOCAL_RETURN:
+<span class="fc" id="L1620">                jvmMethod().loadStaticScope();</span>
+<span class="fc" id="L1621">                jvmLoadLocal(DYNAMIC_SCOPE);</span>
+<span class="fc" id="L1622">                visit(runtimehelpercall.getArgs()[0]);</span>
+<span class="fc" id="L1623">                jvmMethod().loadBlockType();</span>
+<span class="fc" id="L1624">                jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;handleNonlocalReturn&quot;, sig(IRubyObject.class, StaticScope.class, DynamicScope.class, Object.class, Block.Type.class));</span>
+<span class="fc" id="L1625">                jvmStoreLocal(runtimehelpercall.getResult());</span>
+<span class="fc" id="L1626">                break;</span>
+            case HANDLE_BREAK_AND_RETURNS_IN_LAMBDA:
+<span class="fc" id="L1628">                jvmMethod().loadContext();</span>
+<span class="fc" id="L1629">                jvmMethod().loadStaticScope();</span>
+<span class="fc" id="L1630">                jvmLoadLocal(DYNAMIC_SCOPE);</span>
+<span class="fc" id="L1631">                visit(runtimehelpercall.getArgs()[0]);</span>
+<span class="fc" id="L1632">                jvmMethod().loadBlockType();</span>
+<span class="fc" id="L1633">                jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;handleBreakAndReturnsInLambdas&quot;, sig(IRubyObject.class, ThreadContext.class, StaticScope.class, DynamicScope.class, Object.class, Block.Type.class));</span>
+<span class="fc" id="L1634">                jvmStoreLocal(runtimehelpercall.getResult());</span>
+<span class="fc" id="L1635">                break;</span>
+            case IS_DEFINED_BACKREF:
+<span class="nc" id="L1637">                jvmMethod().loadContext();</span>
+<span class="nc" id="L1638">                jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;isDefinedBackref&quot;, sig(IRubyObject.class, ThreadContext.class));</span>
+<span class="nc" id="L1639">                jvmStoreLocal(runtimehelpercall.getResult());</span>
+<span class="nc" id="L1640">                break;</span>
+            case IS_DEFINED_CALL:
+<span class="nc" id="L1642">                jvmMethod().loadContext();</span>
+<span class="nc" id="L1643">                jvmMethod().loadSelf();</span>
+<span class="nc" id="L1644">                visit(runtimehelpercall.getArgs()[0]);</span>
+<span class="nc" id="L1645">                jvmAdapter().ldc(((StringLiteral) runtimehelpercall.getArgs()[1]).getString());</span>
+<span class="nc" id="L1646">                jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;isDefinedCall&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject.class, IRubyObject.class, String.class));</span>
+<span class="nc" id="L1647">                jvmStoreLocal(runtimehelpercall.getResult());</span>
+<span class="nc" id="L1648">                break;</span>
+            case IS_DEFINED_CONSTANT_OR_METHOD:
+<span class="nc" id="L1650">                jvmMethod().loadContext();</span>
+<span class="nc" id="L1651">                visit(runtimehelpercall.getArgs()[0]);</span>
+<span class="nc" id="L1652">                jvmAdapter().ldc(((StringLiteral)runtimehelpercall.getArgs()[1]).getString());</span>
+<span class="nc" id="L1653">                jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;isDefinedConstantOrMethod&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject.class, String.class));</span>
+<span class="nc" id="L1654">                jvmStoreLocal(runtimehelpercall.getResult());</span>
+<span class="nc" id="L1655">                break;</span>
+            case IS_DEFINED_NTH_REF:
+<span class="nc" id="L1657">                jvmMethod().loadContext();</span>
+<span class="nc" id="L1658">                jvmAdapter().ldc((int)((Fixnum)runtimehelpercall.getArgs()[0]).getValue());</span>
+<span class="nc" id="L1659">                jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;isDefinedNthRef&quot;, sig(IRubyObject.class, ThreadContext.class, int.class));</span>
+<span class="nc" id="L1660">                jvmStoreLocal(runtimehelpercall.getResult());</span>
+<span class="nc" id="L1661">                break;</span>
+            case IS_DEFINED_GLOBAL:
+<span class="nc" id="L1663">                jvmMethod().loadContext();</span>
+<span class="nc" id="L1664">                jvmAdapter().ldc(((StringLiteral)runtimehelpercall.getArgs()[0]).getString());</span>
+<span class="nc" id="L1665">                jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;isDefinedGlobal&quot;, sig(IRubyObject.class, ThreadContext.class, String.class));</span>
+<span class="nc" id="L1666">                jvmStoreLocal(runtimehelpercall.getResult());</span>
+<span class="nc" id="L1667">                break;</span>
+            case IS_DEFINED_INSTANCE_VAR:
+<span class="fc" id="L1669">                jvmMethod().loadContext();</span>
+<span class="fc" id="L1670">                visit(runtimehelpercall.getArgs()[0]);</span>
+<span class="fc" id="L1671">                jvmAdapter().ldc(((StringLiteral)runtimehelpercall.getArgs()[1]).getString());</span>
+<span class="fc" id="L1672">                jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;isDefinedInstanceVar&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject.class, String.class));</span>
+<span class="fc" id="L1673">                jvmStoreLocal(runtimehelpercall.getResult());</span>
+<span class="fc" id="L1674">                break;</span>
+            case IS_DEFINED_CLASS_VAR:
+<span class="nc" id="L1676">                jvmMethod().loadContext();</span>
+<span class="nc" id="L1677">                visit(runtimehelpercall.getArgs()[0]);</span>
+<span class="nc" id="L1678">                jvmAdapter().checkcast(p(RubyModule.class));</span>
+<span class="nc" id="L1679">                jvmAdapter().ldc(((StringLiteral)runtimehelpercall.getArgs()[1]).getString());</span>
+<span class="nc" id="L1680">                jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;isDefinedClassVar&quot;, sig(IRubyObject.class, ThreadContext.class, RubyModule.class, String.class));</span>
+<span class="nc" id="L1681">                jvmStoreLocal(runtimehelpercall.getResult());</span>
+<span class="nc" id="L1682">                break;</span>
+            case IS_DEFINED_SUPER:
+<span class="nc" id="L1684">                jvmMethod().loadContext();</span>
+<span class="nc" id="L1685">                visit(runtimehelpercall.getArgs()[0]);</span>
+<span class="nc" id="L1686">                jvmAdapter().ldc(((StringLiteral)runtimehelpercall.getArgs()[1]).getString());</span>
+<span class="nc" id="L1687">                jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;isDefinedSuper&quot;, sig(IRubyObject.class, ThreadContext.class, String.class));</span>
+<span class="nc" id="L1688">                jvmStoreLocal(runtimehelpercall.getResult());</span>
+<span class="nc" id="L1689">                break;</span>
+            case IS_DEFINED_METHOD:
+<span class="nc" id="L1691">                jvmMethod().loadContext();</span>
+<span class="nc" id="L1692">                visit(runtimehelpercall.getArgs()[0]);</span>
+<span class="nc" id="L1693">                jvmAdapter().ldc(((StringLiteral) runtimehelpercall.getArgs()[1]).getString());</span>
+<span class="nc" id="L1694">                jvmAdapter().ldc(((Boolean)runtimehelpercall.getArgs()[2]).isTrue());</span>
+<span class="nc" id="L1695">                jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;isDefinedMethod&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject.class, String.class, boolean.class));</span>
+<span class="nc" id="L1696">                jvmStoreLocal(runtimehelpercall.getResult());</span>
+<span class="nc" id="L1697">                break;</span>
+            case MERGE_KWARGS:
+<span class="nc" id="L1699">                jvmMethod().loadContext();</span>
+<span class="nc" id="L1700">                visit(runtimehelpercall.getArgs()[0]);</span>
+<span class="nc" id="L1701">                visit(runtimehelpercall.getArgs()[1]);</span>
+<span class="nc" id="L1702">                jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;mergeKeywordArguments&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject.class, IRubyObject.class));</span>
+<span class="nc" id="L1703">                jvmStoreLocal(runtimehelpercall.getResult());</span>
+<span class="nc" id="L1704">                break;</span>
+            case CHECK_FOR_LJE:
+<span class="fc" id="L1706">                jvmMethod().loadContext();</span>
+<span class="fc" id="L1707">                jvmLoadLocal(DYNAMIC_SCOPE);</span>
+<span class="fc" id="L1708">                jvmAdapter().ldc(((Boolean)runtimehelpercall.getArgs()[0]).isTrue());</span>
+<span class="fc" id="L1709">                jvmMethod().loadBlockType();</span>
+<span class="fc" id="L1710">                jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), &quot;checkForLJE&quot;, sig(void.class, ThreadContext.class, DynamicScope.class, boolean.class, Block.Type.class));</span>
+<span class="fc" id="L1711">                break;</span>
+            default:
+<span class="nc" id="L1713">                throw new NotCompilableException(&quot;Unknown IR runtime helper method: &quot; + runtimehelpercall.getHelperMethod() + &quot;; INSTR: &quot; + this);</span>
+        }
+<span class="fc" id="L1715">    }</span>
+
+    @Override
+    public void NonlocalReturnInstr(NonlocalReturnInstr returninstr) {
+<span class="fc" id="L1719">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1720">        jvmLoadLocal(DYNAMIC_SCOPE);</span>
+<span class="fc" id="L1721">        jvmMethod().loadBlockType();</span>
+<span class="fc" id="L1722">        visit(returninstr.getReturnValue());</span>
+
+<span class="fc" id="L1724">        jvmMethod().invokeIRHelper(&quot;initiateNonLocalReturn&quot;, sig(IRubyObject.class, ThreadContext.class, DynamicScope.class, Block.Type.class, IRubyObject.class));</span>
+<span class="fc" id="L1725">        jvmMethod().returnValue();</span>
+<span class="fc" id="L1726">    }</span>
+
+    @Override
+    public void ReturnInstr(ReturnInstr returninstr) {
+<span class="fc" id="L1730">        visit(returninstr.getReturnValue());</span>
+<span class="fc" id="L1731">        jvmMethod().returnValue();</span>
+<span class="fc" id="L1732">    }</span>
+
+    @Override
+    public void SearchConstInstr(SearchConstInstr searchconstinstr) {
+<span class="fc" id="L1736">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1737">        visit(searchconstinstr.getStartingScope());</span>
+<span class="fc" id="L1738">        jvmMethod().searchConst(searchconstinstr.getConstName(), searchconstinstr.isNoPrivateConsts());</span>
+<span class="fc" id="L1739">        jvmStoreLocal(searchconstinstr.getResult());</span>
+<span class="fc" id="L1740">    }</span>
+
+    @Override
+    public void SetCapturedVarInstr(SetCapturedVarInstr instr) {
+<span class="nc" id="L1744">        jvmMethod().loadContext();</span>
+<span class="nc" id="L1745">        visit(instr.getMatch2Result());</span>
+<span class="nc" id="L1746">        jvmAdapter().ldc(instr.getVarName());</span>
+<span class="nc" id="L1747">        jvmMethod().invokeIRHelper(&quot;setCapturedVar&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject.class, String.class));</span>
+<span class="nc" id="L1748">        jvmStoreLocal(instr.getResult());</span>
+<span class="nc" id="L1749">    }</span>
+
+    @Override
+    public void StoreLocalVarInstr(StoreLocalVarInstr storelocalvarinstr) {
+<span class="fc" id="L1753">        IRBytecodeAdapter m = jvmMethod();</span>
+<span class="fc" id="L1754">        jvmLoadLocal(DYNAMIC_SCOPE);</span>
+<span class="fc" id="L1755">        int depth = storelocalvarinstr.getLocalVar().getScopeDepth();</span>
+<span class="fc" id="L1756">        int location = storelocalvarinstr.getLocalVar().getLocation();</span>
+<span class="fc" id="L1757">        Operand storeValue = storelocalvarinstr.getValue();</span>
+<span class="fc bfc" id="L1758" title="All 2 branches covered.">        switch (depth) {</span>
+            case 0:
+<span class="fc bfc" id="L1760" title="All 5 branches covered.">                switch (location) {</span>
+                    case 0:
+<span class="fc" id="L1762">                        storeValue.visit(this);</span>
+<span class="fc" id="L1763">                        m.adapter.invokevirtual(p(DynamicScope.class), &quot;setValueZeroDepthZero&quot;, sig(IRubyObject.class, IRubyObject.class));</span>
+<span class="fc" id="L1764">                        m.adapter.pop();</span>
+<span class="fc" id="L1765">                        return;</span>
+                    case 1:
+<span class="fc" id="L1767">                        storeValue.visit(this);</span>
+<span class="fc" id="L1768">                        m.adapter.invokevirtual(p(DynamicScope.class), &quot;setValueOneDepthZero&quot;, sig(IRubyObject.class, IRubyObject.class));</span>
+<span class="fc" id="L1769">                        m.adapter.pop();</span>
+<span class="fc" id="L1770">                        return;</span>
+                    case 2:
+<span class="fc" id="L1772">                        storeValue.visit(this);</span>
+<span class="fc" id="L1773">                        m.adapter.invokevirtual(p(DynamicScope.class), &quot;setValueTwoDepthZero&quot;, sig(IRubyObject.class, IRubyObject.class));</span>
+<span class="fc" id="L1774">                        m.adapter.pop();</span>
+<span class="fc" id="L1775">                        return;</span>
+                    case 3:
+<span class="fc" id="L1777">                        storeValue.visit(this);</span>
+<span class="fc" id="L1778">                        m.adapter.invokevirtual(p(DynamicScope.class), &quot;setValueThreeDepthZero&quot;, sig(IRubyObject.class, IRubyObject.class));</span>
+<span class="fc" id="L1779">                        m.adapter.pop();</span>
+<span class="fc" id="L1780">                        return;</span>
+                    default:
+<span class="fc" id="L1782">                        storeValue.visit(this);</span>
+<span class="fc" id="L1783">                        m.adapter.pushInt(location);</span>
+<span class="fc" id="L1784">                        m.adapter.invokevirtual(p(DynamicScope.class), &quot;setValueDepthZero&quot;, sig(IRubyObject.class, IRubyObject.class, int.class));</span>
+<span class="fc" id="L1785">                        m.adapter.pop();</span>
+<span class="fc" id="L1786">                        return;</span>
+                }
+            default:
+<span class="fc" id="L1789">                m.adapter.pushInt(location);</span>
+<span class="fc" id="L1790">                storeValue.visit(this);</span>
+<span class="fc" id="L1791">                m.adapter.pushInt(depth);</span>
+<span class="fc" id="L1792">                m.adapter.invokevirtual(p(DynamicScope.class), &quot;setValue&quot;, sig(IRubyObject.class, int.class, IRubyObject.class, int.class));</span>
+<span class="fc" id="L1793">                m.adapter.pop();</span>
+        }
+<span class="fc" id="L1795">    }</span>
+
+    @Override
+    public void ThreadPollInstr(ThreadPollInstr threadpollinstr) {
+<span class="fc" id="L1799">        jvmMethod().checkpoint();</span>
+<span class="fc" id="L1800">    }</span>
+
+    @Override
+    public void ThrowExceptionInstr(ThrowExceptionInstr throwexceptioninstr) {
+<span class="fc" id="L1804">        visit(throwexceptioninstr.getExceptionArg());</span>
+<span class="fc" id="L1805">        jvmAdapter().athrow();</span>
+<span class="fc" id="L1806">    }</span>
+
+    @Override
+    public void ToAryInstr(ToAryInstr toaryinstr) {
+<span class="fc" id="L1810">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1811">        visit(toaryinstr.getArrayArg());</span>
+<span class="fc" id="L1812">        jvmMethod().invokeIRHelper(&quot;irToAry&quot;, sig(IRubyObject.class, ThreadContext.class, IRubyObject.class));</span>
+<span class="fc" id="L1813">        jvmStoreLocal(toaryinstr.getResult());</span>
+<span class="fc" id="L1814">    }</span>
+
+    @Override
+    public void UndefMethodInstr(UndefMethodInstr undefmethodinstr) {
+<span class="nc" id="L1818">        jvmMethod().loadContext();</span>
+<span class="nc" id="L1819">        visit(undefmethodinstr.getMethodName());</span>
+<span class="nc" id="L1820">        jvmLoadLocal(DYNAMIC_SCOPE);</span>
+<span class="nc" id="L1821">        jvmMethod().loadSelf();</span>
+<span class="nc" id="L1822">        jvmMethod().invokeIRHelper(&quot;undefMethod&quot;, sig(IRubyObject.class, ThreadContext.class, Object.class, DynamicScope.class, IRubyObject.class));</span>
+<span class="nc" id="L1823">        jvmStoreLocal(undefmethodinstr.getResult());</span>
+<span class="nc" id="L1824">    }</span>
+
+    @Override
+    public void UnresolvedSuperInstr(UnresolvedSuperInstr unresolvedsuperinstr) {
+<span class="nc" id="L1828">        String name = unresolvedsuperinstr.getName();</span>
+<span class="nc" id="L1829">        Operand[] args = unresolvedsuperinstr.getCallArgs();</span>
+        // this would be getDefiningModule but that is not used for unresolved super
+<span class="nc" id="L1831">        Operand definingModule = UndefinedValue.UNDEFINED;</span>
+<span class="nc" id="L1832">        boolean containsArgSplat = unresolvedsuperinstr.containsArgSplat();</span>
+<span class="nc" id="L1833">        Operand closure = unresolvedsuperinstr.getClosureArg(null);</span>
+
+<span class="nc" id="L1835">        superCommon(name, unresolvedsuperinstr, args, definingModule, containsArgSplat, closure);</span>
+<span class="nc" id="L1836">    }</span>
+
+    @Override
+    public void YieldInstr(YieldInstr yieldinstr) {
+<span class="fc" id="L1840">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1841">        visit(yieldinstr.getBlockArg());</span>
+
+<span class="fc bfc" id="L1843" title="All 2 branches covered.">        if (yieldinstr.getYieldArg() == UndefinedValue.UNDEFINED) {</span>
+<span class="fc" id="L1844">            jvmMethod().invokeIRHelper(&quot;yieldSpecific&quot;, sig(IRubyObject.class, ThreadContext.class, Object.class));</span>
+        } else {
+<span class="fc" id="L1846">            visit(yieldinstr.getYieldArg());</span>
+<span class="fc" id="L1847">            jvmAdapter().ldc(yieldinstr.isUnwrapArray());</span>
+<span class="fc" id="L1848">            jvmMethod().invokeIRHelper(&quot;yield&quot;, sig(IRubyObject.class, ThreadContext.class, Object.class, Object.class, boolean.class));</span>
+        }
+
+<span class="fc" id="L1851">        jvmStoreLocal(yieldinstr.getResult());</span>
+<span class="fc" id="L1852">    }</span>
+
+    @Override
+    public void ZeroOperandArgNoBlockCallInstr(ZeroOperandArgNoBlockCallInstr zeroOperandArgNoBlockCallInstr) {
+<span class="fc" id="L1856">        CallInstr(zeroOperandArgNoBlockCallInstr);</span>
+<span class="fc" id="L1857">    }</span>
+
+    @Override
+    public void ZSuperInstr(ZSuperInstr zsuperinstr) {
+<span class="nc" id="L1861">        String name = zsuperinstr.getName();</span>
+<span class="nc" id="L1862">        Operand[] args = zsuperinstr.getCallArgs();</span>
+        // this would be getDefiningModule but that is not used for unresolved super
+<span class="nc" id="L1864">        Operand definingModule = UndefinedValue.UNDEFINED;</span>
+<span class="nc" id="L1865">        boolean containsArgSplat = zsuperinstr.containsArgSplat();</span>
+<span class="nc" id="L1866">        Operand closure = zsuperinstr.getClosureArg(null);</span>
+
+<span class="nc" id="L1868">        superCommon(name, zsuperinstr, args, definingModule, containsArgSplat, closure);</span>
+<span class="nc" id="L1869">    }</span>
+
+    @Override
+    public void GetErrorInfoInstr(GetErrorInfoInstr geterrorinfoinstr) {
+<span class="nc" id="L1873">        jvmMethod().loadContext();</span>
+<span class="nc" id="L1874">        jvmAdapter().invokevirtual(p(ThreadContext.class), &quot;getErrorInfo&quot;, sig(IRubyObject.class));</span>
+<span class="nc" id="L1875">        jvmStoreLocal(geterrorinfoinstr.getResult());</span>
+<span class="nc" id="L1876">    }</span>
+
+    @Override
+    public void RestoreErrorInfoInstr(RestoreErrorInfoInstr restoreerrorinfoinstr) {
+<span class="nc" id="L1880">        jvmMethod().loadContext();</span>
+<span class="nc" id="L1881">        visit(restoreerrorinfoinstr.getArg());</span>
+<span class="nc" id="L1882">        jvmAdapter().invokevirtual(p(ThreadContext.class), &quot;setErrorInfo&quot;, sig(IRubyObject.class, IRubyObject.class));</span>
+<span class="nc" id="L1883">        jvmAdapter().pop();</span>
+<span class="nc" id="L1884">    }</span>
+
+    // ruby 1.9 specific
+    @Override
+    public void BuildLambdaInstr(BuildLambdaInstr buildlambdainstr) {
+<span class="nc" id="L1889">        jvmMethod().loadRuntime();</span>
+
+<span class="nc" id="L1891">        IRClosure body = ((WrappedIRClosure)buildlambdainstr.getLambdaBody()).getClosure();</span>
+<span class="nc bnc" id="L1892" title="All 2 branches missed.">        if (body == null) {</span>
+<span class="nc" id="L1893">            jvmMethod().pushNil();</span>
+        } else {
+<span class="nc" id="L1895">            visit(buildlambdainstr.getLambdaBody());</span>
+        }
+
+<span class="nc" id="L1898">        jvmAdapter().getstatic(p(Block.Type.class), &quot;LAMBDA&quot;, ci(Block.Type.class));</span>
+<span class="nc" id="L1899">        jvmAdapter().ldc(buildlambdainstr.getPosition().getFile());</span>
+<span class="nc" id="L1900">        jvmAdapter().pushInt(buildlambdainstr.getPosition().getLine());</span>
+
+<span class="nc" id="L1902">        jvmAdapter().invokestatic(p(RubyProc.class), &quot;newProc&quot;, sig(RubyProc.class, Ruby.class, Block.class, Block.Type.class, String.class, int.class));</span>
+
+<span class="nc" id="L1904">        jvmStoreLocal(buildlambdainstr.getResult());</span>
+<span class="nc" id="L1905">    }</span>
+
+    @Override
+    public void GetEncodingInstr(GetEncodingInstr getencodinginstr) {
+<span class="fc" id="L1909">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1910">        jvmMethod().pushEncoding(getencodinginstr.getEncoding());</span>
+<span class="fc" id="L1911">        jvmStoreLocal(getencodinginstr.getResult());</span>
+<span class="fc" id="L1912">    }</span>
+
+    // operands
+    @Override
+    public void Array(Array array) {
+<span class="fc" id="L1917">        jvmMethod().loadContext();</span>
+
+<span class="fc bfc" id="L1919" title="All 2 branches covered.">        for (Operand operand : array.getElts()) {</span>
+<span class="fc" id="L1920">            visit(operand);</span>
+        }
+
+<span class="fc" id="L1923">        jvmMethod().array(array.getElts().length);</span>
+<span class="fc" id="L1924">    }</span>
+
+    @Override
+    public void AsString(AsString asstring) {
+<span class="fc" id="L1928">        visit(asstring.getSource());</span>
+<span class="fc" id="L1929">        jvmAdapter().invokeinterface(p(IRubyObject.class), &quot;asString&quot;, sig(RubyString.class));</span>
+<span class="fc" id="L1930">    }</span>
+
+    @Override
+    public void Backref(Backref backref) {
+<span class="fc" id="L1934">        jvmMethod().loadContext();</span>
+<span class="fc" id="L1935">        jvmAdapter().invokevirtual(p(ThreadContext.class), &quot;getBackRef&quot;, sig(IRubyObject.class));</span>
+
+<span class="pc bpc" id="L1937" title="4 of 5 branches missed.">        switch (backref.type) {</span>
+            case '&amp;':
+<span class="nc" id="L1939">                jvmAdapter().invokestatic(p(RubyRegexp.class), &quot;last_match&quot;, sig(IRubyObject.class, IRubyObject.class));</span>
+<span class="nc" id="L1940">                break;</span>
+            case '`':
+<span class="nc" id="L1942">                jvmAdapter().invokestatic(p(RubyRegexp.class), &quot;match_pre&quot;, sig(IRubyObject.class, IRubyObject.class));</span>
+<span class="nc" id="L1943">                break;</span>
+            case '\'':
+<span class="fc" id="L1945">                jvmAdapter().invokestatic(p(RubyRegexp.class), &quot;match_post&quot;, sig(IRubyObject.class, IRubyObject.class));</span>
+<span class="fc" id="L1946">                break;</span>
+            case '+':
+<span class="nc" id="L1948">                jvmAdapter().invokestatic(p(RubyRegexp.class), &quot;match_last&quot;, sig(IRubyObject.class, IRubyObject.class));</span>
+<span class="nc" id="L1949">                break;</span>
+            default:
+<span class="nc bnc" id="L1951" title="All 2 branches missed.">                assert false: &quot;backref with invalid type&quot;;</span>
+        }
+<span class="fc" id="L1953">    }</span>
+
+    @Override
+    public void Bignum(Bignum bignum) {
+<span class="fc" id="L1957">        jvmMethod().pushBignum(bignum.value);</span>
+<span class="fc" id="L1958">    }</span>
+
+    @Override
+    public void Boolean(org.jruby.ir.operands.Boolean booleanliteral) {
+<span class="fc" id="L1962">        jvmMethod().pushBoolean(booleanliteral.isTrue());</span>
+<span class="fc" id="L1963">    }</span>
+
+    @Override
+    public void UnboxedBoolean(org.jruby.ir.operands.UnboxedBoolean bool) {
+<span class="nc" id="L1967">        jvmAdapter().ldc(bool.isTrue());</span>
+<span class="nc" id="L1968">    }</span>
+
+    @Override
+    public void ClosureLocalVariable(ClosureLocalVariable closurelocalvariable) {
+<span class="nc" id="L1972">        LocalVariable(closurelocalvariable);</span>
+<span class="nc" id="L1973">    }</span>
+
+    @Override
+    public void Complex(Complex complex) {
+<span class="nc" id="L1977">        jvmMethod().loadRuntime();</span>
+<span class="nc" id="L1978">        jvmMethod().pushFixnum(0);</span>
+<span class="nc" id="L1979">        visit(complex.getNumber());</span>
+<span class="nc" id="L1980">        jvmAdapter().invokestatic(p(RubyComplex.class), &quot;newComplexRaw&quot;, sig(RubyComplex.class, Ruby.class, IRubyObject.class, IRubyObject.class));</span>
+<span class="nc" id="L1981">    }</span>
+
+    @Override
+    public void CurrentScope(CurrentScope currentscope) {
+<span class="fc" id="L1985">        jvmMethod().loadStaticScope();</span>
+<span class="fc" id="L1986">    }</span>
+
+    @Override
+    public void DynamicSymbol(DynamicSymbol dynamicsymbol) {
+<span class="fc" id="L1990">        jvmMethod().loadRuntime();</span>
+<span class="fc" id="L1991">        visit(dynamicsymbol.getSymbolName());</span>
+<span class="fc" id="L1992">        jvmAdapter().invokeinterface(p(IRubyObject.class), &quot;asJavaString&quot;, sig(String.class));</span>
+<span class="fc" id="L1993">        jvmAdapter().invokevirtual(p(Ruby.class), &quot;newSymbol&quot;, sig(RubySymbol.class, String.class));</span>
+<span class="fc" id="L1994">    }</span>
+
+    @Override
+    public void Fixnum(Fixnum fixnum) {
+<span class="fc" id="L1998">        jvmMethod().pushFixnum(fixnum.getValue());</span>
+<span class="fc" id="L1999">    }</span>
+
+    @Override
+    public void FrozenString(FrozenString frozen) {
+<span class="nc" id="L2003">        jvmMethod().pushFrozenString(frozen.getByteList());</span>
+<span class="nc" id="L2004">    }</span>
+
+    @Override
+    public void UnboxedFixnum(UnboxedFixnum fixnum) {
+<span class="nc" id="L2008">        jvmAdapter().ldc(fixnum.getValue());</span>
+<span class="nc" id="L2009">    }</span>
+
+    @Override
+    public void Float(org.jruby.ir.operands.Float flote) {
+<span class="fc" id="L2013">        jvmMethod().pushFloat(flote.getValue());</span>
+<span class="fc" id="L2014">    }</span>
+
+    @Override
+    public void UnboxedFloat(org.jruby.ir.operands.UnboxedFloat flote) {
+<span class="nc" id="L2018">        jvmAdapter().ldc(flote.getValue());</span>
+<span class="nc" id="L2019">    }</span>
+
+    @Override
+    public void Hash(Hash hash) {
+<span class="fc" id="L2023">        List&lt;KeyValuePair&lt;Operand, Operand&gt;&gt; pairs = hash.getPairs();</span>
+<span class="fc" id="L2024">        Iterator&lt;KeyValuePair&lt;Operand, Operand&gt;&gt; iter = pairs.iterator();</span>
+<span class="pc bpc" id="L2025" title="3 of 4 branches missed.">        boolean kwargs = hash.isKWArgsHash &amp;&amp; pairs.get(0).getKey() == Symbol.KW_REST_ARG_DUMMY;</span>
+
+<span class="fc" id="L2027">        jvmMethod().loadContext();</span>
+<span class="pc bpc" id="L2028" title="1 of 2 branches missed.">        if (kwargs) {</span>
+<span class="nc" id="L2029">            visit(pairs.get(0).getValue());</span>
+<span class="nc" id="L2030">            jvmAdapter().checkcast(p(RubyHash.class));</span>
+
+<span class="nc" id="L2032">            iter.next();</span>
+        }
+
+<span class="fc bfc" id="L2035" title="All 2 branches covered.">        for (; iter.hasNext() ;) {</span>
+<span class="fc" id="L2036">            KeyValuePair&lt;Operand, Operand&gt; pair = iter.next();</span>
+<span class="fc" id="L2037">            visit(pair.getKey());</span>
+<span class="fc" id="L2038">            visit(pair.getValue());</span>
+<span class="fc" id="L2039">        }</span>
+
+<span class="pc bpc" id="L2041" title="1 of 2 branches missed.">        if (kwargs) {</span>
+<span class="nc" id="L2042">            jvmMethod().kwargsHash(pairs.size() - 1);</span>
+        } else {
+<span class="fc" id="L2044">            jvmMethod().hash(pairs.size());</span>
+        }
+<span class="fc" id="L2046">    }</span>
+
+    @Override
+    public void LocalVariable(LocalVariable localvariable) {
+        // CON FIXME: This isn't as efficient as it could be, but we should not see these in optimized JIT scopes
+<span class="nc" id="L2051">        jvmLoadLocal(DYNAMIC_SCOPE);</span>
+<span class="nc" id="L2052">        jvmAdapter().ldc(localvariable.getOffset());</span>
+<span class="nc" id="L2053">        jvmAdapter().ldc(localvariable.getScopeDepth());</span>
+<span class="nc" id="L2054">        jvmMethod().pushNil();</span>
+<span class="nc" id="L2055">        jvmAdapter().invokevirtual(p(DynamicScope.class), &quot;getValueOrNil&quot;, sig(IRubyObject.class, int.class, int.class, IRubyObject.class));</span>
+<span class="nc" id="L2056">    }</span>
+
+    @Override
+    public void Nil(Nil nil) {
+<span class="fc" id="L2060">        jvmMethod().pushNil();</span>
+<span class="fc" id="L2061">    }</span>
+
+    @Override
+    public void NthRef(NthRef nthref) {
+<span class="fc" id="L2065">        jvmMethod().loadContext();</span>
+<span class="fc" id="L2066">        jvmAdapter().pushInt(nthref.matchNumber);</span>
+<span class="fc" id="L2067">        jvmMethod().invokeIRHelper(&quot;nthMatch&quot;, sig(IRubyObject.class, ThreadContext.class, int.class));</span>
+<span class="fc" id="L2068">    }</span>
+
+    @Override
+    public void ObjectClass(ObjectClass objectclass) {
+<span class="nc" id="L2072">        jvmMethod().pushObjectClass();</span>
+<span class="nc" id="L2073">    }</span>
+
+    @Override
+    public void Rational(Rational rational) {
+<span class="nc" id="L2077">        jvmMethod().loadRuntime();</span>
+<span class="nc" id="L2078">        jvmAdapter().ldc(rational.getNumerator());</span>
+<span class="nc" id="L2079">        jvmAdapter().ldc(rational.getDenominator());</span>
+<span class="nc" id="L2080">        jvmAdapter().invokevirtual(p(Ruby.class), &quot;newRational&quot;, sig(RubyRational.class, long.class, long.class));</span>
+<span class="nc" id="L2081">    }</span>
+
+    @Override
+    public void Regexp(Regexp regexp) {
+<span class="pc bpc" id="L2085" title="3 of 4 branches missed.">        if (!regexp.hasKnownValue() &amp;&amp; !regexp.options.isOnce()) {</span>
+<span class="nc" id="L2086">            jvmMethod().loadRuntime();</span>
+<span class="nc" id="L2087">            visit(regexp.getRegexp());</span>
+<span class="nc" id="L2088">            jvmAdapter().invokevirtual(p(RubyString.class), &quot;getByteList&quot;, sig(ByteList.class));</span>
+<span class="nc" id="L2089">            jvmAdapter().ldc(regexp.options.toEmbeddedOptions());</span>
+<span class="nc" id="L2090">            jvmAdapter().invokestatic(p(RubyRegexp.class), &quot;newRegexp&quot;, sig(RubyRegexp.class, Ruby.class, RubyString.class, int.class));</span>
+<span class="nc" id="L2091">            jvmAdapter().dup();</span>
+<span class="nc" id="L2092">            jvmAdapter().invokevirtual(p(RubyRegexp.class), &quot;setLiteral&quot;, sig(void.class));</span>
+        } else {
+            // FIXME: need to check this on cached path
+            // context.runtime.getKCode() != rubyRegexp.getKCode()) {
+<span class="fc" id="L2096">            jvmMethod().loadContext();</span>
+<span class="fc" id="L2097">            visit(regexp.getRegexp());</span>
+<span class="fc" id="L2098">            jvmMethod().pushRegexp(regexp.options.toEmbeddedOptions());</span>
+        }
+<span class="fc" id="L2100">    }</span>
+
+    @Override
+    public void ScopeModule(ScopeModule scopemodule) {
+<span class="fc" id="L2104">        jvmMethod().loadStaticScope();</span>
+<span class="fc" id="L2105">        jvmAdapter().pushInt(scopemodule.getScopeModuleDepth());</span>
+<span class="fc" id="L2106">        jvmAdapter().invokestatic(p(Helpers.class), &quot;getNthScopeModule&quot;, sig(RubyModule.class, StaticScope.class, int.class));</span>
+<span class="fc" id="L2107">    }</span>
+
+    @Override
+    public void Self(Self self) {
+<span class="fc" id="L2111">        jvmMethod().loadSelf();</span>
+<span class="fc" id="L2112">    }</span>
+
+    @Override
+    public void Splat(Splat splat) {
+<span class="fc" id="L2116">        jvmMethod().loadContext();</span>
+<span class="fc" id="L2117">        visit(splat.getArray());</span>
+<span class="fc" id="L2118">        jvmMethod().invokeIRHelper(&quot;irSplat&quot;, sig(RubyArray.class, ThreadContext.class, IRubyObject.class));</span>
+<span class="fc" id="L2119">    }</span>
+
+    @Override
+    public void StandardError(StandardError standarderror) {
+<span class="nc" id="L2123">        jvmMethod().loadRuntime();</span>
+<span class="nc" id="L2124">        jvmAdapter().invokevirtual(p(Ruby.class), &quot;getStandardError&quot;, sig(RubyClass.class));</span>
+<span class="nc" id="L2125">    }</span>
+
+    @Override
+    public void StringLiteral(StringLiteral stringliteral) {
+<span class="fc" id="L2129">        jvmMethod().pushString(stringliteral.getByteList());</span>
+<span class="fc" id="L2130">    }</span>
+
+    @Override
+    public void SValue(SValue svalue) {
+<span class="nc" id="L2134">        visit(svalue.getArray());</span>
+<span class="nc" id="L2135">        jvmAdapter().dup();</span>
+<span class="nc" id="L2136">        jvmAdapter().instance_of(p(RubyArray.class));</span>
+<span class="nc" id="L2137">        org.objectweb.asm.Label after = new org.objectweb.asm.Label();</span>
+<span class="nc" id="L2138">        jvmAdapter().iftrue(after);</span>
+<span class="nc" id="L2139">        jvmAdapter().pop();</span>
+<span class="nc" id="L2140">        jvmMethod().pushNil();</span>
+<span class="nc" id="L2141">        jvmAdapter().label(after);</span>
+<span class="nc" id="L2142">    }</span>
+
+    @Override
+    public void Symbol(Symbol symbol) {
+<span class="fc" id="L2146">        jvmMethod().pushSymbol(symbol.getName(), symbol.getEncoding());</span>
+<span class="fc" id="L2147">    }</span>
+
+    @Override
+    public void TemporaryVariable(TemporaryVariable temporaryvariable) {
+<span class="nc" id="L2151">        jvmLoadLocal(temporaryvariable);</span>
+<span class="nc" id="L2152">    }</span>
+
+    @Override
+    public void TemporaryLocalVariable(TemporaryLocalVariable temporarylocalvariable) {
+<span class="fc" id="L2156">        jvmLoadLocal(temporarylocalvariable);</span>
+<span class="fc" id="L2157">    }</span>
+
+    @Override
+    public void TemporaryFloatVariable(TemporaryFloatVariable temporaryfloatvariable) {
+<span class="nc" id="L2161">        jvmLoadLocal(temporaryfloatvariable);</span>
+<span class="nc" id="L2162">    }</span>
+
+    @Override
+    public void TemporaryFixnumVariable(TemporaryFixnumVariable temporaryfixnumvariable) {
+<span class="nc" id="L2166">        jvmLoadLocal(temporaryfixnumvariable);</span>
+<span class="nc" id="L2167">    }</span>
+
+    @Override
+    public void TemporaryBooleanVariable(TemporaryBooleanVariable temporarybooleanvariable) {
+<span class="nc" id="L2171">        jvmLoadLocal(temporarybooleanvariable);</span>
+<span class="nc" id="L2172">    }</span>
+
+    @Override
+    public void UndefinedValue(UndefinedValue undefinedvalue) {
+<span class="fc" id="L2176">        jvmMethod().pushUndefined();</span>
+<span class="fc" id="L2177">    }</span>
+
+    @Override
+    public void UnexecutableNil(UnexecutableNil unexecutablenil) {
+<span class="nc" id="L2181">        throw new NotCompilableException(this.getClass().getSimpleName() + &quot; should never be directly executed!&quot;);</span>
+    }
+
+    @Override
+    public void WrappedIRClosure(WrappedIRClosure wrappedirclosure) {
+<span class="fc" id="L2186">        IRClosure closure = wrappedirclosure.getClosure();</span>
+
+<span class="fc" id="L2188">        jvmAdapter().newobj(p(Block.class));</span>
+<span class="fc" id="L2189">        jvmAdapter().dup();</span>
+
+        { // FIXME: block body should be cached
+<span class="fc" id="L2192">            jvmAdapter().newobj(p(CompiledIRBlockBody.class));</span>
+<span class="fc" id="L2193">            jvmAdapter().dup();</span>
+
+<span class="fc" id="L2195">            jvmAdapter().ldc(closure.getHandle());</span>
+<span class="fc" id="L2196">            jvmAdapter().getstatic(jvm.clsData().clsName, closure.getHandle().getName() + &quot;_IRScope&quot;, ci(IRScope.class));</span>
+<span class="fc" id="L2197">            jvmAdapter().ldc(closure.getArity().getValue());</span>
+
+<span class="fc" id="L2199">            jvmAdapter().invokespecial(p(CompiledIRBlockBody.class), &quot;&lt;init&gt;&quot;, sig(void.class, java.lang.invoke.MethodHandle.class, IRScope.class, int.class));</span>
+        }
+
+        { // prepare binding
+<span class="fc" id="L2203">            jvmMethod().loadContext();</span>
+<span class="fc" id="L2204">            visit(closure.getSelf());</span>
+<span class="fc" id="L2205">            jvmLoadLocal(DYNAMIC_SCOPE);</span>
+<span class="fc" id="L2206">            jvmAdapter().invokevirtual(p(ThreadContext.class), &quot;currentBinding&quot;, sig(Binding.class, IRubyObject.class, DynamicScope.class));</span>
+        }
+
+<span class="fc" id="L2209">        jvmAdapter().invokespecial(p(Block.class), &quot;&lt;init&gt;&quot;, sig(void.class, BlockBody.class, Binding.class));</span>
+<span class="fc" id="L2210">    }</span>
+
+    private SkinnyMethodAdapter jvmAdapter() {
+<span class="fc" id="L2213">        return jvmMethod().adapter;</span>
+    }
+
+    private IRBytecodeAdapter jvmMethod() {
+<span class="fc" id="L2217">        return jvm.method();</span>
+    }
+
+    private JVM jvm;
+    private int methodIndex;
+    private Map&lt;String, IRScope&gt; scopeMap;
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

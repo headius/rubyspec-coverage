@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IRBindingEvalScript.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir</a> &gt; <span class="el_source">IRBindingEvalScript.java</span></div><h1>IRBindingEvalScript.java</h1><pre class="source lang-java linenums">package org.jruby.ir;
+
+import org.jruby.EvalType;
+import org.jruby.ir.operands.ClosureLocalVariable;
+import org.jruby.ir.operands.LocalVariable;
+import org.jruby.parser.StaticScope;
+
+/**
+ * Explicit Binding Evals must allow preserving values between evals.  They do this is a special hidden scope.
+ */
+<span class="pc bpc" id="L11" title="1 of 2 branches missed.">public class IRBindingEvalScript extends IREvalScript {</span>
+    private IRScope nearestNonEvalScope;
+    private int     nearestNonEvalScopeDepth;
+
+    public IRBindingEvalScript(IRManager manager, IRScope lexicalParent, String fileName, int lineNumber, StaticScope staticScope, EvalType evalType) {
+<span class="fc" id="L16">        super(manager, lexicalParent, fileName, lineNumber, staticScope, evalType);</span>
+
+<span class="fc" id="L18">        int n = 0;</span>
+<span class="fc" id="L19">        IRScope s = lexicalParent;</span>
+<span class="fc bfc" id="L20" title="All 2 branches covered.">        while (s instanceof IRBindingEvalScript) {</span>
+<span class="fc" id="L21">            n++;</span>
+<span class="fc" id="L22">            s = s.getLexicalParent();</span>
+        }
+
+<span class="fc" id="L25">        this.nearestNonEvalScope = s;</span>
+<span class="fc" id="L26">        this.nearestNonEvalScopeDepth = n;</span>
+<span class="fc" id="L27">        this.nearestNonEvalScope.initEvalScopeVariableAllocator(false);</span>
+
+<span class="pc bpc" id="L29" title="2 of 4 branches missed.">        if (!getManager().isDryRun() &amp;&amp; staticScope != null) {</span>
+            // SSS FIXME: This is awkward!
+<span class="pc bpc" id="L31" title="1 of 2 branches missed.">            if (evalType == EvalType.MODULE_EVAL) {</span>
+<span class="nc" id="L32">                staticScope.setScopeType(getScopeType());</span>
+            } else {
+<span class="fc" id="L34">                staticScope.setScopeType(this.nearestNonEvalScope.getScopeType());</span>
+            }
+        }
+
+<span class="fc" id="L38">    }</span>
+
+    @Override
+    public LocalVariable lookupExistingLVar(String name) {
+<span class="fc" id="L42">        return nearestNonEvalScope.evalScopeVars.get(name);</span>
+    }
+
+    @Override
+    protected LocalVariable findExistingLocalVariable(String name, int scopeDepth) {
+        // Look in the nearest non-eval scope's shared eval scope vars first.
+        // If you dont find anything there, look in the nearest non-eval scope's regular vars.
+<span class="fc" id="L49">        LocalVariable lvar = lookupExistingLVar(name);</span>
+<span class="fc bfc" id="L50" title="All 4 branches covered.">        if (lvar != null || scopeDepth == 0) return lvar;</span>
+<span class="fc" id="L51">        else return nearestNonEvalScope.findExistingLocalVariable(name, scopeDepth-nearestNonEvalScopeDepth-1);</span>
+    }
+
+    @Override
+    public LocalVariable getLocalVariable(String name, int scopeDepth) {
+        // Reduce lookup depth by 1 since the AST seems to be adding
+        // an additional static/dynamic scope for which there is no
+        // corresponding IRScope.
+        //
+        // FIXME: Investigate if this is something left behind from
+        // 1.8 mode support. Or if we need to introduce the additional
+        // IRScope object.
+<span class="pc bpc" id="L63" title="1 of 2 branches missed.">        int lookupDepth = isModuleOrInstanceEval() ? scopeDepth - 1 : scopeDepth;</span>
+<span class="fc" id="L64">        LocalVariable lvar = findExistingLocalVariable(name, lookupDepth);</span>
+<span class="fc bfc" id="L65" title="All 2 branches covered.">        if (lvar == null) lvar = getNewLocalVariable(name, lookupDepth);</span>
+        // Create a copy of the variable usable at the right depth
+<span class="fc bfc" id="L67" title="All 2 branches covered.">        if (lvar.getScopeDepth() != scopeDepth) lvar = lvar.cloneForDepth(scopeDepth);</span>
+
+<span class="fc" id="L69">        return lvar;</span>
+    }
+
+    @Override
+    public LocalVariable getNewLocalVariable(String name, int depth) {
+<span class="pc bpc" id="L74" title="3 of 4 branches missed.">        assert depth == nearestNonEvalScopeDepth: &quot;Local variable depth in IREvalScript:getNewLocalVariable for &quot; + name + &quot; must be &quot; + nearestNonEvalScopeDepth + &quot;.  Got &quot; + depth;</span>
+<span class="fc" id="L75">        LocalVariable lvar = new ClosureLocalVariable(this, name, 0, nearestNonEvalScope.evalScopeVars.size());</span>
+<span class="fc" id="L76">        nearestNonEvalScope.evalScopeVars.put(name, lvar);</span>
+        // CON: unsure how to get static scope to reflect this name as in IRClosure and IRMethod
+<span class="fc" id="L78">        return lvar;</span>
+    }
+
+    @Override
+    public LocalVariable getNewFlipStateVariable() {
+<span class="nc" id="L83">        String flipVarName = &quot;%flip_&quot; + allocateNextPrefixedName(&quot;%flip&quot;);</span>
+<span class="nc" id="L84">        LocalVariable v = lookupExistingLVar(flipVarName);</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">        if (v == null) {</span>
+<span class="nc" id="L86">            v = getNewLocalVariable(flipVarName, 0);</span>
+        }
+<span class="nc" id="L88">        return v;</span>
+    }
+
+    @Override
+    public int getUsedVariablesCount() {
+<span class="fc" id="L93">        return nearestNonEvalScope.evalScopeVars.size()+ getPrefixCountSize(&quot;%flip&quot;);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

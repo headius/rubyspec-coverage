@@ -1,0 +1,1852 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyThread.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby</a> &gt; <span class="el_source">RubyThread.java</span></div><h1>RubyThread.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002 Jason Voegele &lt;jason@jvoegele.com&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2002-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004-2005 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby;
+
+import java.io.IOException;
+import java.lang.ref.WeakReference;
+import java.nio.channels.Channel;
+import java.nio.channels.SelectableChannel;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.util.Iterator;
+import java.util.Queue;
+import java.util.Vector;
+import java.util.WeakHashMap;
+import java.util.HashMap;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Map;
+
+import java.util.Set;
+import org.jruby.common.IRubyWarnings.ID;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.exceptions.ThreadKill;
+import org.jruby.internal.runtime.NativeThread;
+import org.jruby.internal.runtime.RubyRunnable;
+import org.jruby.internal.runtime.ThreadLike;
+import org.jruby.internal.runtime.ThreadService;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.ExecutionContext;
+import org.jruby.runtime.builtin.IRubyObject;
+
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Lock;
+
+import org.jruby.anno.JRubyMethod;
+import org.jruby.anno.JRubyClass;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.ObjectMarshal;
+import static org.jruby.runtime.Visibility.*;
+
+import org.jruby.util.TypeConverter;
+import org.jruby.util.io.BlockingIO;
+import org.jruby.util.io.OpenFile;
+import org.jruby.util.io.SelectorFactory;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+
+import org.jruby.java.proxies.ConcreteJavaProxy;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.backtrace.RubyStackTraceElement;
+import org.jruby.util.ByteList;
+
+/**
+ * Implementation of Ruby's &lt;code&gt;Thread&lt;/code&gt; class.  Each Ruby thread is
+ * mapped to an underlying Java Virtual Machine thread.
+ * &lt;p&gt;
+ * Thread encapsulates the behavior of a thread of execution, including the main
+ * thread of the Ruby script.  In the descriptions that follow, the parameter
+ * &lt;code&gt;aSymbol&lt;/code&gt; refers to a symbol, which is either a quoted string or a
+ * &lt;code&gt;Symbol&lt;/code&gt; (such as &lt;code&gt;:name&lt;/code&gt;).
+ * 
+ * Note: For CVS history, see ThreadClass.java.
+ */
+<span class="pc bpc" id="L101" title="1 of 2 branches missed.">@JRubyClass(name=&quot;Thread&quot;)</span>
+public class RubyThread extends RubyObject implements ExecutionContext {
+
+<span class="fc" id="L104">    private static final Logger LOG = LoggerFactory.getLogger(&quot;RubyThread&quot;);</span>
+
+    /** The thread-like think that is actually executing */
+    private ThreadLike threadImpl;
+
+    /** Normal thread-local variables */
+    private transient Map&lt;IRubyObject, IRubyObject&gt; threadLocalVariables;
+
+    /** Context-local variables, internal-ish thread locals */
+<span class="fc" id="L113">    private final Map&lt;Object, IRubyObject&gt; contextVariables = new WeakHashMap&lt;Object, IRubyObject&gt;();</span>
+
+    /** Whether this thread should try to abort the program on exception */
+    private boolean abortOnException;
+
+    /** The final value resulting from the thread's execution */
+    private IRubyObject finalResult;
+
+    /**
+     * The exception currently being raised out of the thread. We reference
+     * it here to continue propagating it while handling thread shutdown
+     * logic and abort_on_exception.
+     */
+    private RaiseException exitingException;
+
+    /** The ThreadGroup to which this thread belongs */
+    private RubyThreadGroup threadGroup;
+
+    /** Per-thread &quot;current exception&quot; */
+    private IRubyObject errorInfo;
+
+    /** Weak reference to the ThreadContext for this thread. */
+    private volatile WeakReference&lt;ThreadContext&gt; contextRef;
+
+    /** Whether to scan for cross-thread events */
+<span class="fc" id="L138">    private volatile boolean handleInterrupt = true;</span>
+
+    /** Stack of interrupt masks active for this thread */
+<span class="fc" id="L141">    private final List&lt;RubyHash&gt; interruptMaskStack = new ArrayList&lt;RubyHash&gt;();</span>
+
+    private static final boolean DEBUG = false;
+<span class="fc" id="L144">    private int RUBY_MIN_THREAD_PRIORITY = -3;</span>
+<span class="fc" id="L145">    private int RUBY_MAX_THREAD_PRIORITY = 3;</span>
+
+    /** Thread statuses */
+<span class="pc" id="L148">    public static enum Status { </span>
+<span class="fc" id="L149">        RUN, SLEEP, ABORTING, DEAD;</span>
+        
+        public final ByteList bytes;
+        
+<span class="fc" id="L153">        Status() {</span>
+<span class="fc" id="L154">            bytes = new ByteList(toString().toLowerCase().getBytes(RubyEncoding.UTF8));</span>
+<span class="fc" id="L155">        }</span>
+    }
+
+    /** Current status in an atomic reference */
+<span class="fc" id="L159">    private final AtomicReference&lt;Status&gt; status = new AtomicReference&lt;Status&gt;(Status.RUN);</span>
+
+    /** Mail slot for cross-thread events */
+<span class="fc" id="L162">    private final Queue&lt;IRubyObject&gt; pendingInterruptQueue = new ConcurrentLinkedQueue();</span>
+
+    /** A function to use to unblock this thread, if possible */
+    private Unblocker unblockFunc;
+
+    /** Argument to pass to the unblocker */
+    private Object unblockArg;
+
+    /** The list of locks this thread currently holds, so they can be released on exit */
+<span class="fc" id="L171">    private final List&lt;Lock&gt; heldLocks = new Vector&lt;Lock&gt;();</span>
+
+    /** Whether or not this thread has been disposed of */
+<span class="fc" id="L174">    private volatile boolean disposed = false;</span>
+
+    /** Interrupt flags */
+<span class="fc" id="L177">    private volatile int interruptFlag = 0;</span>
+
+    /** Interrupt mask to use for disabling certain types */
+    private volatile int interruptMask;
+
+    /** Short circuit to avoid-re-scanning for interrupts */
+<span class="fc" id="L183">    private volatile boolean pendingInterruptQueueChecked = false;</span>
+
+    private volatile Selector currentSelector;
+
+<span class="fc" id="L187">    private static final AtomicIntegerFieldUpdater INTERRUPT_FLAG_UPDATER =</span>
+<span class="fc" id="L188">            AtomicIntegerFieldUpdater.newUpdater(RubyThread.class, &quot;interruptFlag&quot;);</span>
+
+    private static final int TIMER_INTERRUPT_MASK         = 0x01;
+    private static final int PENDING_INTERRUPT_MASK       = 0x02;
+    private static final int POSTPONED_JOB_INTERRUPT_MASK = 0x04;
+    private static final int TRAP_INTERRUPT_MASK	      = 0x08;
+
+    private static final int INTERRUPT_NONE = 0;
+    private static final int INTERRUPT_IMMEDIATE = 1;
+    private static final int INTERRUPT_ON_BLOCKING = 2;
+    private static final int INTERRUPT_NEVER = 3;
+
+    protected RubyThread(Ruby runtime, RubyClass type) {
+<span class="fc" id="L201">        super(runtime, type);</span>
+
+<span class="fc" id="L203">        finalResult = runtime.getNil();</span>
+<span class="fc" id="L204">        errorInfo = runtime.getNil();</span>
+<span class="fc" id="L205">    }</span>
+    
+    public RubyThread(Ruby runtime, RubyClass klass, Runnable runnable) {
+<span class="nc" id="L208">        this(runtime, klass);</span>
+        
+<span class="nc" id="L210">        startWith(runnable);</span>
+<span class="nc" id="L211">    }</span>
+
+    private void executeInterrupts(ThreadContext context, boolean blockingTiming) {
+<span class="fc" id="L214">        Ruby runtime = context.runtime;</span>
+        int interrupt;
+
+<span class="fc" id="L217">        boolean postponedJobInterrupt = false;</span>
+
+<span class="fc bfc" id="L219" title="All 2 branches covered.">        while ((interrupt = getInterrupts()) != 0) {</span>
+<span class="pc bpc" id="L220" title="1 of 2 branches missed.">            boolean timerInterrupt = (interrupt &amp; TIMER_INTERRUPT_MASK) == TIMER_INTERRUPT_MASK;</span>
+<span class="pc bpc" id="L221" title="1 of 2 branches missed.">            boolean pendingInterrupt = (interrupt &amp; PENDING_INTERRUPT_MASK) == PENDING_INTERRUPT_MASK;</span>
+
+//            if (postponedJobInterrupt) {
+//                postponedJobFlush(context);
+//            }
+            // Missing: signal handling...but perhaps we don't need it on JVM
+
+<span class="pc bpc" id="L228" title="1 of 4 branches missed.">            if (pendingInterrupt &amp;&amp; pendingInterruptActive()) {</span>
+<span class="pc bpc" id="L229" title="1 of 2 branches missed.">                IRubyObject err = pendingInterruptDeque(context, blockingTiming ? INTERRUPT_ON_BLOCKING : INTERRUPT_NONE);</span>
+
+<span class="pc bpc" id="L231" title="1 of 2 branches missed.">                if (err == UNDEF) {</span>
+                    // no error
+<span class="fc bfc" id="L233" title="All 2 branches covered.">                } else if (err == RubyFixnum.zero(runtime) ||</span>
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">                        err == RubyFixnum.one(runtime) ||</span>
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">                        err == RubyFixnum.two(runtime)) {</span>
+<span class="nc" id="L236">                    toKill();</span>
+                } else {
+<span class="fc" id="L238">                    afterBlockingCall();</span>
+<span class="pc bpc" id="L239" title="1 of 2 branches missed.">                    if (status.get() == Status.SLEEP) {</span>
+<span class="nc" id="L240">                        exitSleep();</span>
+                    }
+<span class="nc" id="L242">                    RubyKernel.raise(context, runtime.getKernel(), new IRubyObject[]{err}, Block.NULL_BLOCK);</span>
+                }
+            }
+
+            // Missing: timer interrupt...needed?
+<span class="fc" id="L247">        }</span>
+<span class="fc" id="L248">    }</span>
+
+    private void postponedJobFlush(ThreadContext context) {
+        // unsure if this function has any relevance in JRuby
+
+//        int savedPostponedJobInterruptMask = interruptMask &amp; POSTPONED_JOB_INTERRUPT_MASK;
+//
+//        errorInfo = context.nil;
+//        interruptMask |= POSTPONED_JOB_INTERRUPT_MASK;
+<span class="nc" id="L257">    }</span>
+
+    private boolean pendingInterruptActive() {
+<span class="pc bpc" id="L260" title="1 of 2 branches missed.">        if (pendingInterruptQueueChecked) return false;</span>
+<span class="fc bfc" id="L261" title="All 2 branches covered.">        if (pendingInterruptQueue.isEmpty()) return false;</span>
+<span class="fc" id="L262">        return true;</span>
+    }
+
+    private void toKill() {
+<span class="nc" id="L266">        pendingInterruptClear();</span>
+<span class="nc" id="L267">        throwThreadKill();</span>
+<span class="nc" id="L268">    }</span>
+
+    private void pendingInterruptClear() {
+<span class="fc" id="L271">        pendingInterruptQueue.clear();</span>
+<span class="fc" id="L272">    }</span>
+
+    private int getInterrupts() {
+        int interrupt;
+        while (true) {
+<span class="fc" id="L277">            interrupt = interruptFlag;</span>
+<span class="pc bpc" id="L278" title="1 of 2 branches missed.">            if (INTERRUPT_FLAG_UPDATER.compareAndSet(this, interrupt, interrupt &amp; interruptMask)) {</span>
+<span class="fc" id="L279">                break;</span>
+            }
+        }
+<span class="fc" id="L282">        return interrupt &amp; ~interruptMask;</span>
+    }
+
+    private IRubyObject pendingInterruptDeque(ThreadContext context, int timing) {
+<span class="pc bpc" id="L286" title="1 of 2 branches missed.">        for (Iterator&lt;IRubyObject&gt; iterator = pendingInterruptQueue.iterator(); iterator.hasNext();) {</span>
+<span class="fc" id="L287">            IRubyObject err = iterator.next();</span>
+<span class="fc" id="L288">            int maskTiming = pendingInterruptCheckMask(context, err);</span>
+
+<span class="pc bpc" id="L290" title="2 of 3 branches missed.">            switch (maskTiming) {</span>
+                case INTERRUPT_ON_BLOCKING:
+<span class="nc bnc" id="L292" title="All 2 branches missed.">                    if (timing != INTERRUPT_ON_BLOCKING) break;</span>
+                case INTERRUPT_NONE:
+                case INTERRUPT_IMMEDIATE:
+<span class="fc" id="L295">                    iterator.remove();</span>
+<span class="fc" id="L296">                    return err;</span>
+                case INTERRUPT_NEVER:
+                    break;
+            }
+<span class="nc" id="L300">        }</span>
+
+<span class="nc" id="L302">        pendingInterruptQueueChecked = true;</span>
+
+<span class="nc" id="L304">        return UNDEF;</span>
+    }
+
+    private int pendingInterruptCheckMask(ThreadContext context, IRubyObject err) {
+<span class="fc" id="L308">        List&lt;IRubyObject&gt; ancestors = err.getMetaClass().getAncestorList();</span>
+<span class="fc" id="L309">        int ancestorsLen = ancestors.size();</span>
+
+<span class="fc" id="L311">        List&lt;RubyHash&gt; maskStack = interruptMaskStack;</span>
+<span class="fc" id="L312">        int maskStackLen = maskStack.size();</span>
+
+<span class="pc bpc" id="L314" title="1 of 2 branches missed.">        for (int i = 0; i &lt; maskStackLen; i++) {</span>
+<span class="nc" id="L315">            RubyHash mask = maskStack.get(maskStackLen - (i + 1));</span>
+
+<span class="nc bnc" id="L317" title="All 2 branches missed.">            for (int j = 0; j &lt; ancestorsLen; j++) {</span>
+<span class="nc" id="L318">                IRubyObject klass = ancestors.get(j);</span>
+                IRubyObject sym;
+
+<span class="nc bnc" id="L321" title="All 2 branches missed.">                if (!(sym = mask.op_aref(context, klass)).isNil()) {</span>
+<span class="nc" id="L322">                    String symStr = sym.toString();</span>
+<span class="nc bnc" id="L323" title="All 14 branches missed.">                    switch (symStr) {</span>
+<span class="nc" id="L324">                        case &quot;immediate&quot;: return INTERRUPT_IMMEDIATE;</span>
+<span class="nc" id="L325">                        case &quot;on_blocking&quot;: return INTERRUPT_ON_BLOCKING;</span>
+<span class="nc" id="L326">                        case &quot;never&quot;: return INTERRUPT_NEVER;</span>
+                        default:
+<span class="nc" id="L328">                            throw context.runtime.newThreadError(&quot;unknown mask signature&quot;);</span>
+                    }
+                }
+            }
+        }
+<span class="fc" id="L333">        return INTERRUPT_NONE;</span>
+    }
+
+    public IRubyObject getErrorInfo() {
+<span class="fc" id="L337">        return errorInfo;</span>
+    }
+
+    public IRubyObject setErrorInfo(IRubyObject errorInfo) {
+<span class="fc" id="L341">        this.errorInfo = errorInfo;</span>
+<span class="fc" id="L342">        return errorInfo;</span>
+    }
+
+    public void setContext(ThreadContext context) {
+<span class="fc" id="L346">        this.contextRef = new WeakReference&lt;ThreadContext&gt;(context);</span>
+<span class="fc" id="L347">    }</span>
+
+    public ThreadContext getContext() {
+<span class="pc bpc" id="L350" title="1 of 2 branches missed.">        return contextRef == null ? null : contextRef.get();</span>
+    }
+
+
+    public Thread getNativeThread() {
+<span class="fc" id="L355">        return threadImpl.nativeThread();</span>
+    }
+
+    /**
+     * Perform pre-execution tasks once the native thread is running, but we
+     * have not yet called the Ruby code for the thread.
+     */
+    public void beforeStart() {
+<span class="fc" id="L363">    }</span>
+
+    /**
+     * Dispose of the current thread by tidying up connections to other stuff
+     */
+    public void dispose() {
+<span class="pc bpc" id="L369" title="1 of 2 branches missed.">        if (disposed) return;</span>
+        
+<span class="fc" id="L371">        synchronized (this) {</span>
+<span class="pc bpc" id="L372" title="1 of 2 branches missed.">            if (disposed) return;</span>
+            
+<span class="fc" id="L374">            disposed = true;</span>
+
+            // remove from parent thread group
+<span class="fc" id="L377">            threadGroup.remove(this);</span>
+
+            // unlock all locked locks
+<span class="fc" id="L380">            unlockAll();</span>
+
+            // mark thread as DEAD
+<span class="fc" id="L383">            beDead();</span>
+<span class="pc" id="L384">        }</span>
+
+        // unregister from runtime's ThreadService
+<span class="fc" id="L387">        getRuntime().getThreadService().unregisterThread(this);</span>
+<span class="fc" id="L388">    }</span>
+   
+    public static RubyClass createThreadClass(Ruby runtime) {
+        // FIXME: In order for Thread to play well with the standard 'new' behavior,
+        // it must provide an allocator that can create empty object instances which
+        // initialize then fills with appropriate data.
+<span class="fc" id="L394">        RubyClass threadClass = runtime.defineClass(&quot;Thread&quot;, runtime.getObject(), ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);</span>
+<span class="fc" id="L395">        runtime.setThread(threadClass);</span>
+
+<span class="fc" id="L397">        threadClass.setClassIndex(ClassIndex.THREAD);</span>
+<span class="fc" id="L398">        threadClass.setReifiedClass(RubyThread.class);</span>
+
+<span class="fc" id="L400">        threadClass.defineAnnotatedMethods(RubyThread.class);</span>
+
+<span class="fc" id="L402">        RubyThread rubyThread = new RubyThread(runtime, threadClass);</span>
+        // TODO: need to isolate the &quot;current&quot; thread from class creation
+<span class="fc" id="L404">        rubyThread.threadImpl = new NativeThread(rubyThread, Thread.currentThread());</span>
+<span class="fc" id="L405">        runtime.getThreadService().setMainThread(Thread.currentThread(), rubyThread);</span>
+        
+        // set to default thread group
+<span class="fc" id="L408">        runtime.getDefaultThreadGroup().addDirectly(rubyThread);</span>
+        
+<span class="fc" id="L410">        threadClass.setMarshal(ObjectMarshal.NOT_MARSHALABLE_MARSHAL);</span>
+        
+        // set up Thread::Backtrace::Location class
+<span class="fc" id="L413">        RubyClass backtrace = threadClass.defineClassUnder(&quot;Backtrace&quot;, runtime.getObject(), ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);</span>
+<span class="fc" id="L414">        RubyClass location = backtrace.defineClassUnder(&quot;Location&quot;, runtime.getObject(), ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);</span>
+
+<span class="fc" id="L416">        location.defineAnnotatedMethods(Location.class);</span>
+
+<span class="fc" id="L418">        runtime.setLocation(location);</span>
+        
+<span class="fc" id="L420">        return threadClass;</span>
+    }
+    
+    public static class Location extends RubyObject {
+        public Location(Ruby runtime, RubyClass klass, RubyStackTraceElement element) {
+<span class="nc" id="L425">            super(runtime, klass);</span>
+<span class="nc" id="L426">            this.element = element;</span>
+<span class="nc" id="L427">        }</span>
+        
+        @JRubyMethod
+        public IRubyObject absolute_path(ThreadContext context) {
+<span class="nc" id="L431">            return context.runtime.newString(element.getFileName());</span>
+        }
+        
+        @JRubyMethod
+        public IRubyObject base_label(ThreadContext context) {
+<span class="nc" id="L436">            return context.runtime.newString(element.getMethodName());</span>
+        }
+        
+        @JRubyMethod
+        public IRubyObject inspect(ThreadContext context) {
+<span class="nc" id="L441">            return to_s(context).inspect();</span>
+        }
+        
+        @JRubyMethod
+        public IRubyObject label(ThreadContext context) {
+<span class="nc" id="L446">            return context.runtime.newString(element.getMethodName());</span>
+        }
+        
+        @JRubyMethod
+        public IRubyObject lineno(ThreadContext context) {
+<span class="nc" id="L451">            return context.runtime.newFixnum(element.getLineNumber());</span>
+        }
+        
+        @JRubyMethod
+        public IRubyObject path(ThreadContext context) {
+<span class="nc" id="L456">            return context.runtime.newString(element.getFileName());</span>
+        }
+        
+        @JRubyMethod
+        public IRubyObject to_s(ThreadContext context) {
+<span class="nc" id="L461">            return context.runtime.newString(element.mriStyleString());</span>
+        }
+
+        public static IRubyObject newLocationArray(Ruby runtime, RubyStackTraceElement[] elements) {
+<span class="nc" id="L465">            RubyArray ary = runtime.newArray(elements.length);</span>
+
+<span class="nc bnc" id="L467" title="All 2 branches missed.">            for (RubyStackTraceElement element : elements) {</span>
+<span class="nc" id="L468">                ary.append(new RubyThread.Location(runtime, runtime.getLocation(), element));</span>
+            }
+
+<span class="nc" id="L471">            return ary;</span>
+        }
+        
+        private final RubyStackTraceElement element;
+    }
+
+    /**
+     * &lt;code&gt;Thread.new&lt;/code&gt;
+     * &lt;p&gt;
+     * Thread.new( &lt;i&gt;[ arg ]*&lt;/i&gt; ) {| args | block } -&gt; aThread
+     * &lt;p&gt;
+     * Creates a new thread to execute the instructions given in block, and
+     * begins running it. Any arguments passed to Thread.new are passed into the
+     * block.
+     * &lt;pre&gt;
+     * x = Thread.new { sleep .1; print &quot;x&quot;; print &quot;y&quot;; print &quot;z&quot; }
+     * a = Thread.new { print &quot;a&quot;; print &quot;b&quot;; sleep .2; print &quot;c&quot; }
+     * x.join # Let the threads finish before
+     * a.join # main thread exits...
+     * &lt;/pre&gt;
+     * &lt;i&gt;produces:&lt;/i&gt; abxyzc
+     */
+    @JRubyMethod(name = {&quot;new&quot;, &quot;fork&quot;}, rest = true, meta = true)
+    public static IRubyObject newInstance(IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="fc" id="L495">        return startThread(recv, args, true, block);</span>
+    }
+
+    /**
+     * Basically the same as Thread.new . However, if class Thread is
+     * subclassed, then calling start in that subclass will not invoke the
+     * subclass's initialize method.
+     */
+    public static RubyThread start(IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="nc" id="L504">        return start19(recv, args, block);</span>
+    }
+    
+    @JRubyMethod(rest = true, name = &quot;start&quot;, meta = true)
+    public static RubyThread start19(IRubyObject recv, IRubyObject[] args, Block block) {
+<span class="fc" id="L509">        Ruby runtime = recv.getRuntime();</span>
+        // The error message may appear incongruous here, due to the difference
+        // between JRuby's Thread model and MRI's.
+        // We mimic MRI's message in the name of compatibility.
+<span class="fc bfc" id="L513" title="All 2 branches covered.">        if (! block.isGiven()) throw runtime.newArgumentError(&quot;tried to create Proc object without a block&quot;);</span>
+<span class="fc" id="L514">        return startThread(recv, args, false, block);</span>
+    }
+    
+    public static RubyThread adopt(IRubyObject recv, Thread t) {
+<span class="fc" id="L518">        return adoptThread(recv, t, Block.NULL_BLOCK);</span>
+    }
+
+    private static RubyThread adoptThread(final IRubyObject recv, Thread t, Block block) {
+<span class="fc" id="L522">        final Ruby runtime = recv.getRuntime();</span>
+<span class="fc" id="L523">        final RubyThread rubyThread = new RubyThread(runtime, (RubyClass) recv);</span>
+        
+<span class="fc" id="L525">        rubyThread.threadImpl = new NativeThread(rubyThread, t);</span>
+<span class="fc" id="L526">        ThreadContext context = runtime.getThreadService().registerNewThread(rubyThread);</span>
+<span class="fc" id="L527">        runtime.getThreadService().associateThread(t, rubyThread);</span>
+        
+<span class="fc" id="L529">        context.preAdoptThread();</span>
+        
+        // set to default thread group
+<span class="fc" id="L532">        runtime.getDefaultThreadGroup().addDirectly(rubyThread);</span>
+        
+<span class="fc" id="L534">        return rubyThread;</span>
+    }
+    
+    @JRubyMethod(rest = true, visibility = PRIVATE)
+    public IRubyObject initialize(ThreadContext context, IRubyObject[] args, Block block) {
+<span class="fc" id="L539">        Ruby runtime = getRuntime();</span>
+<span class="fc bfc" id="L540" title="All 2 branches covered.">        if (!block.isGiven()) throw runtime.newThreadError(&quot;must be called with a block&quot;);</span>
+<span class="fc bfc" id="L541" title="All 2 branches covered.">        if (threadImpl != null) throw runtime.newThreadError(&quot;already initialized thread&quot;);</span>
+
+<span class="fc" id="L543">        RubyRunnable runnable = new RubyRunnable(this, args, block);</span>
+        
+<span class="fc" id="L545">        return startWith(runnable);</span>
+    }
+
+    private IRubyObject startWith(Runnable runnable) throws RaiseException, OutOfMemoryError {
+<span class="fc" id="L549">        Ruby runtime = getRuntime();</span>
+<span class="fc" id="L550">        ThreadContext context = runtime.getCurrentContext();</span>
+        
+        try {
+<span class="fc" id="L553">            Thread thread = new Thread(runnable);</span>
+<span class="fc" id="L554">            thread.setDaemon(true);</span>
+<span class="fc" id="L555">            thread.setName(&quot;Ruby-&quot; + runtime.getRuntimeNumber() + &quot;-&quot; + thread.getName() + &quot;: &quot; + context.getFile() + &quot;:&quot; + (context.getLine() + 1));</span>
+<span class="fc" id="L556">            threadImpl = new NativeThread(this, thread);</span>
+
+<span class="fc" id="L558">            addToCorrectThreadGroup(context);</span>
+
+            // JRUBY-2380, associate thread early so it shows up in Thread.list right away, in case it doesn't run immediately
+<span class="fc" id="L561">            runtime.getThreadService().associateThread(thread, this);</span>
+
+<span class="fc" id="L563">            threadImpl.start();</span>
+
+            // We yield here to hopefully permit the target thread to schedule
+            // MRI immediately schedules it, so this is close but not exact
+<span class="fc" id="L567">            Thread.yield();</span>
+        
+<span class="fc" id="L569">            return this;</span>
+<span class="nc" id="L570">        } catch (OutOfMemoryError oome) {</span>
+<span class="nc bnc" id="L571" title="All 2 branches missed.">            if (oome.getMessage().equals(&quot;unable to create new native thread&quot;)) {</span>
+<span class="nc" id="L572">                throw runtime.newThreadError(oome.getMessage());</span>
+            }
+<span class="nc" id="L574">            throw oome;</span>
+<span class="nc" id="L575">        } catch (SecurityException ex) {</span>
+<span class="nc" id="L576">          throw runtime.newThreadError(ex.getMessage());</span>
+        }
+    }
+    
+    private static RubyThread startThread(final IRubyObject recv, final IRubyObject[] args, boolean callInit, Block block) {
+<span class="fc" id="L581">        RubyThread rubyThread = new RubyThread(recv.getRuntime(), (RubyClass) recv);</span>
+        
+<span class="fc bfc" id="L583" title="All 2 branches covered.">        if (callInit) {</span>
+<span class="fc" id="L584">            rubyThread.callInit(args, block);</span>
+        } else {
+            // for Thread::start, which does not call the subclass's initialize
+<span class="fc" id="L587">            rubyThread.initialize(recv.getRuntime().getCurrentContext(), args, block);</span>
+        }
+        
+<span class="fc" id="L590">        return rubyThread;</span>
+    }
+    
+    public synchronized void cleanTerminate(IRubyObject result) {
+<span class="fc" id="L594">        finalResult = result;</span>
+<span class="fc" id="L595">    }</span>
+
+    public synchronized void beDead() {
+<span class="fc" id="L598">        status.set(Status.DEAD);</span>
+<span class="fc" id="L599">    }</span>
+
+    public void pollThreadEvents() {
+<span class="fc" id="L602">        pollThreadEvents(getRuntime().getCurrentContext());</span>
+<span class="fc" id="L603">    }</span>
+
+    // CHECK_INTS
+    public void pollThreadEvents(ThreadContext context) {
+<span class="fc bfc" id="L607" title="All 2 branches covered.">        if (anyInterrupted()) {</span>
+<span class="fc" id="L608">            executeInterrupts(context, true);</span>
+        }
+<span class="fc" id="L610">    }</span>
+
+    // RUBY_VM_INTERRUPTED_ANY
+    private boolean anyInterrupted() {
+<span class="pc bpc" id="L614" title="1 of 4 branches missed.">        return Thread.interrupted() || (interruptFlag &amp; ~interruptMask) != 0;</span>
+    }
+    
+    private static void throwThreadKill() {
+<span class="fc" id="L618">        throw new ThreadKill();</span>
+    }
+
+    @JRubyMethod(meta = true)
+    public static IRubyObject handle_interrupt(ThreadContext context, IRubyObject self, IRubyObject _mask, Block block) {
+<span class="nc" id="L623">        Ruby runtime = context.runtime;</span>
+
+<span class="nc bnc" id="L625" title="All 2 branches missed.">        if (!block.isGiven()) {</span>
+<span class="nc" id="L626">            throw runtime.newArgumentError(&quot;block is needed&quot;);</span>
+        }
+
+<span class="nc" id="L629">        RubyHash mask = (RubyHash)TypeConverter.convertToTypeWithCheck(_mask, runtime.getHash(), &quot;to_hash&quot;);</span>
+
+<span class="nc" id="L631">        mask.visitAll(new RubyHash.Visitor() {</span>
+            @Override
+            public void visit(IRubyObject key, IRubyObject value) {
+<span class="nc bnc" id="L634" title="All 2 branches missed.">                if (value instanceof RubySymbol) {</span>
+<span class="nc" id="L635">                    RubySymbol sym = (RubySymbol)value;</span>
+<span class="nc" id="L636">                    String symString = sym.toString();</span>
+<span class="nc bnc" id="L637" title="All 6 branches missed.">                    if (!symString.equals(&quot;immediate&quot;) &amp;&amp; !symString.equals(&quot;on_blocking&quot;) &amp;&amp; !symString.equals(&quot;never&quot;)) {</span>
+<span class="nc" id="L638">                        throw key.getRuntime().newArgumentError(&quot;unknown mask signature&quot;);</span>
+                    }
+                }
+<span class="nc" id="L641">            }</span>
+        });
+
+<span class="nc" id="L644">        RubyThread th = context.getThread();</span>
+<span class="nc" id="L645">        th.interruptMaskStack.add(mask);</span>
+<span class="nc bnc" id="L646" title="All 2 branches missed.">        if (th.pendingInterruptQueue.isEmpty()) {</span>
+<span class="nc" id="L647">            th.pendingInterruptQueueChecked = false;</span>
+<span class="nc" id="L648">            th.setInterrupt();</span>
+        }
+
+        try {
+<span class="nc" id="L652">            return block.call(context);</span>
+        } finally {
+<span class="nc" id="L654">            th.interruptMaskStack.remove(th.interruptMaskStack.size() - 1);</span>
+<span class="nc" id="L655">            th.setInterrupt();</span>
+
+<span class="nc" id="L657">            th.pollThreadEvents(context);</span>
+        }
+    }
+
+    @JRubyMethod(name = &quot;pending_interrupt?&quot;, meta = true, optional = 1)
+    public static IRubyObject pending_interrupt_p(ThreadContext context, IRubyObject self, IRubyObject[] args) {
+<span class="nc" id="L663">        return context.getThread().pending_interrupt_p(context, args);</span>
+    }
+
+    @JRubyMethod(name = &quot;pending_interrupt?&quot;, optional = 1)
+    public IRubyObject pending_interrupt_p(ThreadContext context, IRubyObject[] args) {
+<span class="nc bnc" id="L668" title="All 2 branches missed.">        if (pendingInterruptQueue.isEmpty()) {</span>
+<span class="nc" id="L669">            return context.runtime.getFalse();</span>
+        } else {
+<span class="nc bnc" id="L671" title="All 2 branches missed.">            if (args.length == 1) {</span>
+<span class="nc" id="L672">                IRubyObject err = args[0];</span>
+<span class="nc bnc" id="L673" title="All 2 branches missed.">                if (!(err instanceof RubyModule)) {</span>
+<span class="nc" id="L674">                    throw context.runtime.newTypeError(&quot;class or module required for rescue clause&quot;);</span>
+                }
+<span class="nc bnc" id="L676" title="All 2 branches missed.">                if (pendingInterruptInclude(err)) {</span>
+<span class="nc" id="L677">                    return context.runtime.getTrue();</span>
+                } else {
+<span class="nc" id="L679">                    return context.runtime.getFalse();</span>
+                }
+            } else {
+<span class="nc" id="L682">                return context.runtime.getTrue();</span>
+            }
+        }
+    }
+
+    private boolean pendingInterruptInclude(IRubyObject err) {
+<span class="nc" id="L688">        Iterator&lt;IRubyObject&gt; iterator = pendingInterruptQueue.iterator();</span>
+<span class="nc bnc" id="L689" title="All 2 branches missed.">        while (iterator.hasNext()) {</span>
+<span class="nc" id="L690">            IRubyObject e = iterator.next();</span>
+<span class="nc bnc" id="L691" title="All 2 branches missed.">            if (((RubyModule)e).op_le(err).isTrue()) {</span>
+<span class="nc" id="L692">                return true;</span>
+            }
+<span class="nc" id="L694">        }</span>
+<span class="nc" id="L695">        return false;</span>
+    }
+
+    /**
+     * Returns the status of the global ``abort on exception'' condition. The
+     * default is false. When set to true, will cause all threads to abort (the
+     * process will exit(0)) if an exception is raised in any thread. See also
+     * Thread.abort_on_exception= .
+     */
+    @JRubyMethod(name = &quot;abort_on_exception&quot;, meta = true)
+    public static RubyBoolean abort_on_exception_x(IRubyObject recv) {
+<span class="fc" id="L706">        Ruby runtime = recv.getRuntime();</span>
+<span class="fc bfc" id="L707" title="All 2 branches covered.">        return runtime.isGlobalAbortOnExceptionEnabled() ? runtime.getTrue() : runtime.getFalse();</span>
+    }
+
+    @JRubyMethod(name = &quot;abort_on_exception=&quot;, required = 1, meta = true)
+    public static IRubyObject abort_on_exception_set_x(IRubyObject recv, IRubyObject value) {
+<span class="fc" id="L712">        recv.getRuntime().setGlobalAbortOnExceptionEnabled(value.isTrue());</span>
+<span class="fc" id="L713">        return value;</span>
+    }
+
+    @JRubyMethod(meta = true)
+    public static RubyThread current(IRubyObject recv) {
+<span class="fc" id="L718">        return recv.getRuntime().getCurrentContext().getThread();</span>
+    }
+
+    @JRubyMethod(meta = true)
+    public static RubyThread main(IRubyObject recv) {
+<span class="fc" id="L723">        return recv.getRuntime().getThreadService().getMainThread();</span>
+    }
+
+    @JRubyMethod(meta = true)
+    public static IRubyObject pass(IRubyObject recv) {
+<span class="fc" id="L728">        Ruby runtime = recv.getRuntime();</span>
+<span class="fc" id="L729">        ThreadService ts = runtime.getThreadService();</span>
+<span class="fc" id="L730">        boolean critical = ts.getCritical();</span>
+        
+<span class="fc" id="L732">        ts.setCritical(false);</span>
+
+        try {
+<span class="fc" id="L735">            Thread.yield();</span>
+        } finally {
+<span class="pc" id="L737">            ts.setCritical(critical);</span>
+<span class="fc" id="L738">        }</span>
+        
+<span class="fc" id="L740">        return recv.getRuntime().getNil();</span>
+    }
+
+    @JRubyMethod(meta = true)
+    public static IRubyObject exclusive(ThreadContext context, IRubyObject recv, Block block) {
+<span class="fc" id="L745">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L746">        ThreadService ts = runtime.getThreadService();</span>
+<span class="fc" id="L747">        boolean critical = ts.getCritical();</span>
+
+<span class="fc" id="L749">        ts.setCritical(true);</span>
+
+        try {
+<span class="fc" id="L752">            return block.yieldSpecific(context);</span>
+        } finally {
+<span class="pc" id="L754">            ts.setCritical(critical);</span>
+        }
+    }
+
+    @JRubyMethod(meta = true)
+    public static RubyArray list(IRubyObject recv) {
+<span class="fc" id="L760">        RubyThread[] activeThreads = recv.getRuntime().getThreadService().getActiveRubyThreads();</span>
+        
+<span class="fc" id="L762">        return recv.getRuntime().newArrayNoCopy(activeThreads);</span>
+    }
+
+    private void addToCorrectThreadGroup(ThreadContext context) {
+        // JRUBY-3568, inherit threadgroup or use default
+<span class="fc" id="L767">        IRubyObject group = context.getThread().group();</span>
+<span class="pc bpc" id="L768" title="1 of 2 branches missed.">        if (!group.isNil()) {</span>
+<span class="fc" id="L769">            ((RubyThreadGroup) group).addDirectly(this);</span>
+        } else {
+<span class="nc" id="L771">            context.runtime.getDefaultThreadGroup().addDirectly(this);</span>
+        }
+<span class="fc" id="L773">    }</span>
+    
+    private IRubyObject getSymbolKey(IRubyObject originalKey) {
+<span class="fc bfc" id="L776" title="All 2 branches covered.">        if (originalKey instanceof RubySymbol) {</span>
+<span class="fc" id="L777">            return originalKey;</span>
+<span class="pc bpc" id="L778" title="1 of 2 branches missed.">        } else if (originalKey instanceof RubyString) {</span>
+<span class="fc" id="L779">            return getRuntime().newSymbol(originalKey.asJavaString());</span>
+<span class="nc bnc" id="L780" title="All 2 branches missed.">        } else if (originalKey instanceof RubyFixnum) {</span>
+<span class="nc" id="L781">            getRuntime().getWarnings().warn(ID.FIXNUMS_NOT_SYMBOLS, &quot;Do not use Fixnums as Symbols&quot;);</span>
+<span class="nc" id="L782">            throw getRuntime().newArgumentError(originalKey + &quot; is not a symbol&quot;);</span>
+        } else {
+<span class="nc" id="L784">            throw getRuntime().newTypeError(originalKey + &quot; is not a symbol&quot;);</span>
+        }
+    }
+    
+    private synchronized Map&lt;IRubyObject, IRubyObject&gt; getThreadLocals() {
+<span class="fc bfc" id="L789" title="All 2 branches covered.">        if (threadLocalVariables == null) {</span>
+<span class="fc" id="L790">            threadLocalVariables = new HashMap&lt;IRubyObject, IRubyObject&gt;();</span>
+        }
+<span class="fc" id="L792">        return threadLocalVariables;</span>
+    }
+
+    private void clearThreadLocals() {
+<span class="nc" id="L796">        threadLocalVariables = null;</span>
+<span class="nc" id="L797">    }</span>
+
+    @Override
+    public final Map&lt;Object, IRubyObject&gt; getContextVariables() {
+<span class="nc" id="L801">        return contextVariables;</span>
+    }
+
+    public boolean isAlive(){
+<span class="pc bpc" id="L805" title="1 of 4 branches missed.">        return threadImpl.isAlive() &amp;&amp; status.get() != Status.ABORTING;</span>
+    }
+
+    @JRubyMethod(name = &quot;[]&quot;, required = 1)
+    public IRubyObject op_aref(IRubyObject key) {
+        IRubyObject value;
+<span class="fc bfc" id="L811" title="All 2 branches covered.">        if ((value = getThreadLocals().get(getSymbolKey(key))) != null) {</span>
+<span class="fc" id="L812">            return value;</span>
+        }
+<span class="fc" id="L814">        return getRuntime().getNil();</span>
+    }
+
+    @JRubyMethod(name = &quot;[]=&quot;, required = 2)
+    public IRubyObject op_aset(IRubyObject key, IRubyObject value) {
+<span class="fc" id="L819">        key = getSymbolKey(key);</span>
+        
+<span class="fc" id="L821">        getThreadLocals().put(key, value);</span>
+<span class="fc" id="L822">        return value;</span>
+    }
+
+    @JRubyMethod
+    public RubyBoolean abort_on_exception() {
+<span class="fc bfc" id="L827" title="All 2 branches covered.">        return abortOnException ? getRuntime().getTrue() : getRuntime().getFalse();</span>
+    }
+
+    @JRubyMethod(name = &quot;abort_on_exception=&quot;, required = 1)
+    public IRubyObject abort_on_exception_set(IRubyObject val) {
+<span class="fc" id="L832">        abortOnException = val.isTrue();</span>
+<span class="fc" id="L833">        return val;</span>
+    }
+
+    @JRubyMethod(name = &quot;alive?&quot;)
+    public RubyBoolean alive_p() {
+<span class="fc bfc" id="L838" title="All 2 branches covered.">        return isAlive() ? getRuntime().getTrue() : getRuntime().getFalse();</span>
+    }
+
+    @Deprecated
+    public IRubyObject join(IRubyObject[] args) {
+<span class="fc" id="L843">        return join(getRuntime().getCurrentContext(), args);</span>
+    }
+
+    @JRubyMethod(optional = 1)
+    public IRubyObject join(ThreadContext context, IRubyObject[] args) {
+<span class="fc" id="L848">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L849">        long timeoutMillis = Long.MAX_VALUE;</span>
+
+<span class="pc bpc" id="L851" title="1 of 4 branches missed.">        if (args.length &gt; 0 &amp;&amp; !args[0].isNil()) {</span>
+<span class="pc bpc" id="L852" title="1 of 2 branches missed.">            if (args.length &gt; 1) {</span>
+<span class="nc" id="L853">                throw runtime.newArgumentError(args.length, 1);</span>
+            }
+            // MRI behavior: value given in seconds; converted to Float; less
+            // than or equal to zero returns immediately; returns nil
+<span class="fc" id="L857">            timeoutMillis = (long)(1000.0D * args[0].convertToFloat().getValue());</span>
+<span class="fc bfc" id="L858" title="All 2 branches covered.">            if (timeoutMillis &lt;= 0) {</span>
+            // TODO: not sure that we should skip calling join() altogether.
+            // Thread.join() has some implications for Java Memory Model, etc.
+<span class="fc bfc" id="L861" title="All 2 branches covered.">                if (threadImpl.isAlive()) {</span>
+<span class="fc" id="L862">                    return context.nil;</span>
+                } else {   
+<span class="fc" id="L864">                   return this;</span>
+                }
+            }
+        }
+
+<span class="pc bpc" id="L869" title="1 of 2 branches missed.">        if (isCurrent()) {</span>
+<span class="nc" id="L870">            throw runtime.newThreadError(&quot;thread &quot; + identityString() + &quot; tried to join itself&quot;);</span>
+        }
+
+<span class="fc" id="L873">        RubyThread currentThread = context.getThread();</span>
+
+        try {
+<span class="pc bpc" id="L876" title="1 of 2 branches missed.">            if (runtime.getThreadService().getCritical()) {</span>
+                // If the target thread is sleeping or stopped, wake it
+<span class="nc" id="L878">                synchronized (this) {</span>
+<span class="nc" id="L879">                    notify();</span>
+<span class="nc" id="L880">                }</span>
+                
+                // interrupt the target thread in case it's blocking or waiting
+                // WARNING: We no longer interrupt the target thread, since this usually means
+                // interrupting IO and with NIO that means the channel is no longer usable.
+                // We either need a new way to handle waking a target thread that's waiting
+                // on IO, or we need to accept that we can't wake such threads and must wait
+                // for them to complete their operation.
+                //threadImpl.interrupt();
+            }
+
+<span class="fc" id="L891">            final long timeToWait = Math.min(timeoutMillis, 200);</span>
+
+            // We need this loop in order to be able to &quot;unblock&quot; the
+            // join call without actually calling interrupt.
+<span class="fc" id="L895">            long start = System.currentTimeMillis();</span>
+            while(true) {
+<span class="fc" id="L897">                currentThread.pollThreadEvents();</span>
+<span class="fc" id="L898">                threadImpl.join(timeToWait);</span>
+<span class="fc bfc" id="L899" title="All 2 branches covered.">                if (!threadImpl.isAlive()) {</span>
+<span class="fc" id="L900">                    break;</span>
+                }
+<span class="fc bfc" id="L902" title="All 2 branches covered.">                if (System.currentTimeMillis() - start &gt; timeoutMillis) {</span>
+<span class="fc" id="L903">                    break;</span>
+                }
+            }
+<span class="nc" id="L906">        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L907">            ie.printStackTrace();</span>
+<span class="nc bnc" id="L908" title="All 2 branches missed.">            assert false : ie;</span>
+<span class="nc" id="L909">        } catch (ExecutionException ie) {</span>
+<span class="nc" id="L910">            ie.printStackTrace();</span>
+<span class="nc bnc" id="L911" title="All 2 branches missed.">            assert false : ie;</span>
+<span class="pc" id="L912">        }</span>
+
+<span class="fc bfc" id="L914" title="All 2 branches covered.">        if (exitingException != null) {</span>
+            // Set $! in the current thread before exiting
+<span class="fc" id="L916">            runtime.getGlobalVariables().set(&quot;$!&quot;, (IRubyObject)exitingException.getException());</span>
+<span class="fc" id="L917">            throw exitingException;</span>
+
+        }
+
+        // check events before leaving
+<span class="fc" id="L922">        currentThread.pollThreadEvents(context);</span>
+
+<span class="fc bfc" id="L924" title="All 2 branches covered.">        if (threadImpl.isAlive()) {</span>
+<span class="fc" id="L925">            return context.nil;</span>
+        } else {
+<span class="fc" id="L927">            return this;</span>
+        }
+    }
+
+    @JRubyMethod
+    public IRubyObject value() {
+<span class="fc" id="L933">        join(new IRubyObject[0]);</span>
+<span class="fc" id="L934">        synchronized (this) {</span>
+<span class="fc" id="L935">            return finalResult;</span>
+<span class="nc" id="L936">        }</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject group() {
+<span class="fc bfc" id="L941" title="All 2 branches covered.">        if (threadGroup == null) {</span>
+<span class="fc" id="L942">            return getRuntime().getNil();</span>
+        }
+        
+<span class="fc" id="L945">        return threadGroup;</span>
+    }
+    
+    void setThreadGroup(RubyThreadGroup rubyThreadGroup) {
+<span class="fc" id="L949">        threadGroup = rubyThreadGroup;</span>
+<span class="fc" id="L950">    }</span>
+    
+    @JRubyMethod
+    @Override
+    public synchronized IRubyObject inspect() {
+        // FIXME: There's some code duplication here with RubyObject#inspect
+<span class="fc" id="L956">        StringBuilder part = new StringBuilder();</span>
+<span class="fc" id="L957">        String cname = getMetaClass().getRealClass().getName();</span>
+<span class="fc" id="L958">        part.append(&quot;#&lt;&quot;).append(cname).append(&quot;:&quot;);</span>
+<span class="fc" id="L959">        part.append(identityString());</span>
+<span class="fc" id="L960">        part.append(' ');</span>
+<span class="fc" id="L961">        part.append(status.toString().toLowerCase());</span>
+<span class="fc" id="L962">        part.append('&gt;');</span>
+<span class="fc" id="L963">        return getRuntime().newString(part.toString());</span>
+    }
+
+    @JRubyMethod(name = &quot;key?&quot;, required = 1)
+    public RubyBoolean key_p(IRubyObject key) {
+<span class="fc" id="L968">        key = getSymbolKey(key);</span>
+        
+<span class="fc" id="L970">        return getRuntime().newBoolean(getThreadLocals().containsKey(key));</span>
+    }
+
+    @JRubyMethod
+    public RubyArray keys() {
+<span class="fc" id="L975">        IRubyObject[] keys = new IRubyObject[getThreadLocals().size()];</span>
+        
+<span class="fc" id="L977">        return RubyArray.newArrayNoCopy(getRuntime(), getThreadLocals().keySet().toArray(keys));</span>
+    }
+    
+    @JRubyMethod(meta = true)
+    public static IRubyObject stop(ThreadContext context, IRubyObject receiver) {
+<span class="fc" id="L982">        RubyThread rubyThread = context.getThread();</span>
+        
+<span class="fc" id="L984">        synchronized (rubyThread) {</span>
+<span class="fc" id="L985">            rubyThread.pollThreadEvents(context);</span>
+            try {
+                // attempt to decriticalize all if we're the critical thread
+<span class="fc" id="L988">                receiver.getRuntime().getThreadService().setCritical(false);</span>
+
+<span class="fc" id="L990">                rubyThread.status.set(Status.SLEEP);</span>
+<span class="fc" id="L991">                rubyThread.wait();</span>
+<span class="nc" id="L992">            } catch (InterruptedException ie) {</span>
+<span class="nc" id="L993">                rubyThread.pollThreadEvents(context);</span>
+<span class="nc" id="L994">                rubyThread.status.set(Status.RUN);</span>
+<span class="fc" id="L995">            }</span>
+<span class="pc" id="L996">        }</span>
+        
+<span class="fc" id="L998">        return receiver.getRuntime().getNil();</span>
+    }
+    
+    @JRubyMethod(required = 1, meta = true)
+    public static IRubyObject kill(IRubyObject receiver, IRubyObject rubyThread, Block block) {
+<span class="pc bpc" id="L1003" title="1 of 2 branches missed.">        if (!(rubyThread instanceof RubyThread)) throw receiver.getRuntime().newTypeError(rubyThread, receiver.getRuntime().getThread());</span>
+<span class="fc" id="L1004">        return ((RubyThread)rubyThread).kill();</span>
+    }
+    
+    @JRubyMethod(meta = true)
+    public static IRubyObject exit(IRubyObject receiver, Block block) {
+<span class="nc" id="L1009">        RubyThread rubyThread = receiver.getRuntime().getThreadService().getCurrentContext().getThread();</span>
+
+<span class="nc" id="L1011">        return rubyThread.kill();</span>
+    }
+
+    @JRubyMethod(name = &quot;stop?&quot;)
+    public RubyBoolean stop_p() {
+        // not valid for &quot;dead&quot; state
+<span class="fc bfc" id="L1017" title="All 4 branches covered.">        return getRuntime().newBoolean(status.get() == Status.SLEEP || status.get() == Status.DEAD);</span>
+    }
+    
+    @JRubyMethod
+    public synchronized RubyThread wakeup() {
+<span class="fc bfc" id="L1022" title="All 4 branches covered.">        if(!threadImpl.isAlive() &amp;&amp; status.get() == Status.DEAD) {</span>
+<span class="fc" id="L1023">            throw getRuntime().newThreadError(&quot;killed thread&quot;);</span>
+        }
+
+<span class="fc" id="L1026">        status.set(Status.RUN);</span>
+<span class="fc" id="L1027">        interrupt();</span>
+
+<span class="fc" id="L1029">        return this;</span>
+    }
+    
+    @JRubyMethod
+    public RubyFixnum priority() {
+<span class="fc" id="L1034">        return RubyFixnum.newFixnum(getRuntime(), javaPriorityToRubyPriority(threadImpl.getPriority()));</span>
+    }
+
+    @JRubyMethod(name = &quot;priority=&quot;, required = 1)
+    public IRubyObject priority_set(IRubyObject priority) {
+<span class="fc" id="L1039">        int iPriority = RubyNumeric.fix2int(priority);</span>
+        
+<span class="pc bpc" id="L1041" title="1 of 2 branches missed.">        if (iPriority &lt; RUBY_MIN_THREAD_PRIORITY) {</span>
+<span class="nc" id="L1042">            iPriority = RUBY_MIN_THREAD_PRIORITY;</span>
+<span class="pc bpc" id="L1043" title="1 of 2 branches missed.">        } else if (iPriority &gt; RUBY_MAX_THREAD_PRIORITY) {</span>
+<span class="nc" id="L1044">            iPriority = RUBY_MAX_THREAD_PRIORITY;</span>
+        }
+
+<span class="pc bpc" id="L1047" title="1 of 2 branches missed.">        if (threadImpl.isAlive()) {</span>
+<span class="fc" id="L1048">            int jPriority = rubyPriorityToJavaPriority(iPriority);</span>
+<span class="pc bpc" id="L1049" title="1 of 2 branches missed.">            if (jPriority &lt; Thread.MIN_PRIORITY) {</span>
+<span class="nc" id="L1050">                jPriority = Thread.MIN_PRIORITY;</span>
+<span class="pc bpc" id="L1051" title="1 of 2 branches missed.">            } else if (jPriority &gt; Thread.MAX_PRIORITY) {</span>
+<span class="nc" id="L1052">                jPriority = Thread.MAX_PRIORITY;</span>
+            }
+<span class="fc" id="L1054">            threadImpl.setPriority(jPriority);</span>
+        }
+
+<span class="fc" id="L1057">        return RubyFixnum.newFixnum(getRuntime(), iPriority);</span>
+    }
+     
+    /* helper methods to translate java thread priority (1-10) to
+     * Ruby thread priority (-3 to 3) using a quadratic polynoimal ant its
+     * inverse
+     * i.e., j = r^2/18 + 3*r/2 + 5
+     *       r = 3/2*sqrt(8*j + 41) - 27/2
+     */
+    private int javaPriorityToRubyPriority(int javaPriority) {
+        double d; // intermediate value
+<span class="fc" id="L1068">        d = 1.5 * Math.sqrt(8.0*javaPriority + 41) - 13.5;</span>
+<span class="fc" id="L1069">        return Math.round((float) d);</span>
+    }
+    
+    private int rubyPriorityToJavaPriority(int rubyPriority) {
+        double d;
+<span class="pc bpc" id="L1074" title="1 of 2 branches missed.">        if (rubyPriority &lt; RUBY_MIN_THREAD_PRIORITY) {</span>
+<span class="nc" id="L1075">            rubyPriority = RUBY_MIN_THREAD_PRIORITY;</span>
+<span class="pc bpc" id="L1076" title="1 of 2 branches missed.">        } else if (rubyPriority &gt; RUBY_MAX_THREAD_PRIORITY) {</span>
+<span class="nc" id="L1077">            rubyPriority = RUBY_MAX_THREAD_PRIORITY;</span>
+        }
+<span class="fc" id="L1079">        d = Math.pow(rubyPriority, 2.0)/18.0 + 1.5 * rubyPriority + 5;</span>
+<span class="fc" id="L1080">        return Math.round((float) d);</span>
+    }
+    
+    /**
+     * Simplified utility method for just raising an existing exception in this
+     * thread.
+     * 
+     * @param exception the exception to raise
+     * @return this thread
+     */
+    public IRubyObject raise(IRubyObject exception) {
+<span class="fc" id="L1091">        return raise(new IRubyObject[]{exception}, Block.NULL_BLOCK);</span>
+    }
+
+    @JRubyMethod(optional = 3)
+    public IRubyObject raise(IRubyObject[] args, Block block) {
+<span class="fc" id="L1096">        Ruby runtime = getRuntime();</span>
+
+<span class="fc" id="L1098">        RubyThread currentThread = runtime.getCurrentContext().getThread();</span>
+
+<span class="fc" id="L1100">        return genericRaise(runtime, args, currentThread);</span>
+    }
+
+    public IRubyObject genericRaise(Ruby runtime, IRubyObject[] args, RubyThread currentThread) {
+<span class="fc bfc" id="L1104" title="All 2 branches covered.">        if (!isAlive()) return runtime.getNil();</span>
+
+<span class="pc bpc" id="L1106" title="1 of 2 branches missed.">        if (currentThread == this) {</span>
+<span class="nc" id="L1107">            RubyKernel.raise(runtime.getCurrentContext(), runtime.getKernel(), args, Block.NULL_BLOCK);</span>
+            // should not reach here
+        }
+
+<span class="fc" id="L1111">        IRubyObject exception = prepareRaiseException(runtime, args, Block.NULL_BLOCK);</span>
+
+<span class="fc" id="L1113">        pendingInterruptEnqueue(exception);</span>
+<span class="fc" id="L1114">        interrupt();</span>
+
+<span class="fc" id="L1116">        return runtime.getNil();</span>
+    }
+
+    private IRubyObject prepareRaiseException(Ruby runtime, IRubyObject[] args, Block block) {
+<span class="fc bfc" id="L1120" title="All 2 branches covered.">        if(args.length == 0) {</span>
+<span class="fc" id="L1121">            IRubyObject lastException = errorInfo;</span>
+<span class="pc bpc" id="L1122" title="1 of 2 branches missed.">            if(lastException.isNil()) {</span>
+<span class="fc" id="L1123">                return new RaiseException(runtime, runtime.getRuntimeError(), &quot;&quot;, false).getException();</span>
+            } 
+<span class="nc" id="L1125">            return lastException;</span>
+        }
+
+        IRubyObject exception;
+<span class="fc" id="L1129">        ThreadContext context = getRuntime().getCurrentContext();</span>
+        
+<span class="fc bfc" id="L1131" title="All 2 branches covered.">        if(args.length == 1) {</span>
+<span class="pc bpc" id="L1132" title="1 of 2 branches missed.">            if(args[0] instanceof RubyString) {</span>
+<span class="nc" id="L1133">                return runtime.getRuntimeError().newInstance(context, args, block);</span>
+<span class="pc bpc" id="L1134" title="1 of 2 branches missed.">            } else if (args[0] instanceof ConcreteJavaProxy) {</span>
+<span class="nc" id="L1135">                return args[0];</span>
+<span class="pc bpc" id="L1136" title="1 of 2 branches missed.">            } else if(!args[0].respondsTo(&quot;exception&quot;)) {</span>
+<span class="nc" id="L1137">                return runtime.newTypeError(&quot;exception class/object expected&quot;).getException();</span>
+            }
+<span class="fc" id="L1139">            exception = args[0].callMethod(context, &quot;exception&quot;);</span>
+        } else {
+<span class="pc bpc" id="L1141" title="1 of 2 branches missed.">            if (!args[0].respondsTo(&quot;exception&quot;)) {</span>
+<span class="nc" id="L1142">                return runtime.newTypeError(&quot;exception class/object expected&quot;).getException();</span>
+            }
+            
+<span class="fc" id="L1145">            exception = args[0].callMethod(context, &quot;exception&quot;, args[1]);</span>
+        }
+        
+<span class="pc bpc" id="L1148" title="1 of 2 branches missed.">        if (!runtime.getException().isInstance(exception)) {</span>
+<span class="nc" id="L1149">            return runtime.newTypeError(&quot;exception object expected&quot;).getException();</span>
+        }
+        
+<span class="pc bpc" id="L1152" title="1 of 2 branches missed.">        if (args.length == 3) {</span>
+<span class="nc" id="L1153">            ((RubyException) exception).set_backtrace(args[2]);</span>
+        }
+        
+<span class="fc" id="L1156">        return exception;</span>
+    }
+    
+    @JRubyMethod
+    public synchronized IRubyObject run() {
+<span class="fc" id="L1161">        return wakeup();</span>
+    }
+
+    /**
+     * Sleep the current thread for millis, waking up on any thread interrupts.
+     *
+     * We can never be sure if a wait will finish because of a Java &quot;spurious wakeup&quot;.  So if we
+     * explicitly wakeup and we wait less than requested amount we will return false.  We will
+     * return true if we sleep right amount or less than right amount via spurious wakeup.
+     *
+     * @param millis Number of milliseconds to sleep. Zero sleeps forever.
+     */
+    public boolean sleep(long millis) throws InterruptedException {
+<span class="pc bpc" id="L1174" title="3 of 4 branches missed.">        assert this == getRuntime().getCurrentContext().getThread();</span>
+<span class="fc" id="L1175">        Semaphore sem = new Semaphore(1);</span>
+<span class="fc" id="L1176">        sem.acquire();</span>
+<span class="pc bpc" id="L1177" title="1 of 2 branches missed.">        if (executeTask(getContext(), new Object[]{sem, millis, 0}, SLEEP_TASK2) &gt;= millis) {</span>
+<span class="fc" id="L1178">            return true;</span>
+        } else {
+<span class="nc" id="L1180">            return false;</span>
+        }
+    }
+
+    public IRubyObject status() {
+<span class="nc" id="L1185">        return status(getRuntime());</span>
+    }
+    @JRubyMethod
+    public IRubyObject status(ThreadContext context) {
+<span class="fc" id="L1189">        return status(context.runtime);</span>
+    }
+    
+    private synchronized IRubyObject status(Ruby runtime) {
+<span class="fc bfc" id="L1193" title="All 2 branches covered.">        if (threadImpl.isAlive()) {</span>
+<span class="fc" id="L1194">            return runtime.getThreadStatus(status.get());</span>
+<span class="fc bfc" id="L1195" title="All 2 branches covered.">        } else if (exitingException != null) {</span>
+<span class="fc" id="L1196">            return runtime.getNil();</span>
+        } else {
+<span class="fc" id="L1198">            return runtime.getFalse();</span>
+        }
+    }
+
+    @Deprecated
+    public static interface BlockingTask {
+        public void run() throws InterruptedException;
+        public void wakeup();
+    }
+
+    public interface Unblocker&lt;Data&gt; {
+        public void wakeup(RubyThread thread, Data self);
+    }
+
+    public interface Task&lt;Data, Return&gt; extends Unblocker&lt;Data&gt; {
+        public Return run(ThreadContext context, Data data) throws InterruptedException;
+        public void wakeup(RubyThread thread, Data data);
+    }
+
+    public static final class SleepTask implements BlockingTask {
+        private final Object object;
+        private final long millis;
+        private final int nanos;
+
+<span class="fc" id="L1222">        public SleepTask(Object object, long millis, int nanos) {</span>
+<span class="fc" id="L1223">            this.object = object;</span>
+<span class="fc" id="L1224">            this.millis = millis;</span>
+<span class="fc" id="L1225">            this.nanos = nanos;</span>
+<span class="fc" id="L1226">        }</span>
+
+        @Override
+        public void run() throws InterruptedException {
+<span class="fc" id="L1230">            synchronized (object) {</span>
+<span class="fc" id="L1231">                object.wait(millis, nanos);</span>
+<span class="pc" id="L1232">            }</span>
+<span class="fc" id="L1233">        }</span>
+
+        @Override
+        public void wakeup() {
+<span class="nc" id="L1237">            synchronized (object) {</span>
+<span class="nc" id="L1238">                object.notify();</span>
+<span class="nc" id="L1239">            }</span>
+<span class="nc" id="L1240">        }</span>
+    }
+
+<span class="fc" id="L1243">    private static final class SleepTask2 implements Task&lt;Object[], Long&gt; {</span>
+        @Override
+        public Long run(ThreadContext context, Object[] data) throws InterruptedException {
+<span class="fc" id="L1246">            long millis = (Long)data[1];</span>
+<span class="fc" id="L1247">            int nanos = (Integer)data[2];</span>
+
+<span class="fc" id="L1249">            long start = System.currentTimeMillis();</span>
+            // TODO: nano handling?
+<span class="fc bfc" id="L1251" title="All 2 branches covered.">            if (millis == 0) {</span>
+<span class="fc" id="L1252">                ((Semaphore) data[0]).acquire();</span>
+            } else {
+<span class="fc" id="L1254">                ((Semaphore) data[0]).tryAcquire(millis, TimeUnit.MILLISECONDS);</span>
+            }
+<span class="fc" id="L1256">            return System.currentTimeMillis() - start;</span>
+        }
+
+        @Override
+        public void wakeup(RubyThread thread, Object[] data) {
+<span class="fc" id="L1261">            ((Semaphore)data[0]).release();</span>
+<span class="fc" id="L1262">        }</span>
+    }
+
+<span class="fc" id="L1265">    private static final Task&lt;Object[], Long&gt; SLEEP_TASK2 = new SleepTask2();</span>
+
+    @Deprecated
+    public void executeBlockingTask(BlockingTask task) throws InterruptedException {
+        try {
+<span class="fc" id="L1270">            this.currentBlockingTask = task;</span>
+<span class="fc" id="L1271">            enterSleep();</span>
+<span class="fc" id="L1272">            pollThreadEvents();</span>
+<span class="fc" id="L1273">            task.run();</span>
+        } finally {
+<span class="pc" id="L1275">            exitSleep();</span>
+<span class="pc" id="L1276">            currentBlockingTask = null;</span>
+<span class="pc" id="L1277">            pollThreadEvents();</span>
+<span class="fc" id="L1278">        }</span>
+<span class="fc" id="L1279">    }</span>
+
+    public &lt;Data, Return&gt; Return executeTask(ThreadContext context, Data data, Task&lt;Data, Return&gt; task) throws InterruptedException {
+        try {
+<span class="fc" id="L1283">            this.unblockFunc = task;</span>
+<span class="fc" id="L1284">            this.unblockArg = data;</span>
+
+            // check for interrupt before going into blocking call
+<span class="fc" id="L1287">            pollThreadEvents(context);</span>
+
+<span class="fc" id="L1289">            enterSleep();</span>
+
+<span class="fc" id="L1291">            return task.run(context, data);</span>
+        } finally {
+<span class="pc" id="L1293">            exitSleep();</span>
+<span class="pc" id="L1294">            this.unblockFunc = null;</span>
+<span class="pc" id="L1295">            this.unblockArg = null;</span>
+<span class="pc" id="L1296">            pollThreadEvents(context);</span>
+        }
+    }
+
+    public void enterSleep() {
+<span class="fc" id="L1301">        status.set(Status.SLEEP);</span>
+<span class="fc" id="L1302">    }</span>
+
+    public void exitSleep() {
+<span class="fc" id="L1305">        status.set(Status.RUN);</span>
+<span class="fc" id="L1306">    }</span>
+
+    @JRubyMethod(name = {&quot;kill&quot;, &quot;exit&quot;, &quot;terminate&quot;})
+    public IRubyObject kill() {
+<span class="fc" id="L1310">        Ruby runtime = getRuntime();</span>
+        // need to reexamine this
+<span class="fc" id="L1312">        RubyThread currentThread = runtime.getCurrentContext().getThread();</span>
+
+<span class="fc bfc" id="L1314" title="All 2 branches covered.">        if (currentThread == runtime.getThreadService().getMainThread()) {</span>
+            // rb_exit to hard exit process...not quite right for us
+        }
+<span class="fc" id="L1317">        return genericKill(runtime, currentThread);</span>
+    }
+
+    private IRubyObject genericKill(Ruby runtime, RubyThread currentThread) {
+        // If the killee thread is the same as the killer thread, just die
+<span class="pc bpc" id="L1322" title="1 of 2 branches missed.">        if (currentThread == this) throwThreadKill();</span>
+
+<span class="fc" id="L1324">        pendingInterruptEnqueue(RubyFixnum.zero(runtime));</span>
+<span class="fc" id="L1325">        interrupt();</span>
+
+<span class="fc" id="L1327">        return this;</span>
+    }
+
+    private void pendingInterruptEnqueue(IRubyObject v) {
+<span class="fc" id="L1331">        pendingInterruptQueue.add(v);</span>
+<span class="fc" id="L1332">        pendingInterruptQueueChecked = false;</span>
+<span class="fc" id="L1333">    }</span>
+    
+    /**
+     * Used for finalizers that need to kill a Ruby thread. Finalizers run in
+     * a VM thread to which we do not want to attach a ThreadContext and within
+     * which we do not want to check for Ruby thread events. This mechanism goes
+     * directly to mail delivery, bypassing all Ruby Thread-related steps.
+     */
+    public void dieFromFinalizer() {
+<span class="fc" id="L1342">        genericKill(getRuntime(), null);</span>
+<span class="fc" id="L1343">    }</span>
+
+    private static void debug(RubyThread thread, String message) {
+        if (DEBUG) LOG.debug(Thread.currentThread() + &quot;(&quot; + thread.status + &quot;): &quot; + message);
+<span class="nc" id="L1347">    }</span>
+    
+    @JRubyMethod
+    public IRubyObject safe_level() {
+<span class="nc" id="L1351">        throw getRuntime().newNotImplementedError(&quot;Thread-specific SAFE levels are not supported&quot;);</span>
+    }
+
+    public IRubyObject backtrace(ThreadContext context) {
+<span class="nc" id="L1355">        return backtrace20(context, NULL_ARRAY);</span>
+    }
+
+    @JRubyMethod(name = &quot;backtrace&quot;, optional = 2)
+    public IRubyObject backtrace20(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L1360">        ThreadContext myContext = getContext();</span>
+
+        // context can be nil if we have not started or GC has claimed our context
+<span class="nc bnc" id="L1363" title="All 2 branches missed.">        if (myContext == null) return context.nil;</span>
+
+<span class="nc" id="L1365">        Thread nativeThread = getNativeThread();</span>
+
+        // nativeThread can be null if the thread has terminated and GC has claimed it
+<span class="nc bnc" id="L1368" title="All 2 branches missed.">        if (nativeThread == null) return context.nil;</span>
+        
+<span class="nc" id="L1370">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L1371">        Integer[] ll = RubyKernel.levelAndLengthFromArgs(runtime, args, 0);</span>
+<span class="nc" id="L1372">        Integer level = ll[0], length = ll[1];</span>
+        
+<span class="nc" id="L1374">        return myContext.createCallerBacktrace(level, length, getNativeThread().getStackTrace());</span>
+    }
+    
+    @JRubyMethod(optional = 2)
+    public IRubyObject backtrace_locations(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L1379">        ThreadContext myContext = getContext();</span>
+
+<span class="nc bnc" id="L1381" title="All 2 branches missed.">        if (myContext == null) return context.nil;</span>
+        
+<span class="nc" id="L1383">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L1384">        Integer[] ll = RubyKernel.levelAndLengthFromArgs(runtime, args, 0);</span>
+<span class="nc" id="L1385">        Integer level = ll[0], length = ll[1];</span>
+        
+<span class="nc" id="L1387">        return myContext.createCallerLocations(level, length, getNativeThread().getStackTrace());</span>
+    }
+
+    public StackTraceElement[] javaBacktrace() {
+<span class="nc bnc" id="L1391" title="All 2 branches missed.">        if (threadImpl instanceof NativeThread) {</span>
+<span class="nc" id="L1392">            return ((NativeThread)threadImpl).getThread().getStackTrace();</span>
+        }
+
+        // Future-based threads can't get a Java trace
+<span class="nc" id="L1396">        return new StackTraceElement[0];</span>
+    }
+
+    private boolean isCurrent() {
+<span class="fc" id="L1400">        return threadImpl.isCurrent();</span>
+    }
+
+    public void exceptionRaised(RaiseException exception) {
+<span class="pc bpc" id="L1404" title="3 of 4 branches missed.">        assert isCurrent();</span>
+
+<span class="fc" id="L1406">        RubyException rubyException = exception.getException();</span>
+<span class="fc" id="L1407">        Ruby runtime = rubyException.getRuntime();</span>
+<span class="pc bpc" id="L1408" title="1 of 2 branches missed.">        if (runtime.getSystemExit().isInstance(rubyException)) {</span>
+<span class="nc" id="L1409">            runtime.getThreadService().getMainThread().raise(new IRubyObject[] {rubyException}, Block.NULL_BLOCK);</span>
+<span class="fc bfc" id="L1410" title="All 2 branches covered.">        } else if (abortOnException(runtime)) {</span>
+<span class="fc" id="L1411">            runtime.getThreadService().getMainThread().raise(new IRubyObject[] {rubyException}, Block.NULL_BLOCK);</span>
+<span class="fc" id="L1412">            return;</span>
+<span class="pc bpc" id="L1413" title="1 of 2 branches missed.">        } else if (runtime.getDebug().isTrue()) {</span>
+<span class="nc" id="L1414">            runtime.printError(exception.getException());</span>
+        }
+<span class="fc" id="L1416">        exitingException = exception;</span>
+<span class="fc" id="L1417">    }</span>
+
+    /**
+     * For handling all non-Ruby exceptions bubbling out of threads
+     * @param exception
+     */
+    @SuppressWarnings(&quot;deprecation&quot;)
+    public void exceptionRaised(Throwable exception) {
+<span class="fc bfc" id="L1425" title="All 2 branches covered.">        if (exception instanceof RaiseException) {</span>
+<span class="fc" id="L1426">            exceptionRaised((RaiseException)exception);</span>
+<span class="fc" id="L1427">            return;</span>
+        }
+
+<span class="pc bpc" id="L1430" title="3 of 4 branches missed.">        assert isCurrent();</span>
+
+<span class="fc" id="L1432">        Ruby runtime = getRuntime();</span>
+<span class="pc bpc" id="L1433" title="3 of 4 branches missed.">        if (abortOnException(runtime) &amp;&amp; exception instanceof Error) {</span>
+            // re-propagate on main thread
+<span class="nc" id="L1435">            runtime.getThreadService().getMainThread().getNativeThread().stop(exception);</span>
+        } else {
+            // just rethrow on this thread, let system handlers report it
+<span class="nc" id="L1438">            Helpers.throwException(exception);</span>
+        }
+<span class="nc" id="L1440">    }</span>
+
+    private boolean abortOnException(Ruby runtime) {
+<span class="fc bfc" id="L1443" title="All 4 branches covered.">        return (runtime.isGlobalAbortOnExceptionEnabled() || abortOnException);</span>
+    }
+
+    public static RubyThread mainThread(IRubyObject receiver) {
+<span class="nc" id="L1447">        return receiver.getRuntime().getThreadService().getMainThread();</span>
+    }
+
+    /**
+     * Perform an interruptible select operation on the given channel and fptr,
+     * waiting for the requested operations or the given timeout.
+     *
+     * @param io the RubyIO that contains the channel, for managing blocked threads list.
+     * @param ops the operations to wait for, from {@see java.nio.channels.SelectionKey}.
+     * @return true if the IO's channel became ready for the requested operations, false if
+     *         it was not selectable.
+     */
+    public boolean select(RubyIO io, int ops) {
+<span class="nc" id="L1460">        return select(io.getChannel(), io.getOpenFile(), ops);</span>
+    }
+
+    /**
+     * Perform an interruptible select operation on the given channel and fptr,
+     * waiting for the requested operations or the given timeout.
+     *
+     * @param io the RubyIO that contains the channel, for managing blocked threads list.
+     * @param ops the operations to wait for, from {@see java.nio.channels.SelectionKey}.
+     * @param timeout a timeout in ms to limit the select. Less than zero selects forever,
+     *                zero selects and returns ready channels or nothing immediately, and
+     *                greater than zero selects for at most that many ms.
+     * @return true if the IO's channel became ready for the requested operations, false if
+     *         it timed out or was not selectable.
+     */
+    public boolean select(RubyIO io, int ops, long timeout) {
+<span class="nc" id="L1476">        return select(io.getChannel(), io.getOpenFile(), ops, timeout);</span>
+    }
+
+    /**
+     * Perform an interruptible select operation on the given channel and fptr,
+     * waiting for the requested operations.
+     *
+     * @param channel the channel to perform a select against. If this is not
+     *                a selectable channel, then this method will just return true.
+     * @param fptr the fptr that contains the channel, for managing blocked threads list.
+     * @param ops the operations to wait for, from {@see java.nio.channels.SelectionKey}.
+     * @return true if the channel became ready for the requested operations, false if
+     *         it was not selectable.
+     */
+    public boolean select(Channel channel, OpenFile fptr, int ops) {
+<span class="fc" id="L1491">        return select(channel, fptr, ops, -1);</span>
+    }
+
+    /**
+     * Perform an interruptible select operation on the given channel and fptr,
+     * waiting for the requested operations.
+     *
+     * @param channel the channel to perform a select against. If this is not
+     *                a selectable channel, then this method will just return true.
+     * @param io the RubyIO that contains the channel, for managing blocked threads list.
+     * @param ops the operations to wait for, from {@see java.nio.channels.SelectionKey}.
+     * @return true if the channel became ready for the requested operations, false if
+     *         it was not selectable.
+     */
+    public boolean select(Channel channel, RubyIO io, int ops) {
+<span class="nc bnc" id="L1506" title="All 2 branches missed.">        return select(channel, io == null ? null : io.getOpenFile(), ops, -1);</span>
+    }
+
+    /**
+     * Perform an interruptible select operation on the given channel and fptr,
+     * waiting for the requested operations or the given timeout.
+     *
+     * @param channel the channel to perform a select against. If this is not
+     *                a selectable channel, then this method will just return true.
+     * @param io the RubyIO that contains the channel, for managing blocked threads list.
+     * @param ops the operations to wait for, from {@see java.nio.channels.SelectionKey}.
+     * @param timeout a timeout in ms to limit the select. Less than zero selects forever,
+     *                zero selects and returns ready channels or nothing immediately, and
+     *                greater than zero selects for at most that many ms.
+     * @return true if the channel became ready for the requested operations, false if
+     *         it timed out or was not selectable.
+     */
+    public boolean select(Channel channel, RubyIO io, int ops, long timeout) {
+<span class="nc bnc" id="L1524" title="All 2 branches missed.">        return select(channel, io == null ? null : io.getOpenFile(), ops, timeout);</span>
+    }
+
+    /**
+     * Perform an interruptible select operation on the given channel and fptr,
+     * waiting for the requested operations or the given timeout.
+     * 
+     * @param channel the channel to perform a select against. If this is not
+     *                a selectable channel, then this method will just return true.
+     * @param fptr the fptr that contains the channel, for managing blocked threads list.
+     * @param ops the operations to wait for, from {@see java.nio.channels.SelectionKey}.
+     * @param timeout a timeout in ms to limit the select. Less than zero selects forever,
+     *                zero selects and returns ready channels or nothing immediately, and
+     *                greater than zero selects for at most that many ms.
+     * @return true if the channel became ready for the requested operations, false if
+     *         it timed out or was not selectable.
+     */
+    public boolean select(Channel channel, OpenFile fptr, int ops, long timeout) {
+        // Use selectables but only if they're not associated with a file (which has odd select semantics)
+<span class="pc bpc" id="L1543" title="2 of 6 branches missed.">        if (channel instanceof SelectableChannel &amp;&amp; (fptr == null || !fptr.fd().isNativeFile)) {</span>
+<span class="fc" id="L1544">            SelectableChannel selectable = (SelectableChannel)channel;</span>
+            
+<span class="fc" id="L1546">            synchronized (selectable.blockingLock()) {</span>
+<span class="fc" id="L1547">                boolean oldBlocking = selectable.isBlocking();</span>
+
+<span class="fc" id="L1549">                SelectionKey key = null;</span>
+                try {
+<span class="fc" id="L1551">                    selectable.configureBlocking(false);</span>
+
+<span class="pc bpc" id="L1553" title="1 of 2 branches missed.">                    if (fptr != null) fptr.addBlockingThread(this);</span>
+<span class="fc" id="L1554">                    currentSelector = getRuntime().getSelectorPool().get(selectable.provider());</span>
+
+<span class="fc" id="L1556">                    key = selectable.register(currentSelector, ops);</span>
+
+<span class="fc" id="L1558">                    beforeBlockingCall();</span>
+                    int result;
+<span class="pc bpc" id="L1560" title="1 of 2 branches missed.">                    if (timeout &lt; 0) {</span>
+<span class="fc" id="L1561">                        result = currentSelector.select();</span>
+<span class="nc bnc" id="L1562" title="All 2 branches missed.">                    } else if (timeout == 0) {</span>
+<span class="nc" id="L1563">                        result = currentSelector.selectNow();</span>
+                    } else {
+<span class="nc" id="L1565">                        result = currentSelector.select(timeout);</span>
+                    }
+
+                    // check for thread events, in case we've been woken up to die
+<span class="fc" id="L1569">                    pollThreadEvents();</span>
+
+<span class="pc bpc" id="L1571" title="1 of 2 branches missed.">                    if (result == 1) {</span>
+<span class="fc" id="L1572">                        Set&lt;SelectionKey&gt; keySet = currentSelector.selectedKeys();</span>
+
+<span class="pc bpc" id="L1574" title="1 of 2 branches missed.">                        if (keySet.iterator().next() == key) {</span>
+<span class="fc" id="L1575">                            return true;</span>
+                        }
+                    }
+
+<span class="nc" id="L1579">                    return false;</span>
+<span class="nc" id="L1580">                } catch (IOException ioe) {</span>
+<span class="nc" id="L1581">                    throw getRuntime().newIOErrorFromException(ioe);</span>
+                } finally {
+                    // Note: I don't like ignoring these exceptions, but it's
+                    // unclear how likely they are to happen or what damage we
+                    // might do by ignoring them. Note that the pieces are separate
+                    // so that we can ensure one failing does not affect the others
+                    // running.
+
+                    // clean up the key in the selector
+<span class="nc" id="L1590">                    try {</span>
+<span class="pc bpc" id="L1591" title="5 of 6 branches missed.">                        if (key != null) key.cancel();</span>
+<span class="pc bpc" id="L1592" title="5 of 6 branches missed.">                        if (currentSelector != null) currentSelector.selectNow();</span>
+<span class="nc" id="L1593">                    } catch (Exception e) {</span>
+                        // ignore
+<span class="pc" id="L1595">                    }</span>
+
+                    // shut down and null out the selector
+                    try {
+<span class="pc bpc" id="L1599" title="5 of 6 branches missed.">                        if (currentSelector != null) {</span>
+<span class="pc" id="L1600">                            getRuntime().getSelectorPool().put(currentSelector);</span>
+                        }
+<span class="nc" id="L1602">                    } catch (Exception e) {</span>
+                        // ignore
+                    } finally {
+<span class="pc" id="L1605">                        currentSelector = null;</span>
+<span class="pc" id="L1606">                    }</span>
+
+                    // remove this thread as a blocker against the given IO
+<span class="pc bpc" id="L1609" title="5 of 6 branches missed.">                    if (fptr != null) fptr.removeBlockingThread(this);</span>
+
+                    // go back to previous blocking state on the selectable
+                    try {
+<span class="pc" id="L1613">                        selectable.configureBlocking(oldBlocking);</span>
+<span class="nc" id="L1614">                    } catch (Exception e) {</span>
+                        // ignore
+<span class="pc" id="L1616">                    }</span>
+
+                    // clear thread state from blocking call
+<span class="pc" id="L1619">                    afterBlockingCall();</span>
+                }
+<span class="nc" id="L1621">            }</span>
+        } else {
+            // can't select, just have to do a blocking call
+<span class="fc" id="L1624">            return true;</span>
+        }
+    }
+
+    @SuppressWarnings(&quot;deprecated&quot;)
+    public synchronized void interrupt() {
+<span class="fc" id="L1630">        setInterrupt();</span>
+
+<span class="fc" id="L1632">        Selector activeSelector = currentSelector;</span>
+<span class="pc bpc" id="L1633" title="1 of 2 branches missed.">        if (activeSelector != null) {</span>
+<span class="nc" id="L1634">            activeSelector.wakeup();</span>
+        }
+<span class="fc" id="L1636">        BlockingIO.Condition iowait = blockingIO;</span>
+<span class="pc bpc" id="L1637" title="1 of 2 branches missed.">        if (iowait != null) {</span>
+<span class="nc" id="L1638">            iowait.cancel();</span>
+        }
+
+<span class="fc" id="L1641">        Unblocker task = this.unblockFunc;</span>
+<span class="fc bfc" id="L1642" title="All 2 branches covered.">        if (task != null) {</span>
+<span class="fc" id="L1643">            task.wakeup(this, unblockArg);</span>
+        }
+
+        // deprecated
+        {
+<span class="fc" id="L1648">            BlockingTask t = currentBlockingTask;</span>
+<span class="pc bpc" id="L1649" title="1 of 2 branches missed.">            if (t != null) {</span>
+<span class="nc" id="L1650">                t.wakeup();</span>
+            }
+        }
+
+        // If this thread is sleeping or stopped, wake it
+<span class="fc" id="L1655">        notify();</span>
+<span class="fc" id="L1656">    }</span>
+
+    public void setInterrupt() {
+        while (true) {
+<span class="fc" id="L1660">            int oldFlag = interruptFlag;</span>
+<span class="pc bpc" id="L1661" title="1 of 2 branches missed.">            if (INTERRUPT_FLAG_UPDATER.compareAndSet(this, oldFlag, oldFlag | PENDING_INTERRUPT_MASK)) {</span>
+<span class="fc" id="L1662">                return;</span>
+            }
+<span class="nc" id="L1664">        }</span>
+    }
+
+<span class="fc" id="L1667">    private volatile BlockingIO.Condition blockingIO = null;</span>
+    public boolean waitForIO(ThreadContext context, RubyIO io, int ops) {
+<span class="nc" id="L1669">        Channel channel = io.getChannel();</span>
+
+<span class="nc bnc" id="L1671" title="All 2 branches missed.">        if (!(channel instanceof SelectableChannel)) {</span>
+<span class="nc" id="L1672">            return true;</span>
+        }
+        try {
+<span class="nc" id="L1675">            io.addBlockingThread(this);</span>
+<span class="nc" id="L1676">            blockingIO = BlockingIO.newCondition(channel, ops);</span>
+<span class="nc" id="L1677">            boolean ready = blockingIO.await();</span>
+            
+            // check for thread events, in case we've been woken up to die
+<span class="nc" id="L1680">            pollThreadEvents();</span>
+<span class="nc" id="L1681">            return ready;</span>
+<span class="nc" id="L1682">        } catch (IOException ioe) {</span>
+<span class="nc" id="L1683">            throw context.runtime.newRuntimeError(&quot;Error with selector: &quot; + ioe);</span>
+<span class="nc" id="L1684">        } catch (InterruptedException ex) {</span>
+            // FIXME: not correct exception
+<span class="nc" id="L1686">            throw context.runtime.newRuntimeError(&quot;Interrupted&quot;);</span>
+        } finally {
+<span class="nc" id="L1688">            blockingIO = null;</span>
+<span class="nc" id="L1689">            io.removeBlockingThread(this);</span>
+        }
+    }
+    public void beforeBlockingCall() {
+<span class="fc" id="L1693">        pollThreadEvents();</span>
+<span class="fc" id="L1694">        enterSleep();</span>
+<span class="fc" id="L1695">    }</span>
+    
+    public void afterBlockingCall() {
+<span class="fc" id="L1698">        exitSleep();</span>
+<span class="fc" id="L1699">        pollThreadEvents();</span>
+<span class="fc" id="L1700">    }</span>
+
+    private void receivedAnException(ThreadContext context, IRubyObject exception) {
+<span class="nc" id="L1703">        RubyModule kernelModule = getRuntime().getKernel();</span>
+<span class="nc" id="L1704">        debug(this, &quot;before propagating exception&quot;);</span>
+<span class="nc" id="L1705">        kernelModule.callMethod(context, &quot;raise&quot;, exception);</span>
+<span class="nc" id="L1706">    }</span>
+
+    public boolean wait_timeout(IRubyObject o, Double timeout) throws InterruptedException {
+<span class="pc bpc" id="L1709" title="1 of 2 branches missed.">        if ( timeout != null ) {</span>
+<span class="nc" id="L1710">            long delay_ns = (long)(timeout.doubleValue() * 1000000000.0);</span>
+<span class="nc" id="L1711">            long start_ns = System.nanoTime();</span>
+<span class="nc bnc" id="L1712" title="All 2 branches missed.">            if (delay_ns &gt; 0) {</span>
+<span class="nc" id="L1713">                long delay_ms = delay_ns / 1000000;</span>
+<span class="nc" id="L1714">                int delay_ns_remainder = (int)( delay_ns % 1000000 );</span>
+<span class="nc" id="L1715">                executeBlockingTask(new SleepTask(o, delay_ms, delay_ns_remainder));</span>
+            }
+<span class="nc" id="L1717">            long end_ns = System.nanoTime();</span>
+<span class="nc bnc" id="L1718" title="All 2 branches missed.">            return ( end_ns - start_ns ) &lt;= delay_ns;</span>
+        } else {
+<span class="fc" id="L1720">            executeBlockingTask(new SleepTask(o, 0, 0));</span>
+<span class="fc" id="L1721">            return true;</span>
+        }
+    }
+    
+    public RubyThreadGroup getThreadGroup() {
+<span class="fc" id="L1726">        return threadGroup;</span>
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+<span class="pc bpc" id="L1731" title="1 of 2 branches missed.">        if (obj == null) {</span>
+<span class="fc" id="L1732">            return false;</span>
+        }
+<span class="nc bnc" id="L1734" title="All 2 branches missed.">        if (getClass() != obj.getClass()) {</span>
+<span class="nc" id="L1735">            return false;</span>
+        }
+<span class="nc" id="L1737">        final RubyThread other = (RubyThread)obj;</span>
+<span class="nc bnc" id="L1738" title="All 6 branches missed.">        if (this.threadImpl != other.threadImpl &amp;&amp; (this.threadImpl == null || !this.threadImpl.equals(other.threadImpl))) {</span>
+<span class="nc" id="L1739">            return false;</span>
+        }
+<span class="nc" id="L1741">        return true;</span>
+    }
+
+    @Override
+    public int hashCode() {
+<span class="fc" id="L1746">        int hash = 3;</span>
+<span class="pc bpc" id="L1747" title="1 of 2 branches missed.">        hash = 97 * hash + (this.threadImpl != null ? this.threadImpl.hashCode() : 0);</span>
+<span class="fc" id="L1748">        return hash;</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="nc" id="L1753">        return threadImpl.toString();</span>
+    }
+    
+    /**
+     * Acquire the given lock, holding a reference to it for cleanup on thread
+     * termination.
+     * 
+     * @param lock the lock to acquire, released on thread termination
+     */
+    public void lock(Lock lock) {
+<span class="nc bnc" id="L1763" title="All 4 branches missed.">        assert Thread.currentThread() == getNativeThread();</span>
+<span class="nc" id="L1764">        lock.lock();</span>
+<span class="nc" id="L1765">        heldLocks.add(lock);</span>
+<span class="nc" id="L1766">    }</span>
+    
+    /**
+     * Acquire the given lock interruptibly, holding a reference to it for cleanup
+     * on thread termination.
+     * 
+     * @param lock the lock to acquire, released on thread termination
+     * @throws InterruptedException if the lock acquisition is interrupted
+     */
+    public void lockInterruptibly(Lock lock) throws InterruptedException {
+<span class="pc bpc" id="L1776" title="3 of 4 branches missed.">        assert Thread.currentThread() == getNativeThread();</span>
+<span class="fc" id="L1777">        lock.lockInterruptibly();</span>
+<span class="fc" id="L1778">        heldLocks.add(lock);</span>
+<span class="fc" id="L1779">    }</span>
+    
+    /**
+     * Try to acquire the given lock, adding it to a list of held locks for cleanup
+     * on thread termination if it is acquired. Return immediately if the lock
+     * cannot be acquired.
+     * 
+     * @param lock the lock to acquire, released on thread termination
+     */
+    public boolean tryLock(Lock lock) {
+<span class="pc bpc" id="L1789" title="3 of 4 branches missed.">        assert Thread.currentThread() == getNativeThread();</span>
+<span class="fc" id="L1790">        boolean locked = lock.tryLock();</span>
+<span class="fc bfc" id="L1791" title="All 2 branches covered.">        if (locked) {</span>
+<span class="fc" id="L1792">            heldLocks.add(lock);</span>
+        }
+<span class="fc" id="L1794">        return locked;</span>
+    }
+    
+    /**
+     * Release the given lock and remove it from the list of locks to be released
+     * on thread termination.
+     * 
+     * @param lock the lock to release and dereferences
+     */
+    public void unlock(Lock lock) {
+<span class="pc bpc" id="L1804" title="3 of 4 branches missed.">        assert Thread.currentThread() == getNativeThread();</span>
+<span class="fc" id="L1805">        lock.unlock();</span>
+<span class="fc" id="L1806">        heldLocks.remove(lock);</span>
+<span class="fc" id="L1807">    }</span>
+    
+    /**
+     * Release all locks held.
+     */
+    public void unlockAll() {
+<span class="pc bpc" id="L1813" title="3 of 4 branches missed.">        assert Thread.currentThread() == getNativeThread();</span>
+<span class="fc bfc" id="L1814" title="All 2 branches covered.">        for (Lock lock : heldLocks) {</span>
+<span class="fc" id="L1815">            lock.unlock();</span>
+<span class="fc" id="L1816">        }</span>
+<span class="fc" id="L1817">    }</span>
+
+    private String identityString() {
+<span class="fc" id="L1820">        return &quot;0x&quot; + Integer.toHexString(System.identityHashCode(this));</span>
+    }
+
+    /**
+     * This is intended to be used to raise exceptions in Ruby threads from non-
+     * Ruby threads like Timeout's thread.
+     *
+     * @param args Same args as for Thread#raise
+     */
+    @Deprecated
+    public void internalRaise(IRubyObject[] args) {
+<span class="nc" id="L1831">        Ruby runtime = getRuntime();</span>
+
+<span class="nc" id="L1833">        genericRaise(runtime, args, runtime.getCurrentContext().getThread());</span>
+<span class="nc" id="L1834">    }</span>
+
+    @Deprecated
+    public void receiveMail(ThreadService.Event event) {
+<span class="nc" id="L1838">    }</span>
+
+    @Deprecated
+    public void checkMail(ThreadContext context) {
+<span class="nc" id="L1842">    }</span>
+
+    @Deprecated
+    private volatile BlockingTask currentBlockingTask;
+
+    @Deprecated
+    public boolean selectForAccept(RubyIO io) {
+<span class="nc" id="L1849">        return select(io, SelectionKey.OP_ACCEPT);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

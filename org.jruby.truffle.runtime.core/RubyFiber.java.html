@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RubyFiber.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.truffle.runtime.core</a> &gt; <span class="el_source">RubyFiber.java</span></div><h1>RubyFiber.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2013, 2014 Oracle and/or its affiliates. All rights reserved. This
+ * code is released under a tri EPL/GPL/LGPL license. You can use it,
+ * redistribute it and/or modify it under the terms of the:
+ *
+ * Eclipse Public License version 1.0
+ * GNU General Public License version 2
+ * GNU Lesser General Public License version 2.1
+ */
+package org.jruby.truffle.runtime.core;
+
+import com.oracle.truffle.api.nodes.ControlFlowException;
+import org.jruby.truffle.nodes.RubyNode;
+import org.jruby.truffle.nodes.objects.Allocator;
+import org.jruby.truffle.runtime.RubyContext;
+import org.jruby.truffle.runtime.subsystems.FiberManager;
+import org.jruby.truffle.runtime.subsystems.ThreadManager;
+
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Represents the Ruby {@code Fiber} class. The current implementation uses Java threads and message
+ * passing. Note that the relationship between Java threads, Ruby threads and Ruby fibers is
+ * complex. A Java thread might be running a fiber that on difference resumptions is representing
+ * different Ruby threads. Take note of the lock contracts on {@link #waitForResume} and
+ * {@link #resume}.
+ */
+public class RubyFiber extends RubyBasicObject {
+
+    private interface FiberMessage {
+    }
+
+    private static class FiberResumeMessage implements FiberMessage {
+
+        private final RubyThread thread;
+        private final RubyFiber sendingFiber;
+        private final Object arg;
+
+<span class="nc" id="L41">        public FiberResumeMessage(RubyThread thread, RubyFiber sendingFiber, Object arg) {</span>
+<span class="nc" id="L42">            this.thread = thread;</span>
+<span class="nc" id="L43">            this.sendingFiber = sendingFiber;</span>
+<span class="nc" id="L44">            this.arg = arg;</span>
+<span class="nc" id="L45">        }</span>
+
+        public RubyThread getThread() {
+<span class="nc" id="L48">            return thread;</span>
+        }
+
+        public RubyFiber getSendingFiber() {
+<span class="nc" id="L52">            return sendingFiber;</span>
+        }
+
+        public Object getArg() {
+<span class="nc" id="L56">            return arg;</span>
+        }
+
+    }
+
+<span class="nc" id="L61">    private static class FiberExitMessage implements FiberMessage {</span>
+    }
+
+<span class="nc" id="L64">    public static class FiberExitException extends ControlFlowException {</span>
+
+        private static final long serialVersionUID = 1522270454305076317L;
+
+    }
+
+    private final FiberManager fiberManager;
+    private final ThreadManager threadManager;
+
+<span class="nc" id="L73">    private BlockingQueue&lt;FiberMessage&gt; messageQueue = new ArrayBlockingQueue&lt;&gt;(1);</span>
+<span class="nc" id="L74">    public RubyFiber lastResumedByFiber = null;</span>
+
+    public RubyFiber(RubyClass rubyClass, FiberManager fiberManager, ThreadManager threadManager) {
+<span class="nc" id="L77">        super(rubyClass);</span>
+<span class="nc" id="L78">        this.fiberManager = fiberManager;</span>
+<span class="nc" id="L79">        this.threadManager = threadManager;</span>
+<span class="nc" id="L80">    }</span>
+
+    public void initialize(RubyProc block) {
+<span class="nc" id="L83">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L85">        final RubyFiber finalFiber = this;</span>
+<span class="nc" id="L86">        final RubyProc finalBlock = block;</span>
+
+<span class="nc" id="L88">        new Thread(new Runnable() {</span>
+
+            @Override
+            public void run() {
+<span class="nc" id="L92">                fiberManager.registerFiber(finalFiber);</span>
+
+                try {
+                    try {
+<span class="nc" id="L96">                        final Object arg = finalFiber.waitForResume();</span>
+<span class="nc" id="L97">                        final Object result = finalBlock.rootCall(arg);</span>
+<span class="nc" id="L98">                        finalFiber.lastResumedByFiber.resume(finalFiber, result);</span>
+<span class="nc" id="L99">                    } catch (FiberExitException e) {</span>
+                        // Naturally exit the thread on catching this
+<span class="nc" id="L101">                    }</span>
+                } finally {
+<span class="nc" id="L103">                    fiberManager.unregisterFiber(finalFiber);</span>
+<span class="nc" id="L104">                }</span>
+<span class="nc" id="L105">            }</span>
+
+<span class="nc" id="L107">        }).start();</span>
+<span class="nc" id="L108">    }</span>
+
+    /**
+     * Send the Java thread that represents this fiber to sleep until it recieves a resume or exit
+     * message. On entry, assumes that the GIL is not held. On exit, holding the GIL.
+     */
+    public Object waitForResume() {
+<span class="nc" id="L115">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L117">        FiberMessage message = null;</span>
+
+        do {
+            try {
+                // TODO(cs) what is a suitable timeout?
+<span class="nc" id="L122">                message = messageQueue.poll(1, TimeUnit.SECONDS);</span>
+<span class="nc" id="L123">            } catch (InterruptedException e) {</span>
+                // Poll again
+<span class="nc" id="L125">            }</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">        } while (message == null);</span>
+
+<span class="nc bnc" id="L128" title="All 2 branches missed.">        if (message instanceof FiberExitMessage) {</span>
+<span class="nc" id="L129">            throw new FiberExitException();</span>
+        }
+
+<span class="nc" id="L132">        final FiberResumeMessage resumeMessage = (FiberResumeMessage) message;</span>
+
+<span class="nc" id="L134">        threadManager.enterGlobalLock(resumeMessage.getThread());</span>
+
+<span class="nc" id="L136">        fiberManager.setCurrentFiber(this);</span>
+
+<span class="nc" id="L138">        lastResumedByFiber = resumeMessage.getSendingFiber();</span>
+<span class="nc" id="L139">        return resumeMessage.getArg();</span>
+    }
+
+    /**
+     * Send a message to a fiber by posting into a message queue. Doesn't explicitly notify the Java
+     * thread (although the queue implementation may) and doesn't wait for the message to be
+     * received. On entry, assumes the the GIL is held. On exit, not holding the GIL.
+     */
+    public void resume(RubyFiber sendingFiber, Object... args) {
+<span class="nc" id="L148">        RubyNode.notDesignedForCompilation();</span>
+
+        Object arg;
+
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        if (args.length == 0) {</span>
+<span class="nc" id="L153">            arg = getContext().getCoreLibrary().getNilObject();</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        } else if (args.length == 1) {</span>
+<span class="nc" id="L155">            arg = args[0];</span>
+        } else {
+<span class="nc" id="L157">            arg = RubyArray.fromObjects(getContext().getCoreLibrary().getArrayClass(), args);</span>
+        }
+
+<span class="nc" id="L160">        final RubyThread runningThread = threadManager.leaveGlobalLock();</span>
+
+<span class="nc" id="L162">        messageQueue.add(new FiberResumeMessage(runningThread, sendingFiber, arg));</span>
+<span class="nc" id="L163">    }</span>
+
+    public void shutdown() {
+<span class="nc" id="L166">        RubyNode.notDesignedForCompilation();</span>
+
+<span class="nc" id="L168">        messageQueue.add(new FiberExitMessage());</span>
+<span class="nc" id="L169">    }</span>
+
+<span class="nc" id="L171">    public static class FiberAllocator implements Allocator {</span>
+
+        @Override
+        public RubyBasicObject allocate(RubyContext context, RubyClass rubyClass, RubyNode currentNode) {
+<span class="nc" id="L175">            return new RubyFiber(rubyClass, context.getFiberManager(), context.getThreadManager());</span>
+        }
+
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

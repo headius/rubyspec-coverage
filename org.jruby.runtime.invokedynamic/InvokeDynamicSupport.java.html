@@ -1,0 +1,1024 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>InvokeDynamicSupport.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime.invokedynamic</a> &gt; <span class="el_source">InvokeDynamicSupport.java</span></div><h1>InvokeDynamicSupport.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+
+package org.jruby.runtime.invokedynamic;
+
+import org.jruby.runtime.ivars.VariableAccessor;
+import com.headius.invokebinder.Binder;
+import java.lang.invoke.CallSite;
+import java.lang.invoke.ConstantCallSite;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodType;
+import java.lang.invoke.MutableCallSite;
+import java.lang.invoke.SwitchPoint;
+import java.math.BigInteger;
+import org.jcodings.Encoding;
+import org.jcodings.EncodingDB;
+import org.jruby.*;
+import org.jruby.ast.executable.AbstractScript;
+import org.jruby.exceptions.JumpException;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.runtime.Helpers;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.BlockBody;
+import org.jruby.runtime.CallType;
+import org.jruby.runtime.MethodIndex;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.callsite.CacheEntry;
+import org.jruby.util.ByteList;
+import org.jruby.util.RegexpOptions;
+import static org.jruby.util.CodegenUtils.*;
+
+import org.objectweb.asm.Handle;
+import org.objectweb.asm.Opcodes;
+
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+import static java.lang.invoke.MethodHandles.*;
+import static java.lang.invoke.MethodType.*;
+import org.jruby.internal.runtime.GlobalVariable;
+import org.jruby.runtime.ivars.FieldVariableAccessor;
+import org.jruby.runtime.opto.Invalidator;
+import org.jruby.util.JavaNameMangler;
+import org.jruby.util.cli.Options;
+
+@SuppressWarnings(&quot;deprecation&quot;)
+<span class="nc" id="L72">public class InvokeDynamicSupport {</span>
+<span class="nc" id="L73">    private static final Logger LOG = LoggerFactory.getLogger(&quot;InvokeDynamicSupport&quot;);</span>
+    
+    ////////////////////////////////////////////////////////////////////////////
+    // BOOTSTRAP HANDLES
+    ////////////////////////////////////////////////////////////////////////////
+    
+<span class="nc" id="L79">    public final static String BOOTSTRAP_BARE_SIG = sig(CallSite.class, Lookup.class, String.class, MethodType.class);</span>
+<span class="nc" id="L80">    public final static String BOOTSTRAP_INT_SIG = sig(CallSite.class, Lookup.class, String.class, MethodType.class, int.class);</span>
+<span class="nc" id="L81">    public final static String BOOTSTRAP_STRING_STRING_SIG = sig(CallSite.class, Lookup.class, String.class, MethodType.class, String.class, String.class);</span>
+<span class="nc" id="L82">    public final static String BOOTSTRAP_STRING_STRING_INT_SIG = sig(CallSite.class, Lookup.class, String.class, MethodType.class, String.class, String.class, int.class);</span>
+<span class="nc" id="L83">    public final static String BOOTSTRAP_STRING_SIG = sig(CallSite.class, Lookup.class, String.class, MethodType.class, String.class);</span>
+<span class="nc" id="L84">    public final static String BOOTSTRAP_STRING_CALLTYPE_SIG = sig(CallSite.class, Lookup.class, String.class, MethodType.class, String.class, CallType.class);</span>
+<span class="nc" id="L85">    public final static String BOOTSTRAP_LONG_SIG = sig(CallSite.class, Lookup.class, String.class, MethodType.class, long.class);</span>
+<span class="nc" id="L86">    public final static String BOOTSTRAP_DOUBLE_SIG = sig(CallSite.class, Lookup.class, String.class, MethodType.class, double.class);</span>
+<span class="nc" id="L87">    public final static String BOOTSTRAP_LONG_STRING_INT_SIG = sig(CallSite.class, Lookup.class, String.class, MethodType.class, long.class, String.class, int.class);</span>
+<span class="nc" id="L88">    public final static String BOOTSTRAP_DOUBLE_STRING_INT_SIG = sig(CallSite.class, Lookup.class, String.class, MethodType.class, double.class, String.class, int.class);</span>
+<span class="nc" id="L89">    public final static String BOOTSTRAP_STRING_INT_SIG = sig(CallSite.class, Lookup.class, String.class, MethodType.class, String.class, int.class);</span>
+<span class="nc" id="L90">    public final static String BOOTSTRAP_STRING_LONG_SIG = sig(CallSite.class, Lookup.class, String.class, MethodType.class, String.class, long.class);</span>
+<span class="nc" id="L91">    public final static String BOOTSTRAP_STRING_DOUBLE_SIG = sig(CallSite.class, Lookup.class, String.class, MethodType.class, String.class, double.class);</span>
+    
+    public static Handle getBootstrapHandle(String name, Class type, String sig) {
+<span class="nc" id="L94">        return new Handle(Opcodes.H_INVOKESTATIC, p(type), name, sig);</span>
+    }
+    
+    public static Handle getBootstrapHandle(String name, String sig) {
+<span class="nc" id="L98">        return getBootstrapHandle(name, InvokeDynamicSupport.class, sig);</span>
+    }
+    
+    public static Handle getInvocationHandle() {
+<span class="nc" id="L102">        return getBootstrapHandle(&quot;invocationBootstrap&quot;, InvocationLinker.class, BOOTSTRAP_STRING_INT_SIG);</span>
+    }
+    
+    public static Handle getConstantHandle() {
+<span class="nc" id="L106">        return getBootstrapHandle(&quot;getConstantBootstrap&quot;, BOOTSTRAP_INT_SIG);</span>
+    }
+    
+    public static Handle getConstantBooleanHandle() {
+<span class="nc" id="L110">        return getBootstrapHandle(&quot;getConstantBooleanBootstrap&quot;, BOOTSTRAP_INT_SIG);</span>
+    }
+    
+    public static Handle getByteListHandle() {
+<span class="nc" id="L114">        return getBootstrapHandle(&quot;getByteListBootstrap&quot;, BOOTSTRAP_STRING_STRING_SIG);</span>
+    }
+    
+    public static Handle getRegexpHandle() {
+<span class="nc" id="L118">        return getBootstrapHandle(&quot;getRegexpBootstrap&quot;, BOOTSTRAP_STRING_STRING_INT_SIG);</span>
+    }
+    
+    public static Handle getSymbolHandle() {
+<span class="nc" id="L122">        return getBootstrapHandle(&quot;getSymbolBootstrap&quot;, BOOTSTRAP_STRING_STRING_SIG);</span>
+    }
+    
+    public static Handle getFixnumHandle() {
+<span class="nc" id="L126">        return getBootstrapHandle(&quot;getFixnumBootstrap&quot;, BOOTSTRAP_LONG_SIG);</span>
+    }
+    
+    public static Handle getFloatHandle() {
+<span class="nc" id="L130">        return getBootstrapHandle(&quot;getFloatBootstrap&quot;, BOOTSTRAP_DOUBLE_SIG);</span>
+    }
+    
+    public static Handle getStaticScopeHandle() {
+<span class="nc" id="L134">        return getBootstrapHandle(&quot;getStaticScopeBootstrap&quot;, BOOTSTRAP_STRING_INT_SIG);</span>
+    }
+    
+    public static Handle getLoadStaticScopeHandle() {
+<span class="nc" id="L138">        return getBootstrapHandle(&quot;getLoadStaticScopeBootstrap&quot;, BOOTSTRAP_INT_SIG);</span>
+    }
+    
+    public static Handle getCallSiteHandle() {
+<span class="nc" id="L142">        return getBootstrapHandle(&quot;getCallSiteBootstrap&quot;, BOOTSTRAP_STRING_INT_SIG);</span>
+    }
+    
+    public static Handle getStringHandle() {
+<span class="nc" id="L146">        return getBootstrapHandle(&quot;getStringBootstrap&quot;, BOOTSTRAP_STRING_STRING_INT_SIG);</span>
+    }
+    
+    public static Handle getFrozenStringHandle() {
+<span class="nc" id="L150">        return getBootstrapHandle(&quot;getFrozenStringBootstrap&quot;, BOOTSTRAP_STRING_STRING_INT_SIG);</span>
+    }
+    
+    public static Handle getBigIntegerHandle() {
+<span class="nc" id="L154">        return getBootstrapHandle(&quot;getBigIntegerBootstrap&quot;, BOOTSTRAP_STRING_SIG);</span>
+    }
+    
+    public static Handle getEncodingHandle() {
+<span class="nc" id="L158">        return getBootstrapHandle(&quot;getEncodingBootstrap&quot;, BOOTSTRAP_STRING_SIG);</span>
+    }
+    
+    public static Handle getBlockBodyHandle() {
+<span class="nc" id="L162">        return getBootstrapHandle(&quot;getBlockBodyBootstrap&quot;, BOOTSTRAP_STRING_SIG);</span>
+    }
+    
+    public static Handle getBlockBody19Handle() {
+<span class="nc" id="L166">        return getBootstrapHandle(&quot;getBlockBody19Bootstrap&quot;, BOOTSTRAP_STRING_SIG);</span>
+    }
+    
+    public static Handle getFixnumOperatorHandle() {
+<span class="nc" id="L170">        return getBootstrapHandle(&quot;fixnumOperatorBootstrap&quot;, MathLinker.class, BOOTSTRAP_LONG_STRING_INT_SIG);</span>
+    }
+    
+    public static Handle getFixnumBooleanHandle() {
+<span class="nc" id="L174">        return getBootstrapHandle(&quot;fixnumBooleanBootstrap&quot;, MathLinker.class, BOOTSTRAP_LONG_STRING_INT_SIG);</span>
+    }
+    
+    public static Handle getFloatOperatorHandle() {
+<span class="nc" id="L178">        return getBootstrapHandle(&quot;floatOperatorBootstrap&quot;, MathLinker.class, BOOTSTRAP_DOUBLE_STRING_INT_SIG);</span>
+    }
+    
+    public static Handle getVariableHandle() {
+<span class="nc" id="L182">        return getBootstrapHandle(&quot;variableBootstrap&quot;, BOOTSTRAP_STRING_INT_SIG);</span>
+    }
+    
+    public static Handle getContextFieldHandle() {
+<span class="nc" id="L186">        return getBootstrapHandle(&quot;contextFieldBootstrap&quot;, BOOTSTRAP_BARE_SIG);</span>
+    }
+    
+    public static Handle getGlobalHandle() {
+<span class="nc" id="L190">        return getBootstrapHandle(&quot;globalBootstrap&quot;, BOOTSTRAP_STRING_INT_SIG);</span>
+    }
+    
+    public static Handle getGlobalBooleanHandle() {
+<span class="nc" id="L194">        return getBootstrapHandle(&quot;globalBooleanBootstrap&quot;, BOOTSTRAP_STRING_INT_SIG);</span>
+    }
+    
+    public static Handle getLoadBooleanHandle() {
+<span class="nc" id="L198">        return getBootstrapHandle(&quot;loadBooleanBootstrap&quot;, BOOTSTRAP_BARE_SIG);</span>
+    }
+    
+    public static Handle checkpointHandle() {
+<span class="nc" id="L202">        return getBootstrapHandle(&quot;checkpointBootstrap&quot;, BOOTSTRAP_BARE_SIG);</span>
+    }
+    
+    ////////////////////////////////////////////////////////////////////////////
+    // BOOTSTRAP METHODS
+    ////////////////////////////////////////////////////////////////////////////
+    
+    // &lt;editor-fold desc=&quot;bootstraps&quot;&gt;
+    
+    public static CallSite contextFieldBootstrap(Lookup lookup, String name, MethodType type) throws NoSuchMethodException, IllegalAccessException {
+<span class="nc" id="L212">        MutableCallSite site = new MutableCallSite(type);</span>
+        
+<span class="nc bnc" id="L214" title="All 2 branches missed.">        if (name.equals(&quot;nil&quot;)) {</span>
+<span class="nc" id="L215">            site.setTarget(Binder.from(type).insert(0, site).invokeStatic(lookup, InvokeDynamicSupport.class, &quot;loadNil&quot;));</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">        } else if (name.equals(&quot;runtime&quot;)) {</span>
+<span class="nc" id="L217">            site.setTarget(Binder.from(type).insert(0, site).invokeStatic(lookup, InvokeDynamicSupport.class, &quot;loadRuntime&quot;));</span>
+        }
+        
+<span class="nc" id="L220">        return site;</span>
+    }
+    
+    public static IRubyObject loadNil(MutableCallSite site, ThreadContext context) throws Throwable {
+<span class="nc" id="L224">        site.setTarget(Binder.from(IRubyObject.class, ThreadContext.class).drop(0).constant(context.nil));</span>
+        
+<span class="nc" id="L226">        return context.nil;</span>
+    }
+    
+    public static Ruby loadRuntime(MutableCallSite site, ThreadContext context) throws Throwable {
+<span class="nc" id="L230">        site.setTarget(Binder.from(Ruby.class, ThreadContext.class).drop(0).constant(context.runtime));</span>
+        
+<span class="nc" id="L232">        return context.runtime;</span>
+    }
+
+    public static CallSite getConstantBootstrap(Lookup lookup, String name, MethodType type, int scopeIndex) throws NoSuchMethodException, IllegalAccessException {
+        RubyConstantCallSite site;
+
+<span class="nc" id="L238">        site = new RubyConstantCallSite(type, name);</span>
+        
+<span class="nc" id="L240">        MethodType fallbackType = methodType(IRubyObject.class, RubyConstantCallSite.class, AbstractScript.class, ThreadContext.class, int.class);</span>
+<span class="nc" id="L241">        MethodHandle myFallback = insertArguments(</span>
+<span class="nc" id="L242">                lookup.findStatic(InvokeDynamicSupport.class, &quot;constantFallback&quot;,</span>
+                fallbackType),
+                0,
+                site);
+<span class="nc" id="L246">        myFallback = insertArguments(myFallback, 2, scopeIndex);</span>
+<span class="nc" id="L247">        site.setTarget(myFallback);</span>
+<span class="nc" id="L248">        return site;</span>
+    }
+
+    public static CallSite getConstantBooleanBootstrap(Lookup lookup, String name, MethodType type, int scopeIndex) throws NoSuchMethodException, IllegalAccessException {
+        RubyConstantCallSite site;
+
+<span class="nc" id="L254">        site = new RubyConstantCallSite(type, name);</span>
+        
+<span class="nc" id="L256">        MethodType fallbackType = methodType(boolean.class, RubyConstantCallSite.class, AbstractScript.class, ThreadContext.class, int.class);</span>
+<span class="nc" id="L257">        MethodHandle myFallback = insertArguments(</span>
+<span class="nc" id="L258">                lookup.findStatic(InvokeDynamicSupport.class, &quot;constantBooleanFallback&quot;,</span>
+                fallbackType),
+                0,
+                site);
+<span class="nc" id="L262">        myFallback = insertArguments(myFallback, 2, scopeIndex);</span>
+<span class="nc" id="L263">        site.setTarget(myFallback);</span>
+<span class="nc" id="L264">        return site;</span>
+    }
+
+    public static CallSite getByteListBootstrap(Lookup lookup, String name, MethodType type, String asString, String encodingName) {
+<span class="nc" id="L268">        byte[] bytes = Helpers.stringToRawBytes(asString);</span>
+<span class="nc" id="L269">        Encoding encoding = EncodingDB.getEncodings().get(encodingName.getBytes()).getEncoding();</span>
+<span class="nc" id="L270">        ByteList byteList = new ByteList(bytes, encoding);</span>
+        
+<span class="nc" id="L272">        return new ConstantCallSite(constant(ByteList.class, byteList));</span>
+    }
+    
+    public static CallSite getRegexpBootstrap(Lookup lookup, String name, MethodType type, String asString, String encodingName, int options) {
+<span class="nc" id="L276">        byte[] bytes = Helpers.stringToRawBytes(asString);</span>
+<span class="nc" id="L277">        Encoding encoding = EncodingDB.getEncodings().get(encodingName.getBytes()).getEncoding();</span>
+<span class="nc" id="L278">        ByteList byteList = new ByteList(bytes, encoding);</span>
+        
+<span class="nc" id="L280">        MutableCallSite site = new MutableCallSite(type);</span>
+<span class="nc" id="L281">        MethodHandle init = findStatic(</span>
+                InvokeDynamicSupport.class,
+                &quot;initRegexp&quot;,
+<span class="nc" id="L284">                methodType(RubyRegexp.class, MutableCallSite.class, ThreadContext.class, ByteList.class, int.class));</span>
+<span class="nc" id="L285">        init = insertArguments(init, 2, byteList, options);</span>
+<span class="nc" id="L286">        init = insertArguments(</span>
+                init,
+                0,
+                site);
+<span class="nc" id="L290">        site.setTarget(init);</span>
+<span class="nc" id="L291">        return site;</span>
+    }
+    
+    public static CallSite getSymbolBootstrap(Lookup lookup, String name, MethodType type, String symbol, String encodingName) {
+<span class="nc" id="L295">        MutableCallSite site = new MutableCallSite(type);</span>
+<span class="nc" id="L296">        MethodHandle init = findStatic(</span>
+                InvokeDynamicSupport.class,
+                &quot;initSymbol&quot;,
+<span class="nc" id="L299">                methodType(RubySymbol.class, MutableCallSite.class, ThreadContext.class, String.class, Encoding.class));</span>
+
+<span class="nc" id="L301">        Encoding encoding = null;</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">        if (encodingName != null) {</span>
+<span class="nc" id="L303">            encoding = EncodingDB.getEncodings().get(encodingName.getBytes()).getEncoding();</span>
+        }
+
+<span class="nc" id="L306">        init = insertArguments(init, 2, symbol, encoding);</span>
+<span class="nc" id="L307">        init = insertArguments(</span>
+                init,
+                0,
+                site);
+<span class="nc" id="L311">        site.setTarget(init);</span>
+<span class="nc" id="L312">        return site;</span>
+    }
+    
+    public static CallSite getFixnumBootstrap(Lookup lookup, String name, MethodType type, long value) {
+<span class="nc" id="L316">        MutableCallSite site = new MutableCallSite(type);</span>
+<span class="nc" id="L317">        MethodHandle init = findStatic(</span>
+                InvokeDynamicSupport.class,
+                &quot;initFixnum&quot;,
+<span class="nc" id="L320">                methodType(RubyFixnum.class, MutableCallSite.class, ThreadContext.class, long.class));</span>
+<span class="nc" id="L321">        init = insertArguments(init, 2, value);</span>
+<span class="nc" id="L322">        init = insertArguments(</span>
+                init,
+                0,
+                site);
+<span class="nc" id="L326">        site.setTarget(init);</span>
+<span class="nc" id="L327">        return site;</span>
+    }
+    
+    public static CallSite getFloatBootstrap(Lookup lookup, String name, MethodType type, double value) {
+<span class="nc" id="L331">        MutableCallSite site = new MutableCallSite(type);</span>
+<span class="nc" id="L332">        MethodHandle init = findStatic(</span>
+                InvokeDynamicSupport.class,
+                &quot;initFloat&quot;,
+<span class="nc" id="L335">                methodType(RubyFloat.class, MutableCallSite.class, ThreadContext.class, double.class));</span>
+<span class="nc" id="L336">        init = insertArguments(init, 2, value);</span>
+<span class="nc" id="L337">        init = insertArguments(</span>
+                init,
+                0,
+                site);
+<span class="nc" id="L341">        site.setTarget(init);</span>
+<span class="nc" id="L342">        return site;</span>
+    }
+    
+    public static CallSite getStaticScopeBootstrap(Lookup lookup, String name, MethodType type, String scopeString, int index) {
+<span class="nc" id="L346">        MutableCallSite site = new MutableCallSite(type);</span>
+<span class="nc" id="L347">        MethodHandle init = findStatic(</span>
+                InvokeDynamicSupport.class,
+                &quot;initStaticScope&quot;,
+<span class="nc" id="L350">                methodType(StaticScope.class, MutableCallSite.class, AbstractScript.class, ThreadContext.class, StaticScope.class, String.class, int.class));</span>
+<span class="nc" id="L351">        init = insertArguments(init, 4, scopeString, index);</span>
+<span class="nc" id="L352">        init = insertArguments(</span>
+                init,
+                0,
+                site);
+<span class="nc" id="L356">        site.setTarget(init);</span>
+<span class="nc" id="L357">        return site;</span>
+    }
+    
+    public static CallSite getLoadStaticScopeBootstrap(Lookup lookup, String name, MethodType type, int index) {
+<span class="nc" id="L361">        MutableCallSite site = new MutableCallSite(type);</span>
+<span class="nc" id="L362">        MethodHandle init = findStatic(</span>
+                InvokeDynamicSupport.class,
+                &quot;loadStaticScope&quot;,
+<span class="nc" id="L365">                methodType(StaticScope.class, MutableCallSite.class, AbstractScript.class, int.class));</span>
+<span class="nc" id="L366">        init = insertArguments(init, 2, index);</span>
+<span class="nc" id="L367">        init = insertArguments(</span>
+                init,
+                0,
+                site);
+<span class="nc" id="L371">        site.setTarget(init);</span>
+<span class="nc" id="L372">        return site;</span>
+    }
+
+    public static CallSite getCallSiteBootstrap(Lookup lookup, String name, MethodType type, String callName, int callTypeChar) {
+<span class="nc" id="L376">        org.jruby.runtime.CallSite callSite = null;</span>
+<span class="nc bnc" id="L377" title="All 5 branches missed.">        switch (callTypeChar) {</span>
+            case 'N':
+<span class="nc" id="L379">                callSite = MethodIndex.getCallSite(callName);</span>
+<span class="nc" id="L380">                break;</span>
+            case 'F':
+<span class="nc" id="L382">                callSite = MethodIndex.getFunctionalCallSite(callName);</span>
+<span class="nc" id="L383">                break;</span>
+            case 'V':
+<span class="nc" id="L385">                callSite = MethodIndex.getVariableCallSite(callName);</span>
+<span class="nc" id="L386">                break;</span>
+            case 'S':
+<span class="nc" id="L388">                callSite = MethodIndex.getSuperCallSite();</span>
+                break;
+        }
+        
+<span class="nc" id="L392">        return new ConstantCallSite(constant(org.jruby.runtime.CallSite.class, callSite));</span>
+    }
+    
+    public static CallSite getStringBootstrap(Lookup lookup, String name, MethodType type, String asString, String encodingName, int codeRange) {
+<span class="nc" id="L396">        byte[] bytes = Helpers.stringToRawBytes(asString);</span>
+<span class="nc" id="L397">        Encoding encoding = EncodingDB.getEncodings().get(encodingName.getBytes()).getEncoding();</span>
+<span class="nc" id="L398">        ByteList byteList = new ByteList(bytes, encoding);</span>
+        
+<span class="nc" id="L400">        MutableCallSite site = new MutableCallSite(type);</span>
+<span class="nc" id="L401">        MethodHandle init = findStatic(</span>
+                InvokeDynamicSupport.class,
+                &quot;newString&quot;,
+<span class="nc" id="L404">                methodType(RubyString.class, ThreadContext.class, ByteList.class, int.class));</span>
+<span class="nc" id="L405">        init = insertArguments(init, 1, byteList, codeRange);</span>
+<span class="nc" id="L406">        site.setTarget(init);</span>
+<span class="nc" id="L407">        return site;</span>
+    }
+    
+    public static CallSite getFrozenStringBootstrap(Lookup lookup, String name, MethodType type, String asString, String encodingName, int codeRange) {
+<span class="nc" id="L411">        byte[] bytes = Helpers.stringToRawBytes(asString);</span>
+<span class="nc" id="L412">        Encoding encoding = EncodingDB.getEncodings().get(encodingName.getBytes()).getEncoding();</span>
+<span class="nc" id="L413">        ByteList byteList = new ByteList(bytes, encoding);</span>
+        
+<span class="nc" id="L415">        MutableCallSite site = new MutableCallSite(type);</span>
+<span class="nc" id="L416">        MethodHandle init = findStatic(</span>
+                InvokeDynamicSupport.class,
+                &quot;newFrozenString&quot;,
+<span class="nc" id="L419">                methodType(RubyString.class, ThreadContext.class, MutableCallSite.class, ByteList.class, int.class));</span>
+<span class="nc" id="L420">        init = insertArguments(init, 1, site, byteList, codeRange);</span>
+<span class="nc" id="L421">        site.setTarget(init);</span>
+<span class="nc" id="L422">        return site;</span>
+    }
+
+    public static CallSite getBigIntegerBootstrap(Lookup lookup, String name, MethodType type, String asString) {
+<span class="nc" id="L426">        BigInteger byteList = new BigInteger(asString, 16);</span>
+        
+<span class="nc" id="L428">        return new ConstantCallSite(constant(BigInteger.class, byteList));</span>
+    }
+    
+    public static CallSite getEncodingBootstrap(Lookup lookup, String name, MethodType type, String encodingName) {
+<span class="nc" id="L432">        Encoding encoding = EncodingDB.getEncodings().get(encodingName.getBytes()).getEncoding();</span>
+        
+<span class="nc" id="L434">        MutableCallSite site = new MutableCallSite(type);</span>
+<span class="nc" id="L435">        MethodHandle init = findStatic(</span>
+                InvokeDynamicSupport.class,
+                &quot;initEncoding&quot;,
+<span class="nc" id="L438">                methodType(RubyEncoding.class, MutableCallSite.class, ThreadContext.class, Encoding.class));</span>
+<span class="nc" id="L439">        init = insertArguments(init, 2, encoding);</span>
+<span class="nc" id="L440">        init = insertArguments(</span>
+                init,
+                0,
+                site);
+<span class="nc" id="L444">        site.setTarget(init);</span>
+<span class="nc" id="L445">        return site;</span>
+    }
+    
+    public static CallSite getBlockBodyBootstrap(Lookup lookup, String name, MethodType type, String descriptor) {
+<span class="nc" id="L449">        MutableCallSite site = new MutableCallSite(type);</span>
+<span class="nc" id="L450">        MethodHandle init = findStatic(</span>
+                InvokeDynamicSupport.class,
+                &quot;initBlockBody&quot;,
+<span class="nc" id="L453">                methodType(BlockBody.class, MutableCallSite.class, Object.class, ThreadContext.class, StaticScope.class, String.class));</span>
+<span class="nc" id="L454">        init = insertArguments(init, 4, descriptor);</span>
+<span class="nc" id="L455">        init = insertArguments(</span>
+                init,
+                0,
+                site);
+<span class="nc" id="L459">        site.setTarget(init);</span>
+<span class="nc" id="L460">        return site;</span>
+    }
+    
+    public static CallSite getBlockBody19Bootstrap(Lookup lookup, String name, MethodType type, String descriptor) {
+<span class="nc" id="L464">        MutableCallSite site = new MutableCallSite(type);</span>
+<span class="nc" id="L465">        MethodHandle init = findStatic(</span>
+                InvokeDynamicSupport.class,
+                &quot;initBlockBody19&quot;,
+<span class="nc" id="L468">                methodType(BlockBody.class, MutableCallSite.class, Object.class, ThreadContext.class, StaticScope.class, String.class));</span>
+<span class="nc" id="L469">        init = insertArguments(init, 4, descriptor);</span>
+<span class="nc" id="L470">        init = insertArguments(</span>
+                init,
+                0,
+                site);
+<span class="nc" id="L474">        site.setTarget(init);</span>
+<span class="nc" id="L475">        return site;</span>
+    }
+
+    public static CallSite variableBootstrap(Lookup lookup, String name, MethodType type, String file, int line) throws Throwable {
+<span class="nc" id="L479">        String[] names = name.split(&quot;:&quot;);</span>
+<span class="nc" id="L480">        String operation = names[0];</span>
+<span class="nc" id="L481">        String varName = names[1];</span>
+<span class="nc" id="L482">        VariableSite site = new VariableSite(type, varName, file, line);</span>
+        MethodHandle handle;
+        
+<span class="nc bnc" id="L485" title="All 2 branches missed.">        if (operation.equals(&quot;get&quot;)) {</span>
+<span class="nc" id="L486">            handle = lookup.findStatic(InvokeDynamicSupport.class, &quot;getVariableFallback&quot;, methodType(IRubyObject.class, VariableSite.class, IRubyObject.class));</span>
+<span class="nc bnc" id="L487" title="All 2 branches missed.">        } else if (operation.equals(&quot;set&quot;)) {</span>
+<span class="nc" id="L488">            handle = lookup.findStatic(InvokeDynamicSupport.class, &quot;setVariableFallback&quot;, methodType(IRubyObject.class, VariableSite.class, IRubyObject.class, IRubyObject.class));</span>
+        } else {
+<span class="nc" id="L490">            throw new RuntimeException(&quot;invalid variable access type&quot;);</span>
+        }
+        
+<span class="nc" id="L493">        handle = handle.bindTo(site);</span>
+<span class="nc" id="L494">        site.setTarget(handle);</span>
+        
+<span class="nc" id="L496">        return site;</span>
+    }
+    
+    public static IRubyObject getVariableFallback(VariableSite site, IRubyObject self) throws Throwable {
+<span class="nc" id="L500">        RubyClass realClass = self.getMetaClass().getRealClass();</span>
+<span class="nc" id="L501">        VariableAccessor accessor = realClass.getVariableAccessorForRead(site.name());</span>
+        
+        // produce nil if the variable has not been initialize
+<span class="nc" id="L504">        MethodHandle nullToNil = findStatic(Helpers.class, &quot;nullToNil&quot;, methodType(IRubyObject.class, IRubyObject.class, IRubyObject.class));</span>
+<span class="nc" id="L505">        nullToNil = insertArguments(nullToNil, 1, self.getRuntime().getNil());</span>
+<span class="nc" id="L506">        nullToNil = explicitCastArguments(nullToNil, methodType(IRubyObject.class, Object.class));</span>
+        
+        // get variable value and filter with nullToNil
+        MethodHandle getValue;
+<span class="nc" id="L510">        boolean direct = false;</span>
+        
+<span class="nc bnc" id="L512" title="All 2 branches missed.">        if (accessor instanceof FieldVariableAccessor) {</span>
+<span class="nc" id="L513">            direct = true;</span>
+<span class="nc" id="L514">            int offset = ((FieldVariableAccessor)accessor).getOffset();</span>
+<span class="nc" id="L515">            Class cls = REIFIED_OBJECT_CLASSES[offset];</span>
+<span class="nc" id="L516">            getValue = lookup().findGetter(cls, &quot;var&quot; + offset, Object.class);</span>
+<span class="nc" id="L517">            getValue = explicitCastArguments(getValue, methodType(Object.class, IRubyObject.class));</span>
+<span class="nc" id="L518">        } else {</span>
+<span class="nc" id="L519">            getValue = findStatic(VariableAccessor.class, &quot;getVariable&quot;, methodType(Object.class, RubyBasicObject.class, int.class));</span>
+<span class="nc" id="L520">            getValue = explicitCastArguments(getValue, methodType(Object.class, IRubyObject.class, int.class));</span>
+<span class="nc" id="L521">            getValue = insertArguments(getValue, 1, accessor.getIndex());</span>
+        }
+        
+<span class="nc" id="L524">        getValue = filterReturnValue(getValue, nullToNil);</span>
+        
+        // prepare fallback
+<span class="nc" id="L527">        MethodHandle fallback = null;</span>
+<span class="nc bnc" id="L528" title="All 2 branches missed.">        if (site.chainCount() + 1 &gt; Options.INVOKEDYNAMIC_MAXPOLY.load()) {</span>
+<span class="nc bnc" id="L529" title="All 2 branches missed.">            if (Options.INVOKEDYNAMIC_LOG_BINDING.load()) LOG.info(site.name() + &quot;\tqet on type &quot; + self.getMetaClass().id + &quot; failed (polymorphic)&quot; + extractSourceInfo(site));</span>
+<span class="nc" id="L530">            fallback = findStatic(InvokeDynamicSupport.class, &quot;getVariableFail&quot;, methodType(IRubyObject.class, VariableSite.class, IRubyObject.class));</span>
+<span class="nc" id="L531">            fallback = fallback.bindTo(site);</span>
+<span class="nc" id="L532">            site.setTarget(fallback);</span>
+<span class="nc" id="L533">            return (IRubyObject)fallback.invokeWithArguments(self);</span>
+        } else {
+<span class="nc bnc" id="L535" title="All 2 branches missed.">            if (Options.INVOKEDYNAMIC_LOG_BINDING.load()) {</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">                if (direct) {</span>
+<span class="nc" id="L537">                    LOG.info(site.name() + &quot;\tget field on type &quot; + self.getMetaClass().id + &quot; added to PIC&quot; + extractSourceInfo(site));</span>
+                } else {
+<span class="nc" id="L539">                    LOG.info(site.name() + &quot;\tget on type &quot; + self.getMetaClass().id + &quot; added to PIC&quot; + extractSourceInfo(site));</span>
+                }
+            }
+<span class="nc" id="L542">            fallback = site.getTarget();</span>
+<span class="nc" id="L543">            site.incrementChainCount();</span>
+        }
+        
+        // prepare test
+<span class="nc" id="L547">        MethodHandle test = findStatic(InvocationLinker.class, &quot;testRealClass&quot;, methodType(boolean.class, int.class, IRubyObject.class));</span>
+<span class="nc" id="L548">        test = insertArguments(test, 0, accessor.getClassId());</span>
+        
+<span class="nc" id="L550">        getValue = guardWithTest(test, getValue, fallback);</span>
+        
+<span class="nc bnc" id="L552" title="All 2 branches missed.">        if (Options.INVOKEDYNAMIC_LOG_BINDING.load()) LOG.info(site.name() + &quot;\tget on class &quot; + self.getMetaClass().id + &quot; bound directly&quot; + extractSourceInfo(site));</span>
+<span class="nc" id="L553">        site.setTarget(getValue);</span>
+        
+<span class="nc" id="L555">        return (IRubyObject)getValue.invokeWithArguments(self);</span>
+    }
+
+    public static IRubyObject getVariableFail(VariableSite site, IRubyObject self) throws Throwable {
+<span class="nc" id="L559">        return site.getVariable(self);</span>
+    }
+    
+<span class="nc" id="L562">    public static final Class[] REIFIED_OBJECT_CLASSES = {</span>
+        RubyObjectVar0.class,
+        RubyObjectVar1.class,
+        RubyObjectVar2.class,
+        RubyObjectVar3.class,
+        RubyObjectVar4.class,
+        RubyObjectVar5.class,
+        RubyObjectVar6.class,
+        RubyObjectVar7.class,
+        RubyObjectVar8.class,
+        RubyObjectVar9.class,
+    };
+    
+    public static IRubyObject setVariableFallback(VariableSite site, IRubyObject self, IRubyObject value) throws Throwable {
+<span class="nc" id="L576">        RubyClass realClass = self.getMetaClass().getRealClass();</span>
+<span class="nc" id="L577">        VariableAccessor accessor = realClass.getVariableAccessorForWrite(site.name());</span>
+
+        // return provided value
+<span class="nc" id="L580">        MethodHandle returnValue = identity(IRubyObject.class);</span>
+<span class="nc" id="L581">        returnValue = dropArguments(returnValue, 0, IRubyObject.class);</span>
+
+        // set variable value and fold by returning value
+        MethodHandle setValue;
+<span class="nc" id="L585">        boolean direct = false;</span>
+        
+<span class="nc bnc" id="L587" title="All 2 branches missed.">        if (accessor instanceof FieldVariableAccessor) {</span>
+<span class="nc" id="L588">            direct = true;</span>
+<span class="nc" id="L589">            int offset = ((FieldVariableAccessor)accessor).getOffset();</span>
+<span class="nc" id="L590">            Class cls = REIFIED_OBJECT_CLASSES[offset];</span>
+<span class="nc" id="L591">            setValue = findStatic(cls, &quot;setVariableChecked&quot;, methodType(void.class, cls, Object.class));</span>
+<span class="nc" id="L592">            setValue = explicitCastArguments(setValue, methodType(void.class, IRubyObject.class, IRubyObject.class));</span>
+<span class="nc" id="L593">        } else {</span>
+<span class="nc" id="L594">            setValue = findStatic(accessor.getClass(), &quot;setVariableChecked&quot;, methodType(void.class, RubyBasicObject.class, RubyClass.class, int.class, Object.class));</span>
+<span class="nc" id="L595">            setValue = explicitCastArguments(setValue, methodType(void.class, IRubyObject.class, RubyClass.class, int.class, IRubyObject.class));</span>
+<span class="nc" id="L596">            setValue = insertArguments(setValue, 1, realClass, accessor.getIndex());</span>
+        }
+        
+<span class="nc" id="L599">        setValue = foldArguments(returnValue, setValue);</span>
+
+        // prepare fallback
+<span class="nc" id="L602">        MethodHandle fallback = null;</span>
+<span class="nc bnc" id="L603" title="All 2 branches missed.">        if (site.chainCount() + 1 &gt; Options.INVOKEDYNAMIC_MAXPOLY.load()) {</span>
+<span class="nc bnc" id="L604" title="All 2 branches missed.">            if (Options.INVOKEDYNAMIC_LOG_BINDING.load()) LOG.info(site.name() + &quot;\tset on type &quot; + self.getMetaClass().id + &quot; failed (polymorphic)&quot; + extractSourceInfo(site));</span>
+<span class="nc" id="L605">            fallback = findStatic(InvokeDynamicSupport.class, &quot;setVariableFail&quot;, methodType(IRubyObject.class, VariableSite.class, IRubyObject.class, IRubyObject.class));</span>
+<span class="nc" id="L606">            fallback = fallback.bindTo(site);</span>
+<span class="nc" id="L607">            site.setTarget(fallback);</span>
+<span class="nc" id="L608">            return (IRubyObject)fallback.invokeWithArguments(self, value);</span>
+        } else {
+<span class="nc bnc" id="L610" title="All 2 branches missed.">            if (Options.INVOKEDYNAMIC_LOG_BINDING.load()) {</span>
+<span class="nc bnc" id="L611" title="All 2 branches missed.">                if (direct) {</span>
+<span class="nc" id="L612">                    LOG.info(site.name() + &quot;\tset field on type &quot; + self.getMetaClass().id + &quot; added to PIC&quot; + extractSourceInfo(site));</span>
+                } else {
+<span class="nc" id="L614">                    LOG.info(site.name() + &quot;\tset on type &quot; + self.getMetaClass().id + &quot; added to PIC&quot; + extractSourceInfo(site));</span>
+                }
+            }
+<span class="nc" id="L617">            fallback = site.getTarget();</span>
+<span class="nc" id="L618">            site.incrementChainCount();</span>
+        }
+
+        // prepare test
+<span class="nc" id="L622">        MethodHandle test = findStatic(InvocationLinker.class, &quot;testRealClass&quot;, methodType(boolean.class, int.class, IRubyObject.class));</span>
+<span class="nc" id="L623">        test = insertArguments(test, 0, accessor.getClassId());</span>
+<span class="nc" id="L624">        test = dropArguments(test, 1, IRubyObject.class);</span>
+
+<span class="nc" id="L626">        setValue = guardWithTest(test, setValue, fallback);</span>
+
+<span class="nc bnc" id="L628" title="All 2 branches missed.">        if (Options.INVOKEDYNAMIC_LOG_BINDING.load()) LOG.info(site.name() + &quot;\tset on class &quot; + self.getMetaClass().id + &quot; bound directly&quot; + extractSourceInfo(site));</span>
+<span class="nc" id="L629">        site.setTarget(setValue);</span>
+
+<span class="nc" id="L631">        return (IRubyObject)setValue.invokeWithArguments(self, value);</span>
+    }
+
+    public static IRubyObject setVariableFail(VariableSite site, IRubyObject self, IRubyObject value) throws Throwable {
+<span class="nc" id="L635">        return site.setVariable(self, value);</span>
+    }
+
+    public static CallSite globalBootstrap(Lookup lookup, String name, MethodType type, String file, int line) throws Throwable {
+<span class="nc" id="L639">        String[] names = name.split(&quot;:&quot;);</span>
+<span class="nc" id="L640">        String operation = names[0];</span>
+<span class="nc" id="L641">        String varName = JavaNameMangler.demangleMethodName(names[1]);</span>
+<span class="nc" id="L642">        GlobalSite site = new GlobalSite(type, varName, file, line);</span>
+        MethodHandle handle;
+        
+<span class="nc bnc" id="L645" title="All 2 branches missed.">        if (operation.equals(&quot;get&quot;)) {</span>
+<span class="nc" id="L646">            handle = lookup.findStatic(InvokeDynamicSupport.class, &quot;getGlobalFallback&quot;, methodType(IRubyObject.class, GlobalSite.class, ThreadContext.class));</span>
+        } else {
+<span class="nc" id="L648">            throw new RuntimeException(&quot;invalid variable access type&quot;);</span>
+        }
+        
+<span class="nc" id="L651">        handle = handle.bindTo(site);</span>
+<span class="nc" id="L652">        site.setTarget(handle);</span>
+        
+<span class="nc" id="L654">        return site;</span>
+    }
+
+    public static CallSite globalBooleanBootstrap(Lookup lookup, String name, MethodType type, String file, int line) throws Throwable {
+<span class="nc" id="L658">        String[] names = name.split(&quot;:&quot;);</span>
+<span class="nc" id="L659">        String operation = names[0];</span>
+<span class="nc" id="L660">        String varName = JavaNameMangler.demangleMethodName(names[1]);</span>
+<span class="nc" id="L661">        GlobalSite site = new GlobalSite(type, varName, file, line);</span>
+        MethodHandle handle;
+        
+<span class="nc bnc" id="L664" title="All 2 branches missed.">        if (operation.equals(&quot;getBoolean&quot;)) {</span>
+<span class="nc" id="L665">            handle = lookup.findStatic(InvokeDynamicSupport.class, &quot;getGlobalBooleanFallback&quot;, methodType(boolean.class, GlobalSite.class, ThreadContext.class));</span>
+        } else {
+<span class="nc" id="L667">            throw new RuntimeException(&quot;invalid variable access type&quot;);</span>
+        }
+        
+<span class="nc" id="L670">        handle = handle.bindTo(site);</span>
+<span class="nc" id="L671">        site.setTarget(handle);</span>
+        
+<span class="nc" id="L673">        return site;</span>
+    }
+
+    public static CallSite loadBooleanBootstrap(Lookup lookup, String name, MethodType type) throws Throwable {
+<span class="nc" id="L677">        String[] names = name.split(&quot;:&quot;);</span>
+<span class="nc" id="L678">        String operation = names[0];</span>
+<span class="nc" id="L679">        boolean value = Boolean.parseBoolean(names[1]);</span>
+<span class="nc" id="L680">        MutableCallSite site = new MutableCallSite(type);</span>
+        MethodHandle handle;
+        
+<span class="nc bnc" id="L683" title="All 2 branches missed.">        if (operation.equals(&quot;loadBoolean&quot;)) {</span>
+<span class="nc" id="L684">            handle = lookup.findStatic(InvokeDynamicSupport.class, &quot;loadBoolean&quot;, methodType(RubyBoolean.class, MutableCallSite.class, boolean.class, ThreadContext.class));</span>
+        } else {
+<span class="nc" id="L686">            throw new RuntimeException(&quot;invalid variable access type&quot;);</span>
+        }
+        
+<span class="nc" id="L689">        handle = insertArguments(handle, 0, site, value);</span>
+<span class="nc" id="L690">        site.setTarget(handle);</span>
+        
+<span class="nc" id="L692">        return site;</span>
+    }
+    
+    public static IRubyObject getGlobalFallback(GlobalSite site, ThreadContext context) throws Throwable {
+<span class="nc" id="L696">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L697">        GlobalVariable variable = runtime.getGlobalVariables().getVariable(site.name());</span>
+        
+<span class="nc bnc" id="L699" title="All 2 branches missed.">        if (site.failures() &gt; Options.INVOKEDYNAMIC_GLOBAL_MAXFAIL.load() ||</span>
+<span class="nc bnc" id="L700" title="All 2 branches missed.">                variable.getScope() != GlobalVariable.Scope.GLOBAL) {</span>
+            
+            // use uncached logic forever
+<span class="nc bnc" id="L703" title="All 2 branches missed.">            if (Options.INVOKEDYNAMIC_LOG_GLOBALS.load()) LOG.info(&quot;global &quot; + site.name() + &quot; (&quot; + site.file() + &quot;:&quot; + site.line() + &quot;) rebound &gt; &quot; + Options.INVOKEDYNAMIC_GLOBAL_MAXFAIL.load() + &quot; times, reverting to simple lookup&quot;);</span>
+            
+<span class="nc" id="L705">            MethodHandle uncached = lookup().findStatic(InvokeDynamicSupport.class, &quot;getGlobalUncached&quot;, methodType(IRubyObject.class, GlobalVariable.class));</span>
+<span class="nc" id="L706">            uncached = uncached.bindTo(variable);</span>
+<span class="nc" id="L707">            uncached = dropArguments(uncached, 0, ThreadContext.class);</span>
+<span class="nc" id="L708">            site.setTarget(uncached);</span>
+<span class="nc" id="L709">            return (IRubyObject)uncached.invokeWithArguments(context);</span>
+        }
+        
+<span class="nc" id="L712">        Invalidator invalidator = variable.getInvalidator();</span>
+<span class="nc" id="L713">        IRubyObject value = variable.getAccessor().getValue();</span>
+        
+<span class="nc" id="L715">        MethodHandle target = constant(IRubyObject.class, value);</span>
+<span class="nc" id="L716">        target = dropArguments(target, 0, ThreadContext.class);</span>
+<span class="nc" id="L717">        MethodHandle fallback = lookup().findStatic(InvokeDynamicSupport.class, &quot;getGlobalFallback&quot;, methodType(IRubyObject.class, GlobalSite.class, ThreadContext.class));</span>
+<span class="nc" id="L718">        fallback = fallback.bindTo(site);</span>
+        
+<span class="nc" id="L720">        target = ((SwitchPoint)invalidator.getData()).guardWithTest(target, fallback);</span>
+        
+<span class="nc" id="L722">        site.setTarget(target);</span>
+        
+<span class="nc bnc" id="L724" title="All 2 branches missed.">        if (Options.INVOKEDYNAMIC_LOG_GLOBALS.load()) LOG.info(&quot;global &quot; + site.name() + &quot; (&quot; + site.file() + &quot;:&quot; + site.line() + &quot;) cached&quot;);</span>
+        
+<span class="nc" id="L726">        return value;</span>
+    }
+    
+    public static IRubyObject getGlobalUncached(GlobalVariable variable) throws Throwable {
+<span class="nc" id="L730">        return variable.getAccessor().getValue();</span>
+    }
+    
+    public static boolean getGlobalBooleanFallback(GlobalSite site, ThreadContext context) throws Throwable {
+<span class="nc" id="L734">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L735">        GlobalVariable variable = runtime.getGlobalVariables().getVariable(site.name());</span>
+        
+<span class="nc bnc" id="L737" title="All 2 branches missed.">        if (site.failures() &gt; Options.INVOKEDYNAMIC_GLOBAL_MAXFAIL.load() ||</span>
+<span class="nc bnc" id="L738" title="All 2 branches missed.">                variable.getScope() != GlobalVariable.Scope.GLOBAL) {</span>
+            
+            // use uncached logic forever
+<span class="nc bnc" id="L741" title="All 2 branches missed.">            if (Options.INVOKEDYNAMIC_LOG_GLOBALS.load()) LOG.info(&quot;global &quot; + site.name() + &quot; (&quot; + site.file() + &quot;:&quot; + site.line() + &quot;) rebound &gt; &quot; + Options.INVOKEDYNAMIC_GLOBAL_MAXFAIL.load() + &quot; times, reverting to simple lookup&quot;);</span>
+
+<span class="nc" id="L743">            MethodHandle uncached = lookup().findStatic(InvokeDynamicSupport.class, &quot;getGlobalBooleanUncached&quot;, methodType(boolean.class, GlobalVariable.class));</span>
+<span class="nc" id="L744">            uncached = uncached.bindTo(variable);</span>
+<span class="nc" id="L745">            uncached = dropArguments(uncached, 0, ThreadContext.class);</span>
+<span class="nc" id="L746">            site.setTarget(uncached);</span>
+<span class="nc" id="L747">            return (Boolean)uncached.invokeWithArguments(context);</span>
+        }
+        
+<span class="nc" id="L750">        Invalidator invalidator = variable.getInvalidator();</span>
+<span class="nc" id="L751">        boolean value = variable.getAccessor().getValue().isTrue();</span>
+        
+<span class="nc" id="L753">        MethodHandle target = constant(boolean.class, value);</span>
+<span class="nc" id="L754">        target = dropArguments(target, 0, ThreadContext.class);</span>
+<span class="nc" id="L755">        MethodHandle fallback = lookup().findStatic(InvokeDynamicSupport.class, &quot;getGlobalBooleanFallback&quot;, methodType(boolean.class, GlobalSite.class, ThreadContext.class));</span>
+<span class="nc" id="L756">        fallback = fallback.bindTo(site);</span>
+        
+<span class="nc" id="L758">        target = ((SwitchPoint)invalidator.getData()).guardWithTest(target, fallback);</span>
+        
+<span class="nc" id="L760">        site.setTarget(target);</span>
+        
+<span class="nc bnc" id="L762" title="All 2 branches missed.">        if (Options.INVOKEDYNAMIC_LOG_GLOBALS.load()) LOG.info(&quot;global &quot; + site.name() + &quot; (&quot; + site.file() + &quot;:&quot; + site.line() + &quot;) cached as boolean&quot;);</span>
+        
+<span class="nc" id="L764">        return value;</span>
+    }
+    
+    public static boolean getGlobalBooleanUncached(GlobalVariable variable) throws Throwable {
+<span class="nc" id="L768">        return variable.getAccessor().getValue().isTrue();</span>
+    }
+
+    public static CallSite checkpointBootstrap(Lookup lookup, String name, MethodType type) throws Throwable {
+<span class="nc" id="L772">        MutableCallSite site = new MutableCallSite(type);</span>
+<span class="nc" id="L773">        MethodHandle handle = lookup.findStatic(InvokeDynamicSupport.class, &quot;checkpointFallback&quot;, methodType(void.class, MutableCallSite.class, ThreadContext.class));</span>
+        
+<span class="nc" id="L775">        handle = handle.bindTo(site);</span>
+<span class="nc" id="L776">        site.setTarget(handle);</span>
+        
+<span class="nc" id="L778">        return site;</span>
+    }
+    
+    public static void checkpointFallback(MutableCallSite site, ThreadContext context) throws Throwable {
+<span class="nc" id="L782">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L783">        Invalidator invalidator = runtime.getCheckpointInvalidator();</span>
+        
+<span class="nc" id="L785">        MethodHandle target = Binder</span>
+<span class="nc" id="L786">                .from(void.class, ThreadContext.class)</span>
+<span class="nc" id="L787">                .nop();</span>
+<span class="nc" id="L788">        MethodHandle fallback = lookup().findStatic(InvokeDynamicSupport.class, &quot;checkpointFallback&quot;, methodType(void.class, MutableCallSite.class, ThreadContext.class));</span>
+<span class="nc" id="L789">        fallback = fallback.bindTo(site);</span>
+        
+<span class="nc" id="L791">        target = ((SwitchPoint)invalidator.getData()).guardWithTest(target, fallback);</span>
+        
+<span class="nc" id="L793">        site.setTarget(target);</span>
+<span class="nc" id="L794">    }</span>
+    
+    // &lt;/editor-fold&gt;
+    
+    ////////////////////////////////////////////////////////////////////////////
+    // INITIAL AND FALLBACK METHODS FOR POST BOOTSTRAP
+    ////////////////////////////////////////////////////////////////////////////
+    
+    public static IRubyObject constantFallback(RubyConstantCallSite site, 
+            AbstractScript script, ThreadContext context, int scopeIndex) {
+<span class="nc" id="L804">        SwitchPoint switchPoint = (SwitchPoint)context.runtime.getConstantInvalidator(site.name()).getData();</span>
+<span class="nc" id="L805">        StaticScope scope = script.getScope(scopeIndex);</span>
+<span class="nc" id="L806">        IRubyObject value = scope.getConstant(site.name());</span>
+        
+<span class="nc bnc" id="L808" title="All 2 branches missed.">        if (value != null) {</span>
+<span class="nc bnc" id="L809" title="All 2 branches missed.">            if (Options.INVOKEDYNAMIC_LOG_CONSTANTS.load()) LOG.info(&quot;constant &quot; + site.name() + &quot; bound directly&quot;);</span>
+            
+<span class="nc" id="L811">            MethodHandle valueHandle = constant(IRubyObject.class, value);</span>
+<span class="nc" id="L812">            valueHandle = dropArguments(valueHandle, 0, AbstractScript.class, ThreadContext.class);</span>
+
+<span class="nc" id="L814">            MethodHandle fallback = insertArguments(</span>
+<span class="nc" id="L815">                    findStatic(InvokeDynamicSupport.class, &quot;constantFallback&quot;,</span>
+<span class="nc" id="L816">                    methodType(IRubyObject.class, RubyConstantCallSite.class, AbstractScript.class, ThreadContext.class, int.class)),</span>
+                    0,
+                    site);
+<span class="nc" id="L819">            fallback = insertArguments(fallback, 2, scopeIndex);</span>
+
+<span class="nc" id="L821">            MethodHandle gwt = switchPoint.guardWithTest(valueHandle, fallback);</span>
+<span class="nc" id="L822">            site.setTarget(gwt);</span>
+<span class="nc" id="L823">        } else {</span>
+<span class="nc" id="L824">            value = scope.getModule()</span>
+<span class="nc" id="L825">                    .callMethod(context, &quot;const_missing&quot;, context.runtime.newSymbol(site.name()));</span>
+        }
+        
+<span class="nc" id="L828">        return value;</span>
+    }
+
+    public static boolean constantBooleanFallback(RubyConstantCallSite site, 
+            AbstractScript script, ThreadContext context, int scopeIndex) {
+<span class="nc" id="L833">        SwitchPoint switchPoint = (SwitchPoint)context.runtime.getConstantInvalidator(site.name()).getData();</span>
+<span class="nc" id="L834">        StaticScope scope = script.getScope(scopeIndex);</span>
+<span class="nc" id="L835">        IRubyObject value = scope.getConstant(site.name());</span>
+        
+<span class="nc bnc" id="L837" title="All 2 branches missed.">        if (value != null) {</span>
+<span class="nc bnc" id="L838" title="All 2 branches missed.">            if (Options.INVOKEDYNAMIC_LOG_CONSTANTS.load()) LOG.info(&quot;constant &quot; + site.name() + &quot; bound directly&quot;);</span>
+            
+<span class="nc" id="L840">            MethodHandle valueHandle = constant(boolean.class, value.isTrue());</span>
+<span class="nc" id="L841">            valueHandle = dropArguments(valueHandle, 0, AbstractScript.class, ThreadContext.class);</span>
+
+<span class="nc" id="L843">            MethodHandle fallback = insertArguments(</span>
+<span class="nc" id="L844">                    findStatic(InvokeDynamicSupport.class, &quot;constantBooleanFallback&quot;,</span>
+<span class="nc" id="L845">                    methodType(boolean.class, RubyConstantCallSite.class, AbstractScript.class, ThreadContext.class, int.class)),</span>
+                    0,
+                    site);
+<span class="nc" id="L848">            fallback = insertArguments(fallback, 2, scopeIndex);</span>
+
+<span class="nc" id="L850">            MethodHandle gwt = switchPoint.guardWithTest(valueHandle, fallback);</span>
+<span class="nc" id="L851">            site.setTarget(gwt);</span>
+<span class="nc" id="L852">        } else {</span>
+<span class="nc" id="L853">            value = scope.getModule()</span>
+<span class="nc" id="L854">                    .callMethod(context, &quot;const_missing&quot;, context.runtime.newSymbol(site.name()));</span>
+        }
+        
+<span class="nc" id="L857">        boolean booleanValue = value.isTrue();</span>
+        
+<span class="nc" id="L859">        return booleanValue;</span>
+    }
+    
+    public static RubyRegexp initRegexp(MutableCallSite site, ThreadContext context, ByteList pattern, int options) {
+<span class="nc" id="L863">        RubyRegexp regexp = RubyRegexp.newRegexp(context.runtime, pattern, RegexpOptions.fromEmbeddedOptions(options));</span>
+<span class="nc" id="L864">        regexp.setLiteral();</span>
+<span class="nc" id="L865">        site.setTarget(dropArguments(constant(RubyRegexp.class, regexp), 0, ThreadContext.class));</span>
+<span class="nc" id="L866">        return regexp;</span>
+    }
+    
+    public static RubySymbol initSymbol(MutableCallSite site, ThreadContext context, String symbol, Encoding encoding) {
+<span class="nc" id="L870">        RubySymbol rubySymbol = context.runtime.newSymbol(symbol);</span>
+<span class="nc bnc" id="L871" title="All 2 branches missed.">        if (encoding != null) rubySymbol.associateEncoding(encoding);</span>
+<span class="nc" id="L872">        site.setTarget(dropArguments(constant(RubySymbol.class, rubySymbol), 0, ThreadContext.class));</span>
+<span class="nc" id="L873">        return rubySymbol;</span>
+    }
+    
+    public static RubyFixnum initFixnum(MutableCallSite site, ThreadContext context, long value) {
+<span class="nc" id="L877">        RubyFixnum rubyFixnum = context.runtime.newFixnum(value);</span>
+<span class="nc" id="L878">        site.setTarget(dropArguments(constant(RubyFixnum.class, rubyFixnum), 0, ThreadContext.class));</span>
+<span class="nc" id="L879">        return rubyFixnum;</span>
+    }
+    
+    public static RubyFloat initFloat(MutableCallSite site, ThreadContext context, double value) {
+<span class="nc" id="L883">        RubyFloat rubyFloat = context.runtime.newFloat(value);</span>
+<span class="nc" id="L884">        site.setTarget(dropArguments(constant(RubyFloat.class, rubyFloat), 0, ThreadContext.class));</span>
+<span class="nc" id="L885">        return rubyFloat;</span>
+    }
+    
+    public static StaticScope initStaticScope(MutableCallSite site, AbstractScript script, ThreadContext context, StaticScope parent, String staticScope, int index) {
+<span class="nc" id="L889">        StaticScope scope = script.getScope(context, parent, staticScope, index);</span>
+<span class="nc" id="L890">        site.setTarget(dropArguments(constant(StaticScope.class, scope), 0, AbstractScript.class, ThreadContext.class, StaticScope.class));</span>
+<span class="nc" id="L891">        return scope;</span>
+    }
+    
+    public static StaticScope loadStaticScope(MutableCallSite site, AbstractScript script, int index) {
+<span class="nc" id="L895">        StaticScope scope = script.getScope(index);</span>
+<span class="nc" id="L896">        site.setTarget(dropArguments(constant(StaticScope.class, scope), 0, AbstractScript.class));</span>
+<span class="nc" id="L897">        return scope;</span>
+    }
+    
+    public static RubyString newString(ThreadContext context, ByteList contents, int codeRange) {
+<span class="nc" id="L901">        return RubyString.newStringShared(context.runtime, contents, codeRange);</span>
+    }
+    
+    public static RubyString newFrozenString(ThreadContext context, MutableCallSite site, ByteList contents, int codeRange) {
+<span class="nc" id="L905">        RubyString string = context.runtime.freezeAndDedupString(RubyString.newStringShared(context.runtime, contents, codeRange));</span>
+<span class="nc" id="L906">        site.setTarget(dropArguments(constant(RubyString.class, string), 0, ThreadContext.class));</span>
+<span class="nc" id="L907">        return string;</span>
+    }
+    
+    public static RubyEncoding initEncoding(MutableCallSite site, ThreadContext context, Encoding encoding) {
+<span class="nc" id="L911">        RubyEncoding rubyEncoding = context.runtime.getEncodingService().getEncoding(encoding);</span>
+<span class="nc" id="L912">        site.setTarget(dropArguments(constant(RubyEncoding.class, rubyEncoding), 0, ThreadContext.class));</span>
+<span class="nc" id="L913">        return rubyEncoding;</span>
+    }
+    
+    public static BlockBody initBlockBody(MutableCallSite site, Object scriptObject, ThreadContext context, StaticScope scope, String descriptor) {
+<span class="nc" id="L917">        BlockBody body = Helpers.createCompiledBlockBody(context, scriptObject, scope, descriptor);</span>
+<span class="nc" id="L918">        site.setTarget(dropArguments(constant(BlockBody.class, body), 0, Object.class, ThreadContext.class, StaticScope.class));</span>
+<span class="nc" id="L919">        return body;</span>
+    }
+    
+    public static BlockBody initBlockBody19(MutableCallSite site, Object scriptObject, ThreadContext context, StaticScope scope, String descriptor) {
+<span class="nc" id="L923">        BlockBody body = Helpers.createCompiledBlockBody19(context, scriptObject, scope, descriptor);</span>
+<span class="nc" id="L924">        site.setTarget(dropArguments(constant(BlockBody.class, body), 0, Object.class, ThreadContext.class, StaticScope.class));</span>
+<span class="nc" id="L925">        return body;</span>
+    }
+    
+    public static RubyBoolean loadBoolean(MutableCallSite site, boolean value, ThreadContext context) {
+<span class="nc" id="L929">        RubyBoolean rubyBoolean = context.runtime.newBoolean(value);</span>
+<span class="nc" id="L930">        site.setTarget(dropArguments(constant(RubyBoolean.class, rubyBoolean), 0, ThreadContext.class));</span>
+<span class="nc" id="L931">        return rubyBoolean;</span>
+    }
+    
+    ////////////////////////////////////////////////////////////////////////////
+    // method_missing support code
+    ////////////////////////////////////////////////////////////////////////////
+
+    public static boolean methodMissing(CacheEntry entry, CallType callType, String name, IRubyObject caller) {
+<span class="nc" id="L939">        DynamicMethod method = entry.method;</span>
+<span class="nc bnc" id="L940" title="All 8 branches missed.">        return method.isUndefined() || (callType == CallType.NORMAL &amp;&amp; !name.equals(&quot;method_missing&quot;) &amp;&amp; !method.isCallableFrom(caller, callType));</span>
+    }
+
+    public static IRubyObject callMethodMissing(CacheEntry entry, CallType callType, ThreadContext context, IRubyObject self, String name, IRubyObject[] args) {
+<span class="nc" id="L944">        return Helpers.selectMethodMissing(context, self, entry.method.getVisibility(), name, callType).call(context, self, self.getMetaClass(), name, args, Block.NULL_BLOCK);</span>
+    }
+
+    public static IRubyObject callMethodMissing(CacheEntry entry, CallType callType, ThreadContext context, IRubyObject self, String name) {
+<span class="nc" id="L948">        return Helpers.selectMethodMissing(context, self, entry.method.getVisibility(), name, callType).call(context, self, self.getMetaClass(), name, Block.NULL_BLOCK);</span>
+    }
+
+    public static IRubyObject callMethodMissing(CacheEntry entry, CallType callType, ThreadContext context, IRubyObject self, String name, Block block) {
+<span class="nc" id="L952">        return Helpers.selectMethodMissing(context, self, entry.method.getVisibility(), name, callType).call(context, self, self.getMetaClass(), name, block);</span>
+    }
+
+    public static IRubyObject callMethodMissing(CacheEntry entry, CallType callType, ThreadContext context, IRubyObject self, String name, IRubyObject arg) {
+<span class="nc" id="L956">        return Helpers.selectMethodMissing(context, self, entry.method.getVisibility(), name, callType).call(context, self, self.getMetaClass(), name, arg, Block.NULL_BLOCK);</span>
+    }
+
+    public static IRubyObject callMethodMissing(CacheEntry entry, CallType callType, ThreadContext context, IRubyObject self, String name, IRubyObject[] args, Block block) {
+<span class="nc" id="L960">        return Helpers.selectMethodMissing(context, self, entry.method.getVisibility(), name, callType).call(context, self, self.getMetaClass(), name, args, block);</span>
+    }
+
+    public static IRubyObject callMethodMissing(CacheEntry entry, CallType callType, ThreadContext context, IRubyObject self, String name, IRubyObject arg0, Block block) {
+<span class="nc" id="L964">        return Helpers.selectMethodMissing(context, self, entry.method.getVisibility(), name, callType).call(context, self, self.getMetaClass(), name, arg0, block);</span>
+    }
+
+    public static IRubyObject callMethodMissing(CacheEntry entry, CallType callType, ThreadContext context, IRubyObject self, String name, IRubyObject arg0, IRubyObject arg1) {
+<span class="nc" id="L968">        return Helpers.selectMethodMissing(context, self, entry.method.getVisibility(), name, callType).call(context, self, self.getMetaClass(), name, arg0, arg1, Block.NULL_BLOCK);</span>
+    }
+
+    public static IRubyObject callMethodMissing(CacheEntry entry, CallType callType, ThreadContext context, IRubyObject self, String name, IRubyObject arg0, IRubyObject arg1, Block block) {
+<span class="nc" id="L972">        return Helpers.selectMethodMissing(context, self, entry.method.getVisibility(), name, callType).call(context, self, self.getMetaClass(), name, arg0, arg1, block);</span>
+    }
+
+    public static IRubyObject callMethodMissing(CacheEntry entry, CallType callType, ThreadContext context, IRubyObject self, String name, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2) {
+<span class="nc" id="L976">        return Helpers.selectMethodMissing(context, self, entry.method.getVisibility(), name, callType).call(context, self, self.getMetaClass(), name, arg0, arg1, arg2, Block.NULL_BLOCK);</span>
+    }
+
+    public static IRubyObject callMethodMissing(CacheEntry entry, CallType callType, ThreadContext context, IRubyObject self, String name, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="nc" id="L980">        return Helpers.selectMethodMissing(context, self, entry.method.getVisibility(), name, callType).call(context, self, self.getMetaClass(), name, arg0, arg1, arg2, block);</span>
+    }
+    
+    ////////////////////////////////////////////////////////////////////////////
+    // Dispatch support methods
+    ////////////////////////////////////////////////////////////////////////////
+
+    public static RubyClass pollAndGetClass(ThreadContext context, IRubyObject self) {
+<span class="nc" id="L988">        context.callThreadPoll();</span>
+<span class="nc" id="L989">        RubyClass selfType = ((RubyBasicObject)self).getMetaClass();</span>
+<span class="nc" id="L990">        return selfType;</span>
+    }
+
+    public static IRubyObject retryJumpError(ThreadContext context) {
+<span class="nc" id="L994">        throw context.runtime.newLocalJumpError(RubyLocalJumpError.Reason.RETRY, context.runtime.getNil(), &quot;retry outside of rescue not supported&quot;);</span>
+    }
+    
+    ////////////////////////////////////////////////////////////////////////////
+    // Utility methods for lookup
+    ////////////////////////////////////////////////////////////////////////////
+    
+    public static MethodHandle findStatic(Class target, String name, MethodType type) {
+        try {
+<span class="nc" id="L1003">            return lookup().findStatic(target, name, type);</span>
+<span class="nc" id="L1004">        } catch (NoSuchMethodException nsme) {</span>
+<span class="nc" id="L1005">            throw new RuntimeException(nsme);</span>
+<span class="nc" id="L1006">        } catch (IllegalAccessException nae) {</span>
+<span class="nc" id="L1007">            throw new RuntimeException(nae);</span>
+        }
+    }
+    public static MethodHandle findVirtual(Class target, String name, MethodType type) {
+        try {
+<span class="nc" id="L1012">            return lookup().findVirtual(target, name, type);</span>
+<span class="nc" id="L1013">        } catch (NoSuchMethodException nsme) {</span>
+<span class="nc" id="L1014">            throw new RuntimeException(nsme);</span>
+<span class="nc" id="L1015">        } catch (IllegalAccessException nae) {</span>
+<span class="nc" id="L1016">            throw new RuntimeException(nae);</span>
+        }
+    }
+
+    private static String extractSourceInfo(VariableSite site) {
+<span class="nc" id="L1021">        return &quot; (&quot; + site.file() + &quot;:&quot; + site.line() + &quot;)&quot;;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

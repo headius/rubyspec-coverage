@@ -1,0 +1,718 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>DefaultMethodFactory.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.ffi.jffi</a> &gt; <span class="el_source">DefaultMethodFactory.java</span></div><h1>DefaultMethodFactory.java</h1><pre class="source lang-java linenums">
+package org.jruby.ext.ffi.jffi;
+
+import com.kenai.jffi.CallingConvention;
+import com.kenai.jffi.Function;
+import com.kenai.jffi.HeapInvocationBuffer;
+import com.kenai.jffi.InvocationBuffer;
+import com.kenai.jffi.Invoker;
+import com.kenai.jffi.ArrayFlags;
+import org.jruby.RubyHash;
+import org.jruby.RubyModule;
+import org.jruby.RubyNumeric;
+import org.jruby.RubyString;
+import org.jruby.ext.ffi.AbstractMemory;
+import org.jruby.ext.ffi.ArrayMemoryIO;
+import org.jruby.ext.ffi.Buffer;
+import org.jruby.ext.ffi.CallbackInfo;
+import org.jruby.ext.ffi.Enums;
+import org.jruby.ext.ffi.MappedType;
+import org.jruby.ext.ffi.MemoryIO;
+import org.jruby.ext.ffi.MemoryPointer;
+import org.jruby.ext.ffi.NativeType;
+import org.jruby.ext.ffi.Platform;
+import org.jruby.ext.ffi.Struct;
+import org.jruby.ext.ffi.StructByValue;
+import org.jruby.ext.ffi.StructLayout;
+import org.jruby.ext.ffi.Type;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+
+
+public final class DefaultMethodFactory extends MethodFactory {
+
+<span class="nc" id="L36">    private static final class SingletonHolder {</span>
+<span class="fc" id="L37">        private static final DefaultMethodFactory INSTANCE = new DefaultMethodFactory();</span>
+    }
+    
+    public static DefaultMethodFactory getFactory() {
+<span class="fc" id="L41">        return SingletonHolder.INSTANCE;</span>
+    }
+
+<span class="fc" id="L44">    private DefaultMethodFactory() {}</span>
+
+    
+    @Override
+    boolean isSupported(Type returnType, Type[] parameterTypes, CallingConvention convention) {
+<span class="fc" id="L49">        return true;</span>
+    }
+    
+    DynamicMethod createMethod(RubyModule module, Function function, 
+            Type returnType, Type[] parameterTypes, CallingConvention convention, IRubyObject enums, boolean ignoreError) {
+
+<span class="fc" id="L55">        FunctionInvoker functionInvoker = getFunctionInvoker(returnType);</span>
+
+<span class="fc" id="L57">        ParameterMarshaller[] marshallers = new ParameterMarshaller[parameterTypes.length];</span>
+<span class="fc bfc" id="L58" title="All 2 branches covered.">        for (int i = 0; i &lt; parameterTypes.length; ++i)  {</span>
+<span class="fc" id="L59">            marshallers[i] = getMarshaller(parameterTypes[i], convention, enums);</span>
+<span class="pc bpc" id="L60" title="1 of 2 branches missed.">            if (marshallers[i] == null) {</span>
+<span class="nc" id="L61">                throw module.getRuntime().newTypeError(&quot;Could not create marshaller for &quot; + parameterTypes[i]);</span>
+            }
+        }
+
+<span class="pc bpc" id="L65" title="1 of 2 branches missed.">        Signature signature = new Signature(returnType, parameterTypes, convention, </span>
+                ignoreError, enums instanceof RubyHash ? (RubyHash) enums : null);
+
+<span class="fc" id="L68">        BufferNativeInvoker fallbackInvoker = new BufferNativeInvoker(module, function, signature, functionInvoker, marshallers);</span>
+<span class="pc bpc" id="L69" title="1 of 2 branches missed.">        return parameterTypes.length &lt;= 6</span>
+            ? new DefaultMethod(module, function, signature, fallbackInvoker)
+            : fallbackInvoker;
+    }
+
+    static FunctionInvoker getFunctionInvoker(Type returnType) {
+<span class="pc bpc" id="L75" title="1 of 2 branches missed.">        if (returnType instanceof Type.Builtin) {</span>
+<span class="fc" id="L76">            return getFunctionInvoker(returnType.getNativeType());</span>
+
+<span class="nc bnc" id="L78" title="All 2 branches missed.">        } else if (returnType instanceof CallbackInfo) {</span>
+<span class="nc" id="L79">            return new ConvertingInvoker(getFunctionInvoker(NativeType.POINTER), </span>
+<span class="nc" id="L80">                    DataConverters.getResultConverter(returnType));</span>
+
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        } else if (returnType instanceof StructByValue) {</span>
+<span class="nc" id="L83">            return new StructByValueInvoker((StructByValue) returnType);</span>
+        
+<span class="nc bnc" id="L85" title="All 2 branches missed.">        } else if (returnType instanceof MappedType) {</span>
+<span class="nc" id="L86">            MappedType ctype = (MappedType) returnType;</span>
+<span class="nc" id="L87">            return new ConvertingInvoker(getFunctionInvoker(ctype.getRealType()), </span>
+<span class="nc" id="L88">                    DataConverters.getResultConverter(ctype));</span>
+        }
+
+<span class="nc" id="L91">        throw returnType.getRuntime().newArgumentError(&quot;Cannot get FunctionInvoker for &quot; + returnType);</span>
+    }
+
+    static FunctionInvoker getFunctionInvoker(NativeType returnType) {
+<span class="pc bpc" id="L95" title="15 of 17 branches missed.">        switch (returnType) {</span>
+            case VOID:
+<span class="nc" id="L97">                return VoidInvoker.INSTANCE;</span>
+            case BOOL:
+<span class="nc" id="L99">                return BooleanInvoker.INSTANCE;</span>
+            case POINTER:
+<span class="nc bnc" id="L101" title="All 2 branches missed.">                return Platform.getPlatform().addressSize() == 32 ? Pointer32Invoker.INSTANCE : Pointer64Invoker.INSTANCE;</span>
+            case CHAR:
+<span class="nc" id="L103">                return Signed8Invoker.INSTANCE;</span>
+            case SHORT:
+<span class="nc" id="L105">                return Signed16Invoker.INSTANCE;</span>
+            case INT:
+<span class="fc" id="L107">                return Signed32Invoker.INSTANCE;</span>
+            case UCHAR:
+<span class="nc" id="L109">                return Unsigned8Invoker.INSTANCE;</span>
+            case USHORT:
+<span class="nc" id="L111">                return Unsigned16Invoker.INSTANCE;</span>
+            case UINT:
+<span class="nc" id="L113">                return Unsigned32Invoker.INSTANCE;</span>
+            case LONG_LONG:
+<span class="nc" id="L115">                return Signed64Invoker.INSTANCE;</span>
+            case ULONG_LONG:
+<span class="nc" id="L117">                return Unsigned64Invoker.INSTANCE;</span>
+            case LONG:
+<span class="nc bnc" id="L119" title="All 2 branches missed.">                return Platform.getPlatform().longSize() == 32</span>
+                        ? Signed32Invoker.INSTANCE
+                        : Signed64Invoker.INSTANCE;
+            case ULONG:
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">                return Platform.getPlatform().longSize() == 32</span>
+                        ? Unsigned32Invoker.INSTANCE
+                        : Unsigned64Invoker.INSTANCE;
+            case FLOAT:
+<span class="nc" id="L127">                return Float32Invoker.INSTANCE;</span>
+            case DOUBLE:
+<span class="nc" id="L129">                return Float64Invoker.INSTANCE;</span>
+            case STRING:
+            case TRANSIENT_STRING:
+<span class="nc" id="L132">                return StringInvoker.INSTANCE;</span>
+                
+            default:
+<span class="nc" id="L135">                throw new IllegalArgumentException(&quot;Invalid return type: &quot; + returnType);</span>
+        }
+    }
+    /**
+     * Gets a marshaller to convert from a ruby type to a native type.
+     *
+     * @param type The native type to convert to.
+     * @return A new &lt;tt&gt;Marshaller&lt;/tt&gt;
+     */
+    static ParameterMarshaller getMarshaller(Type type, CallingConvention convention, IRubyObject enums) {
+<span class="pc bpc" id="L145" title="6 of 8 branches missed.">        if (enums != null &amp;&amp; !enums.isNil() &amp;&amp; !(enums instanceof RubyHash || enums instanceof Enums)) {</span>
+<span class="nc" id="L146">            throw type.getRuntime().newArgumentError(&quot;wrong argument type &quot;</span>
+<span class="nc" id="L147">                    + enums.getMetaClass().getName() + &quot; (expected Hash or Enums)&quot;);</span>
+        }
+
+<span class="pc bpc" id="L150" title="1 of 2 branches missed.">        if (type instanceof Type.Builtin) {</span>
+<span class="pc bpc" id="L151" title="2 of 4 branches missed.">            return enums != null &amp;&amp; !enums.isNil() ? getEnumMarshaller(type, convention, enums) : getMarshaller(type.getNativeType());</span>
+
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        } else if (type instanceof org.jruby.ext.ffi.CallbackInfo) {</span>
+<span class="nc" id="L154">            return new ConvertingMarshaller(getMarshaller(type.getNativeType()), </span>
+<span class="nc" id="L155">                    DataConverters.getParameterConverter(type, (Enums)null));</span>
+
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        } else if (type instanceof org.jruby.ext.ffi.StructByValue) {</span>
+<span class="nc" id="L158">            return new StructByValueMarshaller((org.jruby.ext.ffi.StructByValue) type);</span>
+        
+<span class="nc bnc" id="L160" title="All 2 branches missed.">        } else if (type instanceof org.jruby.ext.ffi.MappedType) {</span>
+<span class="nc" id="L161">            MappedType ctype = (MappedType) type;</span>
+<span class="nc bnc" id="L162" title="All 4 branches missed.">            if (enums == null || enums instanceof Enums)</span>
+<span class="nc" id="L163">                return new ConvertingMarshaller(</span>
+<span class="nc" id="L164">                    getMarshaller(ctype.getRealType(), convention, (Enums)enums), </span>
+<span class="nc" id="L165">                    DataConverters.getParameterConverter(type, (Enums)enums));</span>
+            else
+<span class="nc" id="L167">                return new ConvertingMarshaller(</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">                    getMarshaller(ctype.getRealType(), convention, enums.isNil() ? null : (RubyHash)enums),</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">                    DataConverters.getParameterConverter(type, enums.isNil() ? null : (RubyHash)enums));</span>
+
+        } else {
+<span class="nc" id="L172">            return null;</span>
+        }
+    }
+
+    /**
+     * Gets a marshaller to convert from a ruby type to a native type.
+     *
+     * @param type The native type to convert to.
+     * @param enums The enum map
+     * @return A new &lt;tt&gt;ParameterMarshaller&lt;/tt&gt;
+     */
+    static ParameterMarshaller getEnumMarshaller(Type type, CallingConvention convention, IRubyObject enums) {
+<span class="nc bnc" id="L184" title="All 8 branches missed.">        if (enums != null &amp;&amp; !enums.isNil() &amp;&amp; !(enums instanceof RubyHash || enums instanceof Enums)) {</span>
+<span class="nc" id="L185">            throw type.getRuntime().newArgumentError(&quot;wrong argument type &quot;</span>
+<span class="nc" id="L186">                    + enums.getMetaClass().getName() + &quot; (expected Hash or Enums)&quot;);</span>
+        }
+<span class="nc" id="L188">        NativeDataConverter converter = DataConverters.getParameterConverter(type, (Enums)enums);</span>
+<span class="nc" id="L189">        ParameterMarshaller marshaller = getMarshaller(type.getNativeType());</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">        return converter != null ? new ConvertingMarshaller(marshaller, converter) : marshaller;</span>
+    }
+
+    /**
+     * Gets a marshaller to convert from a ruby type to a native type.
+     *
+     * @param type The native type to convert to.
+     * @return A new &lt;tt&gt;ParameterMarshaller&lt;/tt&gt;
+     */
+    static ParameterMarshaller getMarshaller(NativeType type) {
+<span class="pc bpc" id="L200" title="16 of 19 branches missed.">        switch (type) {</span>
+            case BOOL:
+<span class="nc" id="L202">                return BooleanMarshaller.INSTANCE;</span>
+            case CHAR:
+<span class="nc" id="L204">                return Signed8Marshaller.INSTANCE;</span>
+            case UCHAR:
+<span class="nc" id="L206">                return Unsigned8Marshaller.INSTANCE;</span>
+            case SHORT:
+<span class="nc" id="L208">                return Signed16Marshaller.INSTANCE;</span>
+            case USHORT:
+<span class="nc" id="L210">                return Unsigned16Marshaller.INSTANCE;</span>
+            case INT:
+<span class="fc" id="L212">                return Signed32Marshaller.INSTANCE;</span>
+            case UINT:
+<span class="nc" id="L214">                return Unsigned32Marshaller.INSTANCE;</span>
+            case LONG_LONG:
+<span class="nc" id="L216">                return Signed64Marshaller.INSTANCE;</span>
+            case ULONG_LONG:
+<span class="nc" id="L218">                return Unsigned64Marshaller.INSTANCE;</span>
+            case LONG:
+<span class="nc bnc" id="L220" title="All 2 branches missed.">                return Platform.getPlatform().longSize() == 32</span>
+                        ? Signed32Marshaller.INSTANCE
+                        : Signed64Marshaller.INSTANCE;
+            case ULONG:
+<span class="pc bpc" id="L224" title="1 of 2 branches missed.">                return Platform.getPlatform().longSize() == 32</span>
+                        ? Signed32Marshaller.INSTANCE
+                        : Unsigned64Marshaller.INSTANCE;
+            case FLOAT:
+<span class="nc" id="L228">                return Float32Marshaller.INSTANCE;</span>
+            case DOUBLE:
+<span class="nc" id="L230">                return Float64Marshaller.INSTANCE;</span>
+            case STRING:
+            case TRANSIENT_STRING:
+<span class="nc" id="L233">                return StringMarshaller.INSTANCE;</span>
+            case POINTER:
+<span class="fc" id="L235">                return BufferMarshaller.INOUT;</span>
+            case BUFFER_IN:
+<span class="nc" id="L237">                return BufferMarshaller.IN;</span>
+            case BUFFER_OUT:
+<span class="nc" id="L239">                return BufferMarshaller.OUT;</span>
+            case BUFFER_INOUT:
+<span class="nc" id="L241">                return BufferMarshaller.INOUT;</span>
+    
+            default:
+<span class="nc" id="L244">                throw new IllegalArgumentException(&quot;Invalid parameter type: &quot; + type);</span>
+        }
+    }
+    
+<span class="fc" id="L248">    private static abstract class BaseInvoker implements FunctionInvoker {</span>
+<span class="fc" id="L249">        static final Invoker invoker = Invoker.getInstance();</span>
+    }
+    /**
+     * Invokes the native function with no return type, and returns nil to ruby.
+     */
+<span class="nc" id="L254">    private static final class VoidInvoker extends BaseInvoker {</span>
+<span class="nc" id="L255">        public static final FunctionInvoker INSTANCE = new VoidInvoker();</span>
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L257">            invoker.invokeInt(function, args);</span>
+<span class="nc" id="L258">            return context.runtime.getNil();</span>
+        }
+    }
+
+    /**
+     * Invokes the native function with a boolean return value.
+     * Returns a Boolean to ruby.
+     */
+<span class="nc" id="L266">    private static final class BooleanInvoker extends BaseInvoker {</span>
+<span class="nc" id="L267">        public static final FunctionInvoker INSTANCE = new BooleanInvoker();</span>
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L269">            return JITRuntime.newBoolean(context, invoker.invokeInt(function, args));</span>
+        }
+    }
+
+    /**
+     * Invokes the native function with n signed 8 bit integer return value.
+     * Returns a Fixnum to ruby.
+     */
+<span class="nc" id="L277">    private static final class Signed8Invoker extends BaseInvoker {</span>
+<span class="nc" id="L278">        public static final FunctionInvoker INSTANCE = new Signed8Invoker();</span>
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L280">            return JITRuntime.newSigned8(context, invoker.invokeInt(function, args));</span>
+        }
+    }
+
+    /**
+     * Invokes the native function with an unsigned 8 bit integer return value.
+     * Returns a Fixnum to ruby.
+     */
+<span class="nc" id="L288">    private static final class Unsigned8Invoker extends BaseInvoker {</span>
+<span class="nc" id="L289">        public static final FunctionInvoker INSTANCE = new Unsigned8Invoker();</span>
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L291">            return JITRuntime.newUnsigned8(context, invoker.invokeInt(function, args));</span>
+        }
+    }
+
+    /**
+     * Invokes the native function with n signed 8 bit integer return value.
+     * Returns a Fixnum to ruby.
+     */
+<span class="nc" id="L299">    private static final class Signed16Invoker extends BaseInvoker {</span>
+<span class="nc" id="L300">        public static final FunctionInvoker INSTANCE = new Signed16Invoker();</span>
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L302">            return JITRuntime.newSigned16(context, invoker.invokeInt(function, args));</span>
+        }
+    }
+
+    /**
+     * Invokes the native function with an unsigned 32 bit integer return value.
+     * Returns a Fixnum to ruby.
+     */
+<span class="nc" id="L310">    private static final class Unsigned16Invoker extends BaseInvoker {</span>
+<span class="nc" id="L311">        public static final FunctionInvoker INSTANCE = new Unsigned16Invoker();</span>
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L313">            return JITRuntime.newUnsigned16(context, invoker.invokeInt(function, args));</span>
+        }
+    }
+    /**
+     * Invokes the native function with a 32 bit integer return value.
+     * Returns a Fixnum to ruby.
+     */
+<span class="fc" id="L320">    private static final class Signed32Invoker extends BaseInvoker {</span>
+<span class="fc" id="L321">        public static final FunctionInvoker INSTANCE = new Signed32Invoker();</span>
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L323">            return JITRuntime.newSigned32(context, invoker.invokeInt(function, args));</span>
+        }
+    }
+
+    /**
+     * Invokes the native function with an unsigned 32 bit integer return value.
+     * Returns a Fixnum to ruby.
+     */
+<span class="nc" id="L331">    private static final class Unsigned32Invoker extends BaseInvoker {</span>
+<span class="nc" id="L332">        public static final FunctionInvoker INSTANCE = new Unsigned32Invoker();</span>
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L334">            return JITRuntime.newUnsigned32(context, invoker.invokeInt(function, args));</span>
+        }
+    }
+
+    /**
+     * Invokes the native function with a 64 bit integer return value.
+     * Returns a Fixnum to ruby.
+     */
+<span class="nc" id="L342">    private static final class Signed64Invoker extends BaseInvoker {</span>
+<span class="nc" id="L343">        public static final FunctionInvoker INSTANCE = new Signed64Invoker();</span>
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L345">            return JITRuntime.newSigned64(context, invoker.invokeLong(function, args));</span>
+        }
+    }
+
+    /**
+     * Invokes the native function with a 64 bit unsigned integer return value.
+     * Returns a ruby Fixnum or Bignum.
+     */
+<span class="fc" id="L353">    private static final class Unsigned64Invoker extends BaseInvoker {</span>
+<span class="fc" id="L354">        public static final FunctionInvoker INSTANCE = new Unsigned64Invoker();</span>
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L356">            return JITRuntime.newUnsigned64(context, invoker.invokeLong(function, args));</span>
+        }
+    }
+
+    /**
+     * Invokes the native function with a 32 bit float return value.
+     * Returns a Float to ruby.
+     */
+<span class="nc" id="L364">    private static final class Float32Invoker extends BaseInvoker {</span>
+<span class="nc" id="L365">        public static final FunctionInvoker INSTANCE = new Float32Invoker();</span>
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L367">            return context.runtime.newFloat(invoker.invokeFloat(function, args));</span>
+        }
+    }
+
+    /**
+     * Invokes the native function with a 64 bit float return value.
+     * Returns a Float to ruby.
+     */
+<span class="nc" id="L375">    private static final class Float64Invoker extends BaseInvoker {</span>
+<span class="nc" id="L376">        public static final FunctionInvoker INSTANCE = new Float64Invoker();</span>
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L378">            return context.runtime.newFloat(invoker.invokeDouble(function, args));</span>
+        }
+    }
+
+    /**
+     * Invokes the native function with a native pointer return value.
+     * Returns a {@link MemoryPointer} to ruby.
+     */
+<span class="nc" id="L386">    private static final class Pointer32Invoker extends BaseInvoker {</span>
+<span class="nc" id="L387">        public static final FunctionInvoker INSTANCE = new Pointer32Invoker();</span>
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L389">            return JITRuntime.newPointer32(context, invoker.invokeAddress(function, args));</span>
+        }
+    }
+
+    /**
+     * Invokes the native function with a native pointer return value.
+     * Returns a {@link MemoryPointer} to ruby.
+     */
+<span class="nc" id="L397">    private static final class Pointer64Invoker extends BaseInvoker {</span>
+<span class="nc" id="L398">        public static final FunctionInvoker INSTANCE = new Pointer64Invoker();</span>
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L400">            return JITRuntime.newPointer64(context, invoker.invokeAddress(function, args));</span>
+        }
+    }
+
+    /**
+     * Invokes the native function with a native string return value.
+     * Returns a {@link RubyString} to ruby.
+     */
+<span class="nc" id="L408">    private static final class StringInvoker extends BaseInvoker {</span>
+<span class="nc" id="L409">        public static final FunctionInvoker INSTANCE = new StringInvoker();</span>
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L411">            return JITRuntime.newString(context, invoker.invokeAddress(function, args));</span>
+        }
+    }
+
+    /**
+     * Invokes the native function with a native struct return value.
+     * Returns a FFI::Struct instance to ruby.
+     */
+    private static final class StructByValueInvoker extends BaseInvoker {
+        private final StructByValue info;
+
+<span class="nc" id="L422">        public StructByValueInvoker(StructByValue info) {</span>
+<span class="nc" id="L423">            this.info = info;</span>
+<span class="nc" id="L424">        }</span>
+
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L427">            int size = info.getStructLayout().getSize();</span>
+<span class="nc" id="L428">            Buffer buf = new Buffer(context.runtime, size);</span>
+<span class="nc" id="L429">            MemoryIO mem = buf.getMemoryIO();</span>
+            byte[] array;
+            int arrayOffset;
+<span class="nc bnc" id="L432" title="All 2 branches missed.">            if (mem instanceof ArrayMemoryIO) {</span>
+<span class="nc" id="L433">                ArrayMemoryIO arrayMemoryIO = (ArrayMemoryIO) mem;</span>
+<span class="nc" id="L434">                array = arrayMemoryIO.array();</span>
+<span class="nc" id="L435">                arrayOffset = arrayMemoryIO.arrayOffset();</span>
+<span class="nc" id="L436">            } else {</span>
+<span class="nc" id="L437">                array = new byte[size];</span>
+<span class="nc" id="L438">                arrayOffset = 0;</span>
+            }
+
+<span class="nc" id="L441">            invoker.invokeStruct(function, args, array, arrayOffset);</span>
+
+<span class="nc bnc" id="L443" title="All 2 branches missed.">            if (!(mem instanceof ArrayMemoryIO)) {</span>
+<span class="nc" id="L444">                mem.put(0, array, 0, array.length);</span>
+            }
+
+<span class="nc" id="L447">            return info.getStructClass().newInstance(context, buf, Block.NULL_BLOCK);</span>
+        }
+    }
+
+    /**
+     * Invokes the native function, then passes the return value off to a
+     * conversion method to massage it to a custom ruby type.
+     */
+    private static final class ConvertingInvoker extends BaseInvoker {
+        private final FunctionInvoker nativeInvoker;
+        private final NativeDataConverter converter;
+
+<span class="nc" id="L459">        public ConvertingInvoker(FunctionInvoker nativeInvoker, NativeDataConverter converter) {</span>
+<span class="nc" id="L460">            this.nativeInvoker = nativeInvoker;</span>
+<span class="nc" id="L461">            this.converter = converter;</span>
+<span class="nc" id="L462">        }</span>
+
+        public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
+<span class="nc" id="L465">            return converter.fromNative(context, nativeInvoker.invoke(context, function, args));</span>
+        }
+    }
+
+    /*------------------------------------------------------------------------*/
+<span class="fc" id="L470">    static abstract class NonSessionMarshaller implements ParameterMarshaller {</span>
+        public final boolean requiresPostInvoke() {
+<span class="fc" id="L472">            return false;</span>
+        }
+
+        public final boolean requiresReference() {
+<span class="fc" id="L476">            return false;</span>
+        }
+
+        public final void marshal(Invocation invocation, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L480">            marshal(invocation.getThreadContext(), buffer, parameter);</span>
+<span class="nc" id="L481">        }</span>
+    }
+
+    /**
+     * Converts a ruby Boolean into an 32 bit native integer.
+     */
+<span class="nc" id="L487">    static final class BooleanMarshaller extends NonSessionMarshaller {</span>
+<span class="nc" id="L488">        public static final ParameterMarshaller INSTANCE = new BooleanMarshaller();</span>
+
+        public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L491">            buffer.putByte(JITRuntime.boolValue32(parameter));</span>
+<span class="nc" id="L492">        }</span>
+    }
+
+    /**
+     * Converts a ruby Fixnum into an 8 bit native integer.
+     */
+<span class="nc" id="L498">    static final class Signed8Marshaller extends NonSessionMarshaller {</span>
+<span class="nc" id="L499">        public static final ParameterMarshaller INSTANCE = new Signed8Marshaller();</span>
+
+        public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L502">            buffer.putByte(JITRuntime.s8Value32(parameter));</span>
+<span class="nc" id="L503">        }</span>
+    }
+
+    /**
+     * Converts a ruby Fixnum into an 8 bit native unsigned integer.
+     */
+<span class="nc" id="L509">    static final class Unsigned8Marshaller extends NonSessionMarshaller {</span>
+<span class="nc" id="L510">        public static final ParameterMarshaller INSTANCE = new Unsigned8Marshaller();</span>
+
+        public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L513">            buffer.putByte(JITRuntime.u8Value32(parameter));</span>
+<span class="nc" id="L514">        }</span>
+    }
+
+    /**
+     * Converts a ruby Fixnum into a 16 bit native signed integer.
+     */
+<span class="nc" id="L520">    static final class Signed16Marshaller extends NonSessionMarshaller {</span>
+<span class="nc" id="L521">        public static final ParameterMarshaller INSTANCE = new Signed16Marshaller();</span>
+        public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L523">            buffer.putShort(JITRuntime.s16Value32(parameter));</span>
+<span class="nc" id="L524">        }</span>
+    }
+
+    /**
+     * Converts a ruby Fixnum into a 16 bit native unsigned integer.
+     */
+<span class="nc" id="L530">    static final class Unsigned16Marshaller extends NonSessionMarshaller {</span>
+<span class="nc" id="L531">        public static final ParameterMarshaller INSTANCE = new Unsigned16Marshaller();</span>
+        public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L533">            buffer.putShort(JITRuntime.u16Value32(parameter));</span>
+<span class="nc" id="L534">        }</span>
+    }
+
+    /**
+     * Converts a ruby Fixnum into a 32 bit native signed integer.
+     */
+<span class="fc" id="L540">    static final class Signed32Marshaller extends NonSessionMarshaller {</span>
+<span class="fc" id="L541">        public static final ParameterMarshaller INSTANCE = new Signed32Marshaller();</span>
+        public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L543">            buffer.putInt(JITRuntime.s32Value32(parameter));</span>
+<span class="nc" id="L544">        }</span>
+    }
+
+    /**
+     * Converts a ruby Fixnum into a 32 bit native unsigned integer.
+     */
+<span class="nc" id="L550">    static final class Unsigned32Marshaller extends NonSessionMarshaller {</span>
+<span class="nc" id="L551">        public static final ParameterMarshaller INSTANCE = new Unsigned32Marshaller();</span>
+        public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L553">            buffer.putInt(JITRuntime.u32Value32(parameter));</span>
+<span class="nc" id="L554">        }</span>
+    }
+
+    /**
+     * Converts a ruby Fixnum into a 64 bit native signed integer.
+     */
+<span class="nc" id="L560">    static final class Signed64Marshaller extends NonSessionMarshaller {</span>
+<span class="nc" id="L561">        public static final ParameterMarshaller INSTANCE = new Signed64Marshaller();</span>
+        public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L563">            buffer.putLong(JITRuntime.s64Value64(parameter));</span>
+<span class="nc" id="L564">        }</span>
+    }
+
+    /**
+     * Converts a ruby Fixnum into a 64 bit native unsigned integer.
+     */
+<span class="fc" id="L570">    static final class Unsigned64Marshaller extends NonSessionMarshaller {</span>
+<span class="fc" id="L571">        public static final ParameterMarshaller INSTANCE = new Unsigned64Marshaller();</span>
+        public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L573">            buffer.putLong(JITRuntime.u64Value64(parameter));</span>
+<span class="nc" id="L574">        }</span>
+    }
+
+    /**
+     * Converts a ruby Float into a 32 bit native float.
+     */
+<span class="nc" id="L580">    static final class Float32Marshaller extends NonSessionMarshaller {</span>
+<span class="nc" id="L581">        public static final ParameterMarshaller INSTANCE = new Float32Marshaller();</span>
+        public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L583">            buffer.putFloat((float) RubyNumeric.num2dbl(parameter));</span>
+<span class="nc" id="L584">        }</span>
+    }
+
+    /**
+     * Converts a ruby Float into a 64 bit native float.
+     */
+<span class="nc" id="L590">    static final class Float64Marshaller extends NonSessionMarshaller {</span>
+<span class="nc" id="L591">        public static final ParameterMarshaller INSTANCE = new Float64Marshaller();</span>
+        public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L593">            buffer.putDouble(RubyNumeric.num2dbl(parameter));</span>
+<span class="nc" id="L594">        }</span>
+    }
+
+    static abstract class PointerParameterMarshaller extends NonSessionMarshaller {
+        private final int flags;
+<span class="fc" id="L599">        public PointerParameterMarshaller(int flags) {</span>
+<span class="fc" id="L600">            this.flags = flags;</span>
+<span class="fc" id="L601">        }</span>
+
+        public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter,
+                                  PointerParameterStrategy strategy) {
+<span class="nc bnc" id="L605" title="All 2 branches missed.">            if (strategy.isDirect()) {</span>
+<span class="nc" id="L606">                buffer.putAddress(strategy.address(parameter));</span>
+
+            } else {
+<span class="nc" id="L609">                buffer.putArray(byte[].class.cast(strategy.object(parameter)), strategy.offset(parameter), strategy.length(parameter),</span>
+                        flags);
+            }
+<span class="nc" id="L612">        }</span>
+    }
+    /**
+     * Converts a ruby Buffer into a native address.
+     */
+    static final class BufferMarshaller extends PointerParameterMarshaller {
+<span class="fc" id="L618">        static final ParameterMarshaller IN = new BufferMarshaller(ArrayFlags.IN);</span>
+<span class="fc" id="L619">        static final ParameterMarshaller OUT = new BufferMarshaller(ArrayFlags.OUT);</span>
+<span class="fc" id="L620">        static final ParameterMarshaller INOUT = new BufferMarshaller(ArrayFlags.IN | ArrayFlags.OUT);</span>
+
+        public BufferMarshaller(int flags) {
+<span class="fc" id="L623">            super(flags);</span>
+<span class="fc" id="L624">        }</span>
+
+        public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L627">            marshal(context, buffer, parameter, JITRuntime.pointerParameterStrategy(parameter));</span>
+<span class="nc" id="L628">        }</span>
+    }
+
+    /**
+     * Converts a ruby String into a native pointer.
+     */
+    static final class StringMarshaller extends PointerParameterMarshaller {
+<span class="nc" id="L635">        public static final ParameterMarshaller INSTANCE = new StringMarshaller(ArrayFlags.IN | ArrayFlags.NULTERMINATE);</span>
+
+        StringMarshaller(int flags) {
+<span class="nc" id="L638">            super(flags);</span>
+<span class="nc" id="L639">        }</span>
+
+        public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L642">            marshal(context, buffer, parameter, JITRuntime.stringParameterStrategy(parameter));</span>
+<span class="nc" id="L643">        }</span>
+    }
+
+    /**
+     * Converts a ruby String into a native pointer.
+     */
+    static final class StructByValueMarshaller extends NonSessionMarshaller {
+        private final StructLayout layout;
+<span class="nc" id="L651">        public StructByValueMarshaller(org.jruby.ext.ffi.StructByValue sbv) {</span>
+<span class="nc" id="L652">            layout = sbv.getStructLayout();</span>
+<span class="nc" id="L653">        }</span>
+
+
+        public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc bnc" id="L657" title="All 2 branches missed.">            if (!(parameter instanceof Struct)) {</span>
+<span class="nc" id="L658">                throw context.runtime.newTypeError(&quot;wrong argument type &quot;</span>
+<span class="nc" id="L659">                        + parameter.getMetaClass().getName() + &quot; (expected instance of FFI::Struct)&quot;);</span>
+            }
+
+<span class="nc" id="L662">            final AbstractMemory memory = ((Struct) parameter).getMemory();</span>
+<span class="nc bnc" id="L663" title="All 2 branches missed.">            if (memory.getSize() &lt; layout.getSize()) {</span>
+<span class="nc" id="L664">                throw context.runtime.newArgumentError(&quot;struct memory too small for parameter&quot;);</span>
+            }
+
+<span class="nc" id="L667">            final MemoryIO io = memory.getMemoryIO();</span>
+<span class="nc bnc" id="L668" title="All 2 branches missed.">            if (io.isDirect()) {</span>
+<span class="nc bnc" id="L669" title="All 2 branches missed.">                if (io.isNull()) {</span>
+<span class="nc" id="L670">                    throw context.runtime.newRuntimeError(&quot;Cannot use a NULL pointer as a struct by value argument&quot;);</span>
+                }
+<span class="nc" id="L672">                buffer.putStruct(io.address());</span>
+
+<span class="nc bnc" id="L674" title="All 2 branches missed.">            } else if (io instanceof ArrayMemoryIO) {</span>
+<span class="nc" id="L675">                ArrayMemoryIO aio = (ArrayMemoryIO) io;</span>
+<span class="nc" id="L676">                buffer.putStruct(aio.array(), aio.arrayOffset());</span>
+
+<span class="nc" id="L678">            } else {</span>
+<span class="nc" id="L679">                throw context.runtime.newRuntimeError(&quot;invalid struct memory&quot;);</span>
+            }
+<span class="nc" id="L681">        }</span>
+    }
+    
+    static final class ConvertingMarshaller implements ParameterMarshaller {
+        private final ParameterMarshaller nativeMarshaller;
+        private final NativeDataConverter converter;
+
+<span class="nc" id="L688">        public ConvertingMarshaller(ParameterMarshaller nativeMarshaller, NativeDataConverter converter) {</span>
+<span class="nc" id="L689">            this.nativeMarshaller = nativeMarshaller;</span>
+<span class="nc" id="L690">            this.converter = converter;</span>
+<span class="nc" id="L691">        }</span>
+
+
+        public void marshal(Invocation invocation, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L695">            ThreadContext context = invocation.getThreadContext();</span>
+<span class="nc" id="L696">            final IRubyObject nativeValue = converter.toNative(context, parameter);</span>
+
+            // keep a hard ref to the converted value if needed
+<span class="nc bnc" id="L699" title="All 2 branches missed.">            if (converter.isReferenceRequired()) {</span>
+<span class="nc" id="L700">                invocation.addReference(nativeValue);</span>
+            }
+<span class="nc" id="L702">            nativeMarshaller.marshal(context, buffer, nativeValue);</span>
+<span class="nc" id="L703">        }</span>
+
+        public void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
+<span class="nc" id="L706">            nativeMarshaller.marshal(context, buffer, converter.toNative(context, parameter));</span>
+<span class="nc" id="L707">        }</span>
+
+        public boolean requiresPostInvoke() {
+<span class="nc" id="L710">            return converter.isPostInvokeRequired();</span>
+        }
+
+        public boolean requiresReference() {
+<span class="nc" id="L714">            return converter.isReferenceRequired();</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

@@ -1,0 +1,842 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Dir.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util</a> &gt; <span class="el_source">Dir.java</span></div><h1>Dir.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2007, 2008 Ola Bini &lt;ola@ologix.com&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.util;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Enumeration;
+import java.util.List;
+import jnr.posix.POSIX;
+import org.jruby.RubyEncoding;
+import org.jruby.RubyFile;
+
+import org.jruby.platform.Platform;
+import java.io.IOException;
+
+/**
+ * This class exists as a counterpart to the dir.c file in 
+ * MRI source. It contains many methods useful for 
+ * File matching and Globbing.
+ *
+ * @author &lt;a href=&quot;mailto:ola.bini@ki.se&quot;&gt;Ola Bini&lt;/a&gt;
+ */
+<span class="nc" id="L49">public class Dir {</span>
+<span class="fc" id="L50">    public final static boolean DOSISH = Platform.IS_WINDOWS;</span>
+<span class="fc" id="L51">    public final static boolean CASEFOLD_FILESYSTEM = DOSISH;</span>
+
+    public final static int FNM_NOESCAPE = 0x01;
+    public final static int FNM_PATHNAME = 0x02;
+    public final static int FNM_DOTMATCH = 0x04;
+    public final static int FNM_CASEFOLD = 0x08;
+
+<span class="pc bpc" id="L58" title="1 of 2 branches missed.">    public final static int FNM_SYSCASE = CASEFOLD_FILESYSTEM ? FNM_CASEFOLD : 0;</span>
+
+    public final static int FNM_NOMATCH = 1;
+    public final static int FNM_ERROR   = 2;
+
+<span class="fc" id="L63">    public final static byte[] EMPTY = new byte[0];</span>
+<span class="fc" id="L64">    public final static byte[] SLASH = new byte[]{'/'};</span>
+<span class="fc" id="L65">    public final static byte[] STAR = new byte[]{'*'};</span>
+<span class="fc" id="L66">    public final static byte[] DOUBLE_STAR = new byte[]{'*','*'};</span>
+
+    private static boolean isdirsep(byte c) {
+<span class="pc bpc" id="L69" title="3 of 6 branches missed.">        return c == '/' || DOSISH &amp;&amp; c == '\\';</span>
+    }
+
+    private static int rb_path_next(byte[] _s, int s, int send) {
+<span class="pc bpc" id="L73" title="1 of 4 branches missed.">        while(s &lt; send &amp;&amp; !isdirsep(_s[s])) {</span>
+<span class="fc" id="L74">            s++;</span>
+        }
+<span class="fc" id="L76">        return s;</span>
+    }
+
+    private static int fnmatch_helper(byte[] bytes, int pstart, int pend, byte[] string, int sstart, int send, int flags) {
+        char test;
+<span class="fc" id="L81">        int s = sstart;</span>
+<span class="fc" id="L82">        int pat = pstart;</span>
+<span class="fc bfc" id="L83" title="All 2 branches covered.">        boolean escape = (flags &amp; FNM_NOESCAPE) == 0;</span>
+<span class="fc bfc" id="L84" title="All 2 branches covered.">        boolean pathname = (flags &amp; FNM_PATHNAME) != 0;</span>
+<span class="fc bfc" id="L85" title="All 2 branches covered.">        boolean period = (flags &amp; FNM_DOTMATCH) == 0;</span>
+<span class="fc bfc" id="L86" title="All 2 branches covered.">        boolean nocase = (flags &amp; FNM_CASEFOLD) != 0;</span>
+
+<span class="fc bfc" id="L88" title="All 2 branches covered.">        while(pat&lt;pend) {</span>
+<span class="fc" id="L89">            byte c = bytes[pat++];</span>
+<span class="fc bfc" id="L90" title="All 5 branches covered.">            switch(c) {</span>
+            case '?':
+<span class="pc bpc" id="L92" title="4 of 14 branches missed.">                if(s &gt;= send || (pathname &amp;&amp; isdirsep(string[s])) || </span>
+<span class="nc bnc" id="L93" title="All 2 branches missed.">                   (period &amp;&amp; string[s] == '.' &amp;&amp; (s == 0 || (pathname &amp;&amp; isdirsep(string[s-1]))))) {</span>
+<span class="fc" id="L94">                    return FNM_NOMATCH;</span>
+                }
+<span class="fc" id="L96">                s++;</span>
+<span class="fc" id="L97">                break;</span>
+            case '*':
+<span class="fc bfc" id="L99" title="All 4 branches covered.">                while(pat &lt; pend &amp;&amp; (c = bytes[pat++]) == '*') {}</span>
+<span class="pc bpc" id="L100" title="1 of 12 branches missed.">                if(s &lt; send &amp;&amp; (period &amp;&amp; string[s] == '.' &amp;&amp; (s == 0 || (pathname &amp;&amp; isdirsep(string[s-1]))))) {</span>
+<span class="fc" id="L101">                    return FNM_NOMATCH;</span>
+                }
+<span class="pc bpc" id="L103" title="1 of 6 branches missed.">                if(pat &gt; pend || (pat == pend &amp;&amp; c == '*')) {</span>
+<span class="pc bpc" id="L104" title="1 of 4 branches missed.">                    if(pathname &amp;&amp; rb_path_next(string, s, send) &lt; send) {</span>
+<span class="nc" id="L105">                        return FNM_NOMATCH;</span>
+                    } else {
+<span class="fc" id="L107">                        return 0;</span>
+                    }
+<span class="pc bpc" id="L109" title="1 of 4 branches missed.">                } else if((pathname &amp;&amp; isdirsep(c))) {</span>
+<span class="nc" id="L110">                    s = rb_path_next(string, s, send);</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">                    if(s &lt; send) {</span>
+<span class="nc" id="L112">                        s++;</span>
+<span class="nc" id="L113">                        break;</span>
+                    }
+<span class="nc" id="L115">                    return FNM_NOMATCH;</span>
+                }
+<span class="pc bpc" id="L117" title="4 of 6 branches missed.">                test = (char)((escape &amp;&amp; c == '\\' &amp;&amp; pat &lt; pend ? bytes[pat] : c)&amp;0xFF);</span>
+<span class="fc" id="L118">                test = Character.toLowerCase(test);</span>
+<span class="fc" id="L119">                pat--;</span>
+<span class="fc bfc" id="L120" title="All 2 branches covered.">                while(s &lt; send) {</span>
+<span class="pc bpc" id="L121" title="2 of 6 branches missed.">                    if((c == '?' || c == '[' || Character.toLowerCase((char) string[s]) == test) &amp;&amp;</span>
+<span class="fc bfc" id="L122" title="All 2 branches covered.">                       fnmatch(bytes, pat, pend, string, s, send, flags | FNM_DOTMATCH) == 0) {</span>
+<span class="fc" id="L123">                        return 0;</span>
+<span class="pc bpc" id="L124" title="1 of 4 branches missed.">                    } else if((pathname &amp;&amp; isdirsep(string[s]))) {</span>
+<span class="nc" id="L125">                        break;</span>
+                    }
+<span class="fc" id="L127">                    s++;</span>
+                }
+<span class="fc" id="L129">                return FNM_NOMATCH;</span>
+            case '[':
+<span class="pc bpc" id="L131" title="7 of 14 branches missed.">                if(s &gt;= send || (pathname &amp;&amp; isdirsep(string[s]) || </span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">                                 (period &amp;&amp; string[s] == '.' &amp;&amp; (s == 0 || (pathname &amp;&amp; isdirsep(string[s-1])))))) {</span>
+<span class="fc" id="L133">                    return FNM_NOMATCH;</span>
+                }
+<span class="fc" id="L135">                pat = range(bytes, pat, pend, (char)(string[s]&amp;0xFF), flags);</span>
+<span class="fc bfc" id="L136" title="All 2 branches covered.">                if(pat == -1) {</span>
+<span class="fc" id="L137">                    return FNM_NOMATCH;</span>
+                }
+<span class="fc" id="L139">                s++;</span>
+<span class="fc" id="L140">                break;</span>
+            case '\\':
+<span class="fc bfc" id="L142" title="All 2 branches covered.">                if (escape) {</span>
+<span class="pc bpc" id="L143" title="1 of 2 branches missed.">                    if (pat &gt;= pend) {</span>
+<span class="nc" id="L144">                        c = '\\';</span>
+                    } else {
+<span class="fc" id="L146">                        c = bytes[pat++];</span>
+                    }
+                }
+            default:
+<span class="fc bfc" id="L150" title="All 2 branches covered.">                if(s &gt;= send) {</span>
+<span class="fc" id="L151">                    return FNM_NOMATCH;</span>
+                }
+<span class="pc bpc" id="L153" title="7 of 8 branches missed.">                if(DOSISH &amp;&amp; (pathname &amp;&amp; isdirsep(c) &amp;&amp; isdirsep(string[s]))) {</span>
+                } else {
+<span class="fc bfc" id="L155" title="All 2 branches covered.">                    if (nocase) {</span>
+<span class="fc bfc" id="L156" title="All 2 branches covered.">                        if(Character.toLowerCase((char)c) != Character.toLowerCase((char)string[s])) {</span>
+<span class="fc" id="L157">                            return FNM_NOMATCH;</span>
+                        }
+                        
+                    } else {
+<span class="fc bfc" id="L161" title="All 2 branches covered.">                        if(c != (char)string[s]) {</span>
+<span class="fc" id="L162">                            return FNM_NOMATCH;</span>
+                        }
+                    }
+                    
+                }
+<span class="fc" id="L167">                s++;</span>
+                break;
+            }
+<span class="fc" id="L170">        }</span>
+<span class="fc bfc" id="L171" title="All 2 branches covered.">        return s &gt;= send ? 0 : FNM_NOMATCH;</span>
+    }
+
+    public static int fnmatch(
+            byte[] bytes, int pstart, int pend,
+            byte[] string, int sstart, int send, int flags) {
+        
+        // This method handles '**/' patterns and delegates to
+        // fnmatch_helper for the main work.
+
+<span class="fc bfc" id="L181" title="All 2 branches covered.">        boolean period = (flags &amp; FNM_DOTMATCH) == 0;</span>
+<span class="fc bfc" id="L182" title="All 2 branches covered.">        boolean pathname = (flags &amp; FNM_PATHNAME) != 0;</span>
+
+<span class="fc" id="L184">        int pat_pos = pstart;</span>
+<span class="fc" id="L185">        int str_pos = sstart;</span>
+<span class="fc" id="L186">        int ptmp = -1;</span>
+<span class="fc" id="L187">        int stmp = -1;</span>
+
+<span class="fc bfc" id="L189" title="All 2 branches covered.">        if (pathname) {</span>
+            while (true) {
+<span class="fc bfc" id="L191" title="All 2 branches covered.">                if (isDoubleStarAndSlash(bytes, pat_pos)) {</span>
+<span class="pc bpc" id="L192" title="1 of 2 branches missed.">                    do { pat_pos += 3; } while (isDoubleStarAndSlash(bytes, pat_pos));</span>
+<span class="fc" id="L193">                    ptmp = pat_pos;</span>
+<span class="fc" id="L194">                    stmp = str_pos;</span>
+                }
+
+<span class="fc" id="L197">                int patSlashIdx = nextSlashIndex(bytes, pat_pos, pend);</span>
+<span class="fc" id="L198">                int strSlashIdx = nextSlashIndex(string, str_pos, send);</span>
+
+<span class="fc bfc" id="L200" title="All 2 branches covered.">                if (fnmatch_helper(bytes, pat_pos, patSlashIdx,</span>
+                        string, str_pos, strSlashIdx, flags) == 0) {
+<span class="pc bpc" id="L202" title="1 of 4 branches missed.">                    if (patSlashIdx &lt; pend &amp;&amp; strSlashIdx &lt; send) {</span>
+<span class="fc" id="L203">                        pat_pos = ++patSlashIdx;</span>
+<span class="fc" id="L204">                        str_pos = ++strSlashIdx;</span>
+<span class="fc" id="L205">                        continue;</span>
+                    }
+<span class="pc bpc" id="L207" title="1 of 4 branches missed.">                    if (patSlashIdx == pend &amp;&amp; strSlashIdx == send) {</span>
+<span class="fc" id="L208">                        return 0;</span>
+                    }
+                }
+                /* failed : try next recursion */
+<span class="pc bpc" id="L212" title="1 of 8 branches missed.">                if (ptmp != -1 &amp;&amp; stmp != -1 &amp;&amp; !(period &amp;&amp; string[stmp] == '.')) {</span>
+<span class="fc" id="L213">                    stmp = nextSlashIndex(string, stmp, send);</span>
+<span class="pc bpc" id="L214" title="1 of 2 branches missed.">                    if (stmp &lt; send) {</span>
+<span class="fc" id="L215">                        pat_pos = ptmp;</span>
+<span class="fc" id="L216">                        stmp++;</span>
+<span class="fc" id="L217">                        str_pos = stmp;</span>
+<span class="fc" id="L218">                        continue;</span>
+                    }
+                }
+<span class="fc" id="L221">                return FNM_NOMATCH;</span>
+            }
+        } else {
+<span class="fc" id="L224">            return fnmatch_helper(bytes, pstart, pend, string, sstart, send, flags);</span>
+        }
+
+    }
+
+    // are we at '**/'
+    private static boolean isDoubleStarAndSlash(byte[] bytes, int pos) {
+<span class="fc bfc" id="L231" title="All 2 branches covered.">        if ((bytes.length - pos) &lt;= 2) {</span>
+<span class="fc" id="L232">            return false; // not enough bytes</span>
+        }
+
+<span class="pc bpc" id="L235" title="1 of 6 branches missed.">        return bytes[pos] == '*'</span>
+            &amp;&amp; bytes[pos + 1] == '*'
+            &amp;&amp; bytes[pos + 2] == '/';
+    }
+
+    // Look for slash, starting from 'start' position, until 'end'.
+    private static int nextSlashIndex(byte[] bytes, int start, int end) {
+<span class="fc" id="L242">        int idx = start;</span>
+<span class="pc bpc" id="L243" title="1 of 6 branches missed.">        while (idx &lt; end &amp;&amp; idx &lt; bytes.length &amp;&amp; bytes[idx] != '/') {</span>
+<span class="fc" id="L244">            idx++;</span>
+        }
+<span class="fc" id="L246">        return idx;</span>
+    }
+
+    public static int range(byte[] _pat, int pat, int pend, char test, int flags) {
+        boolean not;
+<span class="fc" id="L251">        boolean ok = false;</span>
+<span class="fc bfc" id="L252" title="All 2 branches covered.">        boolean nocase = (flags &amp; FNM_CASEFOLD) != 0;</span>
+<span class="pc bpc" id="L253" title="1 of 2 branches missed.">        boolean escape = (flags &amp; FNM_NOESCAPE) == 0;</span>
+
+<span class="fc bfc" id="L255" title="All 4 branches covered.">        not = _pat[pat] == '!' || _pat[pat] == '^';</span>
+<span class="fc bfc" id="L256" title="All 2 branches covered.">        if(not) {</span>
+<span class="fc" id="L257">            pat++;</span>
+        }
+
+<span class="fc bfc" id="L260" title="All 2 branches covered.">        if (nocase) {</span>
+<span class="fc" id="L261">            test = Character.toLowerCase(test);</span>
+        }
+
+<span class="fc bfc" id="L264" title="All 2 branches covered.">        while(_pat[pat] != ']') {</span>
+            char cstart, cend;
+<span class="pc bpc" id="L266" title="1 of 4 branches missed.">            if(escape &amp;&amp; _pat[pat] == '\\') {</span>
+<span class="fc" id="L267">                pat++;</span>
+            }
+<span class="pc bpc" id="L269" title="1 of 2 branches missed.">            if(pat &gt;= pend) {</span>
+<span class="nc" id="L270">                return -1;</span>
+            }
+<span class="fc" id="L272">            cstart = cend = (char)(_pat[pat++]&amp;0xFF);</span>
+<span class="pc bpc" id="L273" title="1 of 4 branches missed.">            if(_pat[pat] == '-' &amp;&amp; _pat[pat+1] != ']') {</span>
+<span class="fc" id="L274">                pat++;</span>
+<span class="pc bpc" id="L275" title="2 of 4 branches missed.">                if(escape &amp;&amp; _pat[pat] == '\\') {</span>
+<span class="nc" id="L276">                    pat++;</span>
+                }
+<span class="pc bpc" id="L278" title="1 of 2 branches missed.">                if(pat &gt;= pend) {</span>
+<span class="nc" id="L279">                    return -1;</span>
+                }
+
+<span class="fc" id="L282">                cend = (char)(_pat[pat++] &amp; 0xFF);</span>
+            }
+
+<span class="fc bfc" id="L285" title="All 2 branches covered.">            if (nocase) {</span>
+<span class="pc bpc" id="L286" title="1 of 2 branches missed.">                if (Character.toLowerCase(cstart) &lt;= test</span>
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">                        &amp;&amp; test &lt;= Character.toLowerCase(cend)) {</span>
+<span class="fc" id="L288">                    ok = true;</span>
+                }
+            } else {
+<span class="fc bfc" id="L291" title="All 4 branches covered.">                if (cstart &lt;= test &amp;&amp; test &lt;= cend) {</span>
+<span class="fc" id="L292">                    ok = true;</span>
+                }
+            }
+<span class="fc" id="L295">        }</span>
+
+<span class="fc bfc" id="L297" title="All 2 branches covered.">        return ok == not ? -1 : pat + 1;</span>
+    }
+
+    public static List&lt;ByteList&gt; push_glob(POSIX posix, String cwd, ByteList globByteList, int flags) {
+<span class="fc" id="L301">        List&lt;ByteList&gt; result = new ArrayList&lt;ByteList&gt;();</span>
+<span class="fc bfc" id="L302" title="All 2 branches covered.">        if (globByteList.length() &gt; 0) {</span>
+<span class="fc" id="L303">            push_braces(posix, cwd, result, new GlobPattern(globByteList, flags));</span>
+        }
+
+<span class="fc" id="L306">        return result;</span>
+    }
+    
+    private static class GlobPattern {
+        final byte[] bytes;        
+        final int begin;
+        final int end;
+        
+        int flags;
+        int index;
+
+        public GlobPattern(ByteList bytelist, int flags) {
+<span class="fc" id="L318">            this(bytelist.getUnsafeBytes(), bytelist.getBegin(),  bytelist.getBegin() + bytelist.getRealSize(), flags);</span>
+<span class="fc" id="L319">        }</span>
+        
+<span class="fc" id="L321">        public GlobPattern(byte[] bytes, int index, int end, int flags) {</span>
+<span class="fc" id="L322">            this.bytes = bytes;</span>
+<span class="fc" id="L323">            this.index = index;</span>
+<span class="fc" id="L324">            this.begin = index;</span>
+<span class="fc" id="L325">            this.end = end;</span>
+<span class="fc" id="L326">            this.flags = flags;</span>
+<span class="fc" id="L327">        }</span>
+        
+        public int findClosingIndexOf(int leftTokenIndex) {
+<span class="pc bpc" id="L330" title="1 of 4 branches missed.">            if (leftTokenIndex == -1 || leftTokenIndex &gt; end) return -1;</span>
+            
+<span class="fc" id="L332">            byte leftToken = bytes[leftTokenIndex];</span>
+            byte rightToken;
+            
+<span class="pc bpc" id="L335" title="2 of 3 branches missed.">            switch (leftToken) {</span>
+<span class="fc" id="L336">            case '{': rightToken = '}'; break;</span>
+<span class="nc" id="L337">            case '[': rightToken = ']'; break;</span>
+<span class="nc" id="L338">            default: return -1;</span>
+            }
+            
+<span class="fc" id="L341">            int nest = 1; // leftToken made us start as nest 1</span>
+<span class="fc" id="L342">            index = leftTokenIndex + 1;</span>
+<span class="fc bfc" id="L343" title="All 2 branches covered.">            while (hasNext()) {</span>
+<span class="fc" id="L344">                byte c = next();</span>
+                
+<span class="fc bfc" id="L346" title="All 2 branches covered.">                if (c == leftToken) {</span>
+<span class="fc" id="L347">                    nest++;</span>
+<span class="fc bfc" id="L348" title="All 4 branches covered.">                } else if (c == rightToken &amp;&amp; --nest == 0) {</span>
+<span class="fc" id="L349">                    return index();</span>
+                }
+<span class="fc" id="L351">            }</span>
+            
+<span class="fc" id="L353">            return -1;</span>
+        }
+        
+        public boolean hasNext() {
+<span class="fc bfc" id="L357" title="All 2 branches covered.">            return index &lt; end;</span>
+        }
+        
+        public void reset() {
+<span class="fc" id="L361">            index = begin;</span>
+<span class="fc" id="L362">        }</span>
+        
+        public void setIndex(int value) {
+<span class="nc" id="L365">            index = value;</span>
+<span class="nc" id="L366">        }</span>
+        
+        // Get index of last read byte
+        public int index() {
+<span class="fc" id="L370">            return index - 1;</span>
+        }
+        
+        public int indexOf(byte c) {
+<span class="fc bfc" id="L374" title="All 4 branches covered.">            while (hasNext()) if (next() == c) return index();</span>
+            
+<span class="fc" id="L376">            return -1;</span>
+        }
+        
+        public byte next() {
+<span class="fc" id="L380">            return bytes[index++];</span>
+        }
+
+    }
+
+    public static interface GlobFunc {
+        int call(byte[] ptr, int p, int len, Object ary);
+    }
+
+    private static class GlobArgs {
+        GlobFunc func;
+<span class="fc" id="L391">        int c = -1;</span>
+        List&lt;ByteList&gt; v;
+        
+<span class="fc" id="L394">        public GlobArgs(GlobFunc func, List&lt;ByteList&gt; arg) {</span>
+<span class="fc" id="L395">            this.func = func;</span>
+<span class="fc" id="L396">            this.v = arg;</span>
+<span class="fc" id="L397">        }</span>
+    }
+
+<span class="fc" id="L400">    public final static GlobFunc push_pattern = new GlobFunc() {</span>
+            @SuppressWarnings(&quot;unchecked&quot;)
+            public int call(byte[] ptr, int p, int len, Object ary) {
+<span class="fc" id="L403">                ((List) ary).add(new ByteList(ptr, p, len));</span>
+<span class="fc" id="L404">                return 0;</span>
+            }
+        };
+<span class="fc" id="L407">    public final static GlobFunc glob_caller = new GlobFunc() {</span>
+        public int call(byte[] ptr, int p, int len, Object ary) {
+<span class="fc" id="L409">            GlobArgs args = (GlobArgs)ary;</span>
+<span class="fc" id="L410">            args.c = p;</span>
+<span class="fc" id="L411">            return args.func.call(ptr, args.c, len, args.v);</span>
+        }
+    };
+
+    /*
+     * Process {}'s (example: Dir.glob(&quot;{jruby,jython}/README*&quot;) 
+     */
+    private static int push_braces(POSIX posix, String cwd, List&lt;ByteList&gt; result, GlobPattern pattern) {
+<span class="fc" id="L419">        pattern.reset();</span>
+<span class="fc" id="L420">        int lbrace = pattern.indexOf((byte) '{'); // index of left-most brace</span>
+<span class="fc" id="L421">        int rbrace = pattern.findClosingIndexOf(lbrace);// index of right-most brace</span>
+
+        // No, mismatched or escaped braces..Move along..nothing to see here
+<span class="pc bpc" id="L424" title="2 of 12 branches missed.">        if (lbrace == -1 || rbrace == -1 || </span>
+                lbrace &gt; 0 &amp;&amp; pattern.bytes[lbrace-1] == '\\' || 
+                rbrace &gt; 0 &amp;&amp; pattern.bytes[rbrace-1] == '\\') {
+<span class="fc" id="L427">            ByteList unescaped = new ByteList(pattern.bytes.length-1);</span>
+<span class="fc bfc" id="L428" title="All 2 branches covered.">            for (int i = pattern.begin; i &lt; pattern.end; i++) {</span>
+<span class="fc" id="L429">                byte b = pattern.bytes[i];</span>
+<span class="pc bpc" id="L430" title="1 of 4 branches missed.">                if (b == '\\' &amp;&amp; i &lt; pattern.bytes.length - 1) {</span>
+<span class="fc" id="L431">                    byte next_b = pattern.bytes[i + 1];</span>
+<span class="fc bfc" id="L432" title="All 4 branches covered.">                    if (next_b != '{' &amp;&amp; next_b != '}') {</span>
+<span class="fc" id="L433">                        unescaped.append(b);</span>
+                    }
+<span class="fc" id="L435">                } else {</span>
+<span class="fc" id="L436">                    unescaped.append(b);</span>
+                }
+            }
+<span class="fc" id="L439">            return push_globs(posix, cwd, result, unescaped.getUnsafeBytes(), unescaped.begin(), unescaped.length(), pattern.flags);</span>
+        }
+
+        // Peel onion...make subpatterns out of outer layer of glob and recall with each subpattern 
+        // Example: foo{a{c},b}bar -&gt; fooa{c}bar, foobbar
+<span class="fc" id="L444">        ByteList buf = new ByteList(20);</span>
+        int middleRegionIndex;
+<span class="fc" id="L446">        int i = lbrace;</span>
+<span class="fc bfc" id="L447" title="All 2 branches covered.">        while (pattern.bytes[i] != '}') {</span>
+<span class="fc" id="L448">            middleRegionIndex = i + 1;</span>
+<span class="pc bpc" id="L449" title="1 of 6 branches missed.">            for(i = middleRegionIndex; i &lt; pattern.end &amp;&amp; pattern.bytes[i] != '}' &amp;&amp; pattern.bytes[i] != ','; i++) {</span>
+<span class="fc bfc" id="L450" title="All 2 branches covered.">                if (pattern.bytes[i] == '{') i = pattern.findClosingIndexOf(i); // skip inner braces</span>
+            }
+
+<span class="fc" id="L453">            buf.length(0);</span>
+<span class="fc" id="L454">            buf.append(pattern.bytes, pattern.begin, lbrace - pattern.begin);</span>
+<span class="fc" id="L455">            buf.append(pattern.bytes, middleRegionIndex, i - middleRegionIndex);</span>
+<span class="fc" id="L456">            buf.append(pattern.bytes, rbrace + 1, pattern.end - (rbrace + 1));</span>
+<span class="fc" id="L457">            int status = push_braces(posix, cwd, result, new GlobPattern(buf.getUnsafeBytes(), buf.getBegin(), buf.getRealSize(),pattern.flags));</span>
+<span class="pc bpc" id="L458" title="1 of 2 branches missed.">            if(status != 0) return status;</span>
+<span class="fc" id="L459">        }</span>
+        
+<span class="fc" id="L461">        return 0; // All braces pushed..</span>
+    }
+
+    private static int push_globs(POSIX posix, String cwd, List&lt;ByteList&gt; ary, byte[] pattern, int pbegin, int pend, int pflags) {
+<span class="fc" id="L465">        pflags |= FNM_SYSCASE;</span>
+<span class="fc" id="L466">        return glob_helper(posix, cwd, pattern, pbegin, pend, -1, pflags, glob_caller, new GlobArgs(push_pattern, ary));</span>
+    }
+
+    public static ArrayList&lt;String&gt; braces(String pattern, int flags, ArrayList&lt;String&gt; patterns) {
+<span class="pc bpc" id="L470" title="1 of 2 branches missed.">        boolean escape = (flags &amp; FNM_NOESCAPE) == 0;</span>
+
+<span class="fc" id="L472">        int rbrace = -1;</span>
+<span class="fc" id="L473">        int lbrace = -1;</span>
+
+        // Do a quick search for a { to start the search better
+<span class="fc" id="L476">        int i = pattern.indexOf('{');</span>
+
+<span class="fc bfc" id="L478" title="All 2 branches covered.">        if(i &gt;= 0) {</span>
+<span class="fc" id="L479">            int nest = 0;</span>
+
+<span class="fc bfc" id="L481" title="All 2 branches covered.">            while(i &lt; pattern.length()) {</span>
+<span class="fc" id="L482">                char c = pattern.charAt(i);</span>
+
+<span class="fc bfc" id="L484" title="All 2 branches covered.">                if(c == '{') {</span>
+<span class="fc bfc" id="L485" title="All 2 branches covered.">                    if(nest == 0) {</span>
+<span class="fc" id="L486">                        lbrace = i;</span>
+                    }
+<span class="fc" id="L488">                    nest += 1;</span>
+                }
+
+<span class="fc bfc" id="L491" title="All 2 branches covered.">                if(c == '}') {</span>
+<span class="fc" id="L492">                    nest -= 1;</span>
+                }
+
+<span class="fc bfc" id="L495" title="All 2 branches covered.">                if(nest == 0) {</span>
+<span class="fc" id="L496">                    rbrace = i;</span>
+<span class="fc" id="L497">                    break;</span>
+                }
+
+<span class="pc bpc" id="L500" title="1 of 4 branches missed.">                if(c == '\\' &amp;&amp; escape) {</span>
+<span class="fc" id="L501">                    i += 1;</span>
+                }
+
+<span class="fc" id="L504">                i += 1;</span>
+<span class="fc" id="L505">            }</span>
+        }
+
+        // There was a full {} expression detected, expand each part of it
+        // recursively.
+<span class="fc bfc" id="L510" title="All 4 branches covered.">        if(lbrace &gt;= 0 &amp;&amp; rbrace &gt;= 0) {</span>
+<span class="fc" id="L511">            int pos = lbrace;</span>
+<span class="fc" id="L512">            String front = pattern.substring(0, lbrace);</span>
+<span class="fc" id="L513">            String back = pattern.substring(rbrace + 1, pattern.length());</span>
+
+<span class="fc bfc" id="L515" title="All 2 branches covered.">            while(pos &lt; rbrace) {</span>
+<span class="fc" id="L516">                int nest = 0;</span>
+<span class="fc" id="L517">                pos += 1;</span>
+<span class="fc" id="L518">                int last = pos;</span>
+
+<span class="fc bfc" id="L520" title="All 6 branches covered.">                while(pos &lt; rbrace &amp;&amp; !(pattern.charAt(pos) == ',' &amp;&amp; nest == 0)) {</span>
+<span class="fc bfc" id="L521" title="All 2 branches covered.">                    if(pattern.charAt(pos) == '{') {</span>
+<span class="fc" id="L522">                        nest += 1;</span>
+                    }
+<span class="fc bfc" id="L524" title="All 2 branches covered.">                    if(pattern.charAt(pos) == '}') {</span>
+<span class="fc" id="L525">                        nest -= 1;</span>
+                    }
+
+<span class="pc bpc" id="L528" title="1 of 4 branches missed.">                    if(pattern.charAt(pos) == '\\' &amp;&amp; escape) {</span>
+<span class="fc" id="L529">                        pos += 1;</span>
+<span class="pc bpc" id="L530" title="1 of 2 branches missed.">                        if(pos == rbrace) {</span>
+<span class="nc" id="L531">                            break;</span>
+                        }
+                    }
+
+<span class="fc" id="L535">                    pos += 1;</span>
+                }
+<span class="fc" id="L537">                String brace_pattern = front + pattern.substring(last, pos) + back;</span>
+<span class="fc" id="L538">                patterns.add(brace_pattern);</span>
+
+<span class="fc" id="L540">                braces(brace_pattern, flags, patterns);</span>
+<span class="fc" id="L541">            }</span>
+        }
+
+<span class="fc" id="L544">        return patterns;</span>
+    }
+
+    private static boolean has_magic(byte[] bytes, int begin, int end, int flags) {
+<span class="fc bfc" id="L548" title="All 2 branches covered.">        boolean escape = (flags &amp; FNM_NOESCAPE) == 0;</span>
+<span class="pc bpc" id="L549" title="1 of 2 branches missed.">        boolean nocase = (flags &amp; FNM_CASEFOLD) != 0;</span>
+<span class="fc" id="L550">        int open = 0;</span>
+
+<span class="fc bfc" id="L552" title="All 2 branches covered.">        for (int i = begin; i &lt; end; i++) {</span>
+<span class="fc bfc" id="L553" title="All 5 branches covered.">            switch(bytes[i]) {</span>
+            case '?':
+            case '*':
+<span class="fc" id="L556">                return true;</span>
+            case '[':	/* Only accept an open brace if there is a close */
+<span class="fc" id="L558">                open++;	/* brace to match it.  Bracket expressions must be */</span>
+<span class="fc" id="L559">                continue;	/* complete, according to Posix.2 */</span>
+            case ']':
+<span class="fc bfc" id="L561" title="All 2 branches covered.">                if (open &gt; 0) return true;</span>
+
+                continue;
+            case '\\':
+<span class="pc bpc" id="L565" title="1 of 4 branches missed.">                if (escape &amp;&amp; i == end) return false;</span>
+
+                break;
+            default:
+<span class="pc bpc" id="L569" title="4 of 6 branches missed.">                if (FNM_SYSCASE == 0 &amp;&amp; nocase &amp;&amp; Character.isLetter((char)(bytes[i]&amp;0xFF))) return true;</span>
+            }
+        }
+
+<span class="fc" id="L573">        return false;</span>
+    }
+
+    private static int remove_backslashes(byte[] bytes, int index, int len) {
+<span class="fc" id="L577">        int t = index;</span>
+        
+<span class="fc bfc" id="L579" title="All 2 branches covered.">        for (; index &lt; len; index++, t++) {</span>
+<span class="pc bpc" id="L580" title="1 of 4 branches missed.">            if (bytes[index] == '\\' &amp;&amp; ++index == len) break;</span>
+            
+<span class="fc" id="L582">            bytes[t] = bytes[index];</span>
+        }
+        
+<span class="fc" id="L585">        return t;</span>
+    }
+
+    private static int strchr(byte[] bytes, int begin, int end, byte ch) {
+<span class="fc bfc" id="L589" title="All 2 branches covered.">        for (int i = begin; i &lt; end; i++) {</span>
+<span class="fc bfc" id="L590" title="All 2 branches covered.">            if (bytes[i] == ch) return i;</span>
+        }
+        
+<span class="fc" id="L593">        return -1;</span>
+    }
+
+    private static byte[] extract_path(byte[] bytes, int begin, int end) {
+<span class="fc" id="L597">        int len = end - begin;</span>
+        
+<span class="pc bpc" id="L599" title="5 of 10 branches missed.">        if (len &gt; 1 &amp;&amp; bytes[end-1] == '/' &amp;&amp; (!DOSISH || (len &lt; 2 || bytes[end-2] != ':'))) len--;</span>
+
+<span class="fc" id="L601">        byte[] alloc = new byte[len];</span>
+<span class="fc" id="L602">        System.arraycopy(bytes,begin,alloc,0,len);</span>
+<span class="fc" id="L603">        return alloc;</span>
+    }
+
+    private static byte[] extract_elem(byte[] bytes, int begin, int end) {
+<span class="fc" id="L607">        int elementEnd = strchr(bytes, begin, end, (byte)'/');</span>
+<span class="fc bfc" id="L608" title="All 2 branches covered.">        if (elementEnd == -1) elementEnd = end;</span>
+        
+<span class="fc" id="L610">        return extract_path(bytes, begin, elementEnd);</span>
+    }
+    
+    // Win drive letter X:/
+    private static boolean beginsWithDriveLetter(byte[] path, int begin, int end) {
+<span class="pc bpc" id="L615" title="7 of 8 branches missed.">        return DOSISH &amp;&amp; begin + 2 &lt; end &amp;&amp; path[begin + 1] == ':' &amp;&amp; isdirsep(path[begin + 2]); </span>
+    }
+
+    // Is this nothing or literally root directory for the OS.
+    private static boolean isRoot(byte[] base) {
+<span class="fc" id="L620">        int length = base.length;</span>
+        
+<span class="fc bfc" id="L622" title="All 4 branches covered.">        return length == 0 ||  // empty</span>
+<span class="pc bpc" id="L623" title="1 of 4 branches missed.">               length == 1 &amp;&amp; isdirsep(base[0]) || // Just '/'</span>
+<span class="pc bpc" id="L624" title="1 of 2 branches missed.">               length == 3 &amp;&amp; beginsWithDriveLetter(base, 0, length); // Just X:/ </span>
+    }
+    
+    private static boolean isAbsolutePath(byte[] path, int begin, int length) {
+<span class="pc bpc" id="L628" title="1 of 4 branches missed.">        return isdirsep(path[begin]) || beginsWithDriveLetter(path, begin, length);</span>
+    }
+
+    private static String[] files(FileResource directory) {
+<span class="fc" id="L632">        String[] files = directory.list();</span>
+        
+<span class="fc bfc" id="L634" title="All 2 branches covered.">        if (files != null) {</span>
+<span class="fc" id="L635">            return files;</span>
+        } else {
+<span class="fc" id="L637">            return new String[0];</span>
+        }
+    }
+
+<span class="nc" id="L641">    private static final class DirGlobber {</span>
+        public final ByteList link;
+
+<span class="fc" id="L644">        public DirGlobber(ByteList link) {</span>
+<span class="fc" id="L645">            this.link = link;</span>
+<span class="fc" id="L646">        }</span>
+    }
+
+    private static boolean isSpecialFile(String name) {
+<span class="nc" id="L650">        int length = name.length();</span>
+        
+<span class="nc bnc" id="L652" title="All 6 branches missed.">        if (length &lt; 1 || length &gt; 3 || name.charAt(0) != '.') return false;</span>
+<span class="nc bnc" id="L653" title="All 2 branches missed.">        if (length == 1) return true;</span>
+<span class="nc" id="L654">        char c = name.charAt(1);</span>
+<span class="nc bnc" id="L655" title="All 6 branches missed.">        if (length == 2 &amp;&amp; (c == '.' || c == '/')) return true;</span>
+<span class="nc bnc" id="L656" title="All 4 branches missed.">        return c == '.' &amp;&amp; name.charAt(2) == '/';</span>
+    }
+
+    private static int addToResultIfExists(POSIX posix, String cwd, byte[] bytes, int begin, int end, int flags, GlobFunc func, GlobArgs arg) {
+<span class="fc" id="L660">        String fileName = newStringFromUTF8(bytes, begin, end - begin);</span>
+<span class="fc" id="L661">        FileResource file = JRubyFile.createResource(posix, cwd, fileName);</span>
+
+<span class="fc bfc" id="L663" title="All 2 branches covered.">        if (file.exists()) {</span>
+<span class="fc bfc" id="L664" title="All 2 branches covered.">            boolean trailingSlash = bytes[end - 1] == '/';</span>
+
+            // On case-insenstive file systems any case string will 'exists',
+            // but what does it display as if you ls/dir it?
+            /* No idea what this is doing =/
+             
+              if ((flags &amp; FNM_CASEFOLD) != 0 &amp;&amp; !isSpecialFile(fileName)) {
+                try {
+                    String realName = file.getCanonicalFile().getName();
+
+                    // TODO: This is only being done to the name of the file,
+                    // but it should do for all parent directories too...
+                    // TODO: OMGZ is this ugly
+                    int fileNameLength = fileName.length();
+                    int newEnd = fileNameLength &lt;= 1 ? -1 : fileName.lastIndexOf('/', fileNameLength - 2);
+                    if (newEnd != -1) {
+                        realName = fileName.substring(0, newEnd + 1) + realName;
+                    }
+                    // It came in with a trailing slash preserve that in new name.
+                    if (trailingSlash) realName = realName + &quot;/&quot;;
+
+                    bytes = realName.getBytes();
+                    begin = 0;
+                    end = bytes.length;
+                } catch (Exception e) {} // Failure will just use what we pass in
+            }*/
+            
+<span class="fc" id="L691">            return func.call(bytes, begin, end - begin, arg);</span>
+        }
+
+<span class="fc" id="L694">        return 0;</span>
+    }
+
+    private static int glob_helper(POSIX posix, String cwd, byte[] bytes, int begin, int end, int sub, int flags, GlobFunc func, GlobArgs arg) {
+        int p,m;
+<span class="fc" id="L699">        int status = 0;</span>
+<span class="fc" id="L700">        byte[] newpath = null;</span>
+        FileResource st;
+<span class="fc bfc" id="L702" title="All 2 branches covered.">        p = sub != -1 ? sub : begin;</span>
+
+<span class="fc bfc" id="L704" title="All 2 branches covered.">        if (!has_magic(bytes, p, end, flags)) {</span>
+<span class="pc bpc" id="L705" title="2 of 4 branches missed.">            if (DOSISH || (flags &amp; FNM_NOESCAPE) == 0) {</span>
+<span class="fc" id="L706">                newpath = new byte[end];</span>
+<span class="fc" id="L707">                System.arraycopy(bytes,0,newpath,0,end);</span>
+<span class="fc bfc" id="L708" title="All 2 branches covered.">                if (sub != -1) {</span>
+<span class="fc" id="L709">                    p = (sub - begin);</span>
+<span class="fc" id="L710">                    end = remove_backslashes(newpath, p, end);</span>
+<span class="fc" id="L711">                    sub = p;</span>
+                } else {
+<span class="fc" id="L713">                    end = remove_backslashes(newpath, 0, end);</span>
+<span class="fc" id="L714">                    bytes = newpath;</span>
+                }
+            }
+
+<span class="fc bfc" id="L718" title="All 2 branches covered.">            if (isAbsolutePath(bytes, begin, end)) {</span>
+<span class="fc" id="L719">                status = addToResultIfExists(posix, null, bytes, begin, end, flags, func, arg);</span>
+<span class="fc bfc" id="L720" title="All 2 branches covered.">            } else if ((end - begin) &gt; 0) { // Length check is a hack.  We should not be reeiving &quot;&quot; as a filename ever.</span>
+<span class="fc" id="L721">                status = addToResultIfExists(posix, cwd, bytes, begin, end, flags, func, arg);</span>
+            }
+
+<span class="fc" id="L724">            return status;</span>
+        }
+        
+<span class="fc" id="L727">        ByteList buf = new ByteList(20);</span>
+<span class="fc" id="L728">        List&lt;DirGlobber&gt; link = new ArrayList&lt;DirGlobber&gt;();</span>
+<span class="pc bpc" id="L729" title="1 of 4 branches missed.">        mainLoop: while(p != -1 &amp;&amp; status == 0) {</span>
+<span class="fc bfc" id="L730" title="All 2 branches covered.">            if (bytes[p] == '/') p++;</span>
+
+<span class="fc" id="L732">            m = strchr(bytes, p, end, (byte)'/');</span>
+<span class="fc bfc" id="L733" title="All 4 branches covered.">            if(has_magic(bytes, p, m == -1 ? end : m, flags)) {</span>
+                finalize: do {
+<span class="fc" id="L735">                    byte[] base = extract_path(bytes, begin, p);</span>
+<span class="fc bfc" id="L736" title="All 2 branches covered.">                    byte[] dir = begin == p ? new byte[]{'.'} : base; </span>
+<span class="fc" id="L737">                    byte[] magic = extract_elem(bytes,p,end);</span>
+<span class="fc" id="L738">                    boolean recursive = false;</span>
+
+<span class="fc" id="L740">                    st = JRubyFile.createResource(posix, cwd, newStringFromUTF8(dir));</span>
+
+<span class="fc bfc" id="L742" title="All 2 branches covered.">                    if (st.isDirectory()) {</span>
+<span class="fc bfc" id="L743" title="All 4 branches covered.">                        if(m != -1 &amp;&amp; Arrays.equals(magic, DOUBLE_STAR)) {</span>
+<span class="fc" id="L744">                            int n = base.length;</span>
+<span class="fc" id="L745">                            recursive = true;</span>
+<span class="fc" id="L746">                            buf.length(0);</span>
+<span class="fc" id="L747">                            buf.append(base);</span>
+<span class="fc bfc" id="L748" title="All 4 branches covered.">                            buf.append(bytes, (base.length &gt; 0 ? m : m + 1), end - (base.length &gt; 0 ? m : m + 1));</span>
+<span class="fc" id="L749">                            status = glob_helper(posix, cwd, buf.getUnsafeBytes(), buf.getBegin(), buf.getRealSize(), n, flags, func, arg);</span>
+<span class="pc bpc" id="L750" title="1 of 2 branches missed.">                            if(status != 0) {</span>
+<span class="nc" id="L751">                                break finalize;</span>
+                            }
+                        }
+                    } else {
+                        break mainLoop;
+                    }
+
+<span class="fc" id="L758">                    String[] dirp = files(st);</span>
+
+<span class="fc bfc" id="L760" title="All 2 branches covered.">                    for(int i=0;i&lt;dirp.length;i++) {</span>
+<span class="fc bfc" id="L761" title="All 2 branches covered.">                        if(recursive) {</span>
+<span class="fc" id="L762">                            byte[] bs = getBytesInUTF8(dirp[i]);</span>
+<span class="fc bfc" id="L763" title="All 2 branches covered.">                            if (fnmatch(STAR,0,1,bs,0,bs.length,flags) != 0) {</span>
+<span class="fc" id="L764">                                continue;</span>
+                            }
+<span class="fc" id="L766">                            buf.length(0);</span>
+<span class="fc" id="L767">                            buf.append(base);</span>
+<span class="fc bfc" id="L768" title="All 2 branches covered.">                            buf.append(isRoot(base) ? EMPTY : SLASH );</span>
+<span class="fc" id="L769">                            buf.append(getBytesInUTF8(dirp[i]));</span>
+<span class="fc" id="L770">                            st = JRubyFile.createResource(posix, cwd, newStringFromUTF8(buf.getUnsafeBytes(), buf.getBegin(), buf.getRealSize()));</span>
+<span class="fc bfc" id="L771" title="All 8 branches covered.">                            if(!st.isSymLink() &amp;&amp; st.isDirectory() &amp;&amp; !&quot;.&quot;.equals(dirp[i]) &amp;&amp; !&quot;..&quot;.equals(dirp[i])) {</span>
+<span class="fc" id="L772">                                int t = buf.getRealSize();</span>
+<span class="fc" id="L773">                                buf.append(SLASH);</span>
+<span class="fc" id="L774">                                buf.append(DOUBLE_STAR);</span>
+<span class="fc" id="L775">                                buf.append(bytes, m, end - m);</span>
+<span class="fc" id="L776">                                status = glob_helper(posix, cwd, buf.getUnsafeBytes(), buf.getBegin(), buf.getRealSize(), t, flags, func, arg);</span>
+<span class="pc bpc" id="L777" title="1 of 2 branches missed.">                                if(status != 0) {</span>
+<span class="nc" id="L778">                                    break;</span>
+                                }
+<span class="fc" id="L780">                            }</span>
+                            continue;
+                        }
+<span class="fc" id="L783">                        byte[] bs = getBytesInUTF8(dirp[i]);</span>
+<span class="fc bfc" id="L784" title="All 2 branches covered.">                        if(fnmatch(magic,0,magic.length,bs,0, bs.length,flags) == 0) {</span>
+<span class="fc" id="L785">                            buf.length(0);</span>
+<span class="fc" id="L786">                            buf.append(base);</span>
+<span class="fc bfc" id="L787" title="All 2 branches covered.">                            buf.append(isRoot(base) ? EMPTY : SLASH );</span>
+<span class="fc" id="L788">                            buf.append(getBytesInUTF8(dirp[i]));</span>
+<span class="fc bfc" id="L789" title="All 2 branches covered.">                            if(m == -1) {</span>
+<span class="fc" id="L790">                                status = func.call(buf.getUnsafeBytes(),0, buf.getRealSize(),arg);</span>
+<span class="pc bpc" id="L791" title="1 of 2 branches missed.">                                if(status != 0) {</span>
+<span class="nc" id="L792">                                    break;</span>
+                                }
+                                continue;
+                            }
+<span class="fc" id="L796">                            link.add(new DirGlobber(buf));</span>
+<span class="fc" id="L797">                            buf = new ByteList(20);</span>
+                        }
+                    }
+                } while(false);
+
+<span class="fc bfc" id="L802" title="All 2 branches covered.">                if (link.size() &gt; 0) {</span>
+<span class="fc bfc" id="L803" title="All 2 branches covered.">                    for (DirGlobber globber : link) {</span>
+<span class="fc" id="L804">                        ByteList b = globber.link;</span>
+<span class="pc bpc" id="L805" title="1 of 2 branches missed.">                        if (status == 0) {</span>
+<span class="fc" id="L806">                            st = JRubyFile.createResource(posix, cwd, newStringFromUTF8(b.getUnsafeBytes(), 0, b.getRealSize()));</span>
+<span class="fc bfc" id="L807" title="All 2 branches covered.">                            if(st.isDirectory()) {</span>
+<span class="fc" id="L808">                                int len = b.getRealSize();</span>
+<span class="fc" id="L809">                                buf.length(0);</span>
+<span class="fc" id="L810">                                buf.append(b);</span>
+<span class="fc" id="L811">                                buf.append(bytes, m, end - m);</span>
+<span class="fc" id="L812">                                status = glob_helper(posix, cwd, buf.getUnsafeBytes(),0, buf.getRealSize(),len,flags,func,arg);</span>
+                            }
+                        }
+<span class="fc" id="L815">                    }</span>
+<span class="fc" id="L816">                    break mainLoop;</span>
+                }
+            }
+<span class="fc" id="L819">            p = m;</span>
+        }
+<span class="fc" id="L821">        return status;</span>
+    }
+
+    private static ByteList fixBytesForJarInUTF8(byte[] buf, int offset, int len) {
+<span class="nc" id="L825">        String path = newStringFromUTF8(buf, offset, len);</span>
+<span class="nc" id="L826">        path = path.replace(&quot;.jar/&quot;, &quot;.jar!&quot;);</span>
+<span class="nc" id="L827">        return new ByteList(path.getBytes());</span>
+    }
+
+    private static byte[] getBytesInUTF8(String s) {
+<span class="fc" id="L831">        return RubyEncoding.encodeUTF8(s);</span>
+    }
+
+    private static String newStringFromUTF8(byte[] buf, int offset, int len) {
+<span class="fc" id="L835">        return RubyEncoding.decodeUTF8(buf, offset, len);</span>
+    }
+
+    private static String newStringFromUTF8(byte[] buf) {
+<span class="fc" id="L839">        return RubyEncoding.decodeUTF8(buf);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

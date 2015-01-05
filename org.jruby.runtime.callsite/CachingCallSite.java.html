@@ -1,0 +1,430 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>CachingCallSite.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.runtime.callsite</a> &gt; <span class="el_source">CachingCallSite.java</span></div><h1>CachingCallSite.java</h1><pre class="source lang-java linenums">package org.jruby.runtime.callsite;
+
+import org.jruby.RubyBasicObject;
+import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyFloat;
+import org.jruby.RubyLocalJumpError;
+import org.jruby.exceptions.JumpException;
+import org.jruby.exceptions.JumpException.BreakJump;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.internal.runtime.methods.DynamicMethod;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.Block;
+import org.jruby.runtime.CallSite;
+import org.jruby.runtime.CallType;
+import org.jruby.runtime.ClassIndex;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+
+public abstract class CachingCallSite extends CallSite {
+<span class="fc" id="L21">    protected CacheEntry cache = CacheEntry.NULL_CACHE;</span>
+    public static volatile int totalCallSites;
+//    private AtomicBoolean isPolymorphic = new AtomicBoolean(false);
+
+    public CachingCallSite(String methodName, CallType callType) {
+<span class="fc" id="L26">        super(methodName, callType);</span>
+<span class="fc" id="L27">        totalCallSites++;</span>
+<span class="fc" id="L28">    }</span>
+
+    public CacheEntry getCache() {
+<span class="nc" id="L31">        return cache;</span>
+    }
+
+    public boolean isOptimizable() {
+<span class="nc bnc" id="L35" title="All 2 branches missed.">        return getCache() != CacheEntry.NULL_CACHE;// &amp;&amp; !isPolymorphic.get();</span>
+    }
+
+    public int getCachedClassIndex() {
+<span class="nc" id="L39">        CacheEntry cacheEntry = getCache();</span>
+<span class="nc bnc" id="L40" title="All 2 branches missed.">        if (cacheEntry != CacheEntry.NULL_CACHE) {</span>
+<span class="nc" id="L41">            return cacheEntry.method.getImplementationClass().getClassIndex().ordinal();</span>
+        }
+<span class="nc" id="L43">        return ClassIndex.NO_INDEX.ordinal();</span>
+    }
+
+    public String getMethodName() {
+<span class="nc" id="L47">        return methodName;</span>
+    }
+
+    public long getCachedMethodSerial() {
+<span class="nc" id="L51">        CacheEntry cacheEntry = getCache();</span>
+<span class="nc bnc" id="L52" title="All 2 branches missed.">        if (cacheEntry != CacheEntry.NULL_CACHE) {</span>
+<span class="nc" id="L53">            return cacheEntry.method.getSerialNumber();</span>
+        }
+<span class="nc" id="L55">        return -1;</span>
+    }
+
+    public IRubyObject call(ThreadContext context, IRubyObject caller, IRubyObject self, long fixnum) {
+<span class="fc" id="L59">        return call(context, caller, self, RubyFixnum.newFixnum(context.runtime, fixnum));</span>
+    }
+
+    public IRubyObject call(ThreadContext context, IRubyObject caller, IRubyObject self, double flote) {
+<span class="fc" id="L63">        return call(context, caller, self, RubyFloat.newFloat(context.runtime, flote));</span>
+    }
+
+    public IRubyObject call(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject... args) {
+<span class="fc" id="L67">        RubyClass selfType = getClass(self);</span>
+        // This must be retrieved *once* to avoid racing with other threads.
+<span class="fc" id="L69">        CacheEntry cache = this.cache;</span>
+<span class="fc bfc" id="L70" title="All 2 branches covered.">        if (CacheEntry.typeOk(cache, selfType)) {</span>
+<span class="fc" id="L71">            return cache.method.call(context, self, selfType, methodName, args);</span>
+        }
+<span class="fc" id="L73">        return cacheAndCall(caller, selfType, args, context, self);</span>
+    }
+
+    private IRubyObject callBlock(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject[] args, Block block) {
+<span class="fc" id="L77">        RubyClass selfType = getClass(self);</span>
+        // This must be retrieved *once* to avoid racing with other threads.
+<span class="fc" id="L79">        CacheEntry cache = this.cache;</span>
+<span class="fc bfc" id="L80" title="All 2 branches covered.">        if (CacheEntry.typeOk(cache, selfType)) {</span>
+<span class="fc" id="L81">            return cache.method.call(context, self, selfType, methodName, args, block);</span>
+        }
+<span class="fc" id="L83">        return cacheAndCall(caller, selfType, block, args, context, self);</span>
+    }
+
+    public IRubyObject call(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject[] args, Block block) {
+<span class="fc" id="L87">        return callBlock(context, caller, self, args, block);</span>
+    }
+
+    public IRubyObject callIter(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject[] args, Block block) {
+        try {
+<span class="nc" id="L92">            return callBlock(context, caller, self, args, block);</span>
+        } finally {
+<span class="nc" id="L94">            block.escape();</span>
+        }
+    }
+
+    public IRubyObject callVarargs(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject... args) {
+<span class="nc bnc" id="L99" title="All 5 branches missed.">        switch (args.length) {</span>
+<span class="nc" id="L100">            case 0: return call(context, caller, self);</span>
+<span class="nc" id="L101">            case 1: return call(context, caller, self, args[0]);</span>
+<span class="nc" id="L102">            case 2: return call(context, caller, self, args[0], args[1]);</span>
+<span class="nc" id="L103">            case 3: return call(context, caller, self, args[0], args[1], args[2]);</span>
+<span class="nc" id="L104">            default: return call(context, caller, self, args);</span>
+        }
+    }
+
+    public IRubyObject callVarargs(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject[] args, Block block) {
+<span class="nc bnc" id="L109" title="All 5 branches missed.">        switch (args.length) {</span>
+<span class="nc" id="L110">            case 0: return call(context, caller, self, block);</span>
+<span class="nc" id="L111">            case 1: return call(context, caller, self, args[0], block);</span>
+<span class="nc" id="L112">            case 2: return call(context, caller, self, args[0], args[1], block);</span>
+<span class="nc" id="L113">            case 3: return call(context, caller, self, args[0], args[1], args[2], block);</span>
+<span class="nc" id="L114">            default: return call(context, caller, self, args, block);</span>
+        }
+    }
+
+    public IRubyObject callVarargsIter(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject[] args, Block block) {
+<span class="nc bnc" id="L119" title="All 5 branches missed.">        switch (args.length) {</span>
+<span class="nc" id="L120">            case 0: return callIter(context, caller, self, block);</span>
+<span class="nc" id="L121">            case 1: return callIter(context, caller, self, args[0], block);</span>
+<span class="nc" id="L122">            case 2: return callIter(context, caller, self, args[0], args[1], block);</span>
+<span class="nc" id="L123">            case 3: return callIter(context, caller, self, args[0], args[1], args[2], block);</span>
+<span class="nc" id="L124">            default: return callIter(context, caller, self, args, block);</span>
+        }
+    }
+
+    public IRubyObject call(ThreadContext context, IRubyObject caller, IRubyObject self) {
+<span class="fc" id="L129">        RubyClass selfType = getClass(self);</span>
+        // This must be retrieved *once* to avoid racing with other threads.
+<span class="fc" id="L131">        CacheEntry cache = this.cache;</span>
+<span class="fc bfc" id="L132" title="All 2 branches covered.">        if (CacheEntry.typeOk(cache, selfType)) {</span>
+<span class="fc" id="L133">            return cache.method.call(context, self, selfType, methodName);</span>
+        }
+<span class="fc" id="L135">        return cacheAndCall(caller, selfType, context, self);</span>
+    }
+
+    private IRubyObject callBlock(ThreadContext context, IRubyObject caller, IRubyObject self, Block block) {
+<span class="fc" id="L139">        RubyClass selfType = getClass(self);</span>
+        // This must be retrieved *once* to avoid racing with other threads.
+<span class="fc" id="L141">        CacheEntry cache = this.cache;</span>
+<span class="fc bfc" id="L142" title="All 2 branches covered.">        if (CacheEntry.typeOk(cache, selfType)) {</span>
+<span class="fc" id="L143">            return cache.method.call(context, self, selfType, methodName, block);</span>
+        }
+<span class="fc" id="L145">        return cacheAndCall(caller, selfType, block, context, self);</span>
+    }
+
+    public IRubyObject call(ThreadContext context, IRubyObject caller, IRubyObject self, Block block) {
+<span class="fc" id="L149">        return callBlock(context, caller, self, block);</span>
+    }
+
+    public IRubyObject callIter(ThreadContext context, IRubyObject caller, IRubyObject self, Block block) {
+        try {
+<span class="nc" id="L154">            return callBlock(context, caller, self, block);</span>
+        } finally {
+<span class="nc" id="L156">            block.escape();</span>
+        }
+    }
+
+    public IRubyObject call(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg1) {
+<span class="fc" id="L161">        RubyClass selfType = getClass(self);</span>
+        // This must be retrieved *once* to avoid racing with other threads.
+<span class="fc" id="L163">        CacheEntry cache = this.cache;</span>
+<span class="fc bfc" id="L164" title="All 2 branches covered.">        if (CacheEntry.typeOk(cache, selfType)) {</span>
+<span class="fc" id="L165">            return cache.method.call(context, self, selfType, methodName, arg1);</span>
+        }
+<span class="fc" id="L167">        return cacheAndCall(caller, selfType, context, self, arg1);</span>
+    }
+
+    private IRubyObject callBlock(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg1, Block block) {
+<span class="fc" id="L171">        RubyClass selfType = getClass(self);</span>
+        // This must be retrieved *once* to avoid racing with other threads.
+<span class="fc" id="L173">        CacheEntry cache = this.cache;</span>
+<span class="fc bfc" id="L174" title="All 2 branches covered.">        if (CacheEntry.typeOk(cache, selfType)) {</span>
+<span class="fc" id="L175">            return cache.method.call(context, self, selfType, methodName, arg1, block);</span>
+        }
+<span class="fc" id="L177">        return cacheAndCall(caller, selfType, block, context, self, arg1);</span>
+    }
+
+    public IRubyObject call(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg1, Block block) {
+<span class="fc" id="L181">        return callBlock(context, caller, self, arg1, block);</span>
+    }
+
+    public IRubyObject callIter(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg1, Block block) {
+        try {
+<span class="nc" id="L186">            return callBlock(context, caller, self, arg1, block);</span>
+        } finally {
+<span class="nc" id="L188">            block.escape();</span>
+        }
+    }
+
+    public IRubyObject call(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg1, IRubyObject arg2) {
+<span class="fc" id="L193">        RubyClass selfType = getClass(self);</span>
+        // This must be retrieved *once* to avoid racing with other threads.
+<span class="fc" id="L195">        CacheEntry cache = this.cache;</span>
+<span class="fc bfc" id="L196" title="All 2 branches covered.">        if (CacheEntry.typeOk(cache, selfType)) {</span>
+<span class="fc" id="L197">            return cache.method.call(context, self, selfType, methodName, arg1, arg2);</span>
+        }
+<span class="fc" id="L199">        return cacheAndCall(caller, selfType, context, self, arg1, arg2);</span>
+    }
+
+    private IRubyObject callBlock(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="fc" id="L203">        RubyClass selfType = getClass(self);</span>
+        // This must be retrieved *once* to avoid racing with other threads.
+<span class="fc" id="L205">        CacheEntry cache = this.cache;</span>
+<span class="fc bfc" id="L206" title="All 2 branches covered.">        if (CacheEntry.typeOk(cache, selfType)) {</span>
+<span class="fc" id="L207">            return cache.method.call(context, self, selfType, methodName, arg1, arg2, block);</span>
+        }
+<span class="fc" id="L209">        return cacheAndCall(caller, selfType, block, context, self, arg1, arg2);</span>
+    }
+
+    public IRubyObject call(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="fc" id="L213">        return callBlock(context, caller, self, arg1, arg2, block);</span>
+    }
+
+    public IRubyObject callIter(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg1, IRubyObject arg2, Block block) {
+        try {
+<span class="nc" id="L218">            return callBlock(context, caller, self, arg1, arg2, block);</span>
+        } finally {
+<span class="nc" id="L220">            block.escape();</span>
+        }
+    }
+
+    public IRubyObject call(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg1, IRubyObject arg2, IRubyObject arg3) {
+<span class="fc" id="L225">        RubyClass selfType = getClass(self);</span>
+        // This must be retrieved *once* to avoid racing with other threads.
+<span class="fc" id="L227">        CacheEntry cache = this.cache;</span>
+<span class="fc bfc" id="L228" title="All 2 branches covered.">        if (CacheEntry.typeOk(cache, selfType)) {</span>
+<span class="fc" id="L229">            return cache.method.call(context, self, selfType, methodName, arg1, arg2, arg3);</span>
+        }
+<span class="fc" id="L231">        return cacheAndCall(caller, selfType, context, self, arg1, arg2, arg3);</span>
+    }
+
+    private IRubyObject callBlock(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg1, IRubyObject arg2, IRubyObject arg3, Block block) {
+<span class="fc" id="L235">        RubyClass selfType = getClass(self);</span>
+        // This must be retrieved *once* to avoid racing with other threads.
+<span class="fc" id="L237">        CacheEntry cache = this.cache;</span>
+<span class="fc bfc" id="L238" title="All 2 branches covered.">        if (CacheEntry.typeOk(cache, selfType)) {</span>
+<span class="fc" id="L239">            return cache.method.call(context, self, selfType, methodName, arg1, arg2, arg3, block);</span>
+        }
+<span class="fc" id="L241">        return cacheAndCall(caller, selfType, block, context, self, arg1, arg2, arg3);</span>
+    }
+
+    public IRubyObject call(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg1, IRubyObject arg2, IRubyObject arg3, Block block) {
+<span class="fc" id="L245">        return callBlock(context, caller, self, arg1, arg2, arg3, block);</span>
+    }
+
+    public IRubyObject callIter(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg1, IRubyObject arg2, IRubyObject arg3, Block block) {
+        try {
+<span class="nc" id="L250">            return callBlock(context, caller, self, arg1, arg2, arg3, block);</span>
+        } finally {
+<span class="nc" id="L252">            block.escape();</span>
+        }
+    }
+
+    public CacheEntry retrieveCache(RubyClass selfType, String methodName) {
+        // This must be retrieved *once* to avoid racing with other threads.
+<span class="nc" id="L258">        CacheEntry cache = this.cache;</span>
+<span class="nc bnc" id="L259" title="All 2 branches missed.">        if (CacheEntry.typeOk(cache, selfType)) {</span>
+<span class="nc" id="L260">            return cache;</span>
+        }
+<span class="nc" id="L262">        return cacheAndGet(selfType, methodName);</span>
+    }
+
+    private CacheEntry cacheAndGet(RubyClass selfType, String methodName) {
+<span class="nc" id="L266">        CacheEntry entry = selfType.searchWithCache(methodName);</span>
+<span class="nc" id="L267">        return cache = entry;</span>
+    }
+    
+    protected IRubyObject cacheAndCall(IRubyObject caller, RubyClass selfType, Block block, IRubyObject[] args, ThreadContext context, IRubyObject self) {
+<span class="fc" id="L271">        CacheEntry entry = selfType.searchWithCache(methodName);</span>
+<span class="fc" id="L272">        DynamicMethod method = entry.method;</span>
+<span class="fc bfc" id="L273" title="All 2 branches covered.">        if (methodMissing(method, caller)) {</span>
+<span class="fc" id="L274">            return callMethodMissing(context, self, method, args, block);</span>
+        }
+<span class="fc" id="L276">        updateCache(entry);</span>
+<span class="fc" id="L277">        return method.call(context, self, selfType, methodName, args, block);</span>
+    }
+
+    protected IRubyObject cacheAndCall(IRubyObject caller, RubyClass selfType, IRubyObject[] args, ThreadContext context, IRubyObject self) {
+<span class="fc" id="L281">        CacheEntry entry = selfType.searchWithCache(methodName);</span>
+<span class="fc" id="L282">        DynamicMethod method = entry.method;</span>
+<span class="pc bpc" id="L283" title="1 of 2 branches missed.">        if (methodMissing(method, caller)) {</span>
+<span class="nc" id="L284">            return callMethodMissing(context, self, method, args);</span>
+        }
+<span class="fc" id="L286">        updateCache(entry);</span>
+<span class="fc" id="L287">        return method.call(context, self, selfType, methodName, args);</span>
+    }
+
+    protected IRubyObject cacheAndCall(IRubyObject caller, RubyClass selfType, ThreadContext context, IRubyObject self) {
+<span class="fc" id="L291">        CacheEntry entry = selfType.searchWithCache(methodName);</span>
+<span class="fc" id="L292">        DynamicMethod method = entry.method;</span>
+<span class="fc bfc" id="L293" title="All 2 branches covered.">        if (methodMissing(method, caller)) {</span>
+<span class="fc" id="L294">            return callMethodMissing(context, self, method);</span>
+        }
+<span class="fc" id="L296">        updateCache(entry);</span>
+<span class="fc" id="L297">        return method.call(context, self, selfType, methodName);</span>
+    }
+
+    protected IRubyObject cacheAndCall(IRubyObject caller, RubyClass selfType, Block block, ThreadContext context, IRubyObject self) {
+<span class="fc" id="L301">        CacheEntry entry = selfType.searchWithCache(methodName);</span>
+<span class="fc" id="L302">        DynamicMethod method = entry.method;</span>
+<span class="pc bpc" id="L303" title="1 of 2 branches missed.">        if (methodMissing(method, caller)) {</span>
+<span class="nc" id="L304">            return callMethodMissing(context, self, method, block);</span>
+        }
+<span class="fc" id="L306">        updateCache(entry);</span>
+<span class="fc" id="L307">        return method.call(context, self, selfType, methodName, block);</span>
+    }
+
+    protected IRubyObject cacheAndCall(IRubyObject caller, RubyClass selfType, ThreadContext context, IRubyObject self, IRubyObject arg) {
+<span class="fc" id="L311">        CacheEntry entry = selfType.searchWithCache(methodName);</span>
+<span class="fc" id="L312">        DynamicMethod method = entry.method;</span>
+<span class="fc bfc" id="L313" title="All 2 branches covered.">        if (methodMissing(method, caller)) {</span>
+<span class="fc" id="L314">            return callMethodMissing(context, self, method, arg);</span>
+        }
+<span class="fc" id="L316">        updateCache(entry);</span>
+<span class="fc" id="L317">        return method.call(context, self, selfType, methodName, arg);</span>
+    }
+
+    protected IRubyObject cacheAndCall(IRubyObject caller, RubyClass selfType, Block block, ThreadContext context, IRubyObject self, IRubyObject arg) {
+<span class="fc" id="L321">        CacheEntry entry = selfType.searchWithCache(methodName);</span>
+<span class="fc" id="L322">        DynamicMethod method = entry.method;</span>
+<span class="pc bpc" id="L323" title="1 of 2 branches missed.">        if (methodMissing(method, caller)) {</span>
+<span class="nc" id="L324">            return callMethodMissing(context, self, method, arg, block);</span>
+        }
+<span class="fc" id="L326">        updateCache(entry);</span>
+<span class="fc" id="L327">        return method.call(context, self, selfType, methodName, arg, block);</span>
+    }
+
+    protected IRubyObject cacheAndCall(IRubyObject caller, RubyClass selfType, ThreadContext context, IRubyObject self, IRubyObject arg1, IRubyObject arg2) {
+<span class="fc" id="L331">        CacheEntry entry = selfType.searchWithCache(methodName);</span>
+<span class="fc" id="L332">        DynamicMethod method = entry.method;</span>
+<span class="pc bpc" id="L333" title="1 of 2 branches missed.">        if (methodMissing(method, caller)) {</span>
+<span class="nc" id="L334">            return callMethodMissing(context, self, method, arg1, arg2);</span>
+        }
+<span class="fc" id="L336">        updateCache(entry);</span>
+<span class="fc" id="L337">        return method.call(context, self, selfType, methodName, arg1, arg2);</span>
+    }
+
+    protected IRubyObject cacheAndCall(IRubyObject caller, RubyClass selfType, Block block, ThreadContext context, IRubyObject self, IRubyObject arg1, IRubyObject arg2) {
+<span class="fc" id="L341">        CacheEntry entry = selfType.searchWithCache(methodName);</span>
+<span class="fc" id="L342">        DynamicMethod method = entry.method;</span>
+<span class="pc bpc" id="L343" title="1 of 2 branches missed.">        if (methodMissing(method, caller)) {</span>
+<span class="nc" id="L344">            return callMethodMissing(context, self, method, arg1, arg2, block);</span>
+        }
+<span class="fc" id="L346">        updateCache(entry);</span>
+<span class="fc" id="L347">        return method.call(context, self, selfType, methodName, arg1, arg2, block);</span>
+    }
+
+    protected IRubyObject cacheAndCall(IRubyObject caller, RubyClass selfType, ThreadContext context, IRubyObject self, IRubyObject arg1, IRubyObject arg2, IRubyObject arg3) {
+<span class="fc" id="L351">        CacheEntry entry = selfType.searchWithCache(methodName);</span>
+<span class="fc" id="L352">        DynamicMethod method = entry.method;</span>
+<span class="pc bpc" id="L353" title="1 of 2 branches missed.">        if (methodMissing(method, caller)) {</span>
+<span class="nc" id="L354">            return callMethodMissing(context, self, method, arg1, arg2, arg3);</span>
+        }
+<span class="fc" id="L356">        updateCache(entry);</span>
+<span class="fc" id="L357">        return method.call(context, self, selfType, methodName, arg1, arg2, arg3);</span>
+    }
+
+    protected IRubyObject cacheAndCall(IRubyObject caller, RubyClass selfType, Block block, ThreadContext context, IRubyObject self, IRubyObject arg1, IRubyObject arg2, IRubyObject arg3) {
+<span class="fc" id="L361">        CacheEntry entry = selfType.searchWithCache(methodName);</span>
+<span class="fc" id="L362">        DynamicMethod method = entry.method;</span>
+<span class="pc bpc" id="L363" title="1 of 2 branches missed.">        if (methodMissing(method, caller)) {</span>
+<span class="nc" id="L364">            return callMethodMissing(context, self, method, arg1, arg2, arg3, block);</span>
+        }
+<span class="fc" id="L366">        updateCache(entry);</span>
+<span class="fc" id="L367">        return method.call(context, self, selfType, methodName, arg1, arg2, arg3, block);</span>
+    }
+
+    protected void updateCache(CacheEntry newEntry) {
+        // not really working because it flags jitted methods as polymorphic
+//        CacheEntry oldCache = cache;
+//        if (oldCache != CacheEntry.NULL_CACHE &amp;&amp; oldCache.method != newEntry.method) {
+//            isPolymorphic.set(true);
+//        }
+<span class="fc" id="L376">        cache = newEntry;</span>
+<span class="fc" id="L377">    }</span>
+
+    protected IRubyObject callMethodMissing(ThreadContext context, IRubyObject self, DynamicMethod method, IRubyObject[] args) {
+<span class="nc" id="L380">        return Helpers.selectMethodMissing(context, self, method.getVisibility(), methodName, callType).call(context, self, self.getMetaClass(), methodName, args, Block.NULL_BLOCK);</span>
+    }
+
+    protected IRubyObject callMethodMissing(ThreadContext context, IRubyObject self, DynamicMethod method) {
+<span class="fc" id="L384">        return Helpers.selectMethodMissing(context, self, method.getVisibility(), methodName, callType).call(context, self, self.getMetaClass(), methodName, Block.NULL_BLOCK);</span>
+    }
+
+    protected IRubyObject callMethodMissing(ThreadContext context, IRubyObject self, DynamicMethod method, Block block) {
+<span class="nc" id="L388">        return Helpers.selectMethodMissing(context, self, method.getVisibility(), methodName, callType).call(context, self, self.getMetaClass(), methodName, block);</span>
+    }
+
+    protected IRubyObject callMethodMissing(ThreadContext context, IRubyObject self, DynamicMethod method, IRubyObject arg) {
+<span class="fc" id="L392">        return Helpers.selectMethodMissing(context, self, method.getVisibility(), methodName, callType).call(context, self, self.getMetaClass(), methodName, arg, Block.NULL_BLOCK);</span>
+    }
+
+    protected IRubyObject callMethodMissing(ThreadContext context, IRubyObject self, DynamicMethod method, IRubyObject[] args, Block block) {
+<span class="fc" id="L396">        return Helpers.selectMethodMissing(context, self, method.getVisibility(), methodName, callType).call(context, self, self.getMetaClass(), methodName, args, block);</span>
+    }
+
+    protected IRubyObject callMethodMissing(ThreadContext context, IRubyObject self, DynamicMethod method, IRubyObject arg0, Block block) {
+<span class="nc" id="L400">        return Helpers.selectMethodMissing(context, self, method.getVisibility(), methodName, callType).call(context, self, self.getMetaClass(), methodName, arg0, block);</span>
+    }
+
+    protected IRubyObject callMethodMissing(ThreadContext context, IRubyObject self, DynamicMethod method, IRubyObject arg0, IRubyObject arg1) {
+<span class="nc" id="L404">        return Helpers.selectMethodMissing(context, self, method.getVisibility(), methodName, callType).call(context, self, self.getMetaClass(), methodName, arg0, arg1, Block.NULL_BLOCK);</span>
+    }
+
+    protected IRubyObject callMethodMissing(ThreadContext context, IRubyObject self, DynamicMethod method, IRubyObject arg0, IRubyObject arg1, Block block) {
+<span class="nc" id="L408">        return Helpers.selectMethodMissing(context, self, method.getVisibility(), methodName, callType).call(context, self, self.getMetaClass(), methodName, arg0, arg1, block);</span>
+    }
+
+    protected IRubyObject callMethodMissing(ThreadContext context, IRubyObject self, DynamicMethod method, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2) {
+<span class="nc" id="L412">        return Helpers.selectMethodMissing(context, self, method.getVisibility(), methodName, callType).call(context, self, self.getMetaClass(), methodName, arg0, arg1, arg2, Block.NULL_BLOCK);</span>
+    }
+
+    protected IRubyObject callMethodMissing(ThreadContext context, IRubyObject self, DynamicMethod method, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, Block block) {
+<span class="nc" id="L416">        return Helpers.selectMethodMissing(context, self, method.getVisibility(), methodName, callType).call(context, self, self.getMetaClass(), methodName, arg0, arg1, arg2, block);</span>
+    }
+
+    protected abstract boolean methodMissing(DynamicMethod method, IRubyObject caller);
+
+    private static RubyClass getClass(IRubyObject self) {
+        // the cast in the following line is necessary due to lacking optimizations in Hotspot
+<span class="fc" id="L423">        return ((RubyBasicObject)self).getMetaClass();</span>
+    }
+
+    private static RaiseException retryJumpError(ThreadContext context) {
+<span class="nc" id="L427">        return context.runtime.newLocalJumpError(RubyLocalJumpError.Reason.RETRY, context.runtime.getNil(), &quot;retry outside of rescue not supported&quot;);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

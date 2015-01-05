@@ -1,0 +1,490 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RbConfigLibrary.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.rbconfig</a> &gt; <span class="el_source">RbConfigLibrary.java</span></div><h1>RbConfigLibrary.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2005 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2006 Nick Sieger
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.ext.rbconfig;
+
+import jnr.posix.util.Platform;
+import org.jruby.Ruby;
+import org.jruby.RubyHash;
+import org.jruby.RubyKernel;
+import org.jruby.RubyModule;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.anno.JRubyModule;
+import org.jruby.runtime.Constants;
+import org.jruby.runtime.Helpers;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.load.Library;
+import org.jruby.util.NormalizedFile;
+import org.jruby.util.SafePropertyAccessor;
+
+import java.io.IOException;
+import java.net.URL;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+@JRubyModule(name=&quot;Config&quot;)
+<span class="fc" id="L56">public class RbConfigLibrary implements Library {</span>
+    // Ruby's designation for some platforms, minus version numbers in some cases
+    private static final String RUBY_DARWIN = &quot;darwin&quot;;
+    private static final String RUBY_LINUX = &quot;linux&quot;;
+    private static final String RUBY_WIN32 = &quot;mswin32&quot;;
+    private static final String RUBY_SOLARIS = &quot;solaris&quot;;
+    private static final String RUBY_FREEBSD = &quot;freebsd&quot;;
+    private static final String RUBY_AIX = &quot;aix&quot;;
+   
+    private static String normalizedHome;
+    
+    /** This is a map from Java's &quot;friendly&quot; OS names to those used by Ruby */
+<span class="fc" id="L68">    public static final Map&lt;String, String&gt; RUBY_OS_NAMES = new HashMap&lt;String, String&gt;();</span>
+    static {
+<span class="fc" id="L70">        RUBY_OS_NAMES.put(&quot;Mac OS X&quot;, RUBY_DARWIN);</span>
+<span class="fc" id="L71">        RUBY_OS_NAMES.put(&quot;Darwin&quot;, RUBY_DARWIN);</span>
+<span class="fc" id="L72">        RUBY_OS_NAMES.put(&quot;Linux&quot;, RUBY_LINUX);</span>
+<span class="fc" id="L73">        RUBY_OS_NAMES.put(&quot;Windows 95&quot;, RUBY_WIN32);</span>
+<span class="fc" id="L74">        RUBY_OS_NAMES.put(&quot;Windows 98&quot;, RUBY_WIN32);</span>
+<span class="fc" id="L75">        RUBY_OS_NAMES.put(&quot;Windows Me&quot;, RUBY_WIN32);</span>
+<span class="fc" id="L76">        RUBY_OS_NAMES.put(&quot;Windows NT&quot;, RUBY_WIN32);</span>
+<span class="fc" id="L77">        RUBY_OS_NAMES.put(&quot;Windows 2000&quot;, RUBY_WIN32);</span>
+        // that's what JDK5 produces on Windows Vista
+<span class="fc" id="L79">        RUBY_OS_NAMES.put(&quot;Windows NT (unknown)&quot;, RUBY_WIN32);</span>
+<span class="fc" id="L80">        RUBY_OS_NAMES.put(&quot;Windows XP&quot;, RUBY_WIN32);</span>
+<span class="fc" id="L81">        RUBY_OS_NAMES.put(&quot;Windows 2003&quot;, RUBY_WIN32);</span>
+<span class="fc" id="L82">        RUBY_OS_NAMES.put(&quot;Windows Vista&quot;, RUBY_WIN32);</span>
+<span class="fc" id="L83">        RUBY_OS_NAMES.put(&quot;Windows 7&quot;, RUBY_WIN32);</span>
+<span class="fc" id="L84">        RUBY_OS_NAMES.put(&quot;Windows Server 2008&quot;, RUBY_WIN32);</span>
+<span class="fc" id="L85">        RUBY_OS_NAMES.put(&quot;Solaris&quot;, RUBY_SOLARIS);</span>
+<span class="fc" id="L86">        RUBY_OS_NAMES.put(&quot;SunOS&quot;, RUBY_SOLARIS);</span>
+<span class="fc" id="L87">        RUBY_OS_NAMES.put(&quot;FreeBSD&quot;, RUBY_FREEBSD);</span>
+<span class="fc" id="L88">        RUBY_OS_NAMES.put(&quot;AIX&quot;, RUBY_AIX);</span>
+<span class="fc" id="L89">    }</span>
+    
+    public static String getOSName() {
+<span class="pc bpc" id="L92" title="1 of 2 branches missed.">        if (Platform.IS_WINDOWS) {</span>
+<span class="nc" id="L93">            return RUBY_WIN32;</span>
+        }
+        
+<span class="fc" id="L96">        String OSName = Platform.getOSName();</span>
+<span class="fc" id="L97">        String theOSName = RUBY_OS_NAMES.get(OSName);</span>
+        
+<span class="pc bpc" id="L99" title="1 of 2 branches missed.">        return theOSName == null ? OSName : theOSName;</span>
+    }
+
+    public static String getArchitecture() {
+<span class="fc" id="L103">        String architecture = Platform.ARCH;</span>
+<span class="pc bpc" id="L104" title="1 of 2 branches missed.">        if (architecture == null) architecture = &quot;unknown&quot;;</span>
+<span class="pc bpc" id="L105" title="1 of 2 branches missed.">        if (architecture.equals(&quot;amd64&quot;)) architecture = &quot;x86_64&quot;;</span>
+        
+<span class="fc" id="L107">        return architecture;</span>
+    }
+
+    public static String getRuntimeVerStr(Ruby runtime) {
+<span class="fc" id="L111">        return Constants.RUBY_MAJOR_VERSION;</span>
+    }
+
+    public static String getNormalizedHome(Ruby runtime) {
+<span class="fc" id="L115">        normalizedHome = runtime.getJRubyHome();</span>
+<span class="pc bpc" id="L116" title="3 of 4 branches missed.">        if ((normalizedHome == null) &amp;&amp; Ruby.isSecurityRestricted()) {</span>
+<span class="nc" id="L117">            normalizedHome = &quot;SECURITY RESTRICTED&quot;;</span>
+        }
+<span class="fc" id="L119">        return normalizedHome;</span>
+    }
+
+    public static String getLibDir(Ruby runtime) {
+<span class="fc" id="L123">        String libdir = SafePropertyAccessor.getProperty(&quot;jruby.lib&quot;);</span>
+<span class="pc bpc" id="L124" title="1 of 2 branches missed.">        if (libdir == null) {</span>
+<span class="nc" id="L125">            String home = getNormalizedHome(runtime);</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">            if (home.startsWith(&quot;uri:&quot;)) {</span>
+<span class="nc" id="L127">                libdir = home + &quot;/lib&quot;;</span>
+            }
+            else {
+<span class="nc" id="L130">                libdir = new NormalizedFile(home, &quot;lib&quot;).getPath();</span>
+            }
+<span class="nc" id="L132">        } else {</span>
+            try {
+            // Our shell scripts pass in non-canonicalized paths, but even if we didn't
+            // anyone who did would become unhappy because Ruby apps expect no relative
+            // operators in the pathname (rubygems, for example).
+<span class="fc" id="L137">                libdir = new NormalizedFile(libdir).getCanonicalPath();</span>
+<span class="nc" id="L138">            } catch (IOException e) {</span>
+<span class="nc" id="L139">                libdir = new NormalizedFile(libdir).getAbsolutePath();</span>
+<span class="fc" id="L140">            }</span>
+        }
+
+<span class="fc" id="L143">        return libdir;</span>
+    }
+
+    public static String getVendorDirGeneral(Ruby runtime) {
+        // vendorDirGeneral example: /usr/share/jruby/lib/ - commonly the same as libdir
+<span class="fc" id="L148">        return new NormalizedFile(SafePropertyAccessor.getProperty(&quot;vendor.dir.general&quot;, getLibDir(runtime))).getPath();</span>
+    }
+
+    public static String getSiteDirGeneral(Ruby runtime) {
+        // siteDirGeneral example: /usr/local/share/jruby/lib/
+<span class="fc" id="L153">        return new NormalizedFile(SafePropertyAccessor.getProperty(&quot;site.dir.general&quot;, getLibDir(runtime))).getPath();</span>
+    }
+
+    public static Boolean isSiteVendorSame(Ruby runtime) {
+<span class="fc" id="L157">        return getVendorDirGeneral(runtime).equals(getSiteDirGeneral(runtime));</span>
+    }
+
+    public static String getRubygemsDir(Ruby runtime) {
+        // used when integrating JRuby with system RubyGems - example: /usr/share/rubygems
+<span class="fc" id="L162">        return SafePropertyAccessor.getProperty(&quot;vendor.dir.rubygems&quot;, null);</span>
+    }
+
+    public static String getRubySharedLibDir(Ruby runtime) {
+<span class="fc" id="L166">        return new NormalizedFile(getVendorDirGeneral(runtime), &quot;ruby/shared&quot;).getPath();</span>
+    }
+
+    public static String getRubyLibDir(Ruby runtime) {
+<span class="fc" id="L170">        return getRubyLibDirFor(runtime, &quot;stdlib&quot;);</span>
+    }
+
+    public static String getRubyLibDirFor(Ruby runtime, String runtimeVerStr) {
+<span class="fc" id="L174">        return new NormalizedFile(getVendorDirGeneral(runtime), String.format(&quot;ruby/%s&quot;, runtimeVerStr)).getPath();</span>
+    }
+
+    public static String getArchDir(Ruby runtime) {
+<span class="fc" id="L178">        return getRubyLibDir(runtime);</span>
+    }
+
+    public static String getVendorDir(Ruby runtime) {
+<span class="fc" id="L182">        return new NormalizedFile(getRubyLibDir(runtime), &quot;vendor_ruby&quot;).getPath();</span>
+    }
+
+    public static String getVendorLibDir(Ruby runtime) {
+<span class="fc" id="L186">        return getVendorDir(runtime);</span>
+    }
+
+    public static String getVendorArchDir(Ruby runtime) {
+<span class="fc" id="L190">        return getVendorDir(runtime);</span>
+    }
+
+    public static String getSiteDir(Ruby runtime) {
+<span class="fc" id="L194">        return new NormalizedFile(getSiteDirGeneral(runtime), String.format(&quot;ruby/%s/site_ruby&quot;, getRuntimeVerStr(runtime))).getPath();</span>
+    }
+
+    public static String getSiteLibDir(Ruby runtime) {
+<span class="fc" id="L198">        return getSiteDir(runtime);</span>
+    }
+
+    public static String getSiteArchDir(Ruby runtime) {
+<span class="fc" id="L202">        return getSiteDir(runtime);</span>
+    }
+    
+    public static String getSysConfDir(Ruby runtime) {
+<span class="fc" id="L206">        return new NormalizedFile(getNormalizedHome(runtime), &quot;etc&quot;).getPath();</span>
+    }
+
+    /**
+     * Just enough configuration settings (most don't make sense in Java) to run the rubytests
+     * unit tests. The tests use &lt;code&gt;bindir&lt;/code&gt;, &lt;code&gt;RUBY_INSTALL_NAME&lt;/code&gt; and
+     * &lt;code&gt;EXEEXT&lt;/code&gt;.
+     */
+    public void load(Ruby runtime, boolean wrap) {
+        RubyModule configModule;
+
+<span class="fc" id="L217">        configModule = runtime.defineModule(&quot;RbConfig&quot;);</span>
+<span class="fc" id="L218">        RubyKernel.autoload(runtime.getObject(), runtime.newSymbol(&quot;Config&quot;), runtime.newString(&quot;rbconfig/obsolete.rb&quot;));</span>
+        
+<span class="fc" id="L220">        configModule.defineAnnotatedMethods(RbConfigLibrary.class);</span>
+        
+<span class="fc" id="L222">        RubyHash configHash = RubyHash.newHash(runtime);</span>
+<span class="fc" id="L223">        configModule.defineConstant(&quot;CONFIG&quot;, configHash);</span>
+
+        String[] versionParts;
+<span class="fc" id="L226">        versionParts = Constants.RUBY_VERSION.split(&quot;\\.&quot;);</span>
+        
+<span class="fc" id="L228">        setConfig(configHash, &quot;MAJOR&quot;, versionParts[0]);</span>
+<span class="fc" id="L229">        setConfig(configHash, &quot;MINOR&quot;, versionParts[1]);</span>
+<span class="fc" id="L230">        setConfig(configHash, &quot;TEENY&quot;, versionParts[2]);</span>
+<span class="fc" id="L231">        setConfig(configHash, &quot;ruby_version&quot;, versionParts[0] + '.' + versionParts[1]);</span>
+        // Rubygems is too specific on host cpu so until we have real need lets default to universal
+        //setConfig(configHash, &quot;arch&quot;, System.getProperty(&quot;os.arch&quot;) + &quot;-java&quot; + System.getProperty(&quot;java.specification.version&quot;));
+<span class="fc" id="L234">        setConfig(configHash, &quot;arch&quot;, &quot;universal-java&quot; + System.getProperty(&quot;java.specification.version&quot;));</span>
+
+<span class="fc" id="L236">        normalizedHome = getNormalizedHome(runtime);</span>
+
+        // Use property for binDir if available, otherwise fall back to common bin default
+<span class="fc" id="L239">        String binDir = SafePropertyAccessor.getProperty(&quot;jruby.bindir&quot;);</span>
+<span class="pc bpc" id="L240" title="1 of 2 branches missed.">        if (binDir == null) {</span>
+<span class="fc" id="L241">            binDir = new NormalizedFile(normalizedHome, &quot;bin&quot;).getPath();</span>
+        }
+<span class="fc" id="L243">        setConfig(configHash, &quot;bindir&quot;, binDir);</span>
+
+<span class="fc" id="L245">        setConfig(configHash, &quot;RUBY_INSTALL_NAME&quot;, jrubyScript());</span>
+<span class="fc" id="L246">        setConfig(configHash, &quot;ruby_install_name&quot;, jrubyScript());</span>
+<span class="fc" id="L247">        setConfig(configHash, &quot;SHELL&quot;, jrubyShell());</span>
+<span class="fc" id="L248">        setConfig(configHash, &quot;prefix&quot;, normalizedHome);</span>
+<span class="fc" id="L249">        setConfig(configHash, &quot;exec_prefix&quot;, normalizedHome);</span>
+
+<span class="fc" id="L251">        setConfig(configHash, &quot;host_os&quot;, getOSName());</span>
+<span class="fc" id="L252">        setConfig(configHash, &quot;host_vendor&quot;, System.getProperty(&quot;java.vendor&quot;));</span>
+<span class="fc" id="L253">        setConfig(configHash, &quot;host_cpu&quot;, getArchitecture());</span>
+        
+<span class="fc" id="L255">        setConfig(configHash, &quot;target_os&quot;, getOSName());</span>
+        
+<span class="fc" id="L257">        setConfig(configHash, &quot;target_cpu&quot;, getArchitecture());</span>
+        
+<span class="fc" id="L259">        String jrubyJarFile = &quot;jruby.jar&quot;;</span>
+<span class="fc" id="L260">        URL jrubyPropertiesUrl = Ruby.getClassLoader().getResource(&quot;/org/jruby/Ruby.class&quot;);</span>
+<span class="pc bpc" id="L261" title="1 of 2 branches missed.">        if (jrubyPropertiesUrl != null) {</span>
+<span class="nc" id="L262">            Pattern jarFile = Pattern.compile(&quot;jar:file:.*?([a-zA-Z0-9.\\-]+\\.jar)!&quot; + &quot;/org/jruby/Ruby.class&quot;);</span>
+<span class="nc" id="L263">            Matcher jarMatcher = jarFile.matcher(jrubyPropertiesUrl.toString());</span>
+<span class="nc" id="L264">            jarMatcher.find();</span>
+<span class="nc bnc" id="L265" title="All 2 branches missed.">            if (jarMatcher.matches()) {</span>
+<span class="nc" id="L266">                jrubyJarFile = jarMatcher.group(1);</span>
+            }
+        }
+<span class="fc" id="L269">        setConfig(configHash, &quot;LIBRUBY&quot;, jrubyJarFile);</span>
+<span class="fc" id="L270">        setConfig(configHash, &quot;LIBRUBY_SO&quot;, jrubyJarFile);</span>
+<span class="fc" id="L271">        setConfig(configHash, &quot;LIBRUBY_SO&quot;, jrubyJarFile);</span>
+<span class="fc" id="L272">        setConfig(configHash, &quot;LIBRUBY_ALIASES&quot;, jrubyJarFile);</span>
+        
+<span class="fc" id="L274">        setConfig(configHash, &quot;build&quot;, Constants.BUILD);</span>
+<span class="fc" id="L275">        setConfig(configHash, &quot;target&quot;, Constants.TARGET);</span>
+
+
+<span class="fc" id="L278">        String shareDir = new NormalizedFile(normalizedHome, &quot;share&quot;).getPath();</span>
+<span class="fc" id="L279">        String includeDir = new NormalizedFile(normalizedHome, &quot;lib/native/&quot; + getOSName()).getPath();</span>
+
+<span class="fc" id="L281">        String vendorDirGeneral = getVendorDirGeneral(runtime);</span>
+<span class="fc" id="L282">        String siteDirGeneral = getSiteDirGeneral(runtime);</span>
+<span class="fc" id="L283">        String rubySharedLibDir = getRubySharedLibDir(runtime);</span>
+<span class="fc" id="L284">        String rubyLibDir = getRubyLibDir(runtime);</span>
+<span class="fc" id="L285">        String archDir = getArchDir(runtime);</span>
+<span class="fc" id="L286">        String vendorDir = getVendorDir(runtime);</span>
+<span class="fc" id="L287">        String vendorLibDir = getVendorLibDir(runtime);</span>
+<span class="fc" id="L288">        String vendorArchDir = getVendorArchDir(runtime);</span>
+<span class="fc" id="L289">        String siteDir = getSiteDir(runtime);</span>
+<span class="fc" id="L290">        String siteLibDir = getSiteLibDir(runtime);</span>
+<span class="fc" id="L291">        String siteArchDir = getSiteArchDir(runtime);</span>
+<span class="fc" id="L292">        String sysConfDir = getSysConfDir(runtime);</span>
+
+<span class="fc" id="L294">        setConfig(configHash, &quot;libdir&quot;, vendorDirGeneral);</span>
+<span class="fc" id="L295">        setConfig(configHash, &quot;rubylibprefix&quot;, vendorDirGeneral + &quot;/ruby&quot;);</span>
+<span class="fc" id="L296">        setConfig(configHash, &quot;rubylibdir&quot;,     rubyLibDir);</span>
+<span class="fc" id="L297">        setConfig(configHash, &quot;rubysharedlibdir&quot;, rubySharedLibDir);</span>
+<span class="pc bpc" id="L298" title="1 of 2 branches missed.">        if (!isSiteVendorSame(runtime)) {</span>
+<span class="nc" id="L299">        setConfig(configHash, &quot;vendordir&quot;,      vendorDir);</span>
+<span class="nc" id="L300">        setConfig(configHash, &quot;vendorlibdir&quot;,   vendorLibDir);</span>
+<span class="nc" id="L301">        setConfig(configHash, &quot;vendorarchdir&quot;,    vendorArchDir);</span>
+        }
+<span class="fc" id="L303">        setConfig(configHash, &quot;sitedir&quot;,        siteDir);</span>
+<span class="fc" id="L304">        setConfig(configHash, &quot;sitelibdir&quot;,     siteLibDir);</span>
+<span class="fc" id="L305">        setConfig(configHash, &quot;sitearchdir&quot;,    siteArchDir);</span>
+<span class="fc" id="L306">        setConfig(configHash, &quot;sitearch&quot;, &quot;java&quot;);</span>
+<span class="fc" id="L307">        setConfig(configHash, &quot;archdir&quot;,   archDir);</span>
+<span class="fc" id="L308">        setConfig(configHash, &quot;topdir&quot;,   archDir);</span>
+<span class="fc" id="L309">        setConfig(configHash, &quot;includedir&quot;,   includeDir);</span>
+<span class="fc" id="L310">        setConfig(configHash, &quot;configure_args&quot;, &quot;&quot;);</span>
+<span class="fc" id="L311">        setConfig(configHash, &quot;datadir&quot;, shareDir);</span>
+<span class="fc" id="L312">        setConfig(configHash, &quot;mandir&quot;, new NormalizedFile(normalizedHome, &quot;man&quot;).getPath());</span>
+<span class="fc" id="L313">        setConfig(configHash, &quot;sysconfdir&quot;, sysConfDir);</span>
+<span class="fc" id="L314">        setConfig(configHash, &quot;localstatedir&quot;, new NormalizedFile(normalizedHome, &quot;var&quot;).getPath());</span>
+<span class="fc" id="L315">        setConfig(configHash, &quot;DLEXT&quot;, &quot;jar&quot;);</span>
+<span class="pc bpc" id="L316" title="1 of 2 branches missed.">        if (getRubygemsDir(runtime) != null) {</span>
+<span class="nc" id="L317">            setConfig(configHash, &quot;rubygemsdir&quot;, new NormalizedFile(getRubygemsDir(runtime)).getPath());</span>
+        }
+
+<span class="pc bpc" id="L320" title="1 of 2 branches missed.">        if (Platform.IS_WINDOWS) {</span>
+<span class="nc" id="L321">            setConfig(configHash, &quot;EXEEXT&quot;, &quot;.exe&quot;);</span>
+        } else {
+<span class="fc" id="L323">            setConfig(configHash, &quot;EXEEXT&quot;, &quot;&quot;);</span>
+        }
+
+<span class="fc" id="L326">        setConfig(configHash, &quot;ridir&quot;, new NormalizedFile(shareDir, &quot;ri&quot;).getPath());</span>
+
+        // These will be used as jruby defaults for rubygems if found
+<span class="fc" id="L329">        String gemhome = SafePropertyAccessor.getProperty(&quot;jruby.gem.home&quot;);</span>
+<span class="fc" id="L330">        String gempath = SafePropertyAccessor.getProperty(&quot;jruby.gem.path&quot;);</span>
+<span class="pc bpc" id="L331" title="1 of 2 branches missed.">        if (gemhome != null) setConfig(configHash, &quot;default_gem_home&quot;, gemhome);</span>
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">        if (gempath != null) setConfig(configHash, &quot;default_gem_path&quot;, gempath);</span>
+        
+<span class="fc" id="L334">        setConfig(configHash, &quot;joda-time.version&quot;, Constants.JODA_TIME_VERSION);</span>
+<span class="fc" id="L335">        setConfig(configHash, &quot;tzdata.version&quot;,    Constants.TZDATA_VERSION);</span>
+        
+<span class="fc" id="L337">        RubyHash mkmfHash = RubyHash.newHash(runtime);</span>
+        
+
+<span class="fc" id="L340">        setConfig(mkmfHash, &quot;libdir&quot;, vendorDirGeneral);</span>
+<span class="fc" id="L341">        setConfig(mkmfHash, &quot;arch&quot;, &quot;java&quot;);</span>
+<span class="fc" id="L342">        setConfig(mkmfHash, &quot;rubylibdir&quot;,     rubyLibDir);</span>
+<span class="fc" id="L343">        setConfig(mkmfHash, &quot;rubysharedlibdir&quot;, rubySharedLibDir);</span>
+<span class="pc bpc" id="L344" title="1 of 2 branches missed.">        if (!isSiteVendorSame(runtime)) {</span>
+<span class="nc" id="L345">        setConfig(mkmfHash, &quot;vendordir&quot;,      vendorDir);</span>
+<span class="nc" id="L346">        setConfig(mkmfHash, &quot;vendorlibdir&quot;,   vendorLibDir);</span>
+<span class="nc" id="L347">        setConfig(mkmfHash, &quot;vendorarchdir&quot;,  vendorArchDir);</span>
+        }
+<span class="fc" id="L349">        setConfig(mkmfHash, &quot;sitedir&quot;,        siteDir);</span>
+<span class="fc" id="L350">        setConfig(mkmfHash, &quot;sitelibdir&quot;,     siteLibDir);</span>
+<span class="fc" id="L351">        setConfig(mkmfHash, &quot;sitearchdir&quot;,    siteArchDir);</span>
+<span class="fc" id="L352">        setConfig(mkmfHash, &quot;sitearch&quot;, &quot;java&quot;);</span>
+<span class="fc" id="L353">        setConfig(mkmfHash, &quot;archdir&quot;,    archDir);</span>
+<span class="fc" id="L354">        setConfig(mkmfHash, &quot;topdir&quot;,    archDir);</span>
+<span class="fc" id="L355">        setConfig(mkmfHash, &quot;configure_args&quot;, &quot;&quot;);</span>
+<span class="fc" id="L356">        setConfig(mkmfHash, &quot;datadir&quot;, new NormalizedFile(normalizedHome, &quot;share&quot;).getPath());</span>
+<span class="fc" id="L357">        setConfig(mkmfHash, &quot;mandir&quot;, new NormalizedFile(normalizedHome, &quot;man&quot;).getPath());</span>
+<span class="fc" id="L358">        setConfig(mkmfHash, &quot;sysconfdir&quot;, sysConfDir);</span>
+<span class="fc" id="L359">        setConfig(mkmfHash, &quot;localstatedir&quot;, new NormalizedFile(normalizedHome, &quot;var&quot;).getPath());</span>
+<span class="pc bpc" id="L360" title="1 of 2 branches missed.">        if (getRubygemsDir(runtime) != null) {</span>
+<span class="nc" id="L361">            setConfig(mkmfHash, &quot;rubygemsdir&quot;, new NormalizedFile(getRubygemsDir(runtime)).getPath());</span>
+        }
+
+<span class="fc" id="L364">        setupMakefileConfig(configModule, mkmfHash);</span>
+        
+<span class="fc" id="L366">        runtime.getLoadService().load(&quot;jruby/kernel/rbconfig.rb&quot;, false);</span>
+<span class="fc" id="L367">    }</span>
+    
+    private static void setupMakefileConfig(RubyModule configModule, RubyHash mkmfHash) {
+<span class="fc" id="L370">        Ruby ruby = configModule.getRuntime();</span>
+
+<span class="fc" id="L372">        RubyHash envHash = (RubyHash) ruby.getObject().fetchConstant(&quot;ENV&quot;.intern());</span>
+<span class="fc" id="L373">        String cc = getRubyEnv(envHash, &quot;CC&quot;, &quot;cc&quot;);</span>
+<span class="fc" id="L374">        String cpp = getRubyEnv(envHash, &quot;CPP&quot;, &quot;cc -E&quot;);</span>
+<span class="fc" id="L375">        String cxx = getRubyEnv(envHash, &quot;CXX&quot;, &quot;c++&quot;);</span>
+
+<span class="fc" id="L377">        String jflags = &quot; -fno-omit-frame-pointer -fno-strict-aliasing &quot;;</span>
+        // String oflags = &quot; -O2  -DNDEBUG&quot;;
+        // String wflags = &quot; -W -Werror -Wall -Wno-unused -Wno-parentheses &quot;;
+        // String picflags = true ? &quot;&quot; : &quot; -fPIC -pthread &quot;;
+        // String iflags = &quot; -I\&quot;$(JDK_HOME)/include\&quot; -I\&quot;$(JDK_HOME)/include/$(OS)\&quot; -I\&quot;$(BUILD_DIR)\&quot; &quot;;
+        // String soflags = true ? &quot;&quot; : &quot; -shared -static-libgcc -mimpure-text -Wl,-O1 &quot;;
+
+<span class="fc" id="L384">        String cflags = jflags + &quot; -fexceptions&quot; /* + picflags */ + &quot; $(cflags)&quot;;</span>
+<span class="fc" id="L385">        String cppflags = &quot; $(DEFS) $(cppflags)&quot;;</span>
+<span class="fc" id="L386">        String cxxflags = cflags + &quot; $(cxxflags)&quot;;</span>
+<span class="fc" id="L387">        String ldflags = &quot;&quot;; // + soflags;</span>
+<span class="fc" id="L388">        String dldflags = &quot;&quot;;</span>
+<span class="fc" id="L389">        String ldsharedflags = &quot; -shared &quot;;</span>
+
+<span class="pc bpc" id="L391" title="1 of 2 branches missed.">        String archflags = &quot; -m&quot; + (Platform.IS_64_BIT ? &quot;64&quot; : &quot;32&quot;);</span>
+
+<span class="fc" id="L393">        String hdr_dir = new NormalizedFile(normalizedHome, &quot;lib/native/include/&quot;).getPath();</span>
+
+        // A few platform specific values
+<span class="pc bpc" id="L396" title="1 of 2 branches missed.">        if (Platform.IS_WINDOWS) {</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">            ldflags += &quot; -L&quot; + new NormalizedFile(normalizedHome, &quot;lib/native/&quot; + (Platform.IS_64_BIT ? &quot;x86_64&quot; : &quot;i386&quot;) + &quot;-Windows&quot;).getPath();</span>
+<span class="nc" id="L398">            ldflags += &quot; -ljruby-cext&quot;;</span>
+<span class="nc" id="L399">            ldsharedflags += &quot; $(if $(filter-out -g -g0,$(debugflags)),,-s)&quot;;</span>
+<span class="nc" id="L400">            dldflags = &quot;-Wl,--enable-auto-image-base,--enable-auto-import $(DEFFILE)&quot;;</span>
+<span class="nc" id="L401">            archflags += &quot; -march=native -mtune=native&quot;;</span>
+<span class="nc" id="L402">            setConfig(mkmfHash, &quot;DLEXT&quot;, &quot;dll&quot;);</span>
+<span class="pc bpc" id="L403" title="1 of 2 branches missed.">        } else if (Platform.IS_MAC) {</span>
+<span class="fc" id="L404">            ldsharedflags = &quot; -dynamic -bundle -undefined dynamic_lookup &quot;;</span>
+<span class="fc" id="L405">            cflags = &quot; -fPIC -DTARGET_RT_MAC_CFM=0 &quot; + cflags;</span>
+<span class="fc" id="L406">            archflags = &quot; -arch &quot; + Platform.ARCH;</span>
+<span class="fc" id="L407">            cppflags = &quot; -D_XOPEN_SOURCE -D_DARWIN_C_SOURCE &quot; + cppflags;</span>
+<span class="fc" id="L408">            setConfig(mkmfHash, &quot;DLEXT&quot;, &quot;bundle&quot;);</span>
+        } else {
+<span class="nc" id="L410">            cflags = &quot; -fPIC &quot; + cflags;</span>
+<span class="nc" id="L411">            setConfig(mkmfHash, &quot;DLEXT&quot;, &quot;so&quot;);</span>
+        }
+
+<span class="fc" id="L414">        String libext = &quot;a&quot;;</span>
+<span class="fc" id="L415">        String objext = &quot;o&quot;;</span>
+        
+<span class="fc" id="L417">        setConfig(mkmfHash, &quot;configure_args&quot;, &quot;&quot;);</span>
+<span class="fc" id="L418">        setConfig(mkmfHash, &quot;CFLAGS&quot;, cflags);</span>
+<span class="fc" id="L419">        setConfig(mkmfHash, &quot;CPPFLAGS&quot;, cppflags);</span>
+<span class="fc" id="L420">        setConfig(mkmfHash, &quot;CXXFLAGS&quot;, cxxflags);</span>
+<span class="fc" id="L421">        setConfig(mkmfHash, &quot;ARCH_FLAG&quot;, archflags);</span>
+<span class="fc" id="L422">        setConfig(mkmfHash, &quot;LDFLAGS&quot;, ldflags);</span>
+<span class="fc" id="L423">        setConfig(mkmfHash, &quot;DLDFLAGS&quot;, dldflags);</span>
+<span class="fc" id="L424">        setConfig(mkmfHash, &quot;DEFS&quot;, &quot;&quot;);</span>
+<span class="fc" id="L425">        setConfig(mkmfHash, &quot;LIBEXT&quot;, libext);</span>
+<span class="fc" id="L426">        setConfig(mkmfHash, &quot;OBJEXT&quot;, objext);</span>
+<span class="fc" id="L427">        setConfig(mkmfHash, &quot;LIBRUBYARG_STATIC&quot;, &quot;&quot;);</span>
+<span class="fc" id="L428">        setConfig(mkmfHash, &quot;LIBRUBYARG_SHARED&quot;, &quot;&quot;);</span>
+<span class="fc" id="L429">        setConfig(mkmfHash, &quot;LIBS&quot;, &quot;&quot;);</span>
+<span class="fc" id="L430">        setConfig(mkmfHash, &quot;DLDLIBS&quot;, &quot;&quot;);</span>
+<span class="fc" id="L431">        setConfig(mkmfHash, &quot;ENABLED_SHARED&quot;, &quot;&quot;);</span>
+<span class="fc" id="L432">        setConfig(mkmfHash, &quot;LIBRUBY&quot;, &quot;&quot;);</span>
+<span class="fc" id="L433">        setConfig(mkmfHash, &quot;LIBRUBY_A&quot;, &quot;&quot;);</span>
+<span class="fc" id="L434">        setConfig(mkmfHash, &quot;LIBRUBYARG&quot;, &quot;&quot;);</span>
+<span class="fc" id="L435">        setConfig(mkmfHash, &quot;prefix&quot;, &quot; &quot;); // This must not be empty for some extconf.rb's to work</span>
+<span class="fc" id="L436">        setConfig(mkmfHash, &quot;ruby_install_name&quot;, jrubyScript());</span>
+<span class="fc" id="L437">        setConfig(mkmfHash, &quot;LDSHARED&quot;, cc + ldsharedflags);</span>
+<span class="fc" id="L438">        setConfig(mkmfHash, &quot;LDSHAREDXX&quot;, cxx + ldsharedflags);</span>
+<span class="fc" id="L439">        setConfig(mkmfHash, &quot;RUBY_PLATFORM&quot;, getOSName());</span>
+<span class="fc" id="L440">        setConfig(mkmfHash, &quot;CC&quot;, cc);</span>
+<span class="fc" id="L441">        setConfig(mkmfHash, &quot;CPP&quot;, cpp);</span>
+<span class="fc" id="L442">        setConfig(mkmfHash, &quot;CXX&quot;, cxx);</span>
+<span class="fc" id="L443">        setConfig(mkmfHash, &quot;OUTFLAG&quot;, &quot;-o &quot;);</span>
+<span class="fc" id="L444">        setConfig(mkmfHash, &quot;COMMON_HEADERS&quot;, &quot;ruby.h&quot;);</span>
+<span class="fc" id="L445">        setConfig(mkmfHash, &quot;PATH_SEPARATOR&quot;, &quot;:&quot;);</span>
+<span class="fc" id="L446">        setConfig(mkmfHash, &quot;INSTALL&quot;, &quot;install -c &quot;);</span>
+<span class="fc" id="L447">        setConfig(mkmfHash, &quot;RM&quot;, &quot;rm -f&quot;);</span>
+<span class="fc" id="L448">        setConfig(mkmfHash, &quot;CP&quot;, &quot;cp &quot;);</span>
+<span class="fc" id="L449">        setConfig(mkmfHash, &quot;MAKEDIRS&quot;, &quot;mkdir -p &quot;);</span>
+<span class="fc" id="L450">        setConfig(mkmfHash, &quot;includedir&quot;, hdr_dir);</span>
+<span class="fc" id="L451">        setConfig(mkmfHash, &quot;rubyhdrdir&quot;, hdr_dir);</span>
+<span class="fc" id="L452">        setConfig(mkmfHash, &quot;archdir&quot;, hdr_dir);</span>
+        
+<span class="fc" id="L454">        ruby.getObject().defineConstant(&quot;CROSS_COMPILING&quot;, ruby.getNil());</span>
+        
+<span class="fc" id="L456">        configModule.defineConstant(&quot;MAKEFILE_CONFIG&quot;, mkmfHash);</span>
+<span class="fc" id="L457">    }</span>
+
+    private static void setConfig(RubyHash hash, String key, String value) {
+<span class="fc" id="L460">        Ruby runtime = hash.getRuntime();</span>
+<span class="fc" id="L461">        hash.op_aset(runtime.getCurrentContext(), runtime.newString(key), runtime.newString(value));</span>
+<span class="fc" id="L462">    }</span>
+
+    public static String jrubyScript() {
+<span class="fc" id="L465">        return SafePropertyAccessor.getProperty(&quot;jruby.script&quot;, &quot;jruby&quot;).replace('\\', '/');</span>
+    }
+
+    // TODO: note lack of command.com support for Win 9x...
+    public static String jrubyShell() {
+<span class="pc bpc" id="L470" title="1 of 2 branches missed.">        return SafePropertyAccessor.getProperty(&quot;jruby.shell&quot;, Platform.IS_WINDOWS ? &quot;cmd.exe&quot; : &quot;/bin/sh&quot;).replace('\\', '/');</span>
+    }
+
+    @JRubyMethod(name = &quot;ruby&quot;, module = true)
+    public static IRubyObject ruby(ThreadContext context, IRubyObject recv) {
+<span class="nc" id="L475">        Ruby runtime = context.runtime;</span>
+<span class="nc" id="L476">        RubyHash configHash = (RubyHash) runtime.getModule(&quot;RbConfig&quot;).getConstant(&quot;CONFIG&quot;);</span>
+
+<span class="nc" id="L478">        IRubyObject bindir            = configHash.op_aref(context, runtime.newString(&quot;bindir&quot;));</span>
+<span class="nc" id="L479">        IRubyObject ruby_install_name = configHash.op_aref(context, runtime.newString(&quot;ruby_install_name&quot;));</span>
+<span class="nc" id="L480">        IRubyObject exeext            = configHash.op_aref(context, runtime.newString(&quot;EXEEXT&quot;));</span>
+
+<span class="nc" id="L482">        return Helpers.invoke(context, runtime.getClass(&quot;File&quot;), &quot;join&quot;, bindir, ruby_install_name.callMethod(context, &quot;+&quot;, exeext));</span>
+    }
+
+    private static String getRubyEnv(RubyHash envHash, String var, String default_value) {
+<span class="fc" id="L486">        var = (String) envHash.get(var);</span>
+<span class="pc bpc" id="L487" title="1 of 2 branches missed.">        return var == null ? default_value : var;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

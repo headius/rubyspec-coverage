@@ -1,0 +1,1196 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>StringSupport.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util</a> &gt; <span class="el_source">StringSupport.java</span></div><h1>StringSupport.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.util;
+
+import static org.jcodings.Encoding.CHAR_INVALID;
+
+import org.jcodings.Encoding;
+import org.jcodings.ascii.AsciiTables;
+import org.jcodings.constants.CharacterType;
+import org.jcodings.specific.ASCIIEncoding;
+import org.jcodings.specific.UTF8Encoding;
+import org.jcodings.util.IntHash;
+import org.joni.Matcher;
+import org.jruby.Ruby;
+import org.jruby.RubyBasicObject;
+import org.jruby.RubyObject;
+import org.jruby.RubyString;
+import org.jruby.runtime.builtin.IRubyObject;
+
+import sun.misc.Unsafe;
+
+import java.util.Arrays;
+
+<span class="pc bpc" id="L47" title="1 of 2 branches missed.">public final class StringSupport {</span>
+    public static final int CR_MASK      = RubyObject.USER0_F | RubyObject.USER1_F;  
+    public static final int CR_UNKNOWN   = 0;
+    public static final int CR_7BIT      = RubyObject.USER0_F; 
+    public static final int CR_VALID     = RubyObject.USER1_F;
+    public static final int CR_BROKEN    = RubyObject.USER0_F | RubyObject.USER1_F;
+
+<span class="fc" id="L54">    public static final Object UNSAFE = getUnsafe();</span>
+<span class="pc bpc" id="L55" title="1 of 2 branches missed.">    private static final int OFFSET = UNSAFE != null ? ((Unsafe)UNSAFE).arrayBaseOffset(byte[].class) : 0;</span>
+    public static final int TRANS_SIZE = 256;
+
+    private static Object getUnsafe() {
+        try {
+<span class="fc" id="L60">            Class sunUnsafe = Class.forName(&quot;sun.misc.Unsafe&quot;);</span>
+<span class="fc" id="L61">            java.lang.reflect.Field f = sunUnsafe.getDeclaredField(&quot;theUnsafe&quot;);</span>
+<span class="fc" id="L62">            f.setAccessible(true);</span>
+<span class="fc" id="L63">            return sun.misc.Unsafe.class.cast(f.get(sunUnsafe));</span>
+<span class="nc" id="L64">        } catch (Exception ex) {</span>
+<span class="nc" id="L65">            return null;</span>
+        }
+    }
+    
+    public static String codeRangeAsString(int codeRange) {
+<span class="nc bnc" id="L70" title="All 5 branches missed.">        switch (codeRange) {</span>
+<span class="nc" id="L71">            case CR_UNKNOWN: return &quot;unknown&quot;;</span>
+<span class="nc" id="L72">            case CR_7BIT: return &quot;7bit&quot;;</span>
+<span class="nc" id="L73">            case CR_VALID: return &quot;valid&quot;;</span>
+<span class="nc" id="L74">            case CR_BROKEN: return &quot;broken&quot;;</span>
+        }
+        
+<span class="nc" id="L77">        return &quot;???&quot;;  // Not reached unless something seriously boned</span>
+    }
+
+    // rb_enc_fast_mbclen
+    public static int encFastMBCLen(byte[] bytes, int p, int e, Encoding enc) {
+<span class="fc" id="L82">        return enc.length(bytes, p, e);</span>
+    }
+
+    // rb_enc_mbclen
+    public static int length(Encoding enc, byte[]bytes, int p, int end) {
+<span class="fc" id="L87">        int n = enc.length(bytes, p, end);</span>
+<span class="pc bpc" id="L88" title="1 of 4 branches missed.">        if (n &gt; 0 &amp;&amp; end - p &gt;= n) return n;</span>
+<span class="pc bpc" id="L89" title="1 of 2 branches missed.">        return end - p &gt;= enc.minLength() ? enc.minLength() : end - p;</span>
+    }
+
+    // rb_enc_precise_mbclen
+    public static int preciseLength(Encoding enc, byte[]bytes, int p, int end) {
+<span class="pc bpc" id="L94" title="1 of 2 branches missed.">        if (p &gt;= end) return -1 - (1);</span>
+<span class="fc" id="L95">        int n = enc.length(bytes, p, end);</span>
+<span class="fc bfc" id="L96" title="All 2 branches covered.">        if (n &gt; end - p) return MBCLEN_NEEDMORE(n - (end - p));</span>
+<span class="fc" id="L97">        return n;</span>
+    }
+    
+    // MBCLEN_NEEDMORE_P, ONIGENC_MBCLEN_NEEDMORE_P
+    public static boolean MBCLEN_NEEDMORE_P(int r) {
+<span class="fc bfc" id="L102" title="All 2 branches covered.">        return r &lt; -1;</span>
+    }
+
+    // MBCLEN_NEEDMORE, ONIGENC_MBCLEN_NEEDMORE
+    public static int MBCLEN_NEEDMORE(int n) {
+<span class="fc" id="L107">        return -1 - n;</span>
+    }
+    
+    // MBCLEN_INVALID_P, ONIGENC_MBCLEN_INVALID_P
+    public static boolean MBCLEN_INVALID_P(int r) {
+<span class="pc bpc" id="L112" title="1 of 2 branches missed.">        return r == -1;</span>
+    }
+    
+    // MBCLEN_CHARFOUND_LEN, ONIGENC_MBCLEN_CHARFOUND_LEN
+    public static int MBCLEN_CHARFOUND_LEN(int r) {
+<span class="fc" id="L117">        return r;</span>
+    }
+
+    // MBCLEN_CHARFOUND_P, ONIGENC_MBCLEN_CHARFOUND_P
+    public static boolean MBCLEN_CHARFOUND_P(int r) {
+<span class="fc bfc" id="L122" title="All 2 branches covered.">        return 0 &lt; r;</span>
+    }
+
+    // CONSTRUCT_MBCLEN_CHARFOUND, ONIGENC_CONSTRUCT_MBCLEN_CHARFOUND
+    public static int CONSTRUCT_MBCLEN_CHARFOUND(int n) {
+<span class="nc" id="L127">        return n;</span>
+    }
+
+    // MRI: search_nonascii
+    public static int searchNonAscii(byte[]bytes, int p, int end) {
+<span class="fc bfc" id="L132" title="All 2 branches covered.">        while (p &lt; end) {</span>
+<span class="fc bfc" id="L133" title="All 2 branches covered.">            if (!Encoding.isAscii(bytes[p])) return p;</span>
+<span class="fc" id="L134">            p++;</span>
+        }
+<span class="fc" id="L136">        return -1;</span>
+    }
+
+    public static int searchNonAscii(ByteList bytes) { 
+<span class="fc" id="L140">        return searchNonAscii(bytes.getUnsafeBytes(), bytes.getBegin(), bytes.getBegin() + bytes.getRealSize());</span>
+    }
+
+    public static int codeRangeScan(Encoding enc, byte[]bytes, int p, int len) {
+<span class="fc bfc" id="L144" title="All 2 branches covered.">        if (enc == ASCIIEncoding.INSTANCE) {</span>
+<span class="fc bfc" id="L145" title="All 2 branches covered.">            return searchNonAscii(bytes, p, p + len) != -1 ? CR_VALID : CR_7BIT;</span>
+        }
+<span class="fc bfc" id="L147" title="All 2 branches covered.">        if (enc.isAsciiCompatible()) {</span>
+<span class="fc" id="L148">            return codeRangeScanAsciiCompatible(enc, bytes, p, len);</span>
+        }
+<span class="fc" id="L150">        return codeRangeScanNonAsciiCompatible(enc, bytes, p, len);</span>
+    }
+
+    private static int codeRangeScanAsciiCompatible(Encoding enc, byte[]bytes, int p, int len) {
+<span class="fc" id="L154">        int end = p + len;</span>
+<span class="fc" id="L155">        p = searchNonAscii(bytes, p, end);</span>
+<span class="fc bfc" id="L156" title="All 2 branches covered.">        if (p == -1) return CR_7BIT;</span>
+        
+<span class="fc bfc" id="L158" title="All 2 branches covered.">        while (p &lt; end) {</span>
+<span class="fc" id="L159">            int cl = preciseLength(enc, bytes, p, end);</span>
+<span class="fc bfc" id="L160" title="All 2 branches covered.">            if (cl &lt;= 0) return CR_BROKEN;</span>
+<span class="fc" id="L161">            p += cl;</span>
+<span class="fc bfc" id="L162" title="All 2 branches covered.">            if (p &lt; end) {</span>
+<span class="fc" id="L163">                p = searchNonAscii(bytes, p, end);</span>
+<span class="fc bfc" id="L164" title="All 2 branches covered.">                if (p == -1) return CR_VALID;</span>
+            }
+<span class="fc" id="L166">        }</span>
+<span class="pc bpc" id="L167" title="1 of 2 branches missed.">        return p &gt; end ? CR_BROKEN : CR_VALID;</span>
+    }
+    
+    private static int codeRangeScanNonAsciiCompatible(Encoding enc, byte[]bytes, int p, int len) {
+<span class="fc" id="L171">        int end = p + len;</span>
+<span class="fc bfc" id="L172" title="All 2 branches covered.">        while (p &lt; end) {        </span>
+<span class="fc" id="L173">            int cl = preciseLength(enc, bytes, p, end);</span>
+<span class="fc bfc" id="L174" title="All 2 branches covered.">            if (cl &lt;= 0) return CR_BROKEN;</span>
+<span class="fc" id="L175">            p += cl;</span>
+<span class="fc" id="L176">        }</span>
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">        return p &gt; end ? CR_BROKEN : CR_VALID;</span>
+    }
+
+    public static int codeRangeScan(Encoding enc, ByteList bytes) {
+<span class="fc" id="L181">        return codeRangeScan(enc, bytes.getUnsafeBytes(), bytes.getBegin(), bytes.getRealSize());</span>
+    }
+
+    public static long codeRangeScanRestartable(Encoding enc, byte[]bytes, int s, int end, int cr) { 
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">        if (cr == CR_BROKEN) return pack(end - s, cr);</span>
+<span class="fc" id="L186">        int p = s;</span>
+        
+<span class="fc bfc" id="L188" title="All 2 branches covered.">        if (enc == ASCIIEncoding.INSTANCE) {</span>
+<span class="pc bpc" id="L189" title="1 of 4 branches missed.">            return pack(end - s, searchNonAscii(bytes, p, end) == -1 &amp;&amp; cr != CR_VALID ? CR_7BIT : CR_VALID);</span>
+<span class="fc bfc" id="L190" title="All 2 branches covered.">        } else if (enc.isAsciiCompatible()) {</span>
+<span class="fc" id="L191">            p = searchNonAscii(bytes, p, end);</span>
+<span class="pc bpc" id="L192" title="1 of 4 branches missed.">            if (p == -1) return pack(end - s, cr != CR_VALID ? CR_7BIT : cr);</span>
+
+<span class="pc bpc" id="L194" title="1 of 2 branches missed.">            while (p &lt; end) {</span>
+<span class="fc" id="L195">                int cl = preciseLength(enc, bytes, p, end);</span>
+<span class="pc bpc" id="L196" title="3 of 4 branches missed.">                if (cl &lt;= 0) return pack(p - s, cl == CHAR_INVALID ? CR_BROKEN : CR_UNKNOWN);</span>
+<span class="fc" id="L197">                p += cl;</span>
+
+<span class="pc bpc" id="L199" title="1 of 2 branches missed.">                if (p &lt; end) {</span>
+<span class="fc" id="L200">                    p = searchNonAscii(bytes, p, end);</span>
+<span class="fc bfc" id="L201" title="All 2 branches covered.">                    if (p == -1) return pack(end - s, CR_VALID);</span>
+                }
+<span class="fc" id="L203">            }</span>
+        } else {
+<span class="fc bfc" id="L205" title="All 2 branches covered.">            while (p &lt; end) {</span>
+<span class="fc" id="L206">                int cl = preciseLength(enc, bytes, p, end);</span>
+<span class="pc bpc" id="L207" title="3 of 4 branches missed.">                if (cl &lt;= 0) return pack(p - s, cl == CHAR_INVALID ? CR_BROKEN: CR_UNKNOWN);</span>
+<span class="fc" id="L208">                p += cl;</span>
+<span class="fc" id="L209">            }</span>
+        }
+<span class="pc bpc" id="L211" title="1 of 2 branches missed.">        return pack(p - s, p &gt; end ? CR_BROKEN : CR_VALID);</span>
+    }
+
+    private static final long NONASCII_MASK = 0x8080808080808080L;
+    private static int countUtf8LeadBytes(long d) {
+<span class="fc" id="L216">        d |= ~(d &gt;&gt;&gt; 1);</span>
+<span class="fc" id="L217">        d &gt;&gt;&gt;= 6;</span>
+<span class="fc" id="L218">        d &amp;= NONASCII_MASK &gt;&gt;&gt; 7;</span>
+<span class="fc" id="L219">        d += (d &gt;&gt;&gt; 8);</span>
+<span class="fc" id="L220">        d += (d &gt;&gt;&gt; 16);</span>
+<span class="fc" id="L221">        d += (d &gt;&gt;&gt; 32);</span>
+<span class="fc" id="L222">        return (int)(d &amp; 0xf);</span>
+    }
+
+    private static final int LONG_SIZE = 8;
+    private static final int LOWBITS = LONG_SIZE - 1;
+    @SuppressWarnings(&quot;deprecation&quot;)
+    public static int utf8Length(byte[]bytes, int p, int end) {
+<span class="fc" id="L229">        int len = 0;</span>
+<span class="pc bpc" id="L230" title="1 of 2 branches missed.">        if (UNSAFE != null) {</span>
+<span class="fc bfc" id="L231" title="All 2 branches covered.">            if (end - p &gt; LONG_SIZE * 2) {</span>
+<span class="fc" id="L232">                int ep = ~LOWBITS &amp; (p + LOWBITS);</span>
+<span class="pc bpc" id="L233" title="1 of 2 branches missed.">                while (p &lt; ep) {</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">                    if ((bytes[p++] &amp; 0xc0 /*utf8 lead byte*/) != 0x80) len++;</span>
+                }
+<span class="fc" id="L236">                Unsafe us = (Unsafe)UNSAFE;</span>
+<span class="fc" id="L237">                int eend = ~LOWBITS &amp; end;</span>
+<span class="fc bfc" id="L238" title="All 2 branches covered.">                while (p &lt; eend) {</span>
+<span class="fc" id="L239">                    len += countUtf8LeadBytes(us.getLong(bytes, (long)(OFFSET + p)));</span>
+<span class="fc" id="L240">                    p += LONG_SIZE;</span>
+                }
+            }
+        }
+<span class="fc bfc" id="L244" title="All 2 branches covered.">        while (p &lt; end) {</span>
+<span class="fc bfc" id="L245" title="All 2 branches covered.">            if ((bytes[p++] &amp; 0xc0 /*utf8 lead byte*/) != 0x80) len++;</span>
+        }
+<span class="fc" id="L247">        return len;</span>
+    }
+
+    public static int utf8Length(ByteList bytes) {
+<span class="fc" id="L251">        return utf8Length(bytes.getUnsafeBytes(), bytes.getBegin(), bytes.getBegin() + bytes.getRealSize());</span>
+    }
+
+    public static int strLength(Encoding enc, byte[]bytes, int p, int end) {
+<span class="pc bpc" id="L255" title="1 of 2 branches missed.">        if (enc.isFixedWidth()) {</span>
+<span class="nc" id="L256">            return (end - p + enc.minLength() - 1) / enc.minLength();</span>
+<span class="pc bpc" id="L257" title="1 of 2 branches missed.">        } else if (enc.isAsciiCompatible()) {</span>
+<span class="fc" id="L258">            int c = 0;</span>
+<span class="fc bfc" id="L259" title="All 2 branches covered.">            while (p &lt; end) {</span>
+<span class="fc bfc" id="L260" title="All 2 branches covered.">                if (Encoding.isAscii(bytes[p])) {</span>
+<span class="fc" id="L261">                    int q = searchNonAscii(bytes, p, end);</span>
+<span class="pc bpc" id="L262" title="1 of 2 branches missed.">                    if (q == -1) return c + (end - p);</span>
+<span class="nc" id="L263">                    c += q - p;</span>
+<span class="nc" id="L264">                    p = q;</span>
+                }
+<span class="fc" id="L266">                p += length(enc, bytes, p, end);</span>
+<span class="fc" id="L267">                c++;</span>
+            }
+<span class="fc" id="L269">            return c;</span>
+        }
+        
+        int c;
+<span class="nc bnc" id="L273" title="All 2 branches missed.">        for (c = 0; end &gt; p; c++) p += length(enc, bytes, p, end);</span>
+<span class="nc" id="L274">        return c;</span>
+    }
+
+    public static int strLength(ByteList bytes) { 
+<span class="nc" id="L278">        return strLength(bytes.getEncoding(), bytes.getUnsafeBytes(), bytes.getBegin(), bytes.getBegin() + bytes.getRealSize());</span>
+    }
+
+    public static long strLengthWithCodeRange(Encoding enc, byte[]bytes, int p, int end) {
+<span class="fc bfc" id="L282" title="All 2 branches covered.">        if (enc.isFixedWidth()) {</span>
+<span class="fc" id="L283">            return (end - p + enc.minLength() - 1) / enc.minLength();</span>
+<span class="pc bpc" id="L284" title="1 of 2 branches missed.">        } else if (enc.isAsciiCompatible()) {</span>
+<span class="fc" id="L285">            return strLengthWithCodeRangeAsciiCompatible(enc, bytes, p, end);</span>
+        } else {
+<span class="nc" id="L287">            return strLengthWithCodeRangeNonAsciiCompatible(enc, bytes, p, end);</span>
+        }
+    }
+
+    private static long strLengthWithCodeRangeAsciiCompatible(Encoding enc, byte[]bytes, int p, int end) {
+<span class="fc" id="L292">        int cr = 0, c = 0;</span>
+<span class="fc bfc" id="L293" title="All 2 branches covered.">        while (p &lt; end) {</span>
+<span class="fc bfc" id="L294" title="All 2 branches covered.">            if (Encoding.isAscii(bytes[p])) {</span>
+<span class="fc" id="L295">                int q = searchNonAscii(bytes, p, end);</span>
+<span class="fc bfc" id="L296" title="All 4 branches covered.">                if (q == -1) return pack(c + (end - p), cr == 0 ? CR_7BIT : cr);</span>
+<span class="fc" id="L297">                c += q - p;</span>
+<span class="fc" id="L298">                p = q;</span>
+            }
+<span class="fc" id="L300">            int cl = preciseLength(enc, bytes, p, end);</span>
+<span class="fc bfc" id="L301" title="All 2 branches covered.">            if (cl &gt; 0) {</span>
+<span class="fc" id="L302">                cr |= CR_VALID; </span>
+<span class="fc" id="L303">                p += cl;</span>
+            } else {
+<span class="fc" id="L305">                cr = CR_BROKEN;</span>
+<span class="fc" id="L306">                p++;</span>
+            }
+<span class="fc" id="L308">            c++;</span>
+<span class="fc" id="L309">        }</span>
+<span class="fc bfc" id="L310" title="All 2 branches covered.">        return pack(c, cr == 0 ? CR_7BIT : cr);</span>
+    }
+
+    private static long strLengthWithCodeRangeNonAsciiCompatible(Encoding enc, byte[]bytes, int p, int end) {
+<span class="nc" id="L314">        int cr = 0, c = 0;</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">        for (c = 0; p &lt; end; c++) {</span>
+<span class="nc" id="L316">            int cl = preciseLength(enc, bytes, p, end);</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">            if (cl &gt; 0) {</span>
+<span class="nc" id="L318">                cr |= CR_VALID; </span>
+<span class="nc" id="L319">                p += cl;</span>
+            } else {
+<span class="nc" id="L321">                cr = CR_BROKEN;</span>
+<span class="nc" id="L322">                p++;</span>
+            }
+        }
+<span class="nc bnc" id="L325" title="All 2 branches missed.">        return pack(c, cr == 0 ? CR_7BIT : cr);</span>
+    }
+
+    public static long strLengthWithCodeRange(ByteList bytes) { 
+<span class="nc" id="L329">        return strLengthWithCodeRange(bytes.getEncoding(), bytes.getUnsafeBytes(), bytes.getBegin(), bytes.getBegin() + bytes.getRealSize());</span>
+    }
+
+    public static long strLengthWithCodeRange(ByteList bytes, Encoding enc) { 
+<span class="fc" id="L333">        return strLengthWithCodeRange(enc, bytes.getUnsafeBytes(), bytes.getBegin(), bytes.getBegin() + bytes.getRealSize());</span>
+    }
+
+    // arg cannot be negative
+    static long pack(int result, int arg) {
+<span class="fc" id="L338">        return ((long)arg &lt;&lt; 31) | result;</span>
+    }
+
+    public static int unpackResult(long len) {
+<span class="fc" id="L342">        return (int)len &amp; 0x7fffffff;</span>
+    }
+
+    public static int unpackArg(long cr) {
+<span class="fc" id="L346">        return (int)(cr &gt;&gt;&gt; 31);</span>
+    }
+
+    public static int codePoint(Ruby runtime, Encoding enc, byte[]bytes, int p, int end) {
+<span class="fc bfc" id="L350" title="All 2 branches covered.">        if (p &gt;= end) throw runtime.newArgumentError(&quot;empty string&quot;);</span>
+<span class="fc" id="L351">        int cl = preciseLength(enc, bytes, p, end);</span>
+<span class="fc bfc" id="L352" title="All 2 branches covered.">        if (cl &lt;= 0) throw runtime.newArgumentError(&quot;invalid byte sequence in &quot; + enc); </span>
+<span class="fc" id="L353">        return enc.mbcToCode(bytes, p, end); </span>
+    }
+
+    public static int codeLength(Ruby runtime, Encoding enc, int c) {
+<span class="fc" id="L357">        int n = enc.codeToMbcLength(c);</span>
+<span class="pc bpc" id="L358" title="1 of 2 branches missed.">        if (n == 0) throw runtime.newRangeError(&quot;invalid codepoint &quot; + String.format(&quot;0x%x in &quot;, c) + enc.getName());</span>
+<span class="fc" id="L359">        return n;</span>
+    }
+
+    public static long getAscii(Encoding enc, byte[]bytes, int p, int end) {
+<span class="nc" id="L363">        return getAscii(enc, bytes, p, end, 0);</span>
+    }
+
+    public static long getAscii(Encoding enc, byte[]bytes, int p, int end, int len) {
+<span class="nc bnc" id="L367" title="All 2 branches missed.">        if (p &gt;= end) return pack(-1, len);</span>
+
+<span class="nc bnc" id="L369" title="All 2 branches missed.">        if (enc.isAsciiCompatible()) {</span>
+<span class="nc" id="L370">            int c = bytes[p] &amp; 0xff;</span>
+<span class="nc bnc" id="L371" title="All 2 branches missed.">            if (!Encoding.isAscii(c)) return pack(-1, len);</span>
+<span class="nc bnc" id="L372" title="All 2 branches missed.">            return pack(c, len == 0 ? 0 : 1);</span>
+        } else {
+<span class="nc" id="L374">            int cl = preciseLength(enc, bytes, p, end);</span>
+<span class="nc bnc" id="L375" title="All 2 branches missed.">            if (cl &lt;= 0) return pack(-1, len);</span>
+<span class="nc" id="L376">            int c = enc.mbcToCode(bytes, p, end);</span>
+<span class="nc bnc" id="L377" title="All 2 branches missed.">            if (!Encoding.isAscii(c)) return pack(-1, len);</span>
+<span class="nc bnc" id="L378" title="All 2 branches missed.">            return pack(c, len == 0 ? 0 : cl);</span>
+        }
+    }
+
+    public static int preciseCodePoint(Encoding enc, byte[]bytes, int p, int end) {
+<span class="nc" id="L383">        int l = preciseLength(enc, bytes, p, end);</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">        if (l &gt; 0) enc.mbcToCode(bytes, p, end);</span>
+<span class="nc" id="L385">        return -1;</span>
+    }
+
+    @SuppressWarnings(&quot;deprecation&quot;)
+    public static int utf8Nth(byte[]bytes, int p, int e, int nth) {
+        // FIXME: Missing our UNSAFE impl because it was doing the wrong thing: See GH #1986
+<span class="fc bfc" id="L391" title="All 2 branches covered.">        while (p &lt; e) {</span>
+<span class="fc bfc" id="L392" title="All 2 branches covered.">            if ((bytes[p] &amp; 0xc0 /*utf8 lead byte*/) != 0x80) {</span>
+<span class="fc bfc" id="L393" title="All 2 branches covered.">                if (nth == 0) break;</span>
+<span class="fc" id="L394">                nth--;</span>
+            }
+<span class="fc" id="L396">            p++;</span>
+        }
+<span class="fc" id="L398">        return p;</span>
+    }
+
+    public static int nth(Encoding enc, byte[]bytes, int p, int end, int n) {
+<span class="fc bfc" id="L402" title="All 2 branches covered.">        if (enc.isSingleByte()) {</span>
+<span class="fc" id="L403">            p += n;</span>
+<span class="pc bpc" id="L404" title="1 of 2 branches missed.">        } else if (enc.isFixedWidth()) {</span>
+<span class="nc" id="L405">            p += n * enc.maxLength();             </span>
+<span class="pc bpc" id="L406" title="1 of 2 branches missed.">        } else if (enc.isAsciiCompatible()) {</span>
+<span class="fc" id="L407">            p = nthAsciiCompatible(enc, bytes, p, end, n);</span>
+        } else {
+<span class="nc" id="L409">            p = nthNonAsciiCompatible(enc, bytes, p, end, n);</span>
+        }
+<span class="pc bpc" id="L411" title="1 of 2 branches missed.">        return p &gt; end ? end : p;</span>
+    }
+
+    private static int nthAsciiCompatible(Encoding enc, byte[]bytes, int p, int end, int n) {
+<span class="fc bfc" id="L415" title="All 4 branches covered.">        while (p &lt; end &amp;&amp; n &gt; 0) {</span>
+<span class="fc" id="L416">            int end2 = p + n;</span>
+<span class="pc bpc" id="L417" title="1 of 2 branches missed.">            if (end &lt; end2) return end;</span>
+<span class="fc bfc" id="L418" title="All 2 branches covered.">            if (Encoding.isAscii(bytes[p])) {</span>
+<span class="fc" id="L419">                int p2 = searchNonAscii(bytes, p, end2);</span>
+<span class="fc bfc" id="L420" title="All 2 branches covered.">                if (p2 == -1) return end2;</span>
+<span class="fc" id="L421">                n -= p2 - p;</span>
+<span class="fc" id="L422">                p = p2;</span>
+            }
+<span class="fc" id="L424">            int cl = length(enc, bytes, p, end);</span>
+<span class="fc" id="L425">            p += cl;</span>
+<span class="fc" id="L426">            n--;</span>
+<span class="fc" id="L427">        }</span>
+<span class="pc bpc" id="L428" title="1 of 2 branches missed.">        return n != 0 ? end : p;</span>
+    }
+
+    private static int nthNonAsciiCompatible(Encoding enc, byte[]bytes, int p, int end, int n) {
+<span class="nc bnc" id="L432" title="All 4 branches missed.">        while (p &lt; end &amp;&amp; n-- != 0) {</span>
+<span class="nc" id="L433">            p += length(enc, bytes, p, end);</span>
+        }
+<span class="nc" id="L435">        return p;</span>
+    }
+
+    public static int utf8Offset(byte[]bytes, int p, int end, int n) {
+<span class="fc" id="L439">        int pp = utf8Nth(bytes, p, end, n);</span>
+<span class="pc bpc" id="L440" title="1 of 2 branches missed.">        return pp == -1 ? end - p : pp - p; </span>
+    }
+
+    public static int offset(Encoding enc, byte[]bytes, int p, int end, int n) {
+<span class="fc" id="L444">        int pp = nth(enc, bytes, p, end, n);</span>
+<span class="pc bpc" id="L445" title="1 of 2 branches missed.">        return pp == -1 ? end - p : pp - p; </span>
+    }
+
+    public static int offset(RubyString str, int pos) {
+<span class="fc" id="L449">        ByteList value = str.getByteList();</span>
+<span class="fc" id="L450">        return offset(str.getEncoding(), value.getUnsafeBytes(), value.getBegin(), value.getBegin() + value.getRealSize(), pos);</span>
+    }
+
+    public static int toLower(Encoding enc, int c) {
+<span class="fc bfc" id="L454" title="All 2 branches covered.">        return Encoding.isAscii(c) ? AsciiTables.ToLowerCaseTable[c] : c;</span>
+    }
+
+    public static int toUpper(Encoding enc, int c) {
+<span class="fc bfc" id="L458" title="All 2 branches covered.">        return Encoding.isAscii(c) ? AsciiTables.ToUpperCaseTable[c] : c;</span>
+    }
+
+    public static int caseCmp(byte[]bytes1, int p1, byte[]bytes2, int p2, int len) {
+<span class="nc" id="L462">        int i = -1;</span>
+<span class="nc bnc" id="L463" title="All 4 branches missed.">        for (; ++i &lt; len &amp;&amp; bytes1[p1 + i] == bytes2[p2 + i];) {}</span>
+<span class="nc bnc" id="L464" title="All 4 branches missed.">        if (i &lt; len) return (bytes1[p1 + i] &amp; 0xff) &gt; (bytes2[p2 + i] &amp; 0xff) ? 1 : -1;</span>
+<span class="nc" id="L465">        return 0;        </span>
+    }
+
+    public static int scanHex(byte[]bytes, int p, int len) {
+<span class="fc" id="L469">        return scanHex(bytes, p, len, ASCIIEncoding.INSTANCE);</span>
+    }
+
+    public static int scanHex(byte[]bytes, int p, int len, Encoding enc) {
+<span class="fc" id="L473">        int v = 0;</span>
+        int c;
+<span class="fc bfc" id="L475" title="All 4 branches covered.">        while (len-- &gt; 0 &amp;&amp; enc.isXDigit(c = bytes[p++] &amp; 0xff)) {</span>
+<span class="fc" id="L476">            v = (v &lt;&lt; 4) + enc.xdigitVal(c);</span>
+        }
+<span class="fc" id="L478">        return v;</span>
+    }
+
+    public static int hexLength(byte[]bytes, int p, int len) {
+<span class="fc" id="L482">        return hexLength(bytes, p, len, ASCIIEncoding.INSTANCE);</span>
+    }
+
+    public static int hexLength(byte[]bytes, int p, int len, Encoding enc) {
+<span class="fc" id="L486">        int hlen = 0;</span>
+<span class="fc bfc" id="L487" title="All 4 branches covered.">        while (len-- &gt; 0 &amp;&amp; enc.isXDigit(bytes[p++] &amp; 0xff)) hlen++;</span>
+<span class="fc" id="L488">        return hlen;</span>
+    }
+
+    public static int scanOct(byte[]bytes, int p, int len) {
+<span class="fc" id="L492">        return scanOct(bytes, p, len, ASCIIEncoding.INSTANCE);</span>
+    }
+
+    public static int scanOct(byte[]bytes, int p, int len, Encoding enc) {
+<span class="fc" id="L496">        int v = 0;</span>
+        int c;
+<span class="pc bpc" id="L498" title="1 of 6 branches missed.">        while (len-- &gt; 0 &amp;&amp; enc.isDigit(c = bytes[p++] &amp; 0xff) &amp;&amp; c &lt; '8') {</span>
+<span class="fc" id="L499">            v = (v &lt;&lt; 3) + Encoding.digitVal(c);</span>
+        }
+<span class="fc" id="L501">        return v;</span>
+    }
+
+    public static int octLength(byte[]bytes, int p, int len) {
+<span class="fc" id="L505">        return octLength(bytes, p, len, ASCIIEncoding.INSTANCE);</span>
+    }
+
+    public static int octLength(byte[]bytes, int p, int len, Encoding enc) {
+<span class="fc" id="L509">        int olen = 0;</span>
+        int c;
+<span class="pc bpc" id="L511" title="2 of 6 branches missed.">        while (len-- &gt; 0 &amp;&amp; enc.isDigit(c = bytes[p++] &amp; 0xff) &amp;&amp; c &lt; '8') olen++;</span>
+<span class="fc" id="L512">        return olen;</span>
+    }
+
+    /**
+     * Check whether input object's string value contains a null byte, and if so
+     * throw SecurityError.
+     * @param runtime
+     * @param value 
+     */
+    public static final void checkStringSafety(Ruby runtime, IRubyObject value) {
+<span class="fc" id="L522">        RubyString s = value.asString();</span>
+<span class="fc" id="L523">        ByteList bl = s.getByteList();</span>
+<span class="fc" id="L524">        final byte[] array = bl.getUnsafeBytes();</span>
+<span class="fc" id="L525">        final int end = bl.length();</span>
+<span class="fc bfc" id="L526" title="All 2 branches covered.">        for (int i = bl.begin(); i &lt; end; ++i) {</span>
+<span class="pc bpc" id="L527" title="1 of 2 branches missed.">            if (array[i] == (byte) 0) {</span>
+<span class="nc" id="L528">                throw runtime.newSecurityError(&quot;string contains null byte&quot;);</span>
+            }
+        }
+<span class="fc" id="L531">    }</span>
+
+    public static boolean isUnicode(Encoding enc) {
+<span class="fc" id="L534">        byte[] name = enc.getName();</span>
+<span class="pc bpc" id="L535" title="3 of 10 branches missed.">        return name.length &gt; 4 &amp;&amp; name[0] == 'U' &amp;&amp; name[1] == 'T' &amp;&amp; name[2] == 'F' &amp;&amp; name[4] != '7'; </span>
+    }
+
+    public static String escapedCharFormat(int c, boolean isUnicode) {
+        String format;
+<span class="fc bfc" id="L540" title="All 2 branches covered.">        if (isUnicode) {</span>
+
+<span class="pc bpc" id="L542" title="2 of 6 branches missed.">            if (c &lt; 0x7F &amp;&amp; Encoding.isAscii(c) &amp;&amp; ASCIIEncoding.INSTANCE.isPrint(c)) {</span>
+<span class="nc" id="L543">                format = &quot;%c&quot;; </span>
+<span class="pc bpc" id="L544" title="1 of 2 branches missed.">            } else if (c &lt; 0x10000) {</span>
+<span class="fc" id="L545">                format = &quot;\\u%04X&quot;;</span>
+            } else {
+<span class="nc" id="L547">                format = &quot;\\u{%X}&quot;;</span>
+            }
+        } else {
+<span class="pc bpc" id="L550" title="1 of 2 branches missed.">            if (c &lt; 0x100) {</span>
+<span class="fc" id="L551">                format = &quot;\\x%02X&quot;;</span>
+            } else {
+<span class="nc" id="L553">                format = &quot;\\x{%X}&quot;;</span>
+            }
+        }
+<span class="fc" id="L556">        return format;</span>
+    }
+
+    // mri: ONIGENC_MBCLEN_NEEDMORE_P - onigurama.h
+    public static boolean isIncompleteChar(int b) {
+<span class="nc bnc" id="L561" title="All 2 branches missed.">        return b &lt; -1;</span>
+    }
+    
+    public static int bytesToFixBrokenTrailingCharacter(ByteList val, int usingLength) {
+<span class="nc" id="L565">        return bytesToFixBrokenTrailingCharacter(val.getUnsafeBytes(), val.getBegin(), val.getRealSize(), val.getEncoding(), usingLength);</span>
+    }
+    
+    public static int bytesToFixBrokenTrailingCharacter(byte[] bytes, int begin, int byteSize, Encoding encoding, int usingLength) {
+        // read additional bytes to fix broken char
+<span class="nc bnc" id="L570" title="All 2 branches missed.">        if (byteSize &gt; 0) {</span>
+            // get head offset of broken character
+<span class="nc" id="L572">            int charHead = encoding.leftAdjustCharHead(</span>
+                    bytes, // string bytes
+                    begin, // start of string
+                    begin + usingLength - 1, // last byte
+                    begin + usingLength); // end of using
+            
+            // external offset
+<span class="nc" id="L579">            charHead -= begin;</span>
+            
+            // byte at char head
+<span class="nc" id="L582">            byte byteHead = (byte)(bytes[begin + charHead] &amp; 0xFF);</span>
+            
+            // total bytes we would need to complete character
+<span class="nc" id="L585">            int extra = encoding.length(byteHead);</span>
+            
+            // what we already have
+<span class="nc" id="L588">            extra -= usingLength - charHead;</span>
+            
+<span class="nc" id="L590">            return extra;</span>
+        }
+        
+<span class="nc" id="L593">        return 0;</span>
+    }
+
+    public static int memchr(byte[] ptr, int start, int find, int len) {
+<span class="fc bfc" id="L597" title="All 2 branches covered.">        for (int i = start; i &lt; start + len; i++) {</span>
+<span class="fc bfc" id="L598" title="All 2 branches covered.">            if (ptr[i] == find) return i;</span>
+        }
+<span class="fc" id="L600">        return -1;</span>
+    }
+
+    // StringValueCstr, rb_string_value_cstr without trailing null addition
+    public static RubyString checkEmbeddedNulls(Ruby runtime, IRubyObject ptr) {
+<span class="fc" id="L605">        RubyString str = ptr.convertToString();</span>
+<span class="fc" id="L606">        ByteList strByteList = str.getByteList();</span>
+<span class="fc" id="L607">        byte[] sBytes = strByteList.unsafeBytes();</span>
+<span class="fc" id="L608">        int s = strByteList.begin();</span>
+<span class="fc" id="L609">        int len = strByteList.length();</span>
+<span class="fc" id="L610">        Encoding enc = str.getEncoding();</span>
+<span class="fc" id="L611">        final int minlen = enc.minLength();</span>
+
+<span class="pc bpc" id="L613" title="1 of 2 branches missed.">        if (minlen &gt; 1) {</span>
+<span class="nc bnc" id="L614" title="All 2 branches missed.">            if (strNullChar(sBytes, s, len, minlen, enc) != -1) {</span>
+<span class="nc" id="L615">                throw runtime.newArgumentError(&quot;string contains null char&quot;);</span>
+            }
+<span class="nc" id="L617">            return strFillTerm(str, sBytes, s, len, minlen, minlen);</span>
+        }
+<span class="pc bpc" id="L619" title="1 of 2 branches missed.">        if (memchr(sBytes, s, 0, len) != -1) {</span>
+<span class="nc" id="L620">            throw runtime.newArgumentError(&quot;string contains null byte&quot;);</span>
+        }
+//        if (s[len]) {
+//            rb_str_modify(str);
+//            s = RSTRING_PTR(str);
+//            s[RSTRING_LEN(str)] = 0;
+//        }
+<span class="fc" id="L627">        return str;</span>
+    }
+
+    // MRI: str_null_char
+    public static int strNullChar(byte[] sBytes, int s, int len, final int minlen, Encoding enc) {
+<span class="nc" id="L632">        int e = s + len;</span>
+
+<span class="nc bnc" id="L634" title="All 2 branches missed.">        for (; s + minlen &lt;= e; s += enc.length(sBytes, s, e)) {</span>
+<span class="nc bnc" id="L635" title="All 2 branches missed.">            if (zeroFilled(sBytes, s, minlen)) return s;</span>
+        }
+<span class="nc" id="L637">        return -1;</span>
+    }
+
+    public static boolean zeroFilled(byte[] sBytes, int s, int n) {
+<span class="nc bnc" id="L641" title="All 2 branches missed.">        for (; n &gt; 0; --n) {</span>
+<span class="nc bnc" id="L642" title="All 2 branches missed.">            if (sBytes[s++] != 0) return false;</span>
+        }
+<span class="nc" id="L644">        return true;</span>
+    }
+
+    public static RubyString strFillTerm(RubyString str, byte[] sBytes, int s, int len, int oldtermlen, int termlen) {
+<span class="nc" id="L648">        int capa = str.getByteList().getUnsafeBytes().length - str.getByteList().begin();</span>
+
+<span class="nc bnc" id="L650" title="All 2 branches missed.">        if (capa &lt; len + termlen) {</span>
+<span class="nc" id="L651">            str.modify(len + termlen);</span>
+        }
+<span class="nc bnc" id="L653" title="All 2 branches missed.">        else if (!str.independent()) {</span>
+<span class="nc bnc" id="L654" title="All 2 branches missed.">            if (zeroFilled(sBytes, s + len, termlen)) return str;</span>
+<span class="nc" id="L655">            str.makeIndependent();</span>
+        }
+<span class="nc" id="L657">        sBytes = str.getByteList().getUnsafeBytes();</span>
+<span class="nc" id="L658">        s = str.getByteList().begin();</span>
+<span class="nc" id="L659">        TERM_FILL(sBytes, s + len, termlen);</span>
+<span class="nc" id="L660">        return str;</span>
+    }
+
+    public static void TERM_FILL(byte[] ptrBytes, int ptr, int termlen) {
+<span class="nc" id="L664">        int term_fill_ptr = ptr;</span>
+<span class="nc" id="L665">        int term_fill_len = termlen;</span>
+<span class="nc" id="L666">        ptrBytes[term_fill_ptr] = '\0';</span>
+<span class="nc bnc" id="L667" title="All 2 branches missed.">        if (term_fill_len &gt; 1)</span>
+<span class="nc" id="L668">        Arrays.fill(ptrBytes, term_fill_ptr, term_fill_len, (byte)0);</span>
+<span class="nc" id="L669">    }</span>
+
+    /**
+     * rb_str_scan
+     */
+
+    public static int positionEndForScan(ByteList value, Matcher matcher, Encoding enc, int begin, int range) {
+<span class="fc" id="L676">        int end = matcher.getEnd();</span>
+<span class="fc bfc" id="L677" title="All 2 branches covered.">        if (matcher.getBegin() == end) {</span>
+<span class="fc bfc" id="L678" title="All 2 branches covered.">            if (value.getRealSize() &gt; end) {</span>
+<span class="fc" id="L679">                return end + enc.length(value.getUnsafeBytes(), begin + end, range);</span>
+            } else {
+<span class="fc" id="L681">                return end + 1;</span>
+            }
+        } else {
+<span class="fc" id="L684">            return end;</span>
+        }
+    }
+
+    /**
+     * rb_str_dump
+     */
+
+    public static ByteList dumpCommon(Ruby runtime, ByteList byteList) {
+<span class="fc" id="L693">        ByteList buf = null;</span>
+<span class="fc" id="L694">        Encoding enc = byteList.getEncoding();</span>
+
+<span class="fc" id="L696">        int p = byteList.getBegin();</span>
+<span class="fc" id="L697">        int end = p + byteList.getRealSize();</span>
+<span class="fc" id="L698">        byte[]bytes = byteList.getUnsafeBytes();</span>
+
+<span class="fc" id="L700">        int len = 2;</span>
+<span class="fc bfc" id="L701" title="All 2 branches covered.">        while (p &lt; end) {</span>
+<span class="fc" id="L702">            int c = bytes[p++] &amp; 0xff;</span>
+
+<span class="fc bfc" id="L704" title="All 3 branches covered.">            switch (c) {</span>
+            case '&quot;':case '\\':case '\n':case '\r':case '\t':case '\f':
+            case '\013': case '\010': case '\007': case '\033':
+<span class="fc" id="L707">                len += 2;</span>
+<span class="fc" id="L708">                break;</span>
+            case '#':
+<span class="fc bfc" id="L710" title="All 2 branches covered.">                len += isEVStr(bytes, p, end) ? 2 : 1;</span>
+<span class="fc" id="L711">                break;</span>
+            default:
+<span class="fc bfc" id="L713" title="All 2 branches covered.">                if (ASCIIEncoding.INSTANCE.isPrint(c)) {</span>
+<span class="fc" id="L714">                    len++;</span>
+                } else {
+<span class="fc bfc" id="L716" title="All 2 branches covered.">                    if (enc instanceof UTF8Encoding) {</span>
+<span class="fc" id="L717">                        int n = preciseLength(enc, bytes, p - 1, end) - 1;</span>
+<span class="fc bfc" id="L718" title="All 2 branches covered.">                        if (n &gt; 0) {</span>
+<span class="pc bpc" id="L719" title="1 of 2 branches missed.">                            if (buf == null) buf = new ByteList();</span>
+<span class="fc" id="L720">                            int cc = codePoint(runtime, enc, bytes, p - 1, end);</span>
+<span class="fc" id="L721">                            Sprintf.sprintf(runtime, buf, &quot;%x&quot;, cc);</span>
+<span class="fc" id="L722">                            len += buf.getRealSize() + 4;</span>
+<span class="fc" id="L723">                            buf.setRealSize(0);</span>
+<span class="fc" id="L724">                            p += n;</span>
+<span class="fc" id="L725">                            break;</span>
+                        }
+                    }
+<span class="fc" id="L728">                    len += 4;</span>
+                }
+                break;
+            }
+<span class="fc" id="L732">        }</span>
+
+<span class="fc bfc" id="L734" title="All 2 branches covered.">        if (!enc.isAsciiCompatible()) {</span>
+<span class="fc" id="L735">            len += &quot;.force_encoding(\&quot;&quot;.length() + enc.getName().length + &quot;\&quot;)&quot;.length();</span>
+        }
+
+<span class="fc" id="L738">        ByteList outBytes = new ByteList(len);</span>
+<span class="fc" id="L739">        byte out[] = outBytes.getUnsafeBytes();</span>
+<span class="fc" id="L740">        int q = 0;</span>
+<span class="fc" id="L741">        p = byteList.getBegin();</span>
+<span class="fc" id="L742">        end = p + byteList.getRealSize();</span>
+
+<span class="fc" id="L744">        out[q++] = '&quot;';</span>
+<span class="fc bfc" id="L745" title="All 2 branches covered.">        while (p &lt; end) {</span>
+<span class="fc" id="L746">            int c = bytes[p++] &amp; 0xff;</span>
+<span class="fc bfc" id="L747" title="All 4 branches covered.">            if (c == '&quot;' || c == '\\') {</span>
+<span class="fc" id="L748">                out[q++] = '\\';</span>
+<span class="fc" id="L749">                out[q++] = (byte)c;</span>
+<span class="fc bfc" id="L750" title="All 2 branches covered.">            } else if (c == '#') {</span>
+<span class="fc bfc" id="L751" title="All 2 branches covered.">                if (isEVStr(bytes, p, end)) out[q++] = '\\';</span>
+<span class="fc" id="L752">                out[q++] = '#';</span>
+<span class="fc bfc" id="L753" title="All 2 branches covered.">            } else if (c == '\n') {</span>
+<span class="fc" id="L754">                out[q++] = '\\';</span>
+<span class="fc" id="L755">                out[q++] = 'n';</span>
+<span class="fc bfc" id="L756" title="All 2 branches covered.">            } else if (c == '\r') {</span>
+<span class="fc" id="L757">                out[q++] = '\\';</span>
+<span class="fc" id="L758">                out[q++] = 'r';</span>
+<span class="fc bfc" id="L759" title="All 2 branches covered.">            } else if (c == '\t') {</span>
+<span class="fc" id="L760">                out[q++] = '\\';</span>
+<span class="fc" id="L761">                out[q++] = 't';</span>
+<span class="fc bfc" id="L762" title="All 2 branches covered.">            } else if (c == '\f') {</span>
+<span class="fc" id="L763">                out[q++] = '\\';</span>
+<span class="fc" id="L764">                out[q++] = 'f';</span>
+<span class="fc bfc" id="L765" title="All 2 branches covered.">            } else if (c == '\013') {</span>
+<span class="fc" id="L766">                out[q++] = '\\';</span>
+<span class="fc" id="L767">                out[q++] = 'v';</span>
+<span class="fc bfc" id="L768" title="All 2 branches covered.">            } else if (c == '\010') {</span>
+<span class="fc" id="L769">                out[q++] = '\\';</span>
+<span class="fc" id="L770">                out[q++] = 'b';</span>
+<span class="fc bfc" id="L771" title="All 2 branches covered.">            } else if (c == '\007') {</span>
+<span class="fc" id="L772">                out[q++] = '\\';</span>
+<span class="fc" id="L773">                out[q++] = 'a';</span>
+<span class="fc bfc" id="L774" title="All 2 branches covered.">            } else if (c == '\033') {</span>
+<span class="fc" id="L775">                out[q++] = '\\';</span>
+<span class="fc" id="L776">                out[q++] = 'e';</span>
+<span class="fc bfc" id="L777" title="All 2 branches covered.">            } else if (ASCIIEncoding.INSTANCE.isPrint(c)) {</span>
+<span class="fc" id="L778">                out[q++] = (byte)c;</span>
+            } else {
+<span class="fc" id="L780">                out[q++] = '\\';</span>
+<span class="fc bfc" id="L781" title="All 2 branches covered.">                if (enc instanceof UTF8Encoding) {</span>
+<span class="fc" id="L782">                    int n = preciseLength(enc, bytes, p - 1, end) - 1;</span>
+<span class="fc bfc" id="L783" title="All 2 branches covered.">                    if (n &gt; 0) {</span>
+<span class="fc" id="L784">                        int cc = codePoint(runtime, enc, bytes, p - 1, end);</span>
+<span class="fc" id="L785">                        p += n;</span>
+<span class="fc" id="L786">                        outBytes.setRealSize(q);</span>
+<span class="fc" id="L787">                        Sprintf.sprintf(runtime, outBytes, &quot;u{%x}&quot;, cc);</span>
+<span class="fc" id="L788">                        q = outBytes.getRealSize();</span>
+<span class="fc" id="L789">                        continue;</span>
+                    }
+                }
+<span class="fc" id="L792">                outBytes.setRealSize(q);</span>
+<span class="fc" id="L793">                Sprintf.sprintf(runtime, outBytes, &quot;x%02X&quot;, c);</span>
+<span class="fc" id="L794">                q = outBytes.getRealSize();</span>
+            }
+<span class="fc" id="L796">        }</span>
+<span class="fc" id="L797">        out[q++] = '&quot;';</span>
+<span class="fc" id="L798">        outBytes.setRealSize(q);</span>
+<span class="pc bpc" id="L799" title="3 of 4 branches missed.">        assert out == outBytes.getUnsafeBytes(); // must not reallocate</span>
+
+<span class="fc" id="L801">        return outBytes;</span>
+    }
+
+    public static boolean isEVStr(byte[]bytes, int p, int end) {
+<span class="fc bfc" id="L805" title="All 2 branches covered.">        return p &lt; end ? isEVStr(bytes[p] &amp; 0xff) : false;</span>
+    }
+
+    public static boolean isEVStr(int c) {
+<span class="fc bfc" id="L809" title="All 6 branches covered.">        return c == '$' || c == '@' || c == '{';</span>
+    }
+
+    /**
+     * rb_str_count
+     */
+
+    public static int countCommon19(ByteList value, Ruby runtime, boolean[] table, TrTables tables, Encoding enc) {
+<span class="fc" id="L817">        int i = 0;</span>
+<span class="fc" id="L818">        byte[]bytes = value.getUnsafeBytes();</span>
+<span class="fc" id="L819">        int p = value.getBegin();</span>
+<span class="fc" id="L820">        int end = p + value.getRealSize();</span>
+
+        int c;
+<span class="fc bfc" id="L823" title="All 2 branches covered.">        while (p &lt; end) {</span>
+<span class="pc bpc" id="L824" title="1 of 4 branches missed.">            if (enc.isAsciiCompatible() &amp;&amp; (c = bytes[p] &amp; 0xff) &lt; 0x80) {</span>
+<span class="fc bfc" id="L825" title="All 2 branches covered.">                if (table[c]) i++;</span>
+<span class="fc" id="L826">                p++;</span>
+            } else {
+<span class="fc" id="L828">                c = codePoint(runtime, enc, bytes, p, end);</span>
+<span class="fc" id="L829">                int cl = codeLength(runtime, enc, c);</span>
+<span class="pc bpc" id="L830" title="1 of 2 branches missed.">                if (trFind(c, table, tables)) i++;</span>
+<span class="fc" id="L831">                p += cl;</span>
+<span class="fc" id="L832">            }</span>
+        }
+
+<span class="fc" id="L835">        return i;</span>
+    }
+
+    /**
+     * rb_str_rindex_m
+     */
+    public static int rindex(ByteList source, int sourceLen, ByteList subString, int subLen, int endPosition, CodeRangeable subStringCodeRangeable, Encoding enc) {
+<span class="pc bpc" id="L842" title="1 of 2 branches missed.">        if (subStringCodeRangeable.scanForCodeRange() == CR_BROKEN) return -1;</span>
+
+<span class="fc bfc" id="L844" title="All 2 branches covered.">        if (sourceLen &lt; subLen) return -1;</span>
+<span class="fc bfc" id="L845" title="All 2 branches covered.">        if (sourceLen - endPosition &lt; subLen) endPosition = sourceLen - subLen;</span>
+<span class="pc bpc" id="L846" title="1 of 2 branches missed.">        if (sourceLen == 0) return endPosition;</span>
+
+<span class="fc" id="L848">        byte[]bytes = source.getUnsafeBytes();</span>
+<span class="fc" id="L849">        int p = source.getBegin();</span>
+<span class="fc" id="L850">        int end = p + source.getRealSize();</span>
+
+<span class="fc" id="L852">        byte[]sbytes = subString.bytes();</span>
+<span class="fc" id="L853">        subLen = subString.getRealSize();</span>
+
+<span class="fc" id="L855">        int s = nth(enc, bytes, p, end, endPosition);</span>
+<span class="pc bpc" id="L856" title="1 of 2 branches missed.">        while (s &gt;= 0) {</span>
+<span class="fc bfc" id="L857" title="All 2 branches covered.">            if (ByteList.memcmp(bytes, s, sbytes, 0, subLen) == 0) return endPosition;</span>
+
+<span class="fc bfc" id="L859" title="All 2 branches covered.">            if (endPosition == 0) break;</span>
+<span class="fc" id="L860">            endPosition--;</span>
+
+<span class="fc" id="L862">            s = enc.prevCharHead(bytes, p, s, end);</span>
+        }
+<span class="fc" id="L864">        return -1;</span>
+    }
+
+    /**
+     * rb_str_tr / rb_str_tr_bang
+     */
+
+    // TODO (nirvdrum Dec. 19, 2014): Neither the constructor nor the fields should be public. I temporarily escalated visibility during a refactoring that moved the inner class to a new parent class, while the old parent class still needs access.
+    public static final class TR {
+<span class="fc" id="L873">        public TR(ByteList bytes) {</span>
+<span class="fc" id="L874">            p = bytes.getBegin();</span>
+<span class="fc" id="L875">            pend = bytes.getRealSize() + p;</span>
+<span class="fc" id="L876">            buf = bytes.getUnsafeBytes();</span>
+<span class="fc" id="L877">            now = max = 0;</span>
+<span class="fc" id="L878">            gen = false;</span>
+<span class="fc" id="L879">        }</span>
+
+        public int p, pend, now, max;
+        public boolean gen;
+        public byte[]buf;
+    }
+
+    /**
+     * tr_setup_table
+     */
+<span class="fc" id="L889">    public static final class TrTables {</span>
+        private IntHash&lt;IRubyObject&gt; del, noDel;
+    }
+
+    public static TrTables trSetupTable(ByteList value, Ruby runtime, boolean[] table, TrTables tables, boolean init, Encoding enc) {
+<span class="fc" id="L894">        final TR tr = new TR(value);</span>
+<span class="fc" id="L895">        boolean cflag = false;</span>
+<span class="fc bfc" id="L896" title="All 2 branches covered.">        if (value.getRealSize() &gt; 1) {</span>
+<span class="pc bpc" id="L897" title="1 of 2 branches missed.">            if (enc.isAsciiCompatible()) {</span>
+<span class="fc bfc" id="L898" title="All 2 branches covered.">                if ((value.getUnsafeBytes()[value.getBegin()] &amp; 0xff) == '^') {</span>
+<span class="fc" id="L899">                    cflag = true;</span>
+<span class="fc" id="L900">                    tr.p++;</span>
+                }
+            } else {
+<span class="nc" id="L903">                int l = preciseLength(enc, tr.buf, tr.p, tr.pend);</span>
+<span class="nc bnc" id="L904" title="All 2 branches missed.">                if (enc.mbcToCode(tr.buf, tr.p, tr.pend) == '^') {</span>
+<span class="nc" id="L905">                    cflag = true;</span>
+<span class="nc" id="L906">                    tr.p += l;</span>
+                }
+            }
+        }
+
+<span class="fc bfc" id="L911" title="All 2 branches covered.">        if (init) {</span>
+<span class="fc bfc" id="L912" title="All 2 branches covered.">            for (int i=0; i&lt; TRANS_SIZE; i++) table[i] = true;</span>
+<span class="fc" id="L913">            table[TRANS_SIZE] = cflag;</span>
+<span class="pc bpc" id="L914" title="3 of 4 branches missed.">        } else if (table[TRANS_SIZE] &amp;&amp; !cflag) {</span>
+<span class="nc" id="L915">            table[TRANS_SIZE] = false;</span>
+        }
+
+<span class="fc" id="L918">        final boolean[]buf = new boolean[TRANS_SIZE];</span>
+<span class="fc bfc" id="L919" title="All 2 branches covered.">        for (int i=0; i&lt; TRANS_SIZE; i++) buf[i] = cflag;</span>
+
+        int c;
+<span class="fc" id="L922">        IntHash&lt;IRubyObject&gt; hash = null, phash = null;</span>
+<span class="fc bfc" id="L923" title="All 2 branches covered.">        while ((c = trNext(tr, runtime, enc)) &gt;= 0) {</span>
+<span class="fc bfc" id="L924" title="All 2 branches covered.">            if (c &lt; TRANS_SIZE) {</span>
+<span class="fc bfc" id="L925" title="All 2 branches covered.">                buf[c &amp; 0xff] = !cflag;</span>
+            } else {
+<span class="pc bpc" id="L927" title="1 of 2 branches missed.">                if (hash == null) {</span>
+<span class="fc" id="L928">                    hash = new IntHash&lt;IRubyObject&gt;();</span>
+<span class="pc bpc" id="L929" title="1 of 2 branches missed.">                    if (tables == null) tables = new TrTables();</span>
+<span class="pc bpc" id="L930" title="1 of 2 branches missed.">                    if (cflag) {</span>
+<span class="nc" id="L931">                        phash = tables.noDel;</span>
+<span class="nc" id="L932">                        tables.noDel = hash;</span>
+                    } else {
+<span class="fc" id="L934">                        phash  = tables.del;</span>
+<span class="fc" id="L935">                        tables.del = hash;</span>
+                    }
+                }
+<span class="pc bpc" id="L938" title="3 of 4 branches missed.">                if (phash == null || phash.get(c) != null) hash.put(c, RubyBasicObject.NEVER);</span>
+            }
+        }
+
+<span class="fc bfc" id="L942" title="All 6 branches covered.">        for (int i=0; i&lt; TRANS_SIZE; i++) table[i] = table[i] &amp;&amp; buf[i];</span>
+<span class="fc" id="L943">        return tables;</span>
+    }
+
+    public static boolean trFind(int c, boolean[] table, TrTables tables) {
+<span class="pc bpc" id="L947" title="1 of 2 branches missed.">        if (c &lt; TRANS_SIZE) {</span>
+<span class="nc" id="L948">            return table[c];</span>
+        } else {
+<span class="pc bpc" id="L950" title="1 of 2 branches missed.">            if (tables != null) {</span>
+<span class="pc bpc" id="L951" title="1 of 2 branches missed.">                if (tables.del != null) {</span>
+<span class="pc bpc" id="L952" title="3 of 4 branches missed.">                    if (tables.noDel == null || tables.noDel.get(c) == null) return true;</span>
+<span class="nc bnc" id="L953" title="All 4 branches missed.">                } else if (tables.noDel != null &amp;&amp; tables.noDel.get(c) != null) return false;</span>
+            }
+<span class="nc" id="L955">            return table[TRANS_SIZE];</span>
+        }
+    }
+
+    public static int trNext(TR t, Ruby runtime, Encoding enc) {
+<span class="fc" id="L960">        byte[]buf = t.buf;</span>
+
+        for (;;) {
+<span class="fc bfc" id="L963" title="All 2 branches covered.">            if (!t.gen) {</span>
+<span class="fc bfc" id="L964" title="All 2 branches covered.">                if (t.p == t.pend) return -1;</span>
+<span class="fc bfc" id="L965" title="All 4 branches covered.">                if (t.p &lt; t.pend -1 &amp;&amp; buf[t.p] == '\\') t.p++;</span>
+<span class="fc" id="L966">                t.now = codePoint(runtime, enc, buf, t.p, t.pend);</span>
+<span class="fc" id="L967">                t.p += codeLength(runtime, enc, t.now);</span>
+<span class="fc bfc" id="L968" title="All 4 branches covered.">                if (t.p &lt; t.pend - 1 &amp;&amp; buf[t.p] == '-') {</span>
+<span class="fc" id="L969">                    t.p++;</span>
+<span class="pc bpc" id="L970" title="1 of 2 branches missed.">                    if (t.p &lt; t.pend) {</span>
+<span class="fc" id="L971">                        int c = codePoint(runtime, enc, buf, t.p, t.pend);</span>
+<span class="fc" id="L972">                        t.p += codeLength(runtime, enc, c);</span>
+<span class="fc bfc" id="L973" title="All 2 branches covered.">                        if (t.now &gt; c) {</span>
+<span class="pc bpc" id="L974" title="2 of 4 branches missed.">                            if (t.now &lt; 0x80 &amp;&amp; c &lt; 0x80) {</span>
+<span class="fc" id="L975">                                throw runtime.newArgumentError(&quot;invalid range \&quot;&quot;</span>
+                                        + (char) t.now + &quot;-&quot; + (char) c + &quot;\&quot; in string transliteration&quot;);
+                            }
+
+<span class="nc" id="L979">                            throw runtime.newArgumentError(&quot;invalid range in string transliteration&quot;);</span>
+                        }
+<span class="fc" id="L981">                        t.gen = true;</span>
+<span class="fc" id="L982">                        t.max = c;</span>
+                    }
+                }
+<span class="fc" id="L985">                return t.now;</span>
+<span class="fc bfc" id="L986" title="All 2 branches covered.">            } else if (++t.now &lt; t.max) {</span>
+<span class="fc" id="L987">                return t.now;</span>
+            } else {
+<span class="fc" id="L989">                t.gen = false;</span>
+<span class="fc" id="L990">                return t.max;</span>
+            }
+        }
+    }
+
+    /**
+     * succ
+     */
+
+<span class="pc" id="L999">    public static enum NeighborChar {NOT_CHAR, FOUND, WRAPPED}</span>
+
+    public static ByteList succCommon(ByteList original) {
+<span class="fc" id="L1002">        byte carry[] = new byte[org.jcodings.Config.ENC_CODE_TO_MBC_MAXLEN];</span>
+<span class="fc" id="L1003">        int carryP = 0;</span>
+<span class="fc" id="L1004">        carry[0] = 1;</span>
+<span class="fc" id="L1005">        int carryLen = 1;</span>
+
+<span class="fc" id="L1007">        ByteList valueCopy = new ByteList(original);</span>
+<span class="fc" id="L1008">        valueCopy.setEncoding(original.getEncoding());</span>
+<span class="fc" id="L1009">        Encoding enc = original.getEncoding();</span>
+<span class="fc" id="L1010">        int p = valueCopy.getBegin();</span>
+<span class="fc" id="L1011">        int end = p + valueCopy.getRealSize();</span>
+<span class="fc" id="L1012">        int s = end;</span>
+<span class="fc" id="L1013">        byte[]bytes = valueCopy.getUnsafeBytes();</span>
+
+<span class="fc" id="L1015">        NeighborChar neighbor = NeighborChar.FOUND;</span>
+<span class="fc" id="L1016">        int lastAlnum = -1;</span>
+<span class="fc" id="L1017">        boolean alnumSeen = false;</span>
+<span class="fc bfc" id="L1018" title="All 2 branches covered.">        while ((s = enc.prevCharHead(bytes, p, s, end)) != -1) {</span>
+<span class="fc bfc" id="L1019" title="All 4 branches covered.">            if (neighbor == NeighborChar.NOT_CHAR &amp;&amp; lastAlnum != -1) {</span>
+<span class="pc bpc" id="L1020" title="1 of 2 branches missed.">                if (ASCIIEncoding.INSTANCE.isAlpha(bytes[lastAlnum] &amp; 0xff) ?</span>
+<span class="pc bpc" id="L1021" title="1 of 2 branches missed.">                        ASCIIEncoding.INSTANCE.isDigit(bytes[s] &amp; 0xff) :</span>
+<span class="nc bnc" id="L1022" title="All 2 branches missed.">                        ASCIIEncoding.INSTANCE.isDigit(bytes[lastAlnum] &amp; 0xff) ?</span>
+<span class="nc bnc" id="L1023" title="All 2 branches missed.">                                ASCIIEncoding.INSTANCE.isAlpha(bytes[s] &amp; 0xff) : false) {</span>
+<span class="nc" id="L1024">                    s = lastAlnum;</span>
+<span class="nc" id="L1025">                    break;</span>
+                }
+            }
+
+<span class="fc" id="L1029">            int cl = preciseLength(enc, bytes, s, end);</span>
+<span class="pc bpc" id="L1030" title="1 of 2 branches missed.">            if (cl &lt;= 0) continue;</span>
+<span class="pc bpc" id="L1031" title="1 of 4 branches missed.">            switch (neighbor = succAlnumChar(enc, bytes, s, cl, carry, 0)) {</span>
+<span class="fc" id="L1032">                case NOT_CHAR: continue;</span>
+<span class="fc" id="L1033">                case FOUND:    return valueCopy;</span>
+<span class="fc" id="L1034">                case WRAPPED:  lastAlnum = s;</span>
+            }
+<span class="fc" id="L1036">            alnumSeen = true;</span>
+<span class="fc" id="L1037">            carryP = s - p;</span>
+<span class="fc" id="L1038">            carryLen = cl;</span>
+<span class="fc" id="L1039">        }</span>
+
+<span class="fc bfc" id="L1041" title="All 2 branches covered.">        if (!alnumSeen) {</span>
+<span class="fc" id="L1042">            s = end;</span>
+<span class="fc bfc" id="L1043" title="All 2 branches covered.">            while ((s = enc.prevCharHead(bytes, p, s, end)) != -1) {</span>
+<span class="fc" id="L1044">                int cl = preciseLength(enc, bytes, s, end);</span>
+<span class="pc bpc" id="L1045" title="1 of 2 branches missed.">                if (cl &lt;= 0) continue;</span>
+<span class="fc" id="L1046">                neighbor = succChar(enc, bytes, s, cl);</span>
+<span class="fc bfc" id="L1047" title="All 2 branches covered.">                if (neighbor == NeighborChar.FOUND) return valueCopy;</span>
+<span class="pc bpc" id="L1048" title="1 of 2 branches missed.">                if (preciseLength(enc, bytes, s, s + 1) != cl) succChar(enc, bytes, s, cl); /* wrapped to \0...\0.  search next valid char. */</span>
+<span class="pc bpc" id="L1049" title="1 of 2 branches missed.">                if (!enc.isAsciiCompatible()) {</span>
+<span class="nc" id="L1050">                    System.arraycopy(bytes, s, carry, 0, cl);</span>
+<span class="nc" id="L1051">                    carryLen = cl;</span>
+                }
+<span class="fc" id="L1053">                carryP = s - p;</span>
+<span class="fc" id="L1054">            }</span>
+        }
+<span class="fc" id="L1056">        valueCopy.ensure(valueCopy.getBegin() + valueCopy.getRealSize() + carryLen);</span>
+<span class="fc" id="L1057">        s = valueCopy.getBegin() + carryP;</span>
+<span class="fc" id="L1058">        System.arraycopy(valueCopy.getUnsafeBytes(), s, valueCopy.getUnsafeBytes(), s + carryLen, valueCopy.getRealSize() - carryP);</span>
+<span class="fc" id="L1059">        System.arraycopy(carry, 0, valueCopy.getUnsafeBytes(), s, carryLen);</span>
+<span class="fc" id="L1060">        valueCopy.setRealSize(valueCopy.getRealSize() + carryLen);</span>
+<span class="fc" id="L1061">        return valueCopy;</span>
+    }
+
+    public static NeighborChar succChar(Encoding enc, byte[] bytes, int p, int len) {
+        while (true) {
+<span class="fc" id="L1066">            int i = len - 1;</span>
+<span class="fc bfc" id="L1067" title="All 4 branches covered.">            for (; i &gt;= 0 &amp;&amp; bytes[p + i] == (byte)0xff; i--) bytes[p + i] = 0;</span>
+<span class="fc bfc" id="L1068" title="All 2 branches covered.">            if (i &lt; 0) return NeighborChar.WRAPPED;</span>
+<span class="fc" id="L1069">            bytes[p + i] = (byte)((bytes[p + i] &amp; 0xff) + 1);</span>
+<span class="fc" id="L1070">            int cl = preciseLength(enc, bytes, p, p + len);</span>
+<span class="pc bpc" id="L1071" title="1 of 2 branches missed.">            if (cl &gt; 0) {</span>
+<span class="pc bpc" id="L1072" title="1 of 2 branches missed.">                if (cl == len) {</span>
+<span class="fc" id="L1073">                    return NeighborChar.FOUND;</span>
+                } else {
+<span class="nc bnc" id="L1075" title="All 2 branches missed.">                    for (int j = p + cl; j &lt; p + len - cl; j++) bytes[j] = (byte)0xff;</span>
+                }
+            }
+<span class="nc bnc" id="L1078" title="All 4 branches missed.">            if (cl == -1 &amp;&amp; i &lt; len - 1) {</span>
+<span class="nc" id="L1079">                int len2 = len - 1;</span>
+<span class="nc bnc" id="L1080" title="All 2 branches missed.">                for (; len2 &gt; 0; len2--) {</span>
+<span class="nc bnc" id="L1081" title="All 2 branches missed.">                    if (preciseLength(enc, bytes, p, p + len2) != -1) break;</span>
+                }
+<span class="nc bnc" id="L1083" title="All 2 branches missed.">                for (int j = p + len2 + 1; j &lt; p + len - (len2 + 1); j++) bytes[j] = (byte)0xff;</span>
+            }
+<span class="nc" id="L1085">        }</span>
+    }
+
+    private static NeighborChar succAlnumChar(Encoding enc, byte[]bytes, int p, int len, byte[]carry, int carryP) {
+<span class="fc" id="L1089">        byte save[] = new byte[org.jcodings.Config.ENC_CODE_TO_MBC_MAXLEN];</span>
+<span class="fc" id="L1090">        int c = enc.mbcToCode(bytes, p, p + len);</span>
+
+        final int cType;
+<span class="fc bfc" id="L1093" title="All 2 branches covered.">        if (enc.isDigit(c)) {</span>
+<span class="fc" id="L1094">            cType = CharacterType.DIGIT;</span>
+<span class="fc bfc" id="L1095" title="All 2 branches covered.">        } else if (enc.isAlpha(c)) {</span>
+<span class="fc" id="L1096">            cType = CharacterType.ALPHA;</span>
+        } else {
+<span class="fc" id="L1098">            return NeighborChar.NOT_CHAR;</span>
+        }
+
+<span class="fc" id="L1101">        System.arraycopy(bytes, p, save, 0, len);</span>
+<span class="fc" id="L1102">        NeighborChar ret = succChar(enc, bytes, p, len);</span>
+<span class="pc bpc" id="L1103" title="1 of 2 branches missed.">        if (ret == NeighborChar.FOUND) {</span>
+<span class="fc" id="L1104">            c = enc.mbcToCode(bytes, p, p + len);</span>
+<span class="fc bfc" id="L1105" title="All 2 branches covered.">            if (enc.isCodeCType(c, cType)) return NeighborChar.FOUND;</span>
+        }
+
+<span class="fc" id="L1108">        System.arraycopy(save, 0, bytes, p, len);</span>
+<span class="fc" id="L1109">        int range = 1;</span>
+
+        while (true) {
+<span class="fc" id="L1112">            System.arraycopy(bytes, p, save, 0, len);</span>
+<span class="fc" id="L1113">            ret = predChar(enc, bytes, p, len);</span>
+<span class="pc bpc" id="L1114" title="1 of 2 branches missed.">            if (ret == NeighborChar.FOUND) {</span>
+<span class="fc" id="L1115">                c = enc.mbcToCode(bytes, p, p + len);</span>
+<span class="fc bfc" id="L1116" title="All 2 branches covered.">                if (!enc.isCodeCType(c, cType)) {</span>
+<span class="fc" id="L1117">                    System.arraycopy(save, 0, bytes, p, len);</span>
+<span class="fc" id="L1118">                    break;</span>
+                }
+            } else {
+<span class="nc" id="L1121">                System.arraycopy(save, 0, bytes, p, len);</span>
+<span class="nc" id="L1122">                break;</span>
+            }
+<span class="fc" id="L1124">            range++;</span>
+        }
+
+<span class="pc bpc" id="L1127" title="1 of 2 branches missed.">        if (range == 1) return NeighborChar.NOT_CHAR;</span>
+
+<span class="fc bfc" id="L1129" title="All 2 branches covered.">        if (cType != CharacterType.DIGIT) {</span>
+<span class="fc" id="L1130">            System.arraycopy(bytes, p, carry, carryP, len);</span>
+<span class="fc" id="L1131">            return NeighborChar.WRAPPED;</span>
+        }
+
+<span class="fc" id="L1134">        System.arraycopy(bytes, p, carry, carryP, len);</span>
+<span class="fc" id="L1135">        succChar(enc, carry, carryP, len);</span>
+<span class="fc" id="L1136">        return NeighborChar.WRAPPED;</span>
+    }
+
+    private static NeighborChar predChar(Encoding enc, byte[]bytes, int p, int len) {
+        while (true) {
+<span class="fc" id="L1141">            int i = len - 1;</span>
+<span class="pc bpc" id="L1142" title="2 of 4 branches missed.">            for (; i &gt;= 0 &amp;&amp; bytes[p + i] == 0; i--) bytes[p + i] = (byte)0xff;</span>
+<span class="pc bpc" id="L1143" title="1 of 2 branches missed.">            if (i &lt; 0) return NeighborChar.WRAPPED;</span>
+<span class="fc" id="L1144">            bytes[p + i] = (byte)((bytes[p + i] &amp; 0xff) - 1);</span>
+<span class="fc" id="L1145">            int cl = preciseLength(enc, bytes, p, p + len);</span>
+<span class="pc bpc" id="L1146" title="1 of 2 branches missed.">            if (cl &gt; 0) {</span>
+<span class="pc bpc" id="L1147" title="1 of 2 branches missed.">                if (cl == len) {</span>
+<span class="fc" id="L1148">                    return NeighborChar.FOUND;</span>
+                } else {
+<span class="nc bnc" id="L1150" title="All 2 branches missed.">                    for (int j = p + cl; j &lt; p + len - cl; j++) bytes[j] = 0;</span>
+                }
+            }
+<span class="nc bnc" id="L1153" title="All 4 branches missed.">            if (cl == -1 &amp;&amp; i &lt; len - 1) {</span>
+<span class="nc" id="L1154">                int len2 = len - 1;</span>
+<span class="nc bnc" id="L1155" title="All 2 branches missed.">                for (; len2 &gt; 0; len2--) {</span>
+<span class="nc bnc" id="L1156" title="All 2 branches missed.">                    if (preciseLength(enc, bytes, p, p + len2) != -1) break;</span>
+                }
+<span class="nc bnc" id="L1158" title="All 2 branches missed.">                for (int j = p + len2 + 1; j &lt; p + len - (len2 + 1); j++) bytes[j] = 0;</span>
+            }
+<span class="nc" id="L1160">        }</span>
+    }
+
+    public static boolean isSingleByteOptimizable(CodeRangeable string, Encoding encoding) {
+<span class="fc bfc" id="L1164" title="All 4 branches covered.">        return string.getCodeRange() == CR_7BIT || encoding.maxLength() == 1;</span>
+    }
+
+    public static int index(CodeRangeable sourceString, ByteList source, int sourceLen, CodeRangeable subString, ByteList other, int otherLen, int offset, Encoding enc) {
+<span class="pc bpc" id="L1168" title="1 of 2 branches missed.">        if (subString.scanForCodeRange() == CR_BROKEN) return -1;</span>
+<span class="pc bpc" id="L1169" title="1 of 2 branches missed.">        if (offset &lt; 0) {</span>
+<span class="nc" id="L1170">            offset += sourceLen;</span>
+<span class="nc bnc" id="L1171" title="All 2 branches missed.">            if (offset &lt; 0) return -1;</span>
+        }
+
+<span class="fc bfc" id="L1174" title="All 2 branches covered.">        if (sourceLen - offset &lt; otherLen) return -1;</span>
+<span class="fc" id="L1175">        byte[]bytes = source.getUnsafeBytes();</span>
+<span class="fc" id="L1176">        int p = source.getBegin();</span>
+<span class="fc" id="L1177">        int end = p + source.getRealSize();</span>
+<span class="fc bfc" id="L1178" title="All 2 branches covered.">        if (offset != 0) {</span>
+<span class="fc bfc" id="L1179" title="All 2 branches covered.">            offset = isSingleByteOptimizable(sourceString, enc) ? offset : offset(enc, bytes, p, end, offset);</span>
+<span class="fc" id="L1180">            p += offset;</span>
+        }
+<span class="fc bfc" id="L1182" title="All 2 branches covered.">        if (otherLen == 0) return offset;</span>
+
+        while (true) {
+<span class="fc" id="L1185">            int pos = source.indexOf(other, p - source.getBegin());</span>
+<span class="fc bfc" id="L1186" title="All 2 branches covered.">            if (pos &lt; 0) return pos;</span>
+<span class="fc" id="L1187">            pos -= (p - source.getBegin());</span>
+<span class="fc" id="L1188">            int t = enc.rightAdjustCharHead(bytes, p, p + pos, end);</span>
+<span class="pc bpc" id="L1189" title="1 of 2 branches missed.">            if (t == p + pos) return pos + offset;</span>
+<span class="nc bnc" id="L1190" title="All 2 branches missed.">            if ((sourceLen -= t - p) &lt;= 0) return -1;</span>
+<span class="nc" id="L1191">            offset += t - p;</span>
+<span class="nc" id="L1192">            p = t;</span>
+<span class="nc" id="L1193">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

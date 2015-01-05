@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LiveVariablesProblem.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.dataflow.analyses</a> &gt; <span class="el_source">LiveVariablesProblem.java</span></div><h1>LiveVariablesProblem.java</h1><pre class="source lang-java linenums">package org.jruby.ir.dataflow.analyses;
+
+import org.jruby.ir.IREvalScript;
+import org.jruby.ir.IRScope;
+import org.jruby.ir.dataflow.DataFlowProblem;
+import org.jruby.ir.operands.LocalVariable;
+import org.jruby.ir.operands.Variable;
+import org.jruby.ir.representations.BasicBlock;
+
+import java.util.*;
+
+public class LiveVariablesProblem extends DataFlowProblem&lt;LiveVariablesProblem, LiveVariableNode&gt; {
+    public static final String NAME = &quot;Live Variables Analysis&quot;;
+<span class="fc" id="L14">    private static final Set&lt;LocalVariable&gt; EMPTY_SET = new HashSet&lt;LocalVariable&gt;();</span>
+
+    public LiveVariablesProblem(IRScope scope) {
+<span class="fc" id="L17">        this(scope, EMPTY_SET);</span>
+<span class="fc" id="L18">    }</span>
+
+    LiveVariablesProblem(IRScope scope, Set&lt;LocalVariable&gt; nonSelfLocalVars) {
+<span class="fc" id="L21">        super(DataFlowProblem.DF_Direction.BACKWARD);</span>
+
+<span class="fc" id="L23">        setup(scope, nonSelfLocalVars);</span>
+<span class="fc" id="L24">    }</span>
+
+    public Integer getDFVar(Variable v) {
+<span class="fc" id="L27">        return dfVarMap.get(v);</span>
+    }
+
+    public boolean dfVarExists(Variable v) {
+<span class="fc bfc" id="L31" title="All 2 branches covered.">        return getDFVar(v) != null;</span>
+    }
+
+    public Variable getVariable(int id) {
+<span class="fc" id="L35">        return varDfVarMap.get(id);</span>
+    }
+
+    @Override
+    public LiveVariableNode buildFlowGraphNode(BasicBlock bb) {
+<span class="fc" id="L40">        return new LiveVariableNode(this, bb);</span>
+    }
+
+    public void addDFVar(Variable v) {
+<span class="fc" id="L44">        Integer dfv = addDataFlowVar();</span>
+<span class="fc" id="L45">        dfVarMap.put(v, dfv);</span>
+<span class="fc" id="L46">        varDfVarMap.put(dfv, v);</span>
+
+<span class="fc bfc" id="L48" title="All 4 branches covered.">        if (v instanceof LocalVariable &amp;&amp; !v.isSelf()) {</span>
+            //System.out.println(&quot;Adding df var for &quot; + v + &quot;:&quot; + dfv.id);
+<span class="fc" id="L50">            IRScope s = getScope();</span>
+<span class="fc bfc" id="L51" title="All 4 branches covered.">            for (int n = ((LocalVariable) v).getScopeDepth(); s != null &amp;&amp; n &gt;= 0; n--) {</span>
+<span class="fc bfc" id="L52" title="All 2 branches covered.">                if (s instanceof IREvalScript) {</span>
+                    // If a variable is at the topmost scope of the eval OR crosses an eval boundary,
+                    // it is going to be marked always live since it could be used by other evals (n = 0)
+                    // or by enclosing scopes (n &gt; 0)
+<span class="fc" id="L56">                    alwaysLiveVars.add((LocalVariable) v);</span>
+<span class="fc" id="L57">                    break;</span>
+                }
+
+<span class="fc" id="L60">                s = s.getLexicalParent();</span>
+            }
+<span class="fc" id="L62">            localVars.add((LocalVariable) v);</span>
+        }
+<span class="fc" id="L64">    }</span>
+
+    /**
+     * Add all local variables of interest from the provided bitset.
+     */
+    public Set&lt;LocalVariable&gt; addLiveLocalVars(Set&lt;LocalVariable&gt; list, BitSet living) {
+<span class="fc bfc" id="L70" title="All 2 branches covered.">        for (int j = 0; j &lt; living.size(); j++) {</span>
+<span class="fc bfc" id="L71" title="All 2 branches covered.">            if (!living.get(j)) continue;</span>
+
+<span class="fc" id="L73">            Variable v = getVariable(j);</span>
+<span class="fc bfc" id="L74" title="All 2 branches covered.">            if (v instanceof LocalVariable) list.add((LocalVariable) v);</span>
+        }
+
+<span class="fc" id="L77">        return list;</span>
+    }
+
+    /**
+     * Get variables that are live on entry to the cfg.
+     * This is the case for closures which access variables from the parent scope.
+     *
+     *      sum = 0; a.each { |i| sum += i }; return sum
+     *
+     * In the code snippet above, 'sum' is live on entry to the closure
+     */
+    public List&lt;Variable&gt; getVarsLiveOnScopeEntry() {
+<span class="fc" id="L89">        List&lt;Variable&gt; liveVars = new ArrayList&lt;Variable&gt;();</span>
+<span class="fc" id="L90">        BitSet liveIn = getFlowGraphNode(getScope().cfg().getEntryBB()).getLiveOutBitSet();</span>
+
+<span class="fc bfc" id="L92" title="All 2 branches covered.">        for (int i = 0; i &lt; liveIn.size(); i++) {</span>
+<span class="fc bfc" id="L93" title="All 2 branches covered.">            if (!liveIn.get(i)) continue;</span>
+
+<span class="fc" id="L95">            Variable v = getVariable(i);</span>
+<span class="fc" id="L96">            liveVars.add(v);</span>
+            // System.out.println(&quot;variable &quot; + v + &quot; is live on entry!&quot;);
+        }
+
+<span class="fc" id="L100">        return liveVars;</span>
+    }
+
+    /**
+     * Initialize the problem with all vars from the surrounding scope variables.
+     * In closures, vars defined in the closure (or accessed from the surrounding scope)
+     * can be used outside the closure.
+     *
+     *      sum = 0; a.each { |i| sum += i }; return sum
+     *
+     * In the code snippet above, 'sum' is live on entry to and exit from the closure.
+     **/
+    public final void setup(IRScope scope, Collection&lt;LocalVariable&gt; allVars) {
+        // System.out.println(&quot;\nCFG:\n&quot; + scope.cfg().toStringGraph());
+        // System.out.println(&quot;\nInstrs:\n&quot; + scope.cfg().toStringInstrs());
+
+<span class="fc" id="L116">        alwaysLiveVars = new ArrayList&lt;LocalVariable&gt;();</span>
+<span class="fc" id="L117">        setup(scope);</span>
+
+        // Init vars live on scope exit to vars that always live throughout the scope
+<span class="fc" id="L120">        varsLiveOnScopeExit = new ArrayList&lt;LocalVariable&gt;(alwaysLiveVars);</span>
+
+<span class="fc bfc" id="L122" title="All 2 branches covered.">        for (LocalVariable v: allVars) {</span>
+<span class="fc bfc" id="L123" title="All 2 branches covered.">            if (!dfVarExists(v)) addDFVar(v);</span>
+<span class="fc" id="L124">        }</span>
+<span class="fc" id="L125">    }</span>
+
+    @Override
+    public String getDataFlowVarsForOutput() {
+<span class="nc" id="L129">        StringBuilder buf = new StringBuilder();</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">        for (Variable v : dfVarMap.keySet()) {</span>
+<span class="nc" id="L131">            buf.append(&quot;DF Var &quot;).append(dfVarMap.get(v)).append(&quot; = &quot;).append(v).append(&quot;\n&quot;);</span>
+<span class="nc" id="L132">        }</span>
+
+<span class="nc" id="L134">        return buf.toString();</span>
+    }
+
+    public void markDeadInstructions() {
+<span class="fc bfc" id="L138" title="All 2 branches covered.">        for (LiveVariableNode n : flowGraphNodes) {</span>
+<span class="fc" id="L139">            n.markDeadInstructions();</span>
+<span class="fc" id="L140">        }</span>
+<span class="fc" id="L141">    }</span>
+
+    public void setVarsLiveOnScopeExit(Collection&lt;LocalVariable&gt; vars) {
+<span class="fc" id="L144">        varsLiveOnScopeExit.addAll(vars);</span>
+<span class="fc" id="L145">    }</span>
+
+    public Collection&lt;LocalVariable&gt; getVarsLiveOnScopeExit() {
+<span class="fc" id="L148">        return varsLiveOnScopeExit;</span>
+    }
+
+    public Set&lt;Variable&gt; getAllVars() {
+<span class="nc" id="L152">        return dfVarMap.keySet();</span>
+    }
+
+    public Set&lt;LocalVariable&gt; getNonSelfLocalVars() {
+<span class="fc" id="L156">        return localVars;</span>
+    }
+
+    @Override
+    public String getName() {
+<span class="fc" id="L161">        return NAME;</span>
+    }
+
+    /* ----------- Private Interface ------------ */
+<span class="fc" id="L165">    private HashMap&lt;Variable, Integer&gt; dfVarMap = new HashMap&lt;Variable, Integer&gt;();</span>
+<span class="fc" id="L166">    private HashMap&lt;Integer, Variable&gt; varDfVarMap = new HashMap&lt;Integer, Variable&gt;();</span>
+<span class="fc" id="L167">    private HashSet&lt;LocalVariable&gt; localVars = new HashSet&lt;LocalVariable&gt;(); // Local variables that can be live across dataflow barriers</span>
+
+    // Variables that cross eval boundaries and are always live in this scope
+    private List&lt;LocalVariable&gt; alwaysLiveVars;
+    private Collection&lt;LocalVariable&gt; varsLiveOnScopeExit;
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

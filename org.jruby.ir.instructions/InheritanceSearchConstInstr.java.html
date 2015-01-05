@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>InheritanceSearchConstInstr.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ir.instructions</a> &gt; <span class="el_source">InheritanceSearchConstInstr.java</span></div><h1>InheritanceSearchConstInstr.java</h1><pre class="source lang-java linenums">package org.jruby.ir.instructions;
+
+import org.jruby.Ruby;
+import org.jruby.RubyModule;
+import org.jruby.ir.IRVisitor;
+import org.jruby.ir.Operation;
+import org.jruby.ir.operands.*;
+import org.jruby.ir.transformations.inlining.CloneInfo;
+import org.jruby.parser.StaticScope;
+import org.jruby.runtime.DynamicScope;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.opto.ConstantCache;
+import org.jruby.runtime.opto.Invalidator;
+
+import java.util.Map;
+
+// The runtime method call that GET_CONST is translated to in this case will call
+// a get_constant method on the scope meta-object which does the lookup of the constant table
+// on the meta-object.  In the case of method &amp; closures, the runtime method will delegate
+// this call to the parent scope.
+
+<span class="pc bpc" id="L23" title="1 of 2 branches missed.">public class InheritanceSearchConstInstr extends Instr implements ResultInstr, FixedArityInstr {</span>
+    Operand  currentModule;
+    String   constName;
+    private Variable result;
+    private final boolean  noPrivateConsts;
+
+    // Constant caching
+    private volatile transient ConstantCache cache;
+
+    public InheritanceSearchConstInstr(Variable result, Operand currentModule, String constName, boolean noPrivateConsts) {
+<span class="fc" id="L33">        super(Operation.INHERITANCE_SEARCH_CONST);</span>
+
+<span class="pc bpc" id="L35" title="3 of 4 branches missed.">        assert result != null: &quot;InheritanceSearchConstInstr result is null&quot;;</span>
+
+<span class="fc" id="L37">        this.currentModule = currentModule;</span>
+<span class="fc" id="L38">        this.constName = constName;</span>
+<span class="fc" id="L39">        this.result = result;</span>
+<span class="fc" id="L40">        this.noPrivateConsts = noPrivateConsts;</span>
+<span class="fc" id="L41">    }</span>
+
+    @Override
+    public Operand[] getOperands() {
+<span class="fc" id="L45">        return new Operand[] { currentModule, new StringLiteral(constName), new UnboxedBoolean(noPrivateConsts) };</span>
+    }
+
+    @Override
+    public void simplifyOperands(Map&lt;Operand, Operand&gt; valueMap, boolean force) {
+<span class="fc" id="L50">        currentModule = currentModule.getSimplifiedOperand(valueMap, force);</span>
+<span class="fc" id="L51">    }</span>
+
+    @Override
+    public Variable getResult() {
+<span class="fc" id="L55">        return result;</span>
+    }
+
+    @Override
+    public void updateResult(Variable v) {
+<span class="fc" id="L60">        this.result = v;</span>
+<span class="fc" id="L61">    }</span>
+
+    @Override
+    public Instr clone(CloneInfo ii) {
+<span class="fc" id="L65">        return new InheritanceSearchConstInstr(ii.getRenamedVariable(result), currentModule.cloneForInlining(ii), constName, noPrivateConsts);</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="nc" id="L70">        return super.toString() + &quot;(&quot; + currentModule + &quot;, &quot; + constName  + &quot;)&quot;;</span>
+    }
+
+    private Object cache(Ruby runtime, RubyModule module) {
+<span class="fc bfc" id="L74" title="All 2 branches covered.">        Object constant = noPrivateConsts ? module.getConstantFromNoConstMissing(constName, false) : module.getConstantNoConstMissing(constName);</span>
+<span class="fc bfc" id="L75" title="All 2 branches covered.">        if (constant == null) {</span>
+<span class="fc" id="L76">            constant = UndefinedValue.UNDEFINED;</span>
+        } else {
+            // recache
+<span class="fc" id="L79">            Invalidator invalidator = runtime.getConstantInvalidator(constName);</span>
+<span class="fc" id="L80">            cache = new ConstantCache((IRubyObject)constant, invalidator.getData(), invalidator, module.hashCode());</span>
+        }
+<span class="fc" id="L82">        return constant;</span>
+    }
+
+    @Override
+    public Object interpret(ThreadContext context, StaticScope currScope, DynamicScope currDynScope, IRubyObject self, Object[] temp) {
+<span class="fc" id="L87">        Ruby runtime = context.runtime;</span>
+<span class="fc" id="L88">        Object cmVal = currentModule.retrieve(context, self, currScope, currDynScope, temp);</span>
+        RubyModule module;
+<span class="fc bfc" id="L90" title="All 2 branches covered.">        if (cmVal instanceof RubyModule) {</span>
+<span class="fc" id="L91">            module = (RubyModule) cmVal;</span>
+        } else {
+<span class="fc" id="L93">            throw runtime.newTypeError(cmVal + &quot; is not a type/class&quot;);</span>
+        }
+<span class="fc" id="L95">        ConstantCache cache = this.cache;</span>
+<span class="fc bfc" id="L96" title="All 2 branches covered.">        if (!ConstantCache.isCachedFrom(module, cache)) return cache(runtime, module);</span>
+
+<span class="fc" id="L98">        return cache.value;</span>
+    }
+
+    @Override
+    public void visit(IRVisitor visitor) {
+<span class="fc" id="L103">        visitor.InheritanceSearchConstInstr(this);</span>
+<span class="fc" id="L104">    }</span>
+
+    public Operand getCurrentModule() {
+<span class="fc" id="L107">        return currentModule;</span>
+    }
+
+    public String getConstName() {
+<span class="fc" id="L111">        return constName;</span>
+    }
+
+    public boolean isNoPrivateConsts() {
+<span class="fc" id="L115">        return noPrivateConsts;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

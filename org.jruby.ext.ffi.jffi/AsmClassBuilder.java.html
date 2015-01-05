@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AsmClassBuilder.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.ext.ffi.jffi</a> &gt; <span class="el_source">AsmClassBuilder.java</span></div><h1>AsmClassBuilder.java</h1><pre class="source lang-java linenums">package org.jruby.ext.ffi.jffi;
+
+import java.io.PrintWriter;
+
+import org.jruby.RubyModule;
+import org.objectweb.asm.ClassReader;
+import org.jruby.compiler.impl.SkinnyMethodAdapter;
+import java.lang.reflect.Constructor;
+import java.util.concurrent.atomic.AtomicLong;
+import org.jruby.util.cli.Options;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.ClassWriter;
+
+import static org.jruby.util.CodegenUtils.*;
+import static org.objectweb.asm.Opcodes.*;
+
+/**
+ * 
+ */
+final class AsmClassBuilder {
+<span class="nc bnc" id="L21" title="All 4 branches missed.">    public static final boolean DEBUG = false || Options.FFI_COMPILE_DUMP.load() || Options.COMPILE_DUMP.load();</span>
+<span class="nc" id="L22">    public static final boolean REIFY = Options.FFI_COMPILE_REIFY.load();</span>
+<span class="nc" id="L23">    private static final AtomicLong nextClassID = new AtomicLong(0);</span>
+    private final JITSignature signature;
+    private final ClassWriter classWriter;
+    private final ClassVisitor classVisitor;
+    private final String className;
+    private final Class parentClass;
+    private final JITMethodGenerator generator;
+    private final String methodName;
+    
+<span class="nc" id="L32">    AsmClassBuilder(JITMethodGenerator generator, JITSignature signature, String methodName) {</span>
+<span class="nc" id="L33">        this.generator = generator;</span>
+<span class="nc" id="L34">        this.signature = signature;</span>
+<span class="nc" id="L35">        this.methodName = methodName;</span>
+        
+<span class="nc bnc" id="L37" title="All 2 branches missed.">        switch (signature.getParameterCount()) {</span>
+            case 0:
+            case 1:
+            case 2:
+            case 3:
+            case 4:
+            case 5:
+            case 6:
+<span class="nc" id="L45">                parentClass = JITNativeInvoker.class;</span>
+<span class="nc" id="L46">                break;</span>
+
+            default:
+<span class="nc" id="L49">                throw new UnsupportedOperationException(&quot;arity &quot; </span>
+<span class="nc" id="L50">                        + signature.getParameterCount()  + &quot; not supported&quot;);</span>
+        }
+        
+<span class="nc bnc" id="L53" title="All 2 branches missed.">        className = p(NativeInvoker.class) + &quot;$ffi$&quot; + nextClassID.getAndIncrement()</span>
+            + (REIFY ? (&quot;$&quot; + methodName) : &quot;&quot;);
+        
+<span class="nc" id="L56">        classWriter = new ClassWriter(ClassWriter.COMPUTE_FRAMES);</span>
+<span class="nc bnc" id="L57" title="All 2 branches missed.">        classVisitor = DEBUG ? newCheckClassAdapter(classWriter) : classWriter;</span>
+<span class="nc" id="L58">        classVisitor.visit(V1_5, ACC_PUBLIC | ACC_FINAL, className, null, </span>
+<span class="nc" id="L59">                p(parentClass), new String[0]);</span>
+<span class="nc" id="L60">    }</span>
+    
+    Class&lt;? extends NativeInvoker&gt; build() {
+        // Create the constructor to set the 'library' &amp; functions fields
+<span class="nc" id="L64">        SkinnyMethodAdapter init = new SkinnyMethodAdapter(classVisitor, ACC_PUBLIC, &quot;&lt;init&gt;&quot;,</span>
+<span class="nc" id="L65">                sig(void.class, RubyModule.class, com.kenai.jffi.Function.class, Signature.class),</span>
+                null, null);
+        
+<span class="nc" id="L68">        init.start();</span>
+
+        // Invoker the superclass's constructor
+<span class="nc" id="L71">        init.aload(0); // this</span>
+<span class="nc" id="L72">        init.aload(1); // implementationClass</span>
+<span class="nc" id="L73">        init.aload(2); // jffi function</span>
+<span class="nc" id="L74">        init.aload(3); // signature</span>
+<span class="nc" id="L75">        init.invokespecial(p(parentClass), &quot;&lt;init&gt;&quot;,</span>
+<span class="nc" id="L76">                sig(void.class, RubyModule.class, com.kenai.jffi.Function.class, Signature.class));</span>
+<span class="nc" id="L77">        init.voidreturn();</span>
+<span class="nc" id="L78">        init.visitMaxs(10, 10);</span>
+<span class="nc" id="L79">        init.visitEnd();</span>
+        
+<span class="nc" id="L81">        generator.generate(this, &quot;call&quot;, signature);</span>
+
+<span class="nc" id="L83">        classVisitor.visitEnd();</span>
+
+        try {
+<span class="nc" id="L86">            byte[] bytes = classWriter.toByteArray();</span>
+<span class="nc bnc" id="L87" title="All 2 branches missed.">            if (DEBUG) {</span>
+<span class="nc" id="L88">                ClassVisitor trace = newTraceClassVisitor(new PrintWriter(System.err));</span>
+<span class="nc" id="L89">                new ClassReader(bytes).accept(trace, 0);</span>
+            }
+
+<span class="nc" id="L92">            JITClassLoader loader = new JITClassLoader(getClass().getClassLoader());</span>
+            
+<span class="nc" id="L94">            return loader.defineClass(c(className), bytes);</span>
+            
+<span class="nc" id="L96">        } catch (Throwable ex) {</span>
+<span class="nc" id="L97">            throw new RuntimeException(ex);</span>
+        }
+    }
+    
+    public static ClassVisitor newCheckClassAdapter(ClassVisitor cv) {
+        try {
+<span class="nc" id="L103">            Class&lt;? extends ClassVisitor&gt; tmvClass = Class.forName(&quot;org.objectweb.asm.util.CheckClassAdapter&quot;).asSubclass(ClassVisitor.class);</span>
+<span class="nc" id="L104">            Constructor&lt;? extends ClassVisitor&gt; c = tmvClass.getDeclaredConstructor(ClassVisitor.class);</span>
+<span class="nc" id="L105">            return c.newInstance(cv);</span>
+<span class="nc" id="L106">        } catch (Throwable t) {</span>
+<span class="nc" id="L107">            return cv;</span>
+        }
+    }
+    
+    public static final ClassVisitor newTraceClassVisitor(PrintWriter out) {
+        try {
+
+<span class="nc" id="L114">            Class&lt;? extends ClassVisitor&gt; tmvClass = Class.forName(&quot;org.objectweb.asm.util.TraceClassVisitor&quot;).asSubclass(ClassVisitor.class);</span>
+<span class="nc" id="L115">            Constructor&lt;? extends ClassVisitor&gt; c = tmvClass.getDeclaredConstructor(PrintWriter.class);</span>
+<span class="nc" id="L116">            return c.newInstance(out);</span>
+<span class="nc" id="L117">        } catch (Throwable t) {</span>
+<span class="nc" id="L118">            return null;</span>
+        }
+    }
+
+    
+    final String getFunctionFieldName() {
+<span class="nc" id="L124">        return &quot;function&quot;;</span>
+    }
+    
+    final String getResultConverterFieldName() {
+<span class="nc" id="L128">        return &quot;resultConverter&quot;;</span>
+    }
+    
+    final String getParameterConverterFieldName(int i) {
+<span class="nc" id="L132">        return &quot;parameterConverter&quot; + i;</span>
+    }
+
+    final String getParameterCallSiteName(int i) {
+<span class="nc" id="L136">        return &quot;parameterCallSite&quot; + i;</span>
+    }
+
+    final String getFallbackInvokerFieldName() {
+<span class="nc" id="L140">        return &quot;fallbackInvoker&quot;;</span>
+    }
+
+    final ClassVisitor getClassVisitor() {
+<span class="nc" id="L144">        return classVisitor;</span>
+    }
+    
+    final String getClassName() {
+<span class="nc" id="L148">        return className;</span>
+    }
+    
+    
+    static final class JITClassLoader extends ClassLoader {
+
+<span class="nc" id="L154">        public JITClassLoader() {</span>
+<span class="nc" id="L155">        }</span>
+
+        public JITClassLoader(ClassLoader parent) {
+<span class="nc" id="L158">            super(parent);</span>
+<span class="nc" id="L159">        }</span>
+
+        public Class defineClass(String name, byte[] b) {
+<span class="nc" id="L162">            Class klass = defineClass(name, b, 0, b.length);</span>
+<span class="nc" id="L163">            resolveClass(klass);</span>
+<span class="nc" id="L164">            return klass;</span>
+        }
+        
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

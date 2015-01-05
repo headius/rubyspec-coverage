@@ -1,0 +1,674 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JavaMethod.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.javasupport</a> &gt; <span class="el_source">JavaMethod.java</span></div><h1>JavaMethod.java</h1><pre class="source lang-java linenums">/***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2001 Chad Fowler &lt;chadfowler@chadfowler.com&gt;
+ * Copyright (C) 2001 Alan Moore &lt;alan_moore@gmx.net&gt;
+ * Copyright (C) 2001-2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2002 Benoit Cerrina &lt;b.cerrina@wanadoo.fr&gt;
+ * Copyright (C) 2002-2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2004 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 David Corbin &lt;dcorbin@users.sourceforge.net&gt;
+ * Copyright (C) 2005 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2006 Kresten Krab Thorup &lt;krab@gnu.org&gt;
+ * 
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.javasupport;
+
+import org.jruby.Ruby;
+import org.jruby.RubyBoolean;
+import org.jruby.RubyClass;
+import org.jruby.RubyInstanceConfig;
+import org.jruby.RubyModule;
+import org.jruby.RubyString;
+import org.jruby.anno.JRubyClass;
+import org.jruby.anno.JRubyMethod;
+import org.jruby.exceptions.RaiseException;
+import org.jruby.javasupport.proxy.InternalJavaProxy;
+import org.jruby.javasupport.proxy.JavaProxyClass;
+import org.jruby.javasupport.proxy.JavaProxyMethod;
+import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.CodegenUtils;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.AccessibleObject;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Type;
+
+<span class="pc bpc" id="L65" title="1 of 2 branches missed.">@JRubyClass(name=&quot;Java::JavaMethod&quot;)</span>
+public class JavaMethod extends JavaCallable {
+
+<span class="fc" id="L68">    private static final Logger LOG = LoggerFactory.getLogger(&quot;JavaMethod&quot;);</span>
+
+<span class="fc" id="L70">    private final static boolean USE_HANDLES = RubyInstanceConfig.USE_GENERATED_HANDLES;</span>
+    private final static boolean HANDLE_DEBUG = false;
+    private final Method method;
+    private final Class boxedReturnType;
+    private final boolean isFinal;
+    private final JavaUtil.JavaConverter returnConverter;
+
+    public Object getValue() {
+<span class="fc" id="L78">        return method;</span>
+    }
+
+    public static RubyClass createJavaMethodClass(Ruby runtime, RubyModule javaModule) {
+        // TODO: NOT_ALLOCATABLE_ALLOCATOR is probably ok here, since we don't intend for people to monkey with
+        // this type and it can't be marshalled. Confirm. JRUBY-415
+<span class="fc" id="L84">        RubyClass result = </span>
+<span class="fc" id="L85">            javaModule.defineClassUnder(&quot;JavaMethod&quot;, runtime.getObject(), ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);</span>
+
+<span class="fc" id="L87">        JavaAccessibleObject.registerRubyMethods(runtime, result);</span>
+<span class="fc" id="L88">        JavaCallable.registerRubyMethods(runtime, result);</span>
+        
+<span class="fc" id="L90">        result.defineAnnotatedMethods(JavaMethod.class);</span>
+
+<span class="fc" id="L92">        return result;</span>
+    }
+
+    public JavaMethod(Ruby runtime, Method method) {
+<span class="fc" id="L96">        super(runtime, runtime.getJavaSupport().getJavaMethodClass(), method.getParameterTypes());</span>
+<span class="fc" id="L97">        this.method = method;</span>
+<span class="fc" id="L98">        this.isFinal = Modifier.isFinal(method.getModifiers());</span>
+<span class="fc bfc" id="L99" title="All 4 branches covered.">        if (method.getReturnType().isPrimitive() &amp;&amp; method.getReturnType() != void.class) {</span>
+<span class="fc" id="L100">            this.boxedReturnType = CodegenUtils.getBoxType(method.getReturnType());</span>
+        } else {
+<span class="fc" id="L102">            this.boxedReturnType = method.getReturnType();</span>
+        }
+
+<span class="fc" id="L105">        boolean methodIsPublic = Modifier.isPublic(method.getModifiers());</span>
+<span class="fc" id="L106">        boolean classIsPublic = Modifier.isPublic(method.getDeclaringClass().getModifiers());</span>
+
+        // Special classes like Collections.EMPTY_LIST are inner classes that are private but 
+        // implement public interfaces.  Their methods are all public methods for the public 
+        // interface.  Let these public methods execute via setAccessible(true).
+<span class="pc bpc" id="L111" title="1 of 2 branches missed.">        if (JavaClass.CAN_SET_ACCESSIBLE) {</span>
+            // we should be able to setAccessible ok...
+            try {
+<span class="nc bnc" id="L114" title="All 2 branches missed.">                if (methodIsPublic &amp;&amp;</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                    !Modifier.isPublic(method.getDeclaringClass().getModifiers())) {</span>
+<span class="nc" id="L116">                    accessibleObject().setAccessible(true);</span>
+                }
+<span class="nc" id="L118">            } catch (SecurityException se) {</span>
+                // we shouldn't get here if JavaClass.CAN_SET_ACCESSIBLE is doing
+                // what it should, so we warn.
+<span class="nc" id="L121">               runtime.getWarnings().warn(&quot;failed to setAccessible: &quot; + accessibleObject() + &quot;, exception follows: &quot; + se.getMessage());</span>
+<span class="nc" id="L122">            }</span>
+        }
+        
+<span class="fc" id="L125">        returnConverter = JavaUtil.getJavaConverter(method.getReturnType());</span>
+<span class="fc" id="L126">    }</span>
+
+    public static JavaMethod create(Ruby runtime, Method method) {
+<span class="fc" id="L129">        return new JavaMethod(runtime, method);</span>
+    }
+
+    public static JavaMethod create(Ruby runtime, Class&lt;?&gt; javaClass, String methodName, Class&lt;?&gt;[] argumentTypes) {
+        try {
+<span class="nc" id="L134">            Method method = javaClass.getMethod(methodName, argumentTypes);</span>
+<span class="nc" id="L135">            return create(runtime, method);</span>
+<span class="nc" id="L136">        } catch (NoSuchMethodException e) {</span>
+<span class="nc" id="L137">            throw runtime.newNameError(&quot;undefined method '&quot; + methodName + &quot;' for class '&quot; + javaClass.getName() + &quot;'&quot;,</span>
+                    methodName);
+        }
+    }
+
+    public static JavaMethod createDeclared(Ruby runtime, Class&lt;?&gt; javaClass, String methodName, Class&lt;?&gt;[] argumentTypes) {
+        try {
+<span class="nc" id="L144">            return create(runtime, javaClass.getDeclaredMethod(methodName, argumentTypes));</span>
+<span class="nc" id="L145">        } catch (NoSuchMethodException e) {</span>
+<span class="nc" id="L146">            throw runtime.newNameError(&quot;undefined method '&quot; + methodName + &quot;' for class '&quot; + javaClass.getName() + &quot;'&quot;,</span>
+                    methodName);
+        }
+    }
+
+    public static JavaMethod getMatchingDeclaredMethod(Ruby runtime, Class&lt;?&gt; javaClass, String methodName, Class&lt;?&gt;[] argumentTypes) {
+        // FIXME: do we really want 'declared' methods?  includes private/protected, and does _not_
+        // include superclass methods.  also, the getDeclared calls may throw SecurityException if
+        // we're running under a restrictive security policy.
+        try {
+<span class="nc" id="L156">            return create(runtime, javaClass.getDeclaredMethod(methodName, argumentTypes));</span>
+<span class="nc" id="L157">        } catch (NoSuchMethodException e) {</span>
+            // search through all declared methods to find a closest match
+<span class="nc bnc" id="L159" title="All 2 branches missed.">            MethodSearch: for (Method method : javaClass.getDeclaredMethods()) {</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">                if (method.getName().equals(methodName)) {</span>
+<span class="nc" id="L161">                    Class&lt;?&gt;[] targetTypes = method.getParameterTypes();</span>
+                
+                    // for zero args case we can stop searching
+<span class="nc bnc" id="L164" title="All 4 branches missed.">                    if (targetTypes.length == 0 &amp;&amp; argumentTypes.length == 0) {</span>
+<span class="nc" id="L165">                        return create(runtime, method);</span>
+                    }
+                    
+<span class="nc bnc" id="L168" title="All 2 branches missed.">                    TypeScan: for (int i = 0; i &lt; argumentTypes.length; i++) {</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">                        if (i &gt;= targetTypes.length) continue MethodSearch;</span>
+
+<span class="nc bnc" id="L171" title="All 2 branches missed.">                        if (targetTypes[i].isAssignableFrom(argumentTypes[i])) {</span>
+                            continue TypeScan;
+                        } else {
+                            continue MethodSearch;
+                        }
+                    }
+
+                    // if we get here, we found a matching method, use it
+                    // TODO: choose narrowest method by continuing to search
+<span class="nc" id="L180">                    return create(runtime, method);</span>
+                }
+            }
+        }
+        // no matching method found
+<span class="nc" id="L185">        return null;</span>
+    }
+    
+    @Override
+    public boolean equals(Object other) {
+<span class="nc bnc" id="L190" title="All 4 branches missed.">        return other instanceof JavaMethod &amp;&amp;</span>
+            this.method == ((JavaMethod)other).method;
+    }
+    
+    @Override
+    public int hashCode() {
+<span class="nc" id="L196">        return method.hashCode();</span>
+    }
+
+    @JRubyMethod
+    @Override
+    public RubyString name() {
+<span class="nc" id="L202">        return getRuntime().newString(method.getName());</span>
+    }
+
+    public int getArity() {
+<span class="fc" id="L206">        return parameterTypes.length;</span>
+    }
+
+    @JRubyMethod(name = &quot;public?&quot;)
+    @Override
+    public RubyBoolean public_p() {
+<span class="nc" id="L212">        return getRuntime().newBoolean(Modifier.isPublic(method.getModifiers()));</span>
+    }
+
+    @JRubyMethod(name = &quot;final?&quot;)
+    public RubyBoolean final_p() {
+<span class="nc" id="L217">        return getRuntime().newBoolean(Modifier.isFinal(method.getModifiers()));</span>
+    }
+
+    @JRubyMethod(rest = true)
+    public IRubyObject invoke(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L222">        checkArity(args.length - 1);</span>
+<span class="nc" id="L223">        Object[] arguments = new Object[args.length - 1];</span>
+<span class="nc" id="L224">        convertArguments(args, arguments, 1);</span>
+
+<span class="nc" id="L226">        IRubyObject invokee = args[0];</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">        if(invokee.isNil()) {</span>
+<span class="nc" id="L228">            return invokeWithExceptionHandling(context, method, null, arguments);</span>
+        }
+
+<span class="nc" id="L231">        Object javaInvokee = null;</span>
+
+<span class="nc bnc" id="L233" title="All 2 branches missed.">        if (!isStatic()) {</span>
+<span class="nc" id="L234">            javaInvokee = JavaUtil.unwrapJavaValue(getRuntime(), invokee, &quot;invokee not a java object&quot;);</span>
+
+<span class="nc bnc" id="L236" title="All 2 branches missed.">            if (! method.getDeclaringClass().isInstance(javaInvokee)) {</span>
+<span class="nc" id="L237">                throw getRuntime().newTypeError(&quot;invokee not instance of method's class (&quot; +</span>
+<span class="nc" id="L238">                                                  &quot;got&quot; + javaInvokee.getClass().getName() + &quot; wanted &quot; +</span>
+<span class="nc" id="L239">                                                  method.getDeclaringClass().getName() + &quot;)&quot;);</span>
+            }
+
+            //
+            // this test really means, that this is a ruby-defined subclass of a java class
+            //
+<span class="nc bnc" id="L245" title="All 2 branches missed.">            if (javaInvokee instanceof InternalJavaProxy &amp;&amp;</span>
+                    // don't bother to check if final method, it won't
+                    // be there (not generated, can't be!)
+<span class="nc bnc" id="L248" title="All 2 branches missed.">                    !Modifier.isFinal(method.getModifiers())) {</span>
+<span class="nc" id="L249">                JavaProxyClass jpc = ((InternalJavaProxy) javaInvokee)</span>
+<span class="nc" id="L250">                        .___getProxyClass();</span>
+                JavaProxyMethod jpm;
+<span class="nc bnc" id="L252" title="All 2 branches missed.">                if ((jpm = jpc.getMethod(method.getName(), parameterTypes)) != null &amp;&amp;</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">                        jpm.hasSuperImplementation()) {</span>
+<span class="nc" id="L254">                    return invokeWithExceptionHandling(context, jpm.getSuperMethod(), javaInvokee, arguments);</span>
+                }
+            }
+        }
+<span class="nc" id="L258">        return invokeWithExceptionHandling(context, method, javaInvokee, arguments);</span>
+    }
+
+    @JRubyMethod(rest = true)
+    public IRubyObject invoke_static(ThreadContext context, IRubyObject[] args) {
+<span class="nc" id="L263">        checkArity(args.length);</span>
+<span class="nc" id="L264">        Object[] arguments = new Object[args.length];</span>
+<span class="nc" id="L265">        System.arraycopy(args, 0, arguments, 0, arguments.length);</span>
+<span class="nc" id="L266">        convertArguments(args, arguments, 0);</span>
+<span class="nc" id="L267">        return invokeWithExceptionHandling(context, method, null, arguments);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject return_type() {
+<span class="nc" id="L272">        Class&lt;?&gt; klass = method.getReturnType();</span>
+        
+<span class="nc bnc" id="L274" title="All 2 branches missed.">        if (klass.equals(void.class)) {</span>
+<span class="nc" id="L275">            return getRuntime().getNil();</span>
+        }
+<span class="nc" id="L277">        return JavaClass.get(getRuntime(), klass);</span>
+    }
+
+    @JRubyMethod
+    public IRubyObject type_parameters() {
+<span class="nc" id="L282">        return Java.getInstance(getRuntime(), method.getTypeParameters());</span>
+    }
+
+    public IRubyObject invokeDirect(ThreadContext context, Object javaInvokee, Object[] args) {
+<span class="nc" id="L286">        checkArity(args.length);</span>
+<span class="nc" id="L287">        checkInstanceof(javaInvokee);</span>
+
+<span class="nc bnc" id="L289" title="All 2 branches missed.">        if (mightBeProxy(javaInvokee)) {</span>
+<span class="nc" id="L290">            return tryProxyInvocation(context, javaInvokee, args);</span>
+        }
+
+<span class="nc" id="L293">        return invokeDirectWithExceptionHandling(context, method, javaInvokee, args);</span>
+    }
+
+    public IRubyObject invokeDirect(ThreadContext context, Object javaInvokee) {
+<span class="pc bpc" id="L297" title="3 of 4 branches missed.">        assert method.getDeclaringClass().isInstance(javaInvokee);</span>
+
+<span class="fc" id="L299">        checkArity(0);</span>
+
+<span class="pc bpc" id="L301" title="1 of 2 branches missed.">        if (mightBeProxy(javaInvokee)) {</span>
+<span class="nc" id="L302">            return tryProxyInvocation(context, javaInvokee);</span>
+        }
+
+<span class="fc" id="L305">        return invokeDirectWithExceptionHandling(context, method, javaInvokee);</span>
+    }
+
+    public IRubyObject invokeDirect(ThreadContext context, Object javaInvokee, Object arg0) {
+<span class="pc bpc" id="L309" title="3 of 4 branches missed.">        assert method.getDeclaringClass().isInstance(javaInvokee);</span>
+
+<span class="fc" id="L311">        checkArity(1);</span>
+
+<span class="pc bpc" id="L313" title="1 of 2 branches missed.">        if (mightBeProxy(javaInvokee)) {</span>
+<span class="nc" id="L314">            return tryProxyInvocation(context, javaInvokee, arg0);</span>
+        }
+
+<span class="fc" id="L317">        return invokeDirectWithExceptionHandling(context, method, javaInvokee, arg0);</span>
+    }
+
+    public IRubyObject invokeDirect(ThreadContext context, Object javaInvokee, Object arg0, Object arg1) {
+<span class="nc bnc" id="L321" title="All 4 branches missed.">        assert method.getDeclaringClass().isInstance(javaInvokee);</span>
+
+<span class="nc" id="L323">        checkArity(2);</span>
+
+<span class="nc bnc" id="L325" title="All 2 branches missed.">        if (mightBeProxy(javaInvokee)) {</span>
+<span class="nc" id="L326">            return tryProxyInvocation(context, javaInvokee, arg0, arg1);</span>
+        }
+
+<span class="nc" id="L329">        return invokeDirectWithExceptionHandling(context, method, javaInvokee, arg0, arg1);</span>
+    }
+
+    public IRubyObject invokeDirect(ThreadContext context, Object javaInvokee, Object arg0, Object arg1, Object arg2) {
+<span class="nc bnc" id="L333" title="All 4 branches missed.">        assert method.getDeclaringClass().isInstance(javaInvokee);</span>
+
+<span class="nc" id="L335">        checkArity(3);</span>
+
+<span class="nc bnc" id="L337" title="All 2 branches missed.">        if (mightBeProxy(javaInvokee)) {</span>
+<span class="nc" id="L338">            return tryProxyInvocation(context, javaInvokee, arg0, arg1, arg2);</span>
+        }
+
+<span class="nc" id="L341">        return invokeDirectWithExceptionHandling(context, method, javaInvokee, arg0, arg1, arg2);</span>
+    }
+
+    public IRubyObject invokeDirect(ThreadContext context, Object javaInvokee, Object arg0, Object arg1, Object arg2, Object arg3) {
+<span class="nc bnc" id="L345" title="All 4 branches missed.">        assert method.getDeclaringClass().isInstance(javaInvokee);</span>
+
+<span class="nc" id="L347">        checkArity(4);</span>
+
+<span class="nc bnc" id="L349" title="All 2 branches missed.">        if (mightBeProxy(javaInvokee)) {</span>
+<span class="nc" id="L350">            return tryProxyInvocation(context, javaInvokee, arg0, arg1, arg2, arg3);</span>
+        }
+
+<span class="nc" id="L353">        return invokeDirectWithExceptionHandling(context, method, javaInvokee, arg0, arg1, arg2, arg3);</span>
+    }
+
+    public IRubyObject invokeStaticDirect(ThreadContext context, Object[] args) {
+<span class="fc" id="L357">        checkArity(args.length);</span>
+<span class="fc" id="L358">        return invokeDirectWithExceptionHandling(context, method, null, args);</span>
+    }
+
+    public IRubyObject invokeStaticDirect(ThreadContext context) {
+<span class="nc" id="L362">        checkArity(0);</span>
+<span class="nc" id="L363">        return invokeDirectWithExceptionHandling(context, method, null);</span>
+    }
+
+    public IRubyObject invokeStaticDirect(ThreadContext context, Object arg0) {
+<span class="fc" id="L367">        checkArity(1);</span>
+<span class="fc" id="L368">        return invokeDirectWithExceptionHandling(context, method, null, arg0);</span>
+    }
+
+    public IRubyObject invokeStaticDirect(ThreadContext context, Object arg0, Object arg1) {
+<span class="nc" id="L372">        checkArity(2);</span>
+<span class="nc" id="L373">        return invokeDirectWithExceptionHandling(context, method, null, arg0, arg1);</span>
+    }
+
+    public IRubyObject invokeStaticDirect(ThreadContext context, Object arg0, Object arg1, Object arg2) {
+<span class="nc" id="L377">        checkArity(3);</span>
+<span class="nc" id="L378">        return invokeDirectWithExceptionHandling(context, method, null, arg0, arg1, arg2);</span>
+    }
+
+    public IRubyObject invokeStaticDirect(ThreadContext context, Object arg0, Object arg1, Object arg2, Object arg3) {
+<span class="nc" id="L382">        checkArity(4);</span>
+<span class="nc" id="L383">        return invokeDirectWithExceptionHandling(context, method, null, arg0, arg1, arg2, arg3);</span>
+    }
+
+    private void checkInstanceof(Object javaInvokee) throws RaiseException {
+<span class="nc bnc" id="L387" title="All 2 branches missed.">        if (!method.getDeclaringClass().isInstance(javaInvokee)) {</span>
+<span class="nc" id="L388">            throw getRuntime().newTypeError(&quot;invokee not instance of method's class (&quot; + &quot;got&quot; + javaInvokee.getClass().getName() + &quot; wanted &quot; + method.getDeclaringClass().getName() + &quot;)&quot;);</span>
+        }
+<span class="nc" id="L390">    }</span>
+
+    private IRubyObject invokeWithExceptionHandling(ThreadContext context, Method method, Object javaInvokee, Object[] arguments) {
+        try {
+<span class="nc" id="L394">            Object result = method.invoke(javaInvokee, arguments);</span>
+<span class="nc" id="L395">            return returnConverter.convert(getRuntime(), result);</span>
+<span class="nc" id="L396">        } catch (IllegalArgumentException iae) {</span>
+<span class="nc" id="L397">            return handlelIllegalArgumentEx(method, iae, arguments);</span>
+<span class="nc" id="L398">        } catch (IllegalAccessException iae) {</span>
+<span class="nc" id="L399">            return handleIllegalAccessEx(method, iae);</span>
+<span class="nc" id="L400">        } catch (InvocationTargetException ite) {</span>
+<span class="nc" id="L401">            return handleInvocationTargetEx(context, ite);</span>
+<span class="nc" id="L402">        } catch (Throwable t) {</span>
+<span class="nc" id="L403">            return handleThrowable(context, t);</span>
+        }
+    }
+
+    private IRubyObject invokeDirectSuperWithExceptionHandling(ThreadContext context, Method method, Object javaInvokee, Object... arguments) {
+        // super calls from proxies must use reflected method
+        // FIXME: possible to make handles do the superclass call?
+        try {
+<span class="nc" id="L411">            Object result = method.invoke(javaInvokee, arguments);</span>
+<span class="nc" id="L412">            return convertReturn(result);</span>
+<span class="nc" id="L413">        } catch (IllegalArgumentException iae) {</span>
+<span class="nc" id="L414">            return handlelIllegalArgumentEx(method, iae, arguments);</span>
+<span class="nc" id="L415">        } catch (IllegalAccessException iae) {</span>
+<span class="nc" id="L416">            return handleIllegalAccessEx(method, iae);</span>
+<span class="nc" id="L417">        } catch (InvocationTargetException ite) {</span>
+<span class="nc" id="L418">            return handleInvocationTargetEx(context, ite);</span>
+<span class="nc" id="L419">        } catch (Throwable t) {</span>
+<span class="nc" id="L420">            return handleThrowable(context, t);</span>
+        }
+    }
+
+    private IRubyObject invokeDirectWithExceptionHandling(ThreadContext context, Method method, Object javaInvokee, Object[] arguments) {
+        try {
+<span class="fc" id="L426">            Object result = method.invoke(javaInvokee, arguments);</span>
+<span class="fc" id="L427">            return convertReturn(result);</span>
+<span class="nc" id="L428">        } catch (IllegalArgumentException iae) {</span>
+<span class="nc" id="L429">            return handlelIllegalArgumentEx(method, iae, arguments);</span>
+<span class="nc" id="L430">        } catch (IllegalAccessException iae) {</span>
+<span class="nc" id="L431">            return handleIllegalAccessEx(method, iae);</span>
+<span class="nc" id="L432">        } catch (InvocationTargetException ite) {</span>
+<span class="nc" id="L433">            return handleInvocationTargetEx(context, ite);</span>
+<span class="nc" id="L434">        } catch (Throwable t) {</span>
+<span class="nc" id="L435">            return handleThrowable(context, t);</span>
+        }
+    }
+
+    private IRubyObject invokeDirectWithExceptionHandling(ThreadContext context, Method method, Object javaInvokee) {
+        try {
+<span class="fc" id="L441">            Object result = method.invoke(javaInvokee);</span>
+<span class="fc" id="L442">            return convertReturn(result);</span>
+<span class="nc" id="L443">        } catch (IllegalArgumentException iae) {</span>
+<span class="nc" id="L444">            return handlelIllegalArgumentEx(method, iae);</span>
+<span class="nc" id="L445">        } catch (IllegalAccessException iae) {</span>
+<span class="nc" id="L446">            return handleIllegalAccessEx(method, iae);</span>
+<span class="nc" id="L447">        } catch (InvocationTargetException ite) {</span>
+<span class="nc" id="L448">            return handleInvocationTargetEx(context, ite);</span>
+<span class="nc" id="L449">        } catch (Throwable t) {</span>
+<span class="nc" id="L450">            return handleThrowable(context, t);</span>
+        }
+    }
+
+    private IRubyObject invokeDirectWithExceptionHandling(ThreadContext context, Method method, Object javaInvokee, Object arg0) {
+        try {
+<span class="fc" id="L456">            Object result = method.invoke(javaInvokee, arg0);</span>
+<span class="fc" id="L457">            return convertReturn(result);</span>
+<span class="nc" id="L458">        } catch (IllegalArgumentException iae) {</span>
+<span class="nc" id="L459">            return handlelIllegalArgumentEx(method, iae, arg0);</span>
+<span class="nc" id="L460">        } catch (IllegalAccessException iae) {</span>
+<span class="nc" id="L461">            return handleIllegalAccessEx(method, iae);</span>
+<span class="nc" id="L462">        } catch (InvocationTargetException ite) {</span>
+<span class="nc" id="L463">            return handleInvocationTargetEx(context, ite);</span>
+<span class="nc" id="L464">        } catch (Throwable t) {</span>
+<span class="nc" id="L465">            return handleThrowable(context, t);</span>
+        }
+    }
+
+    private IRubyObject invokeDirectWithExceptionHandling(ThreadContext context, Method method, Object javaInvokee, Object arg0, Object arg1) {
+        try {
+<span class="nc" id="L471">            Object result = method.invoke(javaInvokee, arg0, arg1);</span>
+<span class="nc" id="L472">            return convertReturn(result);</span>
+<span class="nc" id="L473">        } catch (IllegalArgumentException iae) {</span>
+<span class="nc" id="L474">            return handlelIllegalArgumentEx(method, iae, arg0, arg1);</span>
+<span class="nc" id="L475">        } catch (IllegalAccessException iae) {</span>
+<span class="nc" id="L476">            return handleIllegalAccessEx(method, iae);</span>
+<span class="nc" id="L477">        } catch (InvocationTargetException ite) {</span>
+<span class="nc" id="L478">            return handleInvocationTargetEx(context, ite);</span>
+<span class="nc" id="L479">        } catch (Throwable t) {</span>
+<span class="nc" id="L480">            return handleThrowable(context, t);</span>
+        }
+    }
+
+    private IRubyObject invokeDirectWithExceptionHandling(ThreadContext context, Method method, Object javaInvokee, Object arg0, Object arg1, Object arg2) {
+        try {
+<span class="nc" id="L486">            Object result = method.invoke(javaInvokee, arg0, arg1, arg2);</span>
+<span class="nc" id="L487">            return convertReturn(result);</span>
+<span class="nc" id="L488">        } catch (IllegalArgumentException iae) {</span>
+<span class="nc" id="L489">            return handlelIllegalArgumentEx(method, iae, arg0, arg1, arg2);</span>
+<span class="nc" id="L490">        } catch (IllegalAccessException iae) {</span>
+<span class="nc" id="L491">            return handleIllegalAccessEx(method, iae);</span>
+<span class="nc" id="L492">        } catch (InvocationTargetException ite) {</span>
+<span class="nc" id="L493">            return handleInvocationTargetEx(context, ite);</span>
+<span class="nc" id="L494">        } catch (Throwable t) {</span>
+<span class="nc" id="L495">            return handleThrowable(context, t);</span>
+        }
+    }
+
+    private IRubyObject invokeDirectWithExceptionHandling(ThreadContext context, Method method, Object javaInvokee, Object arg0, Object arg1, Object arg2, Object arg3) {
+        try {
+<span class="nc" id="L501">            Object result = method.invoke(javaInvokee, arg0, arg1, arg2, arg3);</span>
+<span class="nc" id="L502">            return convertReturn(result);</span>
+<span class="nc" id="L503">        } catch (IllegalArgumentException iae) {</span>
+<span class="nc" id="L504">            return handlelIllegalArgumentEx(method, iae, arg0, arg1, arg2, arg3);</span>
+<span class="nc" id="L505">        } catch (IllegalAccessException iae) {</span>
+<span class="nc" id="L506">            return handleIllegalAccessEx(method, iae);</span>
+<span class="nc" id="L507">        } catch (InvocationTargetException ite) {</span>
+<span class="nc" id="L508">            return handleInvocationTargetEx(context, ite);</span>
+<span class="nc" id="L509">        } catch (Throwable t) {</span>
+<span class="nc" id="L510">            return handleThrowable(context, t);</span>
+        }
+    }
+
+    private IRubyObject convertReturn(Object result) {
+<span class="fc bfc" id="L515" title="All 4 branches covered.">        if (result != null &amp;&amp; result.getClass() != boxedReturnType) {</span>
+            // actual type does not exactly match method return type, re-get converter
+            // FIXME: when the only autoconversions are primitives, this won't be needed
+<span class="fc" id="L518">            return JavaUtil.convertJavaToUsableRubyObject(getRuntime(), result);</span>
+        }
+<span class="fc" id="L520">        return JavaUtil.convertJavaToUsableRubyObjectWithConverter(getRuntime(), result, returnConverter);</span>
+    }
+
+    private IRubyObject handleIllegalAccessEx(Method method, IllegalAccessException iae) throws RaiseException {
+<span class="nc" id="L524">        throw getRuntime().newTypeError(&quot;illegal access on '&quot; + method.getName() + &quot;': &quot; + iae.getMessage());</span>
+    }
+
+    private IRubyObject handlelIllegalArgumentEx(Method method, IllegalArgumentException iae, Object... arguments) throws RaiseException {
+<span class="nc" id="L528">        throw getRuntime().newTypeError(</span>
+                &quot;for method &quot; +
+<span class="nc" id="L530">                method.getDeclaringClass().getSimpleName() +</span>
+                &quot;.&quot; +
+<span class="nc" id="L532">                method.getName() +</span>
+                &quot; expected &quot; +
+<span class="nc" id="L534">                argument_types().inspect() +</span>
+                &quot;; got: &quot; +
+<span class="nc" id="L536">                dumpArgTypes(arguments) +</span>
+                &quot;; error: &quot; +
+<span class="nc" id="L538">                iae.getMessage());</span>
+    }
+
+    private void convertArguments(IRubyObject[] argsIn, Object[] argsOut, int from) {
+<span class="nc" id="L542">        Class&lt;?&gt;[] types = parameterTypes;</span>
+<span class="nc bnc" id="L543" title="All 2 branches missed.">        for (int i = argsOut.length; --i &gt;= 0; ) {</span>
+<span class="nc" id="L544">            argsOut[i] = argsIn[i+from].toJava(types[i]);</span>
+        }
+<span class="nc" id="L546">    }</span>
+
+    public Class&lt;?&gt;[] getParameterTypes() {
+<span class="fc" id="L549">        return parameterTypes;</span>
+    }
+
+    public Class&lt;?&gt;[] getExceptionTypes() {
+<span class="nc" id="L553">        return method.getExceptionTypes();</span>
+    }
+
+    public Type[] getGenericParameterTypes() {
+<span class="nc" id="L557">        return method.getGenericParameterTypes();</span>
+    }
+
+    public Type[] getGenericExceptionTypes() {
+<span class="nc" id="L561">        return method.getGenericExceptionTypes();</span>
+    }
+    
+    public Annotation[][] getParameterAnnotations() {
+<span class="nc" id="L565">        return method.getParameterAnnotations();</span>
+    }
+
+    public boolean isVarArgs() {
+<span class="fc" id="L569">        return method.isVarArgs();</span>
+    }
+
+    protected String nameOnInspection() {
+<span class="nc" id="L573">        return &quot;#&lt;&quot; + getType().toString() + &quot;/&quot; + method.getName() + &quot;(&quot;;</span>
+    }
+
+    @JRubyMethod(name = &quot;static?&quot;)
+    public RubyBoolean static_p() {
+<span class="nc" id="L578">        return getRuntime().newBoolean(isStatic());</span>
+    }
+    
+    public RubyBoolean bridge_p() {
+<span class="nc" id="L582">        return getRuntime().newBoolean(method.isBridge());</span>
+    }
+
+    private boolean isStatic() {
+<span class="nc" id="L586">        return Modifier.isStatic(method.getModifiers());</span>
+    }
+
+    public int getModifiers() {
+<span class="nc" id="L590">        return method.getModifiers();</span>
+    }
+
+    public String toGenericString() {
+<span class="nc" id="L594">        return method.toGenericString();</span>
+    }
+
+    public AccessibleObject accessibleObject() {
+<span class="nc" id="L598">        return method;</span>
+    }
+
+    private boolean mightBeProxy(Object javaInvokee) {
+        // this test really means, that this is a ruby-defined subclass of a java class
+<span class="pc bpc" id="L603" title="3 of 4 branches missed.">        return javaInvokee instanceof InternalJavaProxy &amp;&amp; !isFinal;</span>
+    }
+
+    private IRubyObject tryProxyInvocation(ThreadContext context, Object javaInvokee, Object... args) {
+<span class="nc" id="L607">        JavaProxyClass jpc = ((InternalJavaProxy) javaInvokee).___getProxyClass();</span>
+        JavaProxyMethod jpm;
+<span class="nc bnc" id="L609" title="All 4 branches missed.">        if ((jpm = jpc.getMethod(method.getName(), parameterTypes)) != null &amp;&amp; jpm.hasSuperImplementation()) {</span>
+<span class="nc" id="L610">            return invokeDirectSuperWithExceptionHandling(context, jpm.getSuperMethod(), javaInvokee, args);</span>
+        } else {
+<span class="nc" id="L612">            return invokeDirectWithExceptionHandling(context, method, javaInvokee, args);</span>
+        }
+    }
+
+    private IRubyObject tryProxyInvocation(ThreadContext context, Object javaInvokee) {
+<span class="nc" id="L617">        JavaProxyClass jpc = ((InternalJavaProxy) javaInvokee).___getProxyClass();</span>
+        JavaProxyMethod jpm;
+<span class="nc bnc" id="L619" title="All 4 branches missed.">        if ((jpm = jpc.getMethod(method.getName(), parameterTypes)) != null &amp;&amp; jpm.hasSuperImplementation()) {</span>
+<span class="nc" id="L620">            return invokeDirectSuperWithExceptionHandling(context, jpm.getSuperMethod(), javaInvokee);</span>
+        } else {
+<span class="nc" id="L622">            return invokeDirectWithExceptionHandling(context, method, javaInvokee);</span>
+        }
+    }
+
+    private IRubyObject tryProxyInvocation(ThreadContext context, Object javaInvokee, Object arg0) {
+<span class="nc" id="L627">        JavaProxyClass jpc = ((InternalJavaProxy) javaInvokee).___getProxyClass();</span>
+        JavaProxyMethod jpm;
+<span class="nc bnc" id="L629" title="All 4 branches missed.">        if ((jpm = jpc.getMethod(method.getName(), parameterTypes)) != null &amp;&amp; jpm.hasSuperImplementation()) {</span>
+<span class="nc" id="L630">            return invokeDirectSuperWithExceptionHandling(context, jpm.getSuperMethod(), javaInvokee, arg0);</span>
+        } else {
+<span class="nc" id="L632">            return invokeDirectWithExceptionHandling(context, method, javaInvokee, arg0);</span>
+        }
+    }
+
+    private IRubyObject tryProxyInvocation(ThreadContext context, Object javaInvokee, Object arg0, Object arg1) {
+<span class="nc" id="L637">        JavaProxyClass jpc = ((InternalJavaProxy) javaInvokee).___getProxyClass();</span>
+        JavaProxyMethod jpm;
+<span class="nc bnc" id="L639" title="All 4 branches missed.">        if ((jpm = jpc.getMethod(method.getName(), parameterTypes)) != null &amp;&amp; jpm.hasSuperImplementation()) {</span>
+<span class="nc" id="L640">            return invokeDirectSuperWithExceptionHandling(context, jpm.getSuperMethod(), javaInvokee, arg0, arg1);</span>
+        } else {
+<span class="nc" id="L642">            return invokeDirectWithExceptionHandling(context, method, javaInvokee, arg0, arg1);</span>
+        }
+    }
+
+    private IRubyObject tryProxyInvocation(ThreadContext context, Object javaInvokee, Object arg0, Object arg1, Object arg2) {
+<span class="nc" id="L647">        JavaProxyClass jpc = ((InternalJavaProxy) javaInvokee).___getProxyClass();</span>
+        JavaProxyMethod jpm;
+<span class="nc bnc" id="L649" title="All 4 branches missed.">        if ((jpm = jpc.getMethod(method.getName(), parameterTypes)) != null &amp;&amp; jpm.hasSuperImplementation()) {</span>
+<span class="nc" id="L650">            return invokeDirectSuperWithExceptionHandling(context, jpm.getSuperMethod(), javaInvokee, arg0, arg1, arg2);</span>
+        } else {
+<span class="nc" id="L652">            return invokeDirectWithExceptionHandling(context, method, javaInvokee, arg0, arg1, arg2);</span>
+        }
+    }
+
+    private IRubyObject tryProxyInvocation(ThreadContext context, Object javaInvokee, Object arg0, Object arg1, Object arg2, Object arg3) {
+<span class="nc" id="L657">        JavaProxyClass jpc = ((InternalJavaProxy) javaInvokee).___getProxyClass();</span>
+        JavaProxyMethod jpm;
+<span class="nc bnc" id="L659" title="All 4 branches missed.">        if ((jpm = jpc.getMethod(method.getName(), parameterTypes)) != null &amp;&amp; jpm.hasSuperImplementation()) {</span>
+<span class="nc" id="L660">            return invokeDirectSuperWithExceptionHandling(context, jpm.getSuperMethod(), javaInvokee, arg0, arg1, arg2, arg3);</span>
+        } else {
+<span class="nc" id="L662">            return invokeDirectWithExceptionHandling(context, method, javaInvokee, arg0, arg1, arg2, arg3);</span>
+        }
+    }
+
+    public static RaiseException newMethodNotFoundError(Ruby runtime, Class target, String prettyName, String simpleName) {
+<span class="nc" id="L667">        return runtime.newNameError(&quot;java method not found: &quot; + target.getName() + &quot;.&quot; + prettyName, simpleName);</span>
+    }
+
+    public static RaiseException newArgSizeMismatchError(Ruby runtime, Class ... argTypes) {
+<span class="nc" id="L671">        return runtime.newArgumentError(&quot;argument count mismatch for method signature &quot; + CodegenUtils.prettyParams(argTypes));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>

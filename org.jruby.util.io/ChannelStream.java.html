@@ -1,0 +1,1700 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ChannelStream.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">rubyspec coverage</a> &gt; <a href="index.source.html" class="el_package">org.jruby.util.io</a> &gt; <span class="el_source">ChannelStream.java</span></div><h1>ChannelStream.java</h1><pre class="source lang-java linenums">/*
+ ***** BEGIN LICENSE BLOCK *****
+ * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ *
+ * The contents of this file are subject to the Eclipse Public
+ * License Version 1.0 (the &quot;License&quot;); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.eclipse.org/legal/epl-v10.html
+ *
+ * Software distributed under the License is distributed on an &quot;AS
+ * IS&quot; basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ *
+ * Copyright (C) 2004 Anders Bengtsson &lt;ndrsbngtssn@yahoo.se&gt;
+ * Copyright (C) 2004-2005 Thomas E Enebo &lt;enebo@acm.org&gt;
+ * Copyright (C) 2004 Jan Arne Petersen &lt;jpetersen@uni-bonn.de&gt;
+ * Copyright (C) 2004 Stefan Matthias Aust &lt;sma@3plus4.de&gt;
+ * Copyright (C) 2005 Charles O Nutter &lt;headius@headius.com&gt;
+ * Copyright (C) 2007 Damian Steer &lt;pldms@mac.com&gt;
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either of the GNU General Public License Version 2 or later (the &quot;GPL&quot;),
+ * or the GNU Lesser General Public License Version 2.1 or later (the &quot;LGPL&quot;),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the EPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the EPL, the GPL or the LGPL.
+ ***** END LICENSE BLOCK *****/
+package org.jruby.util.io;
+
+
+import java.io.EOFException;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.channels.Channel;
+import java.nio.channels.FileChannel;
+import java.nio.channels.IllegalBlockingModeException;
+import java.nio.channels.ReadableByteChannel;
+import java.nio.channels.SelectableChannel;
+import java.util.LinkedList;
+
+import org.jruby.Finalizable;
+import org.jruby.Ruby;
+import org.jruby.platform.Platform;
+import org.jruby.util.ByteList;
+import org.jruby.util.JRubyFile;
+import org.jruby.util.ResourceException;
+import org.jruby.util.log.Logger;
+import org.jruby.util.log.LoggerFactory;
+
+/**
+ * This file implements a seekable IO file.
+ */
+<span class="nc bnc" id="L63" title="All 2 branches missed.">@Deprecated</span>
+public class ChannelStream implements Stream, Finalizable {
+
+<span class="nc" id="L66">    private static final Logger LOG = LoggerFactory.getLogger(&quot;ChannelStream&quot;);</span>
+
+    private final static boolean DEBUG = false;
+
+    /**
+     * The size of the read/write buffer allocated for this stream.
+     *
+     * This size has been scaled back from its original 16k because although
+     * the larger buffer size results in raw File.open times being rather slow
+     * (due to the cost of instantiating a relatively large buffer). We should
+     * try to find a happy medium, or potentially pool buffers, or perhaps even
+     * choose a value based on platform(??), but for now I am reducing it along
+     * with changes for the &quot;large read&quot; patch from JRUBY-2657.
+     */
+    public final static int BUFSIZE = 4 * 1024;
+
+    /**
+     * The size at which a single read should turn into a chunkier bulk read.
+     * Currently, this size is about 4x a normal buffer size.
+     *
+     * This size was not really arrived at experimentally, and could potentially
+     * be increased. However, it seems like a &quot;good size&quot; and we should
+     * probably only adjust it if it turns out we would perform better with a
+     * larger buffer for large bulk reads.
+     */
+    private final static int BULK_READ_SIZE = 16 * 1024;
+<span class="nc" id="L92">    private final static ByteBuffer EMPTY_BUFFER = ByteBuffer.allocate(0);</span>
+
+    /**
+     * A cached EOFException. Since EOFException is only used by us internally,
+     * we create a single instance to avoid stack trace generation. Comment out
+     * the initialization of this field to cause a new one each time.
+     */
+<span class="nc" id="L99">    private static EOFException eofException = new EOFException();</span>
+
+    private volatile Ruby runtime;
+    protected ModeFlags modes;
+<span class="nc" id="L103">    protected boolean sync = false;</span>
+
+    protected volatile ByteBuffer buffer; // r/w buffer
+    protected boolean reading; // are we reading or writing?
+    private ChannelDescriptor descriptor;
+<span class="nc" id="L108">    private boolean blocking = true;</span>
+<span class="nc" id="L109">    private ByteList ungotChars = new ByteList();</span>
+<span class="nc" id="L110">    private volatile boolean closedExplicitly = false;</span>
+
+<span class="nc" id="L112">    private volatile boolean eof = false;</span>
+<span class="nc" id="L113">    private volatile boolean autoclose = true;</span>
+
+<span class="nc" id="L115">    private ChannelStream(Ruby runtime, ChannelDescriptor descriptor, boolean autoclose) {</span>
+<span class="nc" id="L116">        this.runtime = runtime;</span>
+<span class="nc" id="L117">        this.descriptor = descriptor;</span>
+<span class="nc" id="L118">        this.modes = descriptor.getOriginalModes();</span>
+<span class="nc" id="L119">        buffer = ByteBuffer.allocate(BUFSIZE);</span>
+<span class="nc" id="L120">        buffer.flip();</span>
+<span class="nc" id="L121">        this.reading = true;</span>
+<span class="nc" id="L122">        this.autoclose = autoclose;</span>
+<span class="nc" id="L123">        runtime.addInternalFinalizer(this);</span>
+<span class="nc" id="L124">    }</span>
+
+    private ChannelStream(Ruby runtime, ChannelDescriptor descriptor, ModeFlags modes, boolean autoclose) {
+<span class="nc" id="L127">        this(runtime, descriptor, autoclose);</span>
+<span class="nc" id="L128">        this.modes = modes;</span>
+<span class="nc" id="L129">    }</span>
+
+    @Override
+    public ByteBuffer getBuffer() {
+<span class="nc" id="L133">        return buffer;</span>
+    }
+
+    public Ruby getRuntime() {
+<span class="nc" id="L137">        return runtime;</span>
+    }
+
+    public void checkReadable() throws IOException {
+<span class="nc bnc" id="L141" title="All 2 branches missed.">        if (!modes.isReadable()) throw new IOException(&quot;not opened for reading&quot;);</span>
+<span class="nc" id="L142">    }</span>
+
+    public void checkWritable() throws IOException {
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (!modes.isWritable()) throw new IOException(&quot;not opened for writing&quot;);</span>
+<span class="nc" id="L146">    }</span>
+
+    public void checkPermissionsSubsetOf(ModeFlags subsetModes) {
+<span class="nc" id="L149">        subsetModes.isSubsetOf(modes);</span>
+<span class="nc" id="L150">    }</span>
+
+    public ModeFlags getModes() {
+<span class="nc" id="L153">    	return modes;</span>
+    }
+    
+    public void setModes(ModeFlags modes) {
+<span class="nc" id="L157">        this.modes = modes;</span>
+<span class="nc" id="L158">    }</span>
+
+    public boolean isSync() {
+<span class="nc" id="L161">        return sync;</span>
+    }
+
+    public void setSync(boolean sync) {
+<span class="nc" id="L165">        this.sync = sync;</span>
+<span class="nc" id="L166">    }</span>
+
+    public void setBinmode() {
+        // No-op here, no binmode handling needed.
+<span class="nc" id="L170">    }</span>
+    
+    public boolean isBinmode() {
+<span class="nc" id="L173">        return false;</span>
+    }
+
+    public boolean isAutoclose() {
+<span class="nc" id="L177">        return autoclose;</span>
+    }
+
+    public void setAutoclose(boolean autoclose) {
+<span class="nc" id="L181">        this.autoclose = autoclose;</span>
+<span class="nc" id="L182">    }</span>
+
+    /**
+     * Implement IO#wait as per io/wait in MRI.
+     * waits until input available or timed out and returns self, or nil when EOF reached.
+     *
+     * The default implementation loops while ready returns 0.
+     */
+    public void waitUntilReady() throws IOException, InterruptedException {
+<span class="nc bnc" id="L191" title="All 2 branches missed.">        while (ready() == 0) {</span>
+<span class="nc" id="L192">            Thread.sleep(10);</span>
+        }
+<span class="nc" id="L194">    }</span>
+
+    public boolean readDataBuffered() {
+<span class="nc bnc" id="L197" title="All 6 branches missed.">        return reading &amp;&amp; (hasUngotChars() || buffer.hasRemaining());</span>
+    }
+
+    private boolean hasUngotChars() {
+<span class="nc bnc" id="L201" title="All 2 branches missed.">        return ungotChars.length() &gt; 0;</span>
+    }
+
+    public boolean writeDataBuffered() {
+<span class="nc bnc" id="L205" title="All 4 branches missed.">        return !reading &amp;&amp; buffer.position() &gt; 0;</span>
+    }
+
+    @Override
+    public final int bufferedAvailable() {
+<span class="nc" id="L210">        return buffer.remaining();</span>
+    }
+
+    @Override
+    public final int refillBuffer() throws IOException {
+<span class="nc" id="L215">        buffer.clear();</span>
+<span class="nc" id="L216">        int n = ((ReadableByteChannel) descriptor.getChannel()).read(buffer);</span>
+<span class="nc" id="L217">        buffer.flip();</span>
+<span class="nc" id="L218">        return n;</span>
+    }
+
+    public synchronized ByteList fgets(ByteList separatorString) throws IOException, BadDescriptorException {
+<span class="nc" id="L222">        checkReadable();</span>
+<span class="nc" id="L223">        ensureRead();</span>
+
+<span class="nc bnc" id="L225" title="All 2 branches missed.">        if (separatorString == null) {</span>
+<span class="nc" id="L226">            return readall();</span>
+        }
+
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        final ByteList separator = (separatorString == PARAGRAPH_DELIMETER) ?</span>
+            PARAGRAPH_SEPARATOR : separatorString;
+
+<span class="nc" id="L232">        descriptor.checkOpen();</span>
+
+<span class="nc bnc" id="L234" title="All 2 branches missed.">        if (feof()) {</span>
+<span class="nc" id="L235">            return null;</span>
+        }
+
+<span class="nc" id="L238">        int c = read();</span>
+
+<span class="nc bnc" id="L240" title="All 2 branches missed.">        if (c == -1) {</span>
+<span class="nc" id="L241">            return null;</span>
+        }
+
+        // unread back
+<span class="nc" id="L245">        buffer.position(buffer.position() - 1);</span>
+
+<span class="nc" id="L247">        ByteList buf = new ByteList(40);</span>
+
+<span class="nc" id="L249">        byte first = separator.getUnsafeBytes()[separator.getBegin()];</span>
+
+        LineLoop : while (true) {
+            ReadLoop: while (true) {
+<span class="nc" id="L253">                byte[] bytes = buffer.array();</span>
+<span class="nc" id="L254">                int offset = buffer.position();</span>
+<span class="nc" id="L255">                int max = buffer.limit();</span>
+
+                // iterate over remainder of buffer until we find a match
+<span class="nc bnc" id="L258" title="All 2 branches missed.">                for (int i = offset; i &lt; max; i++) {</span>
+<span class="nc" id="L259">                    c = bytes[i];</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">                    if (c == first) {</span>
+                        // terminate and advance buffer when we find our char
+<span class="nc" id="L262">                        buf.append(bytes, offset, i - offset);</span>
+<span class="nc bnc" id="L263" title="All 2 branches missed.">                        if (i &gt;= max) {</span>
+<span class="nc" id="L264">                            buffer.clear();</span>
+                        } else {
+<span class="nc" id="L266">                            buffer.position(i + 1);</span>
+                        }
+<span class="nc" id="L268">                        break ReadLoop;</span>
+                    }
+                }
+
+                // no match, append remainder of buffer and continue with next block
+<span class="nc" id="L273">                buf.append(bytes, offset, buffer.remaining());</span>
+<span class="nc" id="L274">                int read = refillBuffer();</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">                if (read == -1) break LineLoop;</span>
+<span class="nc" id="L276">            }</span>
+
+            // found a match above, check if remaining separator characters match, appending as we go
+<span class="nc bnc" id="L279" title="All 2 branches missed.">            for (int i = 0; i &lt; separator.getRealSize(); i++) {</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">                if (c == -1) {</span>
+<span class="nc" id="L281">                    break LineLoop;</span>
+<span class="nc bnc" id="L282" title="All 2 branches missed.">                } else if (c != separator.getUnsafeBytes()[separator.getBegin() + i]) {</span>
+<span class="nc" id="L283">                    buf.append(c);</span>
+<span class="nc" id="L284">                    continue LineLoop;</span>
+                }
+<span class="nc" id="L286">                buf.append(c);</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">                if (i &lt; separator.getRealSize() - 1) {</span>
+<span class="nc" id="L288">                    c = read();</span>
+                }
+            }
+<span class="nc" id="L291">            break;</span>
+        }
+
+<span class="nc bnc" id="L294" title="All 2 branches missed.">        if (separatorString == PARAGRAPH_DELIMETER) {</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">            while (c == separator.getUnsafeBytes()[separator.getBegin()]) {</span>
+<span class="nc" id="L296">                c = read();</span>
+            }
+<span class="nc" id="L298">            ungetc(c);</span>
+        }
+
+<span class="nc" id="L301">        return buf;</span>
+    }
+
+    public synchronized int getline(ByteList dst, byte terminator) throws IOException, BadDescriptorException {
+<span class="nc" id="L305">        checkReadable();</span>
+<span class="nc" id="L306">        ensureRead();</span>
+<span class="nc" id="L307">        descriptor.checkOpen();</span>
+
+<span class="nc" id="L309">        int totalRead = 0;</span>
+<span class="nc" id="L310">        boolean found = false;</span>
+        
+<span class="nc bnc" id="L312" title="All 2 branches missed.">        if (hasUngotChars()) {</span>
+<span class="nc bnc" id="L313" title="All 2 branches missed.">            for(int i = 0; i &lt; ungotChars.length(); i++){</span>
+<span class="nc" id="L314">                byte ungotc = (byte) ungotChars.get(i);</span>
+<span class="nc" id="L315">                dst.append(ungotc);</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">                found = ungotc == terminator;</span>
+<span class="nc" id="L317">                ++totalRead;</span>
+            }
+<span class="nc" id="L319">            clearUngotChars();</span>
+        }
+        
+<span class="nc bnc" id="L322" title="All 2 branches missed.">        while (!found) {</span>
+<span class="nc" id="L323">            final byte[] bytes = buffer.array();</span>
+<span class="nc" id="L324">            final int begin = buffer.arrayOffset() + buffer.position();</span>
+<span class="nc" id="L325">            final int end = begin + buffer.remaining();</span>
+<span class="nc" id="L326">            int len = 0;</span>
+<span class="nc bnc" id="L327" title="All 4 branches missed.">            for (int i = begin; i &lt; end &amp;&amp; !found; ++i) {</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">                found = bytes[i] == terminator;</span>
+<span class="nc" id="L329">                ++len;</span>
+            }
+<span class="nc bnc" id="L331" title="All 2 branches missed.">            if (len &gt; 0) {</span>
+<span class="nc" id="L332">                dst.append(buffer, len);</span>
+<span class="nc" id="L333">                totalRead += len;</span>
+            }
+<span class="nc bnc" id="L335" title="All 2 branches missed.">            if (!found) {</span>
+<span class="nc" id="L336">                int n = refillBuffer();</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">                if (n &lt;= 0) {</span>
+<span class="nc bnc" id="L338" title="All 4 branches missed.">                    if (n &lt; 0 &amp;&amp; totalRead &lt; 1) {</span>
+<span class="nc" id="L339">                        return -1;</span>
+                    }
+                    break;
+                }
+            }
+<span class="nc" id="L344">        }</span>
+<span class="nc" id="L345">        return totalRead;</span>
+    }
+
+    public synchronized int getline(ByteList dst, byte terminator, long limit) throws IOException, BadDescriptorException {
+<span class="nc" id="L349">        checkReadable();</span>
+<span class="nc" id="L350">        ensureRead();</span>
+<span class="nc" id="L351">        descriptor.checkOpen();</span>
+
+<span class="nc" id="L353">        int totalRead = 0;</span>
+<span class="nc" id="L354">        boolean found = false;</span>
+        
+<span class="nc bnc" id="L356" title="All 2 branches missed.">        if (hasUngotChars()) {</span>
+<span class="nc bnc" id="L357" title="All 2 branches missed.">            for(int i = 0; i &lt; ungotChars.length(); i++){</span>
+<span class="nc" id="L358">                byte ungotc = (byte) ungotChars.get(i);</span>
+<span class="nc" id="L359">                dst.append(ungotc);</span>
+<span class="nc bnc" id="L360" title="All 2 branches missed.">                found = ungotc == terminator;</span>
+<span class="nc" id="L361">                limit--;</span>
+<span class="nc" id="L362">                ++totalRead;</span>
+            }
+<span class="nc" id="L364">            clearUngotChars();</span>
+        }
+        
+<span class="nc bnc" id="L367" title="All 2 branches missed.">        while (!found) {</span>
+<span class="nc" id="L368">            final byte[] bytes = buffer.array();</span>
+<span class="nc" id="L369">            final int begin = buffer.arrayOffset() + buffer.position();</span>
+<span class="nc" id="L370">            final int end = begin + buffer.remaining();</span>
+<span class="nc" id="L371">            int len = 0;</span>
+<span class="nc bnc" id="L372" title="All 6 branches missed.">            for (int i = begin; i &lt; end &amp;&amp; limit-- &gt; 0 &amp;&amp; !found; ++i) {</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">                found = bytes[i] == terminator;</span>
+<span class="nc" id="L374">                ++len;</span>
+            }
+<span class="nc bnc" id="L376" title="All 2 branches missed.">            if (limit &lt; 1) found = true;</span>
+
+<span class="nc bnc" id="L378" title="All 2 branches missed.">            if (len &gt; 0) {</span>
+<span class="nc" id="L379">                dst.append(buffer, len);</span>
+<span class="nc" id="L380">                totalRead += len;</span>
+            }
+<span class="nc bnc" id="L382" title="All 2 branches missed.">            if (!found) {</span>
+<span class="nc" id="L383">                int n = refillBuffer();</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">                if (n &lt;= 0) {</span>
+<span class="nc bnc" id="L385" title="All 4 branches missed.">                    if (n &lt; 0 &amp;&amp; totalRead &lt; 1) {</span>
+<span class="nc" id="L386">                        return -1;</span>
+                    }
+                    break;
+                }
+            }
+<span class="nc" id="L391">        }</span>
+<span class="nc" id="L392">        return totalRead;</span>
+    }
+
+    /**
+     * 
+     */
+    private void clearUngotChars() {
+<span class="nc bnc" id="L399" title="All 2 branches missed.">        if(ungotChars.length() &gt; 0) {</span>
+<span class="nc" id="L400">            ungotChars.delete(0, ungotChars.length());</span>
+        }
+<span class="nc" id="L402">    }</span>
+
+    /**
+     * @deprecated readall do busy loop for the IO which has NONBLOCK bit. You
+     *             should implement the logic by yourself with fread().
+     */
+    @Deprecated
+    public synchronized ByteList readall() throws IOException, BadDescriptorException {
+<span class="nc bnc" id="L410" title="All 4 branches missed.">        final long fileSize = descriptor.isSeekable() &amp;&amp; descriptor.getChannel() instanceof FileChannel</span>
+<span class="nc" id="L411">                ? ((FileChannel) descriptor.getChannel()).size() : 0;</span>
+        //
+        // Check file size - special files in /proc have zero size and need to be
+        // handled by the generic read path.
+        //
+<span class="nc bnc" id="L416" title="All 2 branches missed.">        if (fileSize &gt; 0) {</span>
+<span class="nc" id="L417">            ensureRead();</span>
+
+<span class="nc" id="L419">            FileChannel channel = (FileChannel)descriptor.getChannel();</span>
+<span class="nc" id="L420">            final long left = fileSize - channel.position() + bufferedInputBytesRemaining();</span>
+<span class="nc bnc" id="L421" title="All 2 branches missed.">            if (left &lt;= 0) {</span>
+<span class="nc" id="L422">                eof = true;</span>
+<span class="nc" id="L423">                return null;</span>
+            }
+
+<span class="nc bnc" id="L426" title="All 2 branches missed.">            if (left &gt; Integer.MAX_VALUE) {</span>
+<span class="nc bnc" id="L427" title="All 2 branches missed.">                if (getRuntime() != null) {</span>
+<span class="nc" id="L428">                    throw getRuntime().newIOError(&quot;File too large&quot;);</span>
+                } else {
+<span class="nc" id="L430">                    throw new IOException(&quot;File too large&quot;);</span>
+                }
+            }
+
+<span class="nc" id="L434">            ByteList result = new ByteList((int) left);</span>
+<span class="nc" id="L435">            ByteBuffer buf = ByteBuffer.wrap(result.getUnsafeBytes(),</span>
+<span class="nc" id="L436">                    result.begin(), (int) left);</span>
+
+            //
+            // Copy any buffered data (including ungetc byte)
+            //
+<span class="nc" id="L441">            copyBufferedBytes(buf);</span>
+
+            //
+            // Now read unbuffered directly from the file
+            //
+<span class="nc bnc" id="L446" title="All 2 branches missed.">            while (buf.hasRemaining()) {</span>
+<span class="nc" id="L447">                final int MAX_READ_CHUNK = 1 * 1024 * 1024;</span>
+                //
+                // When reading into a heap buffer, the jvm allocates a temporary
+                // direct ByteBuffer of the requested size.  To avoid allocating
+                // a huge direct buffer when doing ludicrous reads (e.g. 1G or more)
+                // we split the read up into chunks of no more than 1M
+                //
+<span class="nc" id="L454">                ByteBuffer tmp = buf.duplicate();</span>
+<span class="nc bnc" id="L455" title="All 2 branches missed.">                if (tmp.remaining() &gt; MAX_READ_CHUNK) {</span>
+<span class="nc" id="L456">                    tmp.limit(tmp.position() + MAX_READ_CHUNK);</span>
+                }
+<span class="nc" id="L458">                int n = channel.read(tmp);</span>
+<span class="nc bnc" id="L459" title="All 2 branches missed.">                if (n &lt;= 0) {</span>
+<span class="nc" id="L460">                    break;</span>
+                }
+<span class="nc" id="L462">                buf.position(tmp.position());</span>
+<span class="nc" id="L463">            }</span>
+<span class="nc" id="L464">            eof = true;</span>
+<span class="nc" id="L465">            result.length(buf.position());</span>
+<span class="nc" id="L466">            return result;</span>
+<span class="nc bnc" id="L467" title="All 2 branches missed.">        } else if (descriptor.isNull()) {</span>
+<span class="nc" id="L468">            return new ByteList(0);</span>
+        } else {
+<span class="nc" id="L470">            checkReadable();</span>
+
+<span class="nc" id="L472">            ByteList byteList = new ByteList();</span>
+<span class="nc" id="L473">            ByteList read = fread(BUFSIZE);</span>
+
+<span class="nc bnc" id="L475" title="All 2 branches missed.">            if (read == null) {</span>
+<span class="nc" id="L476">                eof = true;</span>
+<span class="nc" id="L477">                return byteList;</span>
+            }
+
+<span class="nc bnc" id="L480" title="All 2 branches missed.">            while (read != null) {</span>
+<span class="nc" id="L481">                byteList.append(read);</span>
+<span class="nc" id="L482">                read = fread(BUFSIZE);</span>
+            }
+
+<span class="nc" id="L485">            return byteList;</span>
+        }
+    }
+
+    /**
+     * Copies bytes from the channel buffer into a destination &lt;tt&gt;ByteBuffer&lt;/tt&gt;
+     *
+     * @param dst A &lt;tt&gt;ByteBuffer&lt;/tt&gt; to place the data in.
+     * @return The number of bytes copied.
+     */
+    private final int copyBufferedBytes(ByteBuffer dst) {
+<span class="nc" id="L496">        final int bytesToCopy = dst.remaining();</span>
+        
+<span class="nc bnc" id="L498" title="All 4 branches missed.">        if (hasUngotChars() &amp;&amp; dst.hasRemaining()) {</span>
+<span class="nc bnc" id="L499" title="All 2 branches missed.">            for(int i = 0; i &lt; ungotChars.length(); i++){</span>
+<span class="nc" id="L500">                byte ungotc = (byte) ungotChars.get(i);</span>
+<span class="nc" id="L501">                dst.put(ungotc);</span>
+            }
+<span class="nc" id="L503">            clearUngotChars();</span>
+        }
+
+<span class="nc bnc" id="L506" title="All 4 branches missed.">        if (buffer.hasRemaining() &amp;&amp; dst.hasRemaining()) {</span>
+
+<span class="nc bnc" id="L508" title="All 2 branches missed.">            if (dst.remaining() &gt;= buffer.remaining()) {</span>
+                //
+                // Copy out any buffered bytes
+                //
+<span class="nc" id="L512">                dst.put(buffer);</span>
+
+            } else {
+                //
+                // Need to clamp source (buffer) size to avoid overrun
+                //
+<span class="nc" id="L518">                ByteBuffer tmp = buffer.duplicate();</span>
+<span class="nc" id="L519">                tmp.limit(tmp.position() + dst.remaining());</span>
+<span class="nc" id="L520">                dst.put(tmp);</span>
+<span class="nc" id="L521">                buffer.position(tmp.position());</span>
+            }
+        }
+
+<span class="nc" id="L525">        return bytesToCopy - dst.remaining();</span>
+    }
+
+    /**
+     * Copies bytes from the channel buffer into a destination &lt;tt&gt;ByteBuffer&lt;/tt&gt;
+     *
+     * @param dst A &lt;tt&gt;ByteBuffer&lt;/tt&gt; to place the data in.
+     * @return The number of bytes copied.
+     */
+    private final int copyBufferedBytes(byte[] dst, int off, int len) {
+<span class="nc" id="L535">        int bytesCopied = 0;</span>
+        
+<span class="nc bnc" id="L537" title="All 4 branches missed.">        if (hasUngotChars() &amp;&amp; len &gt; 0) {</span>
+<span class="nc bnc" id="L538" title="All 2 branches missed.">            for(int i = 0; i &lt; ungotChars.length(); i++){</span>
+<span class="nc" id="L539">                byte ungotc = (byte) ungotChars.get(i);</span>
+<span class="nc" id="L540">                dst[off++] = ungotc;</span>
+<span class="nc" id="L541">                ++bytesCopied;</span>
+            }
+<span class="nc" id="L543">            clearUngotChars();</span>
+        }
+
+<span class="nc" id="L546">        final int n = Math.min(len - bytesCopied, buffer.remaining());</span>
+<span class="nc" id="L547">        buffer.get(dst, off, n);</span>
+<span class="nc" id="L548">        bytesCopied += n;</span>
+
+<span class="nc" id="L550">        return bytesCopied;</span>
+    }
+
+    /**
+     * Copies bytes from the channel buffer into a destination &lt;tt&gt;ByteBuffer&lt;/tt&gt;
+     *
+     * @param dst A &lt;tt&gt;ByteList&lt;/tt&gt; to place the data in.
+     * @param len The maximum number of bytes to copy.
+     * @return The number of bytes copied.
+     */
+    private final int copyBufferedBytes(ByteList dst, int len) {
+<span class="nc" id="L561">        int bytesCopied = 0;</span>
+
+<span class="nc" id="L563">        dst.ensure(Math.min(len, bufferedInputBytesRemaining()));</span>
+        
+<span class="nc bnc" id="L565" title="All 4 branches missed.">        if (hasUngotChars() &amp;&amp; hasUngotChars()) {</span>
+<span class="nc bnc" id="L566" title="All 2 branches missed.">            for(int i = 0; i &lt; ungotChars.length(); i++){</span>
+<span class="nc" id="L567">                byte ungotc = (byte) ungotChars.get(i);</span>
+<span class="nc" id="L568">                ++bytesCopied;</span>
+<span class="nc" id="L569">                dst.append(ungotc);</span>
+            }
+<span class="nc" id="L571">            clearUngotChars();</span>
+        }
+
+        //
+        // Copy out any buffered bytes
+        //
+<span class="nc bnc" id="L577" title="All 4 branches missed.">        if (bytesCopied &lt; len &amp;&amp; buffer.hasRemaining()) {</span>
+<span class="nc" id="L578">            int n = Math.min(buffer.remaining(), len - bytesCopied);</span>
+<span class="nc" id="L579">            dst.append(buffer, n);</span>
+<span class="nc" id="L580">            bytesCopied += n;</span>
+        }
+
+<span class="nc" id="L583">        return bytesCopied;</span>
+    }
+
+    /**
+     * Returns a count of how many bytes are available in the read buffer
+     *
+     * @return The number of bytes that can be read without reading the underlying stream.
+     */
+    private final int bufferedInputBytesRemaining() {
+<span class="nc bnc" id="L592" title="All 2 branches missed.">        return reading ? (buffer.remaining() + (ungotChars.length())) : 0;</span>
+    }
+
+    /**
+     * Tests if there are bytes remaining in the read buffer.
+     *
+     * @return &lt;tt&gt;true&lt;/tt&gt; if there are bytes available in the read buffer.
+     */
+    private final boolean hasBufferedInputBytes() {
+<span class="nc bnc" id="L601" title="All 6 branches missed.">        return reading &amp;&amp; (buffer.hasRemaining() || hasUngotChars());</span>
+    }
+
+    /**
+     * Returns a count of how many bytes of space is available in the write buffer.
+     *
+     * @return The number of bytes that can be written to the buffer without flushing
+     * to the underlying stream.
+     */
+    private final int bufferedOutputSpaceRemaining() {
+<span class="nc bnc" id="L611" title="All 2 branches missed.">        return !reading ? buffer.remaining() : 0;</span>
+    }
+
+    /**
+     * Tests if there is space available in the write buffer.
+     *
+     * @return &lt;tt&gt;true&lt;/tt&gt; if there are bytes available in the write buffer.
+     */
+    private final boolean hasBufferedOutputSpace() {
+<span class="nc bnc" id="L620" title="All 4 branches missed.">        return !reading &amp;&amp; buffer.hasRemaining();</span>
+    }
+
+    /**
+     * Closes IO handler resources.
+     *
+     * @throws IOException
+     * @throws BadDescriptorException
+     */
+    public void fclose() throws IOException, BadDescriptorException {
+        try {
+<span class="nc" id="L631">            synchronized (this) {</span>
+<span class="nc" id="L632">                closedExplicitly = true;</span>
+<span class="nc" id="L633">                close(); // not closing from finalize</span>
+<span class="nc" id="L634">            }</span>
+        } finally {
+<span class="nc" id="L636">            Ruby localRuntime = getRuntime();</span>
+
+            // Make sure we remove finalizers while not holding self lock,
+            // otherwise there is a possibility for a deadlock!
+<span class="nc bnc" id="L640" title="All 4 branches missed.">            if (localRuntime != null) localRuntime.removeInternalFinalizer(this);</span>
+
+            // clear runtime so it doesn't get stuck in memory (JRUBY-2933)
+<span class="nc" id="L643">            runtime = null;</span>
+<span class="nc" id="L644">        }</span>
+<span class="nc" id="L645">    }</span>
+
+    /**
+     * Internal close.
+     *
+     * @throws IOException
+     * @throws BadDescriptorException
+     */
+    private void close() throws IOException, BadDescriptorException {
+        // finish and close ourselves
+<span class="nc" id="L655">        finish(true);</span>
+<span class="nc" id="L656">    }</span>
+
+    private void finish(boolean close) throws BadDescriptorException, IOException {
+        try {
+<span class="nc" id="L660">            flushWrite();</span>
+
+            if (DEBUG) LOG.info(&quot;Descriptor for fileno {} closed by stream&quot;, descriptor.getFileno());
+        } finally {
+<span class="nc" id="L664">            buffer = EMPTY_BUFFER;</span>
+
+            // clear runtime so it doesn't get stuck in memory (JRUBY-2933)
+<span class="nc" id="L667">            runtime = null;</span>
+
+            // finish descriptor
+<span class="nc" id="L670">            descriptor.finish(close);</span>
+<span class="nc" id="L671">        }</span>
+<span class="nc" id="L672">    }</span>
+
+    /**
+     * @throws IOException
+     * @throws BadDescriptorException
+     */
+    public synchronized int fflush() throws IOException, BadDescriptorException {
+<span class="nc" id="L679">        checkWritable();</span>
+        try {
+<span class="nc" id="L681">            flushWrite();</span>
+<span class="nc" id="L682">        } catch (EOFException eofe) {</span>
+<span class="nc" id="L683">            return -1;</span>
+<span class="nc" id="L684">        }</span>
+<span class="nc" id="L685">        return 0;</span>
+    }
+
+    /**
+     * Flush the write buffer to the channel (if needed)
+     * @throws IOException
+     */
+    private void flushWrite() throws IOException, BadDescriptorException {
+<span class="nc bnc" id="L693" title="All 6 branches missed.">        if (reading || !modes.isWritable() || buffer.position() == 0) return; // Don't bother</span>
+
+<span class="nc" id="L695">        int len = buffer.position();</span>
+<span class="nc" id="L696">        buffer.flip();</span>
+<span class="nc" id="L697">        int n = descriptor.write(buffer);</span>
+
+<span class="nc bnc" id="L699" title="All 2 branches missed.">        if(n != len) {</span>
+            // TODO: check the return value here
+        }
+<span class="nc" id="L702">        buffer.clear();</span>
+<span class="nc" id="L703">    }</span>
+
+    /**
+     * Flush the write buffer to the channel (if needed)
+     * @throws IOException
+     */
+    private boolean flushWrite(final boolean block) throws IOException, BadDescriptorException {
+<span class="nc bnc" id="L710" title="All 6 branches missed.">        if (reading || !modes.isWritable() || buffer.position() == 0) return false; // Don't bother</span>
+<span class="nc" id="L711">        int len = buffer.position();</span>
+<span class="nc" id="L712">        int nWritten = 0;</span>
+<span class="nc" id="L713">        buffer.flip();</span>
+
+        // For Sockets, only write as much as will fit.
+<span class="nc bnc" id="L716" title="All 2 branches missed.">        if (descriptor.getChannel() instanceof SelectableChannel) {</span>
+<span class="nc" id="L717">            SelectableChannel selectableChannel = (SelectableChannel)descriptor.getChannel();</span>
+<span class="nc" id="L718">            synchronized (selectableChannel.blockingLock()) {</span>
+<span class="nc" id="L719">                boolean oldBlocking = selectableChannel.isBlocking();</span>
+                try {
+<span class="nc bnc" id="L721" title="All 2 branches missed.">                    if (oldBlocking != block) {</span>
+<span class="nc" id="L722">                        selectableChannel.configureBlocking(block);</span>
+                    }
+<span class="nc" id="L724">                    nWritten = descriptor.write(buffer);</span>
+                } finally {
+<span class="nc bnc" id="L726" title="All 4 branches missed.">                    if (oldBlocking != block) {</span>
+<span class="nc" id="L727">                        selectableChannel.configureBlocking(oldBlocking);</span>
+                    }
+                }
+<span class="nc" id="L730">            }</span>
+<span class="nc" id="L731">        } else {</span>
+<span class="nc" id="L732">            nWritten = descriptor.write(buffer);</span>
+        }
+<span class="nc bnc" id="L734" title="All 2 branches missed.">        if (nWritten != len) {</span>
+<span class="nc" id="L735">            buffer.compact();</span>
+<span class="nc" id="L736">            return false;</span>
+        }
+<span class="nc" id="L738">        buffer.clear();</span>
+<span class="nc" id="L739">        return true;</span>
+    }
+
+    public InputStream newInputStream() {
+<span class="nc" id="L743">        InputStream in = descriptor.getBaseInputStream();</span>
+<span class="nc bnc" id="L744" title="All 2 branches missed.">        return in == null ? new InputStreamAdapter(this) : in;</span>
+    }
+
+    public OutputStream newOutputStream() {
+<span class="nc" id="L748">        return new OutputStreamAdapter(this);</span>
+    }
+
+    public void clearerr() {
+<span class="nc" id="L752">        eof = false;</span>
+<span class="nc" id="L753">    }</span>
+
+    /**
+     * @throws IOException
+     * @throws BadDescriptorException
+     */
+    public boolean feof() throws IOException, BadDescriptorException {
+<span class="nc" id="L760">        checkReadable();</span>
+
+<span class="nc bnc" id="L762" title="All 2 branches missed.">        if (eof) {</span>
+<span class="nc" id="L763">            return true;</span>
+        } else {
+<span class="nc" id="L765">            return false;</span>
+        }
+    }
+
+    /**
+     * @throws IOException
+     */
+    public synchronized long fgetpos() throws IOException, PipeException, InvalidValueException, BadDescriptorException {
+        // Correct position for read / write buffering (we could invalidate, but expensive)
+<span class="nc bnc" id="L774" title="All 2 branches missed.">        if (descriptor.isSeekable()) {</span>
+<span class="nc" id="L775">            FileChannel fileChannel = (FileChannel)descriptor.getChannel();</span>
+<span class="nc" id="L776">            long pos = fileChannel.position();</span>
+            // Adjust for buffered data
+<span class="nc bnc" id="L778" title="All 2 branches missed.">            if (reading) {</span>
+<span class="nc" id="L779">                pos -= buffer.remaining();</span>
+<span class="nc bnc" id="L780" title="All 4 branches missed.">                return pos - (pos &gt; 0 &amp;&amp; hasUngotChars() ? ungotChars.length() : 0);</span>
+            } else {
+<span class="nc" id="L782">                return pos + buffer.position();</span>
+            }
+<span class="nc bnc" id="L784" title="All 2 branches missed.">        } else if (descriptor.isNull()) {</span>
+<span class="nc" id="L785">            return 0;</span>
+        } else {
+<span class="nc" id="L787">            throw new PipeException();</span>
+        }
+    }
+
+    /**
+     * Implementation of libc &quot;lseek&quot;, which seeks on seekable streams, raises
+     * EPIPE if the fd is assocated with a pipe, socket, or FIFO, and doesn't
+     * do anything for other cases (like stdio).
+     *
+     * @throws IOException
+     * @throws InvalidValueException
+     */
+    public synchronized void lseek(long offset, int type) throws IOException, InvalidValueException, PipeException, BadDescriptorException {
+<span class="nc bnc" id="L800" title="All 2 branches missed.">        if (descriptor.isSeekable()) {</span>
+<span class="nc" id="L801">            FileChannel fileChannel = (FileChannel)descriptor.getChannel();</span>
+<span class="nc" id="L802">            clearUngotChars();</span>
+<span class="nc" id="L803">            int adj = 0;</span>
+<span class="nc bnc" id="L804" title="All 2 branches missed.">            if (reading) {</span>
+                // for SEEK_CUR, need to adjust for buffered data
+<span class="nc" id="L806">                adj = buffer.remaining();</span>
+<span class="nc" id="L807">                buffer.clear();</span>
+<span class="nc" id="L808">                buffer.flip();</span>
+            } else {
+<span class="nc" id="L810">                flushWrite();</span>
+            }
+            try {
+<span class="nc bnc" id="L813" title="All 4 branches missed.">                switch (type) {</span>
+                case SEEK_SET:
+<span class="nc" id="L815">                    fileChannel.position(offset);</span>
+<span class="nc" id="L816">                    break;</span>
+                case SEEK_CUR:
+<span class="nc" id="L818">                    fileChannel.position(fileChannel.position() - adj + offset);</span>
+<span class="nc" id="L819">                    break;</span>
+                case SEEK_END:
+<span class="nc" id="L821">                    fileChannel.position(fileChannel.size() + offset);</span>
+                    break;
+                }
+<span class="nc" id="L824">            } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L825">                throw new InvalidValueException();</span>
+<span class="nc" id="L826">            } catch (IOException ioe) {</span>
+<span class="nc" id="L827">                throw ioe;</span>
+<span class="nc" id="L828">            }</span>
+<span class="nc bnc" id="L829" title="All 2 branches missed.">        } else if (descriptor.getChannel() instanceof SelectableChannel) {</span>
+            // TODO: It's perhaps just a coincidence that all the channels for
+            // which we should raise are instanceof SelectableChannel, since
+            // stdio is not...so this bothers me slightly. -CON
+<span class="nc" id="L833">            throw new PipeException();</span>
+        } else {
+        }
+<span class="nc" id="L836">    }</span>
+
+    public synchronized void sync() throws IOException, BadDescriptorException {
+<span class="nc" id="L839">        flushWrite();</span>
+<span class="nc" id="L840">    }</span>
+
+    /**
+     * Ensure buffer is ready for reading, flushing remaining writes if required
+     * @throws IOException
+     */
+    private void ensureRead() throws IOException, BadDescriptorException {
+<span class="nc bnc" id="L847" title="All 2 branches missed.">        if (reading) return;</span>
+<span class="nc" id="L848">        flushWrite();</span>
+<span class="nc" id="L849">        buffer.clear();</span>
+<span class="nc" id="L850">        buffer.flip();</span>
+<span class="nc" id="L851">        reading = true;</span>
+<span class="nc" id="L852">    }</span>
+
+    /**
+     * Ensure buffer is ready for reading, flushing remaining writes if required
+     * @throws IOException
+     */
+    private void ensureReadNonBuffered() throws IOException, BadDescriptorException {
+<span class="nc bnc" id="L859" title="All 2 branches missed.">        if (reading) {</span>
+<span class="nc bnc" id="L860" title="All 2 branches missed.">            if (buffer.hasRemaining()) {</span>
+<span class="nc" id="L861">                Ruby localRuntime = getRuntime();</span>
+<span class="nc bnc" id="L862" title="All 2 branches missed.">                if (localRuntime != null) {</span>
+<span class="nc" id="L863">                    throw localRuntime.newIOError(&quot;sysread for buffered IO&quot;);</span>
+                } else {
+<span class="nc" id="L865">                    throw new IOException(&quot;sysread for buffered IO&quot;);</span>
+                }
+            }
+        } else {
+            // libc flushes writes on any read from the actual file, so we flush here
+<span class="nc" id="L870">            flushWrite();</span>
+<span class="nc" id="L871">            buffer.clear();</span>
+<span class="nc" id="L872">            buffer.flip();</span>
+<span class="nc" id="L873">            reading = true;</span>
+        }
+<span class="nc" id="L875">    }</span>
+
+    private void resetForWrite() throws IOException {
+<span class="nc bnc" id="L878" title="All 2 branches missed.">        if (descriptor.isSeekable()) {</span>
+<span class="nc" id="L879">            FileChannel fileChannel = (FileChannel)descriptor.getChannel();</span>
+<span class="nc bnc" id="L880" title="All 2 branches missed.">            if (buffer.hasRemaining()) { // we have read ahead, and need to back up</span>
+<span class="nc" id="L881">                fileChannel.position(fileChannel.position() - buffer.remaining());</span>
+            }
+        }
+        // FIXME: Clearing read buffer here...is this appropriate?
+<span class="nc" id="L885">        buffer.clear();</span>
+<span class="nc" id="L886">        reading = false;</span>
+<span class="nc" id="L887">    }</span>
+
+    /**
+     * Ensure buffer is ready for writing.
+     * @throws IOException
+     */
+    private void ensureWrite() throws IOException {
+<span class="nc bnc" id="L894" title="All 2 branches missed.">        if (!reading) return;</span>
+<span class="nc" id="L895">        resetForWrite();</span>
+<span class="nc" id="L896">    }</span>
+
+    public synchronized ByteList read(int number) throws IOException, BadDescriptorException {
+<span class="nc" id="L899">        checkReadable();</span>
+<span class="nc" id="L900">        ensureReadNonBuffered();</span>
+
+<span class="nc" id="L902">        ByteList byteList = new ByteList(number);</span>
+
+        // TODO this should entry into error handling somewhere
+<span class="nc" id="L905">        int bytesRead = descriptor.read(number, byteList);</span>
+
+<span class="nc bnc" id="L907" title="All 2 branches missed.">        if (bytesRead == -1) {</span>
+<span class="nc" id="L908">            eof = true;</span>
+        }
+
+<span class="nc" id="L911">        return byteList;</span>
+    }
+
+    private ByteList bufferedRead(int number) throws IOException, BadDescriptorException {
+<span class="nc" id="L915">        checkReadable();</span>
+<span class="nc" id="L916">        ensureRead();</span>
+
+<span class="nc" id="L918">        int resultSize = 0;</span>
+
+        // 128K seems to be the minimum at which the stat+seek is faster than reallocation
+<span class="nc" id="L921">        final int BULK_THRESHOLD = 128 * 1024;</span>
+<span class="nc bnc" id="L922" title="All 6 branches missed.">        if (number &gt;= BULK_THRESHOLD &amp;&amp; descriptor.isSeekable() &amp;&amp; descriptor.getChannel() instanceof FileChannel) {</span>
+            //
+            // If it is a file channel, then we can pre-allocate the output buffer
+            // to the total size of buffered + remaining bytes in file
+            //
+<span class="nc" id="L927">            FileChannel fileChannel = (FileChannel) descriptor.getChannel();</span>
+<span class="nc" id="L928">            resultSize = (int) Math.min(fileChannel.size() - fileChannel.position() + bufferedInputBytesRemaining(), number);</span>
+<span class="nc" id="L929">        } else {</span>
+            //
+            // Cannot discern the total read length - allocate at least enough for the buffered data
+            //
+<span class="nc" id="L933">            resultSize = Math.min(bufferedInputBytesRemaining(), number);</span>
+        }
+
+<span class="nc" id="L936">        ByteList result = new ByteList(resultSize);</span>
+<span class="nc" id="L937">        bufferedRead(result, number);</span>
+<span class="nc" id="L938">        return result;</span>
+    }
+
+    private int bufferedRead(ByteList dst, int number) throws IOException, BadDescriptorException {
+
+<span class="nc" id="L943">        int bytesRead = 0;</span>
+
+        //
+        // Copy what is in the buffer, if there is some buffered data
+        //
+<span class="nc" id="L948">        bytesRead += copyBufferedBytes(dst, number);</span>
+
+<span class="nc" id="L950">        boolean done = false;</span>
+        //
+        // Avoid double-copying for reads that are larger than the buffer size
+        //
+<span class="nc bnc" id="L954" title="All 2 branches missed.">        while ((number - bytesRead) &gt;= BUFSIZE) {</span>
+            //
+            // limit each iteration to a max of BULK_READ_SIZE to avoid over-size allocations
+            //
+<span class="nc" id="L958">            final int bytesToRead = Math.min(BULK_READ_SIZE, number - bytesRead);</span>
+<span class="nc" id="L959">            final int n = descriptor.read(bytesToRead, dst);</span>
+<span class="nc bnc" id="L960" title="All 2 branches missed.">            if (n == -1) {</span>
+<span class="nc" id="L961">                eof = true;</span>
+<span class="nc" id="L962">                done = true;</span>
+<span class="nc" id="L963">                break;</span>
+<span class="nc bnc" id="L964" title="All 2 branches missed.">            } else if (n == 0) {</span>
+<span class="nc" id="L965">                done = true;</span>
+<span class="nc" id="L966">                break;</span>
+            }
+<span class="nc" id="L968">            bytesRead += n;</span>
+<span class="nc" id="L969">        }</span>
+
+        //
+        // Complete the request by filling the read buffer first
+        //
+<span class="nc bnc" id="L974" title="All 4 branches missed.">        while (!done &amp;&amp; bytesRead &lt; number) {</span>
+<span class="nc" id="L975">            int read = refillBuffer();</span>
+
+<span class="nc bnc" id="L977" title="All 2 branches missed.">            if (read == -1) {</span>
+<span class="nc" id="L978">                eof = true;</span>
+<span class="nc" id="L979">                break;</span>
+<span class="nc bnc" id="L980" title="All 2 branches missed.">            } else if (read == 0) {</span>
+<span class="nc" id="L981">                break;</span>
+            }
+
+            // append what we read into our buffer and allow the loop to continue
+<span class="nc" id="L985">            final int len = Math.min(buffer.remaining(), number - bytesRead);</span>
+<span class="nc" id="L986">            dst.append(buffer, len);</span>
+<span class="nc" id="L987">            bytesRead += len;</span>
+<span class="nc" id="L988">        }</span>
+
+<span class="nc bnc" id="L990" title="All 4 branches missed.">        if (bytesRead == 0 &amp;&amp; number != 0) {</span>
+<span class="nc bnc" id="L991" title="All 2 branches missed.">            if (eof) {</span>
+<span class="nc" id="L992">                throw newEOFException();</span>
+            }
+        }
+
+<span class="nc" id="L996">        return bytesRead;</span>
+    }
+
+    private EOFException newEOFException() {
+<span class="nc bnc" id="L1000" title="All 2 branches missed.">        if (eofException != null) {</span>
+<span class="nc" id="L1001">            return eofException;</span>
+        } else {
+<span class="nc" id="L1003">            return new EOFException();</span>
+        }
+    }
+
+    private int bufferedRead(ByteBuffer dst, boolean partial) throws IOException, BadDescriptorException {
+<span class="nc" id="L1008">        checkReadable();</span>
+<span class="nc" id="L1009">        ensureRead();</span>
+
+<span class="nc" id="L1011">        boolean done = false;</span>
+<span class="nc" id="L1012">        int bytesRead = 0;</span>
+
+        //
+        // Copy what is in the buffer, if there is some buffered data
+        //
+<span class="nc" id="L1017">        bytesRead += copyBufferedBytes(dst);</span>
+
+        //
+        // Avoid double-copying for reads that are larger than the buffer size, or
+        // the destination is a direct buffer.
+        //
+<span class="nc bnc" id="L1023" title="All 8 branches missed.">        while ((bytesRead &lt; 1 || !partial) &amp;&amp; (dst.remaining() &gt;= BUFSIZE || dst.isDirect())) {</span>
+<span class="nc" id="L1024">            ByteBuffer tmpDst = dst;</span>
+<span class="nc bnc" id="L1025" title="All 2 branches missed.">            if (!dst.isDirect()) {</span>
+                //
+                // We limit reads to BULK_READ_SIZED chunks to avoid NIO allocating
+                // a huge temporary native buffer, when doing reads into a heap buffer
+                // If the dst buffer is direct, then no need to limit.
+                //
+<span class="nc" id="L1031">                int bytesToRead = Math.min(BULK_READ_SIZE, dst.remaining());</span>
+<span class="nc bnc" id="L1032" title="All 2 branches missed.">                if (bytesToRead &lt; dst.remaining()) {</span>
+<span class="nc" id="L1033">                    tmpDst = dst.duplicate();</span>
+<span class="nc" id="L1034">                    tmpDst.limit(tmpDst.position() + bytesToRead);</span>
+                }
+            }
+<span class="nc" id="L1037">            int n = descriptor.read(tmpDst);</span>
+<span class="nc bnc" id="L1038" title="All 2 branches missed.">            if (n == -1) {</span>
+<span class="nc" id="L1039">                eof = true;</span>
+<span class="nc" id="L1040">                done = true;</span>
+<span class="nc" id="L1041">                break;</span>
+<span class="nc bnc" id="L1042" title="All 2 branches missed.">            } else if (n == 0) {</span>
+<span class="nc" id="L1043">                done = true;</span>
+<span class="nc" id="L1044">                break;</span>
+            } else {
+<span class="nc" id="L1046">                bytesRead += n;</span>
+            }
+<span class="nc" id="L1048">        }</span>
+
+        //
+        // Complete the request by filling the read buffer first
+        //
+<span class="nc bnc" id="L1053" title="All 8 branches missed.">        while (!done &amp;&amp; dst.hasRemaining() &amp;&amp; (bytesRead &lt; 1 || !partial)) {</span>
+<span class="nc" id="L1054">            int read = refillBuffer();</span>
+
+<span class="nc bnc" id="L1056" title="All 2 branches missed.">            if (read == -1) {</span>
+<span class="nc" id="L1057">                eof = true;</span>
+<span class="nc" id="L1058">                done = true;</span>
+<span class="nc" id="L1059">                break;</span>
+<span class="nc bnc" id="L1060" title="All 2 branches missed.">            } else if (read == 0) {</span>
+<span class="nc" id="L1061">                done = true;</span>
+<span class="nc" id="L1062">                break;</span>
+            } else {
+                // append what we read into our buffer and allow the loop to continue
+<span class="nc" id="L1065">                bytesRead += copyBufferedBytes(dst);</span>
+            }
+<span class="nc" id="L1067">        }</span>
+
+<span class="nc bnc" id="L1069" title="All 6 branches missed.">        if (eof &amp;&amp; bytesRead == 0 &amp;&amp; dst.remaining() != 0) {</span>
+<span class="nc" id="L1070">            throw newEOFException();</span>
+        }
+
+<span class="nc" id="L1073">        return bytesRead;</span>
+    }
+
+    private int bufferedRead() throws IOException, BadDescriptorException {
+<span class="nc" id="L1077">        ensureRead();</span>
+
+<span class="nc bnc" id="L1079" title="All 2 branches missed.">        if (!buffer.hasRemaining()) {</span>
+<span class="nc" id="L1080">            int len = refillBuffer();</span>
+<span class="nc bnc" id="L1081" title="All 2 branches missed.">            if (len == -1) {</span>
+<span class="nc" id="L1082">                eof = true;</span>
+<span class="nc" id="L1083">                return -1;</span>
+<span class="nc bnc" id="L1084" title="All 2 branches missed.">            } else if (len == 0) {</span>
+<span class="nc" id="L1085">                return -1;</span>
+            }
+        }
+<span class="nc" id="L1088">        return buffer.get() &amp; 0xFF;</span>
+    }
+
+    /**
+     * @throws IOException
+     * @throws BadDescriptorException
+     */
+    private int bufferedWrite(ByteList buf) throws IOException, BadDescriptorException {
+<span class="nc" id="L1096">        checkWritable();</span>
+<span class="nc" id="L1097">        ensureWrite();</span>
+
+        // Ruby ignores empty syswrites
+<span class="nc bnc" id="L1100" title="All 4 branches missed.">        if (buf == null || buf.length() == 0) return 0;</span>
+
+<span class="nc bnc" id="L1102" title="All 2 branches missed.">        if (buf.length() &gt; buffer.capacity()) { // Doesn't fit in buffer. Write immediately.</span>
+<span class="nc" id="L1103">            flushWrite(); // ensure nothing left to write</span>
+
+
+<span class="nc" id="L1106">            int n = descriptor.write(ByteBuffer.wrap(buf.getUnsafeBytes(), buf.begin(), buf.length()));</span>
+<span class="nc bnc" id="L1107" title="All 2 branches missed.">            if(n != buf.length()) {</span>
+                // TODO: check the return value here
+            }
+<span class="nc" id="L1110">        } else {</span>
+<span class="nc bnc" id="L1111" title="All 2 branches missed.">            if (buf.length() &gt; buffer.remaining()) flushWrite();</span>
+
+<span class="nc" id="L1113">            buffer.put(buf.getUnsafeBytes(), buf.begin(), buf.length());</span>
+        }
+
+<span class="nc bnc" id="L1116" title="All 2 branches missed.">        if (isSync()) flushWrite();</span>
+
+<span class="nc" id="L1118">        return buf.getRealSize();</span>
+    }
+
+    /**
+     * @throws IOException
+     * @throws BadDescriptorException
+     */
+    private int bufferedWrite(ByteBuffer buf) throws IOException, BadDescriptorException {
+<span class="nc" id="L1126">        checkWritable();</span>
+<span class="nc" id="L1127">        ensureWrite();</span>
+
+        // Ruby ignores empty syswrites
+<span class="nc bnc" id="L1130" title="All 4 branches missed.">        if (buf == null || !buf.hasRemaining()) return 0;</span>
+
+<span class="nc" id="L1132">        final int nbytes = buf.remaining();</span>
+<span class="nc bnc" id="L1133" title="All 2 branches missed.">        if (nbytes &gt;= buffer.capacity()) { // Doesn't fit in buffer. Write immediately.</span>
+<span class="nc" id="L1134">            flushWrite(); // ensure nothing left to write</span>
+
+<span class="nc" id="L1136">            descriptor.write(buf);</span>
+            // TODO: check the return value here
+        } else {
+<span class="nc bnc" id="L1139" title="All 2 branches missed.">            if (nbytes &gt; buffer.remaining()) flushWrite();</span>
+
+<span class="nc" id="L1141">            buffer.put(buf);</span>
+        }
+
+<span class="nc bnc" id="L1144" title="All 2 branches missed.">        if (isSync()) flushWrite();</span>
+
+<span class="nc" id="L1146">        return nbytes - buf.remaining();</span>
+    }
+
+    /**
+     * @throws IOException
+     * @throws BadDescriptorException
+     */
+    private int bufferedWrite(int c) throws IOException, BadDescriptorException {
+<span class="nc" id="L1154">        checkWritable();</span>
+<span class="nc" id="L1155">        ensureWrite();</span>
+
+<span class="nc bnc" id="L1157" title="All 2 branches missed.">        if (!buffer.hasRemaining()) flushWrite();</span>
+
+<span class="nc" id="L1159">        buffer.put((byte) c);</span>
+
+<span class="nc bnc" id="L1161" title="All 2 branches missed.">        if (isSync()) flushWrite();</span>
+
+<span class="nc" id="L1163">        return 1;</span>
+    }
+
+    public synchronized void ftruncate(long newLength) throws IOException,
+            BadDescriptorException, InvalidValueException {
+<span class="nc" id="L1168">        Channel ch = descriptor.getChannel();</span>
+<span class="nc bnc" id="L1169" title="All 2 branches missed.">        if (!(ch instanceof FileChannel)) {</span>
+<span class="nc" id="L1170">            throw new InvalidValueException();</span>
+        }
+<span class="nc" id="L1172">        invalidateBuffer();</span>
+<span class="nc" id="L1173">        FileChannel fileChannel = (FileChannel)ch;</span>
+<span class="nc" id="L1174">        long position = fileChannel.position();</span>
+<span class="nc bnc" id="L1175" title="All 2 branches missed.">        if (newLength &gt; fileChannel.size()) {</span>
+            // truncate can't lengthen files, so we save position, seek/write, and go back
+<span class="nc" id="L1177">            int difference = (int)(newLength - fileChannel.size());</span>
+
+<span class="nc" id="L1179">            fileChannel.position(fileChannel.size());</span>
+            // FIXME: This worries me a bit, since it could allocate a lot with a large newLength
+<span class="nc" id="L1181">            fileChannel.write(ByteBuffer.allocate(difference));</span>
+<span class="nc" id="L1182">        } else {</span>
+<span class="nc" id="L1183">            fileChannel.truncate(newLength);</span>
+        }
+<span class="nc" id="L1185">        fileChannel.position(position);</span>
+<span class="nc" id="L1186">    }</span>
+
+    /**
+     * Invalidate buffer before a position change has occurred (e.g. seek),
+     * flushing writes if required, and correcting file position if reading
+     * @throws IOException
+     */
+    private void invalidateBuffer() throws IOException, BadDescriptorException {
+<span class="nc bnc" id="L1194" title="All 2 branches missed.">        if (!reading) flushWrite();</span>
+<span class="nc" id="L1195">        int posOverrun = buffer.remaining(); // how far ahead we are when reading</span>
+<span class="nc" id="L1196">        buffer.clear();</span>
+<span class="nc bnc" id="L1197" title="All 2 branches missed.">        if (reading) {</span>
+<span class="nc" id="L1198">            buffer.flip();</span>
+            // if the read buffer is ahead, back up
+<span class="nc" id="L1200">            FileChannel fileChannel = (FileChannel)descriptor.getChannel();</span>
+<span class="nc bnc" id="L1201" title="All 2 branches missed.">            if (posOverrun != 0) fileChannel.position(fileChannel.position() - posOverrun);</span>
+        }
+<span class="nc" id="L1203">    }</span>
+
+    /**
+     * Ensure close (especially flush) when we're finished with.
+     */
+    @Override
+    public void finalize() throws Throwable {
+<span class="nc" id="L1210">        super.finalize();</span>
+        
+<span class="nc bnc" id="L1212" title="All 2 branches missed.">        if (closedExplicitly) return;</span>
+
+        if (DEBUG) {
+            LOG.info(&quot;finalize() for not explicitly closed stream&quot;);
+        }
+
+        // FIXME: I got a bunch of NPEs when I didn't check for nulls here...HOW?!
+<span class="nc bnc" id="L1219" title="All 4 branches missed.">        if (descriptor != null &amp;&amp; descriptor.isOpen()) {</span>
+            // tidy up
+<span class="nc" id="L1221">            finish(autoclose);</span>
+        }
+<span class="nc" id="L1223">    }</span>
+
+    public int ready() throws IOException {
+<span class="nc bnc" id="L1226" title="All 2 branches missed.">        if (descriptor.getChannel() instanceof SelectableChannel) {</span>
+<span class="nc" id="L1227">            int ready_stat = 0;</span>
+<span class="nc" id="L1228">            java.nio.channels.Selector sel = SelectorFactory.openWithRetryFrom(null, ((SelectableChannel) descriptor.getChannel()).provider());</span>
+<span class="nc" id="L1229">            SelectableChannel selchan = (SelectableChannel)descriptor.getChannel();</span>
+<span class="nc" id="L1230">            synchronized (selchan.blockingLock()) {</span>
+<span class="nc" id="L1231">                boolean is_block = selchan.isBlocking();</span>
+                try {
+<span class="nc" id="L1233">                    selchan.configureBlocking(false);</span>
+<span class="nc" id="L1234">                    selchan.register(sel, java.nio.channels.SelectionKey.OP_READ);</span>
+<span class="nc" id="L1235">                    ready_stat = sel.selectNow();</span>
+<span class="nc" id="L1236">                    sel.close();</span>
+<span class="nc" id="L1237">                } catch (Throwable ex) {</span>
+                } finally {
+<span class="nc bnc" id="L1239" title="All 6 branches missed.">                    if (sel != null) {</span>
+                        try {
+<span class="nc" id="L1241">                            sel.close();</span>
+<span class="nc" id="L1242">                        } catch (Exception e) {</span>
+<span class="nc" id="L1243">                        }</span>
+                    }
+<span class="nc" id="L1245">                    selchan.configureBlocking(is_block);</span>
+<span class="nc" id="L1246">                }</span>
+<span class="nc" id="L1247">            }</span>
+<span class="nc" id="L1248">            return ready_stat;</span>
+        } else {
+<span class="nc" id="L1250">            return newInputStream().available();</span>
+        }
+    }
+
+    public synchronized void fputc(int c) throws IOException, BadDescriptorException {
+<span class="nc" id="L1255">        bufferedWrite(c);</span>
+<span class="nc" id="L1256">    }</span>
+
+    public int ungetc(int c) {
+<span class="nc bnc" id="L1259" title="All 2 branches missed.">        if (c == -1) {</span>
+<span class="nc" id="L1260">            return -1;</span>
+        }
+
+        // putting a bit back, so we're not at EOF anymore
+<span class="nc" id="L1264">        eof = false;</span>
+
+        // save the ungot
+<span class="nc" id="L1267">        ungotChars.prepend((byte)c);</span>
+
+<span class="nc" id="L1269">        return c;</span>
+    }
+
+    public synchronized int fgetc() throws IOException, BadDescriptorException {
+<span class="nc bnc" id="L1273" title="All 2 branches missed.">        if (eof) {</span>
+<span class="nc" id="L1274">            return -1;</span>
+        }
+
+<span class="nc" id="L1277">        checkReadable();</span>
+
+<span class="nc" id="L1279">        int c = read();</span>
+
+<span class="nc bnc" id="L1281" title="All 2 branches missed.">        if (c == -1) {</span>
+<span class="nc" id="L1282">            eof = true;</span>
+<span class="nc" id="L1283">            return c;</span>
+        }
+
+<span class="nc" id="L1286">        return c &amp; 0xff;</span>
+    }
+
+    public synchronized int fwrite(ByteList string) throws IOException, BadDescriptorException {
+<span class="nc" id="L1290">        return bufferedWrite(string);</span>
+    }
+
+    public synchronized int write(ByteBuffer buf) throws IOException, BadDescriptorException {
+<span class="nc" id="L1294">        return bufferedWrite(buf);</span>
+    }
+
+    public synchronized int writenonblock(ByteList buf) throws IOException, BadDescriptorException {
+<span class="nc" id="L1298">        checkWritable();</span>
+<span class="nc" id="L1299">        ensureWrite();</span>
+
+        // Ruby ignores empty syswrites
+<span class="nc bnc" id="L1302" title="All 4 branches missed.">        if (buf == null || buf.length() == 0) return 0;</span>
+
+<span class="nc bnc" id="L1304" title="All 4 branches missed.">        if (buffer.position() != 0 &amp;&amp; !flushWrite(false)) return 0;</span>
+
+<span class="nc bnc" id="L1306" title="All 2 branches missed.">        if (descriptor.getChannel() instanceof SelectableChannel) {</span>
+<span class="nc" id="L1307">            SelectableChannel selectableChannel = (SelectableChannel)descriptor.getChannel();</span>
+<span class="nc" id="L1308">            synchronized (selectableChannel.blockingLock()) {</span>
+<span class="nc" id="L1309">                boolean oldBlocking = selectableChannel.isBlocking();</span>
+                try {
+<span class="nc bnc" id="L1311" title="All 2 branches missed.">                    if (oldBlocking) {</span>
+<span class="nc" id="L1312">                        selectableChannel.configureBlocking(false);</span>
+                    }
+<span class="nc" id="L1314">                    return descriptor.write(ByteBuffer.wrap(buf.getUnsafeBytes(), buf.begin(), buf.length()));</span>
+                } finally {
+<span class="nc bnc" id="L1316" title="All 4 branches missed.">                    if (oldBlocking) {</span>
+<span class="nc" id="L1317">                        selectableChannel.configureBlocking(oldBlocking);</span>
+                    }
+                }
+<span class="nc" id="L1320">            }</span>
+        } else {
+            // can't set nonblocking, so go ahead with it...not much else we can do
+<span class="nc" id="L1323">            return descriptor.write(ByteBuffer.wrap(buf.getUnsafeBytes(), buf.begin(), buf.length()));</span>
+        }
+    }
+
+    public synchronized ByteList fread(int number) throws IOException, BadDescriptorException {
+        try {
+<span class="nc bnc" id="L1329" title="All 2 branches missed.">            if (number == 0) {</span>
+<span class="nc bnc" id="L1330" title="All 2 branches missed.">                if (eof) {</span>
+<span class="nc" id="L1331">                    return null;</span>
+                } else {
+<span class="nc" id="L1333">                    return new ByteList(0);</span>
+                }
+            }
+
+<span class="nc" id="L1337">            return bufferedRead(number);</span>
+<span class="nc" id="L1338">        } catch (EOFException e) {</span>
+<span class="nc" id="L1339">            eof = true;</span>
+<span class="nc" id="L1340">            return null;</span>
+        }
+    }
+
+    public synchronized ByteList readnonblock(int number) throws IOException, BadDescriptorException, EOFException {
+<span class="nc bnc" id="L1345" title="All 4 branches missed.">        assert number &gt;= 0;</span>
+
+<span class="nc bnc" id="L1347" title="All 2 branches missed.">        if (number == 0) {</span>
+<span class="nc" id="L1348">            return null;</span>
+        }
+
+<span class="nc bnc" id="L1351" title="All 2 branches missed.">        if (descriptor.getChannel() instanceof SelectableChannel) {</span>
+<span class="nc" id="L1352">            SelectableChannel selectableChannel = (SelectableChannel)descriptor.getChannel();</span>
+<span class="nc" id="L1353">            synchronized (selectableChannel.blockingLock()) {</span>
+<span class="nc" id="L1354">                boolean oldBlocking = selectableChannel.isBlocking();</span>
+                try {
+<span class="nc" id="L1356">                    selectableChannel.configureBlocking(false);</span>
+<span class="nc" id="L1357">                    return readpartial(number);</span>
+                } finally {
+<span class="nc" id="L1359">                    selectableChannel.configureBlocking(oldBlocking);</span>
+                }
+<span class="nc" id="L1361">            }</span>
+<span class="nc bnc" id="L1362" title="All 2 branches missed.">        } else if (descriptor.getChannel() instanceof FileChannel) {</span>
+<span class="nc" id="L1363">            return fread(number);</span>
+        } else {
+<span class="nc" id="L1365">            return null;</span>
+        }
+    }
+
+    public synchronized ByteList readpartial(int number) throws IOException, BadDescriptorException, EOFException {
+<span class="nc bnc" id="L1370" title="All 4 branches missed.">        assert number &gt;= 0;</span>
+
+<span class="nc bnc" id="L1372" title="All 2 branches missed.">        if (number == 0) {</span>
+<span class="nc" id="L1373">            return null;</span>
+        }
+<span class="nc bnc" id="L1375" title="All 2 branches missed.">        if (descriptor.getChannel() instanceof FileChannel) {</span>
+<span class="nc" id="L1376">            return fread(number);</span>
+        }
+
+<span class="nc bnc" id="L1379" title="All 2 branches missed.">        if (hasBufferedInputBytes()) {</span>
+            // already have some bytes buffered, just return those
+<span class="nc" id="L1381">            return bufferedRead(Math.min(bufferedInputBytesRemaining(), number));</span>
+        } else {
+            // otherwise, we try an unbuffered read to get whatever's available
+<span class="nc" id="L1384">            return read(number);</span>
+        }
+    }
+
+    public synchronized int read(ByteBuffer dst) throws IOException, BadDescriptorException, EOFException {
+<span class="nc bnc" id="L1389" title="All 2 branches missed.">        return read(dst, !(descriptor.getChannel() instanceof FileChannel));</span>
+    }
+
+    public synchronized int read(ByteBuffer dst, boolean partial) throws IOException, BadDescriptorException, EOFException {
+<span class="nc bnc" id="L1393" title="All 4 branches missed.">        assert dst.hasRemaining();</span>
+
+<span class="nc" id="L1395">        return bufferedRead(dst, partial);</span>
+    }
+
+    public synchronized int read() throws IOException, BadDescriptorException {
+        try {
+<span class="nc" id="L1400">            descriptor.checkOpen();</span>
+
+<span class="nc bnc" id="L1402" title="All 2 branches missed.">            if (hasUngotChars()) {</span>
+<span class="nc" id="L1403">                int c = ungotChars.get(0);</span>
+<span class="nc" id="L1404">                ungotChars.delete(0,1);</span>
+<span class="nc" id="L1405">                return c;</span>
+            }
+
+<span class="nc" id="L1408">            return bufferedRead();</span>
+<span class="nc" id="L1409">        } catch (EOFException e) {</span>
+<span class="nc" id="L1410">            eof = true;</span>
+<span class="nc" id="L1411">            return -1;</span>
+        }
+    }
+
+    public ChannelDescriptor getDescriptor() {
+<span class="nc" id="L1416">        return descriptor;</span>
+    }
+
+    public void setBlocking(boolean block) throws IOException {
+<span class="nc bnc" id="L1420" title="All 2 branches missed.">        if (!(descriptor.getChannel() instanceof SelectableChannel)) {</span>
+<span class="nc" id="L1421">            return;</span>
+        }
+<span class="nc" id="L1423">        synchronized (((SelectableChannel) descriptor.getChannel()).blockingLock()) {</span>
+<span class="nc" id="L1424">            blocking = block;</span>
+            try {
+<span class="nc" id="L1426">                ((SelectableChannel) descriptor.getChannel()).configureBlocking(block);</span>
+<span class="nc" id="L1427">            } catch (IllegalBlockingModeException e) {</span>
+                // ignore this; select() will set the correct mode when it is finished
+<span class="nc" id="L1429">            }</span>
+<span class="nc" id="L1430">        }</span>
+<span class="nc" id="L1431">    }</span>
+
+    public boolean isBlocking() {
+<span class="nc" id="L1434">        return blocking;</span>
+    }
+
+    public synchronized void freopen(Ruby runtime, String path, ModeFlags modes) throws DirectoryAsFileException, IOException, InvalidValueException, PipeException, BadDescriptorException {
+        // flush first
+<span class="nc" id="L1439">        flushWrite();</span>
+
+        // reset buffer
+<span class="nc" id="L1442">        buffer.clear();</span>
+<span class="nc bnc" id="L1443" title="All 2 branches missed.">        if (reading) {</span>
+<span class="nc" id="L1444">            buffer.flip();</span>
+        }
+
+<span class="nc" id="L1447">        this.modes = modes;</span>
+
+<span class="nc bnc" id="L1449" title="All 2 branches missed.">        if (descriptor.isOpen()) {</span>
+<span class="nc" id="L1450">            descriptor.close();</span>
+        }
+
+<span class="nc bnc" id="L1453" title="All 6 branches missed.">        if (path.equals(&quot;/dev/null&quot;) || path.equalsIgnoreCase(&quot;nul:&quot;) || path.equalsIgnoreCase(&quot;nul&quot;)) {</span>
+<span class="nc" id="L1454">            descriptor = descriptor.reopen(new NullChannel(), modes);</span>
+        } else {
+<span class="nc" id="L1456">            String cwd = runtime.getCurrentDirectory();</span>
+<span class="nc" id="L1457">            JRubyFile theFile = JRubyFile.create(cwd,path);</span>
+
+<span class="nc bnc" id="L1459" title="All 4 branches missed.">            if (theFile.isDirectory() &amp;&amp; modes.isWritable()) {</span>
+<span class="nc" id="L1460">                throw runtime.newErrnoEISDirError(path);</span>
+            }
+
+<span class="nc bnc" id="L1463" title="All 2 branches missed.">            if (modes.isCreate()) {</span>
+<span class="nc bnc" id="L1464" title="All 4 branches missed.">                if (theFile.exists() &amp;&amp; modes.isExclusive()) {</span>
+<span class="nc" id="L1465">                    throw runtime.newErrnoEEXISTError(&quot;File exists - &quot; + path);</span>
+                }
+<span class="nc" id="L1467">                theFile.createNewFile();</span>
+            } else {
+<span class="nc bnc" id="L1469" title="All 2 branches missed.">                if (!theFile.exists()) {</span>
+<span class="nc" id="L1470">                    throw runtime.newErrnoENOENTError(&quot;file not found - &quot; + path);</span>
+                }
+            }
+
+            // We always open this rw since we can only open it r or rw.
+<span class="nc" id="L1475">            RandomAccessFile file = new RandomAccessFile(theFile, modes.toJavaModeString());</span>
+
+<span class="nc bnc" id="L1477" title="All 2 branches missed.">            if (modes.isTruncate()) file.setLength(0L);</span>
+
+<span class="nc" id="L1479">            descriptor = descriptor.reopen(file, modes);</span>
+
+            try {
+<span class="nc bnc" id="L1482" title="All 2 branches missed.">                if (modes.isAppendable()) lseek(0, SEEK_END);</span>
+<span class="nc" id="L1483">            } catch (PipeException pe) {</span>
+                // ignore, it's a pipe or fifo
+<span class="nc" id="L1485">            }</span>
+        }
+<span class="nc" id="L1487">    }</span>
+
+    public static Stream open(Ruby runtime, ChannelDescriptor descriptor) {
+<span class="nc" id="L1490">        return maybeWrapWithLineEndingWrapper(new ChannelStream(runtime, descriptor, true), descriptor.getOriginalModes());</span>
+    }
+
+    public static Stream fdopen(Ruby runtime, ChannelDescriptor descriptor, ModeFlags modes) throws InvalidValueException {
+        // check these modes before constructing, so we don't finalize the partially-initialized stream
+<span class="nc" id="L1495">        descriptor.checkNewModes(modes);</span>
+<span class="nc" id="L1496">        return maybeWrapWithLineEndingWrapper(new ChannelStream(runtime, descriptor, modes, true), modes);</span>
+    }
+
+    public static Stream open(Ruby runtime, ChannelDescriptor descriptor, boolean autoclose) {
+<span class="nc" id="L1500">        return maybeWrapWithLineEndingWrapper(new ChannelStream(runtime, descriptor, autoclose), descriptor.getOriginalModes());</span>
+    }
+
+    public static Stream fdopen(Ruby runtime, ChannelDescriptor descriptor, ModeFlags modes, boolean autoclose) throws InvalidValueException {
+        // check these modes before constructing, so we don't finalize the partially-initialized stream
+<span class="nc" id="L1505">        descriptor.checkNewModes(modes);</span>
+<span class="nc" id="L1506">        return maybeWrapWithLineEndingWrapper(new ChannelStream(runtime, descriptor, modes, autoclose), modes);</span>
+    }
+
+    private static Stream maybeWrapWithLineEndingWrapper(Stream stream, ModeFlags modes) {
+<span class="nc bnc" id="L1510" title="All 4 branches missed.">        if (modes.isText() || // FIXME: Remove this one textmode is part of transcoding.</span>
+<span class="nc bnc" id="L1511" title="All 4 branches missed.">                (Platform.IS_WINDOWS &amp;&amp; stream.getDescriptor().getChannel() instanceof FileChannel &amp;&amp; !modes.isBinary())) {</span>
+<span class="nc" id="L1512">            return new CRLFStreamWrapper(stream);</span>
+        }
+<span class="nc" id="L1514">        return stream;</span>
+    }
+
+    public static Stream fopen(Ruby runtime, String path, ModeFlags modes) throws FileNotFoundException, DirectoryAsFileException, FileExistsException, IOException, InvalidValueException, PipeException, BadDescriptorException {
+        try {
+<span class="nc" id="L1519">            ChannelDescriptor descriptor = ChannelDescriptor.open(runtime.getCurrentDirectory(), path, modes, runtime.getClassLoader());</span>
+<span class="nc" id="L1520">            Stream stream = fdopen(runtime, descriptor, modes);</span>
+
+<span class="nc" id="L1522">            return stream;</span>
+<span class="nc" id="L1523">        } catch (ResourceException resourceException) {</span>
+<span class="nc" id="L1524">            throw resourceException.newRaiseException(runtime);</span>
+        }
+    }
+
+    public Channel getChannel() {
+<span class="nc" id="L1529">        return getDescriptor().getChannel();</span>
+    }
+
+    private static final class InputStreamAdapter extends java.io.InputStream {
+        private final ChannelStream stream;
+
+<span class="nc" id="L1535">        public InputStreamAdapter(ChannelStream stream) {</span>
+<span class="nc" id="L1536">            this.stream = stream;</span>
+<span class="nc" id="L1537">        }</span>
+
+        @Override
+        public int read() throws IOException {
+<span class="nc" id="L1541">            synchronized (stream) {</span>
+                // If it can be pulled direct from the buffer, don't go via the slow path
+<span class="nc bnc" id="L1543" title="All 2 branches missed.">                if (stream.hasBufferedInputBytes()) {</span>
+                    try {
+<span class="nc" id="L1545">                        return stream.read();</span>
+<span class="nc" id="L1546">                    } catch (BadDescriptorException ex) {</span>
+<span class="nc" id="L1547">                        throw new IOException(ex.getMessage());</span>
+                    }
+                }
+<span class="nc" id="L1550">            }</span>
+
+<span class="nc" id="L1552">            byte[] b = new byte[1];</span>
+            // java.io.InputStream#read must return an unsigned value;
+<span class="nc bnc" id="L1554" title="All 2 branches missed.">            return read(b, 0, 1) == 1 ? b[0] &amp; 0xff: -1;</span>
+        }
+
+        @Override
+        public int read(byte[] bytes, int off, int len) throws IOException {
+<span class="nc bnc" id="L1559" title="All 2 branches missed.">            if (bytes == null) {</span>
+<span class="nc" id="L1560">                throw new NullPointerException(&quot;null destination buffer&quot;);</span>
+            }
+<span class="nc bnc" id="L1562" title="All 2 branches missed.">            if ((len | off | (off + len) | (bytes.length - (off + len))) &lt; 0) {</span>
+<span class="nc" id="L1563">                throw new IndexOutOfBoundsException();</span>
+            }
+<span class="nc bnc" id="L1565" title="All 2 branches missed.">            if (len == 0) {</span>
+<span class="nc" id="L1566">                return 0;</span>
+            }
+
+            try {
+<span class="nc" id="L1570">                synchronized(stream) {</span>
+<span class="nc" id="L1571">                    final int available = stream.bufferedInputBytesRemaining();</span>
+<span class="nc bnc" id="L1572" title="All 2 branches missed.">                     if (available &gt;= len) {</span>
+<span class="nc" id="L1573">                        return stream.copyBufferedBytes(bytes, off, len);</span>
+<span class="nc bnc" id="L1574" title="All 2 branches missed.">                    } else if (stream.getDescriptor().getChannel() instanceof SelectableChannel) {</span>
+<span class="nc" id="L1575">                        SelectableChannel ch = (SelectableChannel) stream.getDescriptor().getChannel();</span>
+<span class="nc" id="L1576">                        synchronized (ch.blockingLock()) {</span>
+<span class="nc" id="L1577">                            boolean oldBlocking = ch.isBlocking();</span>
+                            try {
+<span class="nc bnc" id="L1579" title="All 2 branches missed.">                                if (!oldBlocking) {</span>
+<span class="nc" id="L1580">                                    ch.configureBlocking(true);</span>
+                                }
+<span class="nc" id="L1582">                                return stream.bufferedRead(ByteBuffer.wrap(bytes, off, len), true);</span>
+                            } finally {
+<span class="nc bnc" id="L1584" title="All 4 branches missed.">                                if (!oldBlocking) {</span>
+<span class="nc" id="L1585">                                    ch.configureBlocking(oldBlocking);</span>
+                                }
+                            }
+<span class="nc" id="L1588">                        }</span>
+                    } else {
+<span class="nc" id="L1590">                        return stream.bufferedRead(ByteBuffer.wrap(bytes, off, len), true);</span>
+                    }
+<span class="nc" id="L1592">                }</span>
+<span class="nc" id="L1593">            } catch (BadDescriptorException ex) {</span>
+<span class="nc" id="L1594">                throw new IOException(ex.getMessage());</span>
+<span class="nc" id="L1595">            } catch (EOFException ex) {</span>
+<span class="nc" id="L1596">                return -1;</span>
+            }
+        }
+
+        @Override
+        public int available() throws IOException {
+<span class="nc" id="L1602">            synchronized (stream) {</span>
+<span class="nc bnc" id="L1603" title="All 2 branches missed.">                return !stream.eof ? stream.bufferedInputBytesRemaining() : 0;</span>
+<span class="nc" id="L1604">            }</span>
+        }
+
+        @Override
+        public void close() throws IOException {
+            try {
+<span class="nc" id="L1610">                synchronized (stream) {</span>
+<span class="nc" id="L1611">                    stream.fclose();</span>
+<span class="nc" id="L1612">                }</span>
+<span class="nc" id="L1613">            } catch (BadDescriptorException ex) {</span>
+<span class="nc" id="L1614">                throw new IOException(ex.getMessage());</span>
+<span class="nc" id="L1615">            }</span>
+<span class="nc" id="L1616">        }</span>
+    }
+
+    private static final class OutputStreamAdapter extends java.io.OutputStream {
+        private final ChannelStream stream;
+
+<span class="nc" id="L1622">        public OutputStreamAdapter(ChannelStream stream) {</span>
+<span class="nc" id="L1623">            this.stream = stream;</span>
+<span class="nc" id="L1624">        }</span>
+
+        @Override
+        public void write(int i) throws IOException {
+<span class="nc" id="L1628">            synchronized (stream) {</span>
+<span class="nc bnc" id="L1629" title="All 4 branches missed.">                if (!stream.isSync() &amp;&amp; stream.hasBufferedOutputSpace()) {</span>
+<span class="nc" id="L1630">                    stream.buffer.put((byte) i);</span>
+<span class="nc" id="L1631">                    return;</span>
+                }
+<span class="nc" id="L1633">            }</span>
+<span class="nc" id="L1634">            byte[] b = { (byte) i };</span>
+<span class="nc" id="L1635">            write(b, 0, 1);</span>
+<span class="nc" id="L1636">        }</span>
+
+        @Override
+        public void write(byte[] bytes, int off, int len) throws IOException {
+<span class="nc bnc" id="L1640" title="All 2 branches missed.">            if (bytes == null) {</span>
+<span class="nc" id="L1641">                throw new NullPointerException(&quot;null source buffer&quot;);</span>
+            }
+<span class="nc bnc" id="L1643" title="All 2 branches missed.">            if ((len | off | (off + len) | (bytes.length - (off + len))) &lt; 0) {</span>
+<span class="nc" id="L1644">                throw new IndexOutOfBoundsException();</span>
+            }
+
+            try {
+<span class="nc" id="L1648">                synchronized(stream) {</span>
+<span class="nc bnc" id="L1649" title="All 4 branches missed.">                    if (!stream.isSync() &amp;&amp; stream.bufferedOutputSpaceRemaining() &gt;= len) {</span>
+<span class="nc" id="L1650">                        stream.buffer.put(bytes, off, len);</span>
+
+<span class="nc bnc" id="L1652" title="All 2 branches missed.">                    } else if (stream.getDescriptor().getChannel() instanceof SelectableChannel) {</span>
+<span class="nc" id="L1653">                        SelectableChannel ch = (SelectableChannel) stream.getDescriptor().getChannel();</span>
+<span class="nc" id="L1654">                        synchronized (ch.blockingLock()) {</span>
+<span class="nc" id="L1655">                            boolean oldBlocking = ch.isBlocking();</span>
+                            try {
+<span class="nc bnc" id="L1657" title="All 2 branches missed.">                                if (!oldBlocking) {</span>
+<span class="nc" id="L1658">                                    ch.configureBlocking(true);</span>
+                                }
+<span class="nc" id="L1660">                                stream.bufferedWrite(ByteBuffer.wrap(bytes, off, len));</span>
+                            } finally {
+<span class="nc bnc" id="L1662" title="All 4 branches missed.">                                if (!oldBlocking) {</span>
+<span class="nc" id="L1663">                                    ch.configureBlocking(oldBlocking);</span>
+                                }
+                            }
+<span class="nc" id="L1666">                        }</span>
+<span class="nc" id="L1667">                    } else {</span>
+<span class="nc" id="L1668">                        stream.bufferedWrite(ByteBuffer.wrap(bytes, off, len));</span>
+                    }
+<span class="nc" id="L1670">                }</span>
+<span class="nc" id="L1671">            } catch (BadDescriptorException ex) {</span>
+<span class="nc" id="L1672">                throw new IOException(ex.getMessage());</span>
+<span class="nc" id="L1673">            }</span>
+<span class="nc" id="L1674">        }</span>
+
+
+        @Override
+        public void close() throws IOException {
+            try {
+<span class="nc" id="L1680">                synchronized (stream) {</span>
+<span class="nc" id="L1681">                    stream.fclose();</span>
+<span class="nc" id="L1682">                }</span>
+<span class="nc" id="L1683">            } catch (BadDescriptorException ex) {</span>
+<span class="nc" id="L1684">                throw new IOException(ex.getMessage());</span>
+<span class="nc" id="L1685">            }</span>
+<span class="nc" id="L1686">        }</span>
+
+        @Override
+        public void flush() throws IOException {
+            try {
+<span class="nc" id="L1691">                synchronized (stream) {</span>
+<span class="nc" id="L1692">                    stream.flushWrite(true);</span>
+<span class="nc" id="L1693">                }</span>
+<span class="nc" id="L1694">            } catch (BadDescriptorException ex) {</span>
+<span class="nc" id="L1695">                throw new IOException(ex.getMessage());</span>
+<span class="nc" id="L1696">            }</span>
+<span class="nc" id="L1697">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.3.201501050207</span></div></body></html>
